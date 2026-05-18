@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! B1 phase gate: `require('node:X')` and `require('X')` parity.
 //!
 //! Every module documented in `docs/NODE_COMPAT.md` must be reachable

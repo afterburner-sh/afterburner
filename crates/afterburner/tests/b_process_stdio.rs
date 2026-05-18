@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! `process.stdout` / `stderr` / `stdin` shape — fd numbers, TTY
 //! flags, color helpers, EventEmitter-shaped methods. Many real Node
 //! libraries (chalk, ora, log streams, pipe-aware tools) probe these

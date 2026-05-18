@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! Subtle Crypto elliptic-curve algorithms — ECDSA / ECDH on
 //! P-256 / P-384 / P-521, plus Ed25519 and X25519.
 

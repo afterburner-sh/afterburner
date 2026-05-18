@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! Per-runtime handle store for streaming `crypto.createSign` /
 //! `createVerify`. The JS API expects to keep a cursor alive across
 //! `.update(chunk)` calls; each cursor maps to a [`DigestState`] kept

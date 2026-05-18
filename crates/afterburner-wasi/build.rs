@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! Build-time gate: make sure the committed plugin binary matches the
 //! current polyfill bundle. Without this check, editing a polyfill and
 //! forgetting to rerun `crates/afterburner-plugin/build.sh` silently ships a

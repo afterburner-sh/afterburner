@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! Daemon-event mode: re-enter the long-lived Store with one event.
 //!
 //! Envelope `{mode: "daemon-event", event: {kind, ...}}`. We compile

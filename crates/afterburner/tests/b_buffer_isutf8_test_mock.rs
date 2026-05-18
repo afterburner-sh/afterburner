@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! buffer.isUtf8 / isAscii (Node 19.4+), fs.promises.constants
 //! (Node 18.4+), node:test mock surface (MockFunctionContext +
 //! MockTracker + snapshot, Node 19.1 / 22.3+).

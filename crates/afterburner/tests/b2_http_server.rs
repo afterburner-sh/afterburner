@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! B2 phase gate: `burn server.js` serves HTTP end-to-end.
 //!
 //! This is the headline example from `IMPL_PLAN_BURN_RUNTIME.md §1`:

@@ -10,7 +10,7 @@
   <a href="https://crates.io/crates/afterburner"><img src="https://img.shields.io/crates/v/afterburner?style=flat-square&color=e6832e" alt="crates.io"/></a>
   <a href="https://docs.rs/afterburner"><img src="https://img.shields.io/docsrs/afterburner?style=flat-square&color=2a9d8f" alt="docs.rs"/></a>
   <img src="https://img.shields.io/badge/rust-1.90%2B_(2024_ed)-blue?style=flat-square&logo=rust&logoColor=white" alt="MSRV"/>
-  <img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License"/>
+  <img src="https://img.shields.io/badge/license-BUSL--1.1-orange?style=flat-square" alt="License"/>
 </p>
 
 ---
@@ -130,16 +130,35 @@ app: `require('express')` resolves the actual npm package out of
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+Afterburner is **source-available** under the [Business Source License 1.1](LICENSE)
+(BSL 1.1). Each version released under the BSL automatically converts to the
+[Apache License, Version 2.0](LICENSE-APACHE) **four years after that version's
+release** (its per-version Change Date). Versions released *before* the relicense
+(git tag `last-apache-2.0`) were never under the BSL and remain Apache-2.0.
 
-**Corporate use notice.** Any corporate entity (company, agency, fund, foundation, or any organisation operating commercially) that uses Afterburner (in production, in internal tooling, in a product, in a service, or as a research artefact tied to commercial work) **must email the maintainer** at `vertexclique |TA| gmail <BOT> com` before adopting it. The maintainer reserves the right to refuse permission to use this project to specific entities, at the maintainer's sole discretion, regardless of the underlying Apache-2.0 grant.
+The Apache-2.0 components shipped alongside the engine — everything under
+`examples/` (see [`examples/LICENSE`](examples/LICENSE)), plus the planned
+`afterburner-afb`, `pg_burn`, and `psila/*` packages — are Apache-2.0 via
+their own `LICENSE` / `license` metadata and **not** subject to the BSL.
 
-This notice **applies equally to forks, soft forks, derivative works, repackagings, rebrands, vendored copies, and embedded copies** of Afterburner whether the source originates from this repository, a hosted fork on any platform (GitHub, GitLab, Codeberg, internal mirrors, etc.), a vendored snapshot in another repo, an npm/cargo/Docker re-publication, or a derivative project that incorporates any non-trivial portion of this code base. There is no loophole via forking, renaming, mirroring, or wrapping: a corporate entity that uses Afterburner via any of these paths is bound by the same notice as a corporate entity using the upstream directly.
+**Free for non-commercial and non-production use.** Individuals on personal
+projects, students on coursework, and non-commercial open-source projects (no
+paid sponsorship, no monetised hosting, no enterprise SLA), plus any internal
+evaluation/development/testing, are explicitly welcome — no separate agreement
+needed (see the Additional Use Grant in [LICENSE](LICENSE)).
 
-Individuals using Afterburner for personal projects, students using it for coursework, and non-commercial open-source projects (no paid sponsorship, no monetised hosting, no enterprise SLA) are not subject to this notice, they're explicitly welcome under the Apache-2.0 terms.
+**Commercial license required to host, embed, or compete.** Offering
+Afterburner as a hosted/managed service, embedding it in a commercial product
+distributed to third parties (OEM), or using it to build a competing offering
+requires a commercial license — including via forks, rebrands, vendored, or
+embedded copies. See **[LICENSING.md](LICENSING.md)**; contact
+`licensing@afterburner.sh`.
+
+"Afterburner" and related marks are trademarks of Psila.AI; see
+[TRADEMARK.md](TRADEMARK.md). Contributions require a [CLA](CLA.md).
 
 ---
 
 <p align="center">
-  <sub>Apache-2.0</sub>
+  <sub>BUSL-1.1 &rarr; Apache-2.0 (per-version, 4-year change)</sub>
 </p>

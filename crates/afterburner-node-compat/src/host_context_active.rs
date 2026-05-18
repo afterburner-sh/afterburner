@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! Per-thread active [`HostContext`]. Same activation pattern as
 //! `state_active` / `active_manifold`: the engine drops a context
 //! handle into a thread-local slot before running user JS and clears

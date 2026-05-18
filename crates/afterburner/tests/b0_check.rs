@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! `burn check` surface — verifies syntax errors in user source are
 //! caught at `register`/compile time, while runtime-only errors
 //! (ReferenceError, TypeError) are NOT reported. Matches

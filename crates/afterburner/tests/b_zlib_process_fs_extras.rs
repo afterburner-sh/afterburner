@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! `zlib.crc32` (Node 22.2+), `zlib.brotli{Compress,Decompress}` async
 //! wrappers, `process.uptime` / `kill` / `dlopen` /
 //! `allowedNodeEnvironmentFlags` / `features` / `config` / `release`,

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! B2.2 — `DaemonRuntime` scaffold tests. Exercises the long-lived
 //! Store path end-to-end against the plugin's daemon modes without
 //! the axum listener layer (that lands in B2.4).
