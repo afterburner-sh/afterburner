@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! Round 4 CLI parity flags (Node 22+): --watch · --env-file ·
 //! --require · --import · --permission + --allow-fs-read /
 //! --allow-fs-write / --allow-child-process / --allow-worker. Each

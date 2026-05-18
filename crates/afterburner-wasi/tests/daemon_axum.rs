@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! B2.4 — real axum listener end-to-end. Spawns a `DaemonHttp`
 //! with a live tokio runtime, a WasmCombustor, and a dispatcher
 //! thread; makes a real HTTP request against `127.0.0.1:PORT` and

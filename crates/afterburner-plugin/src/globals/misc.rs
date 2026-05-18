@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! Grab-bag globals: `os`, `http`, `dns`, `zlib`, host-context hooks
 //! (`readColumn` / `emitRow` / `getEnv`), the state store, the
 //! per-thrust input bridge (`__AB_GET_INPUT__`), and the error-message

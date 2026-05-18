@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! PATH shim: creates a temp dir containing a `node` executable that
 //! re-enters the current `burn` binary. When `burn npm install` (or
 //! `pnpm`/`yarn`/`npx`/`bun`) prepends this dir to the spawned

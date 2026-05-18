@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! Round-3 Node-compat surface gaps surfaced while making `burn npm
 //! install` reach actual install logic. Each fix here was a hard
 //! prerequisite for the npm / pnpm / yarn dispatch chain to advance

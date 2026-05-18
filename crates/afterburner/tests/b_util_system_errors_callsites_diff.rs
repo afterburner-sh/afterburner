@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! `util.getSystemErrorName` / `getSystemErrorMessage` /
 //! `getSystemErrorMap` (Node 17+/22.4+), `util.getCallSites`
 //! (Node 22.9+), and `util.diff` (Node 24+).

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! End-to-end coverage of the round-out SubtleCrypto algorithm set:
 //! AES-CTR, AES-KW, RSA-OAEP / RSA-PSS / RSASSA-PKCS1-v1_5,
 //! ECDSA / ECDH (P-256/384/521), Ed25519, X25519.

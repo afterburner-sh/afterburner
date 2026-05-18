@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! `crypto.hash` (Node 21+), `crypto.hkdf` / `hkdfSync` (Node 15+),
 //! `crypto.scrypt` (async), `crypto.subtle` alias, `crypto.fips`,
 //! and `crypto.KeyObject` / `X509Certificate` /

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! Real values for `os.homedir()` / `os.tmpdir()` / `os.hostname()`.
 //! Before this commit the WASM plugin only wired `platform` and
 //! `arch`; everything else fell back to compile-time defaults

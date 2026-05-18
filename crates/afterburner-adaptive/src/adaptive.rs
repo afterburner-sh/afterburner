@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! `AdaptiveCombustor` — native-first, with a single background worker that
 //! compiles the same source through the WASM backend and switches future
 //! `thrust` calls onto it once ready.

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! B0 phase gate: the CLI-vs-library defaults contract
 //! (Q1-D sandbox-default, Q2-A no-auto-daemon in library).
 //!

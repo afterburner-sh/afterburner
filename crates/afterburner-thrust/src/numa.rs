@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! NUMA topology discovery and per-worker affinity — P7.
 //!
 //! On **Linux** we read `/sys/devices/system/node/nodeN/cpulist` to learn

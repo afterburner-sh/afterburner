@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 Psila.AI
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
 //! `module._resolveFilename` / `_nodeModulePaths` / `Module.prototype.load` /
 //! `Module.wrap` — the webpack/corepack-internal surface. Pinned so a
 //! polyfill regression doesn't silently break corepack-managed pnpm/yarn
