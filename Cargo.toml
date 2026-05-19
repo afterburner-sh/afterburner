@@ -10,6 +10,7 @@ members = [
     "crates/afterburner-node-compat",
     "crates/afterburner-plugin",
     "crates/afterburner-thrust",
+    "crates/afterburner-afb",
 ]
 # `afterburner-plugin` targets `wasm32-wasip1`. Building it on the host
 # triple fails because `javy-plugin-api` assumes a WASI environment.
@@ -24,6 +25,7 @@ default-members = [
     "crates/afterburner-adaptive",
     "crates/afterburner-node-compat",
     "crates/afterburner-thrust",
+    "crates/afterburner-afb",
 ]
 
 # `examples/*` are standalone Cargo projects (each with its own
@@ -55,10 +57,25 @@ afterburner-flow = { version = "0.1.1", path = "crates/afterburner-flow" }
 afterburner-adaptive = { version = "0.1.1", path = "crates/afterburner-adaptive" }
 afterburner-node-compat = { version = "0.1.1", path = "crates/afterburner-node-compat" }
 afterburner-thrust = { version = "0.1.1", path = "crates/afterburner-thrust" }
+afterburner-afb = { version = "0.1.1", path = "crates/afterburner-afb" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+
+# `.afb` package format (afterburner-afb). zstd carries a `zstdmt`-free
+# default build (no compression threads) so packing stays single-core and
+# predictable; decode memory is bounded at runtime via window_log_max, not
+# by the dependency. dirs/secrecy/zeroize/httpmock are reserved here for
+# the forthcoming afterburner-cloud client crate.
+tar = { version = "0.4", default-features = false }
+zstd = "0.13"
+toml = "0.8"
+semver = { version = "1", features = ["serde"] }
+dirs = "5"
+secrecy = "0.10"
+zeroize = "1"
+httpmock = "0.7"
 sha1 = { version = "0.10", features = ["oid"] }
 thiserror = "2"
 hmac = "0.12"

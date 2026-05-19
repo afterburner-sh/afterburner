@@ -1,0 +1,320 @@
+// SPDX-License-Identifier: Apache-2.0
+//! End-to-end `.afb` pack/unpack tests.
+//!
+//! These read as the format spec: happy path, reproducibility, the security
+//! invariant (sealed stays sealed), and every hostile-input rejection.
+
+use afterburner_afb::{Afb, AfbError, MAX_AFB_BYTES, Manifest, digest, hex, pack::Builder};
+use afterburner_core::Manifold;
+use std::io::Write;
+use std::path::PathBuf;
+
+const HELLO_SOURCE: &str = "module.exports = (d) => d.n + 1\n";
+
+/// SHA-256 of the canonical `hello.afb`. Reproducible build ⇒ this is stable
+/// across machines and Rust versions; the committed fixture must match it.
+const HELLO_DIGEST_HEX: &str = "5868d4ae7011433a933a709f8818fa1eaca88de1d5f0be99c74d930f9794a901";
+
+fn hello_manifest() -> Manifest {
+    Manifest::parse(
+        r#"
+[format]
+version = "1.0"
+
+[package]
+name = "hello"
+namespace = "psila"
+version = "0.1.0"
+language = "js"
+entry = "source/main.js"
+description = "Canonical afterburner-afb fixture"
+
+[runtime]
+min = "0.1.0"
+"#,
+    )
+    .expect("canonical manifest parses")
+}
+
+/// The one canonical package every test builds from.
+fn build_hello() -> (Vec<u8>, [u8; 32]) {
+    Builder::new(hello_manifest(), Manifold::sealed())
+        .source("source/main.js", HELLO_SOURCE)
+        .build()
+        .expect("hello packs")
+}
+
+fn fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hello.afb")
+}
+
+// ---- happy path -----------------------------------------------------------
+
+#[test]
+fn pack_unpack_roundtrip() {
+    let (bytes, d) = build_hello();
+    let afb = Afb::from_bytes(&bytes).expect("unpacks");
+    assert_eq!(afb.digest, d);
+    assert_eq!(afb.manifest.package.name, "hello");
+    assert_eq!(afb.qualified_name(), "psila/hello");
+    assert_eq!(afb.entry_source().unwrap(), HELLO_SOURCE);
+    assert_eq!(afb.manifold, Manifold::sealed());
+}
+
+#[test]
+fn pack_is_reproducible() {
+    let a = build_hello();
+    let b = build_hello();
+    assert_eq!(a.0, b.0, "same inputs must yield byte-identical .afb");
+    assert_eq!(a.1, b.1);
+}
+
+#[test]
+fn digest_stable_across_machines() {
+    // Materialize the committed fixture on first run; thereafter assert the
+    // committed bytes still produce the golden digest (cross-machine proof).
+    let (bytes, d) = build_hello();
+    let path = fixture_path();
+    if !path.exists() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+    }
+    let on_disk = std::fs::read(&path).expect("fixture present");
+    assert_eq!(on_disk, bytes, "committed hello.afb is not reproducible");
+    assert_eq!(digest(&on_disk), d);
+    if HELLO_DIGEST_HEX != "REPLACE_ME" {
+        assert_eq!(hex(&d), HELLO_DIGEST_HEX, "golden digest drift");
+    }
+    eprintln!("HELLO_DIGEST_HEX = {}", hex(&d));
+}
+
+// ---- the security invariant ----------------------------------------------
+
+#[test]
+fn manifold_serde_roundtrip_preserves_sealed() {
+    let (bytes, _) = Builder::new(hello_manifest(), Manifold::sealed())
+        .source("source/main.js", HELLO_SOURCE)
+        .build()
+        .unwrap();
+    let afb = Afb::from_bytes(&bytes).unwrap();
+    // A sealed manifest must not widen on a pack → unpack round trip.
+    assert_eq!(afb.manifold, Manifold::sealed());
+}
+
+// ---- hostile input --------------------------------------------------------
+
+#[test]
+fn runtime_min_rejects_old() {
+    let mut m = hello_manifest();
+    m.runtime.min = "99.0.0".into();
+    let (bytes, _) = Builder::new(m, Manifold::sealed())
+        .source("source/main.js", HELLO_SOURCE)
+        .build()
+        .unwrap();
+    assert!(matches!(
+        Afb::from_bytes(&bytes),
+        Err(AfbError::RuntimeTooOld { .. })
+    ));
+}
+
+#[test]
+fn corrupt_archive_rejected() {
+    let (mut bytes, _) = build_hello();
+    // Flip a byte well past the zstd magic.
+    let i = bytes.len() / 2;
+    bytes[i] ^= 0xff;
+    let err = Afb::from_bytes(&bytes).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            AfbError::Corrupt(_) | AfbError::DecompressedTooLarge(_)
+        ),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn bad_manifold_rejected() {
+    // Hand-build a tar whose manifold.json is not a valid Manifold.
+    let mut ar = tar::Builder::new(Vec::new());
+    let toml = Manifest::parse(
+        "[format]\nversion=\"1.0\"\n[package]\nname=\"x\"\nnamespace=\"p\"\nversion=\"0.1.0\"\nlanguage=\"js\"\nentry=\"source/main.js\"\n[runtime]\nmin=\"0.1.0\"\n",
+    )
+    .unwrap()
+    .to_toml_string()
+    .unwrap();
+    append(&mut ar, "afb.toml", toml.as_bytes());
+    append(&mut ar, "manifold.json", b"{ not a manifold }");
+    append(&mut ar, "source/main.js", HELLO_SOURCE.as_bytes());
+    let afb = zstd::encode_all(ar.into_inner().unwrap().as_slice(), 19).unwrap();
+    assert!(matches!(
+        Afb::from_bytes(&afb),
+        Err(AfbError::ManifoldParse(_))
+    ));
+}
+
+#[test]
+fn too_large_rejected() {
+    let oversize = vec![0u8; MAX_AFB_BYTES + 1];
+    assert!(matches!(
+        Afb::from_bytes(&oversize),
+        Err(AfbError::TooLarge { .. })
+    ));
+}
+
+#[test]
+fn oversize_uncompressed_bomb() {
+    // 6 × 48 MiB = 288 MiB of zeros: each entry is under the 64 MiB
+    // per-entry cap, but the total exceeds the 256 MiB decompressed cap.
+    // The entries are not "wanted", so unpack never materializes them —
+    // tar streams/discards them through the capped decoder, which must
+    // trip *before* memory is exhausted. This exercises the streaming
+    // total cap specifically (not the per-entry cap).
+    let chunk = vec![0u8; 48 * 1024 * 1024];
+    let mut ar = tar::Builder::new(Vec::new());
+    for i in 0..6 {
+        append(&mut ar, &format!("precompiled/blob{i}"), &chunk);
+    }
+    let afb = zstd::encode_all(ar.into_inner().unwrap().as_slice(), 19).unwrap();
+    assert!(
+        afb.len() < MAX_AFB_BYTES,
+        "compressed bomb fits the size cap"
+    );
+    assert!(matches!(
+        Afb::from_bytes(&afb),
+        Err(AfbError::DecompressedTooLarge(_))
+    ));
+}
+
+#[test]
+fn incompatible_major_rejected() {
+    let mut ar = tar::Builder::new(Vec::new());
+    append(
+        &mut ar,
+        "afb.toml",
+        b"[format]\nversion = \"2.0\"\n[package]\nname=\"x\"\nnamespace=\"p\"\nversion=\"0.1.0\"\nlanguage=\"js\"\nentry=\"source/main.js\"\n[runtime]\nmin=\"0.1.0\"\n",
+    );
+    append(&mut ar, "manifold.json", b"{}");
+    append(&mut ar, "source/main.js", HELLO_SOURCE.as_bytes());
+    let afb = zstd::encode_all(ar.into_inner().unwrap().as_slice(), 19).unwrap();
+    assert!(matches!(
+        Afb::from_bytes(&afb),
+        Err(AfbError::FormatVersion { found, .. }) if found == "2.0"
+    ));
+}
+
+#[test]
+fn zip_slip_rejected() {
+    // The `tar` *writer* refuses to emit `..`, so a real zip-slip archive
+    // is hand-built at the byte level. unpack must reject the traversal.
+    let afb = zstd::encode_all(
+        raw_tar(&[("../../../etc/passwd", b'0', b"pwned")]).as_slice(),
+        19,
+    )
+    .unwrap();
+    assert!(matches!(
+        Afb::from_bytes(&afb),
+        Err(AfbError::PathEscape(_))
+    ));
+}
+
+#[test]
+fn symlink_entry_rejected() {
+    let mut ar = tar::Builder::new(Vec::new());
+    let mut h = tar::Header::new_ustar();
+    h.set_entry_type(tar::EntryType::Symlink);
+    h.set_size(0);
+    h.set_mode(0o777);
+    h.set_mtime(0);
+    h.set_link_name("/etc/passwd").unwrap();
+    ar.append_data(&mut h, "evil-link", std::io::empty())
+        .unwrap();
+    let afb = zstd::encode_all(ar.into_inner().unwrap().as_slice(), 19).unwrap();
+    assert!(matches!(
+        Afb::from_bytes(&afb),
+        Err(AfbError::DisallowedEntryType(_))
+    ));
+}
+
+#[test]
+fn missing_required_members_rejected() {
+    // Valid manifest, no manifold.json.
+    let mut ar = tar::Builder::new(Vec::new());
+    append(
+        &mut ar,
+        "afb.toml",
+        b"[format]\nversion=\"1.0\"\n[package]\nname=\"x\"\nnamespace=\"p\"\nversion=\"0.1.0\"\nlanguage=\"js\"\nentry=\"source/main.js\"\n[runtime]\nmin=\"0.1.0\"\n",
+    );
+    append(&mut ar, "source/main.js", HELLO_SOURCE.as_bytes());
+    let afb = zstd::encode_all(ar.into_inner().unwrap().as_slice(), 19).unwrap();
+    assert!(matches!(
+        Afb::from_bytes(&afb),
+        Err(AfbError::MissingFile("manifold.json"))
+    ));
+}
+
+#[test]
+fn entry_not_in_archive_rejected() {
+    // Manifest points at source/main.js but the archive ships only other.js.
+    let (bytes, _) = Builder::new(hello_manifest(), Manifold::sealed())
+        .source("source/other.js", HELLO_SOURCE)
+        .build()
+        .unwrap();
+    assert!(matches!(
+        Afb::from_bytes(&bytes),
+        Err(AfbError::EntryMissing(e)) if e == "source/main.js"
+    ));
+}
+
+// ---- helpers --------------------------------------------------------------
+
+fn append(ar: &mut tar::Builder<Vec<u8>>, path: &str, data: &[u8]) {
+    let mut h = tar::Header::new_ustar();
+    h.set_size(data.len() as u64);
+    h.set_mode(0o644);
+    h.set_mtime(0);
+    h.set_entry_type(tar::EntryType::Regular);
+    ar.append_data(&mut h, path, data).unwrap();
+}
+
+/// Hand-roll a ustar archive, bypassing the `tar` writer's path validation
+/// so hostile names (`..`, …) can be tested. `(name, typeflag, data)`.
+fn raw_tar(entries: &[(&str, u8, &[u8])]) -> Vec<u8> {
+    fn oct(field: &mut [u8], val: u64) {
+        let n = field.len();
+        let s = format!("{val:0width$o}", width = n - 1);
+        field[..n - 1].copy_from_slice(s.as_bytes());
+        field[n - 1] = 0;
+    }
+    let mut out = Vec::new();
+    for &(name, typeflag, data) in entries {
+        let mut h = [0u8; 512];
+        let nb = name.as_bytes();
+        h[..nb.len()].copy_from_slice(nb);
+        oct(&mut h[100..108], 0o644); // mode
+        oct(&mut h[108..116], 0); // uid
+        oct(&mut h[116..124], 0); // gid
+        oct(&mut h[124..136], data.len() as u64); // size
+        oct(&mut h[136..148], 0); // mtime
+        h[156] = typeflag;
+        h[257..263].copy_from_slice(b"ustar\0");
+        h[263..265].copy_from_slice(b"00");
+        // checksum: sum of all bytes with the chksum field as spaces
+        h[148..156].copy_from_slice(b"        ");
+        let sum: u32 = h.iter().map(|&b| b as u32).sum();
+        let cs = format!("{sum:06o}");
+        h[148..154].copy_from_slice(cs.as_bytes());
+        h[154] = 0;
+        h[155] = b' ';
+        out.extend_from_slice(&h);
+        out.extend_from_slice(data);
+        if data.len() % 512 != 0 {
+            out.extend(std::iter::repeat(0).take(512 - data.len() % 512));
+        }
+    }
+    out.extend(std::iter::repeat(0).take(1024)); // two zero blocks = EOF
+    out
+}

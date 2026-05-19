@@ -276,10 +276,25 @@ impl Afterburner {
     }
 
     /// Apply the same script across a JSON array of records, returning
-    /// an array of outputs. Equivalent to `run` over each element.
+    /// an array of outputs. Equivalent to `run` over each element, with
+    /// the builder-captured defaults.
     pub fn run_batch(&self, id: &ScriptId, input: &Value) -> Result<Value> {
+        self.run_batch_with(id, input, &self.defaults)
+    }
+
+    /// Like [`run_batch`](Self::run_batch) but with explicit per-call
+    /// limits — fuel / timeout / memory / capability [`Manifold`]. The
+    /// whole batch shares one budget (the engine sets fuel + epoch once
+    /// per call); size batches accordingly. Sandbox enforcement is
+    /// identical to [`run_with`](Self::run_with).
+    pub fn run_batch_with(
+        &self,
+        id: &ScriptId,
+        input: &Value,
+        limits: &FuelGauge,
+    ) -> Result<Value> {
         match &self.engine {
-            EngineHolder::Cache(c) => c.execute_batch(id, input, &self.defaults),
+            EngineHolder::Cache(c) => c.execute_batch(id, input, limits),
             #[cfg(feature = "thrust")]
             EngineHolder::Thrust(_) => {
                 // ThrustEngine doesn't expose a batched API yet; loop
@@ -289,7 +304,7 @@ impl Afterburner {
                 })?;
                 let mut out = Vec::with_capacity(arr.len());
                 for item in arr {
-                    out.push(self.run_with(id, item, &self.defaults)?);
+                    out.push(self.run_with(id, item, limits)?);
                 }
                 Ok(Value::Array(out))
             }

@@ -351,7 +351,11 @@ fn outcome_to_result(o: &std::result::Result<ScriptId, String>) -> Result<Script
 
 /// Render a 32-byte hash as a 16-char hex prefix — short enough for log
 /// output, long enough to disambiguate scripts in practice.
-fn hex32(hash: &[u8; 32]) -> String {
+///
+/// This is a *display* helper, not a content address: it encodes only the
+/// first 8 bytes. Full-width content-addressing hex lives in `afterburner-afb`
+/// (`digest::hex`); do not use this for cache keys or registry paths.
+pub fn hex32(hash: &[u8; 32]) -> String {
     let mut s = String::with_capacity(16);
     for b in &hash[..8] {
         s.push_str(&format!("{b:02x}"));

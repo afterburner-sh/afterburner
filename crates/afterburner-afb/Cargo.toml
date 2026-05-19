@@ -1,0 +1,32 @@
+[package]
+name = "afterburner-afb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+# Apache-2.0, NOT the workspace BSL. The package format is the maximal
+# adoption surface; permissive licensing is deliberate. Do not change to
+# `license.workspace = true`.
+license = "Apache-2.0"
+description = "Afterburner .afb package format — reproducible, content-addressed pack/unpack with sandboxed-manifest preservation"
+keywords = ["afterburner", "wasm", "package", "zstd", "sandbox"]
+categories = ["compression", "development-tools", "wasm"]
+readme = "README.md"
+include = ["src/**/*.rs", "Cargo.toml", "LICENSE", "README.md", "FORMAT.md"]
+
+[dependencies]
+afterburner-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tar = { workspace = true }
+zstd = { workspace = true }
+toml = { workspace = true }
+semver = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

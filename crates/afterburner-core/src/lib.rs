@@ -21,10 +21,14 @@ pub mod registry;
 pub mod state_store;
 pub mod types;
 
+/// This crate's version, used by `afterburner-afb` to enforce a package's
+/// `[runtime] min` requirement against the running engine.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub use engine::Combustor;
 pub use error::{AfterburnerError, Result};
 pub use host::{HostContext, HostFunction, HttpMethod, HttpResponse, LogLevel, NullHost};
 pub use manifold::{EnvAccess, FsAccess, Manifold, NetAccess};
-pub use registry::{BurnCache, BurnCacheBackend, InProcessCacheBackend, RegistryStats};
+pub use registry::{BurnCache, BurnCacheBackend, InProcessCacheBackend, RegistryStats, hex32};
 pub use state_store::{InMemoryStateStore, SharedStateStore, StateStore};
 pub use types::{EngineMode, FuelGauge, ScriptId, ScriptInvocation, ScriptOutcome, sha256};
