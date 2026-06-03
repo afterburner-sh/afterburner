@@ -174,10 +174,16 @@ fn npm_install_express_then_serve_works() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn server");
-    // Poll for "SERVING" line in the child's stdout. Up to 8s.
+    // Poll until the server binds the port. Loading express + its ~66
+    // deps through the debug-built engine is CPU-bound and slow on a
+    // cold CI runner — locally ~6s, several multiples of that on CI —
+    // so the budget is deliberately generous. The loop returns the
+    // instant the port is connectable, so a high ceiling only costs
+    // wall-clock on a genuine failure (cf. b7_dgram's 60s cold-spawn
+    // budget, commit f690d57).
     let start = std::time::Instant::now();
     let mut listening = false;
-    while start.elapsed() < Duration::from_secs(8) {
+    while start.elapsed() < Duration::from_secs(60) {
         std::thread::sleep(Duration::from_millis(100));
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
             listening = true;
@@ -185,9 +191,19 @@ fn npm_install_express_then_serve_works() {
         }
     }
     if !listening {
+        // Surface the child's own output — the previous blind
+        // "didn't start" panic told us nothing when this tripped in CI.
         let _ = child.kill();
-        let _ = child.wait();
-        panic!("express server didn't start on port {port}");
+        let (so, se) = child
+            .wait_with_output()
+            .map(|o| {
+                (
+                    String::from_utf8_lossy(&o.stdout).into_owned(),
+                    String::from_utf8_lossy(&o.stderr).into_owned(),
+                )
+            })
+            .unwrap_or_default();
+        panic!("express server didn't start on port {port} within 60s. stdout={so}\nstderr={se}");
     }
     // GET /
     let body = curl_get(&format!("http://127.0.0.1:{port}/"));
