@@ -929,7 +929,14 @@ fn emit_lifecycle(
         "kind": "lifecycle",
         "event_name": event_name,
     });
-    dispatch_with_panic_isolation(shard_idx, daemon, envelope, "lifecycle", stdout_hw, stderr_hw);
+    dispatch_with_panic_isolation(
+        shard_idx,
+        daemon,
+        envelope,
+        "lifecycle",
+        stdout_hw,
+        stderr_hw,
+    );
     let _ = flush_streams(daemon, stdout_hw, stderr_hw);
 }
 

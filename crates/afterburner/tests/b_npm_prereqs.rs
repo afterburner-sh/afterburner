@@ -54,8 +54,14 @@ fn run_in(dir: &PathBuf, code: &str) -> std::process::Output {
 fn assert_marker(out: &std::process::Output, marker: &str) {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "burn failed. stdout={stdout}\nstderr={stderr}");
-    assert!(stdout.contains(marker), "missing `{marker}`. stdout={stdout}\nstderr={stderr}");
+    assert!(
+        out.status.success(),
+        "burn failed. stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains(marker),
+        "missing `{marker}`. stdout={stdout}\nstderr={stderr}"
+    );
 }
 
 #[test]
@@ -135,7 +141,11 @@ fn exports_pattern_subpath_resolves() {
         r#"{"name":"patpkg","exports":{"./features/*":"./dist/features/*.js"}}"#,
     )
     .unwrap();
-    fs::write(pkg.join("dist/features/alpha.js"), "module.exports = 'ALPHA';").unwrap();
+    fs::write(
+        pkg.join("dist/features/alpha.js"),
+        "module.exports = 'ALPHA';",
+    )
+    .unwrap();
     let out = run_in(
         &dir,
         r#"
@@ -155,7 +165,11 @@ fn require_parse_error_names_the_module() {
     let dir = fresh("parseerr");
     let pkg = dir.join("node_modules/brokenpkg");
     fs::create_dir_all(&pkg).unwrap();
-    fs::write(pkg.join("package.json"), r#"{"name":"brokenpkg","main":"index.js"}"#).unwrap();
+    fs::write(
+        pkg.join("package.json"),
+        r#"{"name":"brokenpkg","main":"index.js"}"#,
+    )
+    .unwrap();
     // `const = 5;` is a hard parse error (missing binding identifier).
     fs::write(pkg.join("index.js"), "const = 5;\n").unwrap();
     let out = run_in(
