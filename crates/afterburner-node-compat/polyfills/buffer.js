@@ -156,6 +156,20 @@ __register_module('buffer', function(module, exports, require) {
             makeBuffer(s);
             return s;
         };
+        // `subarray` MUST return a Buffer (not a bare Uint8Array) so the
+        // returned view still has Buffer methods — most importantly
+        // `toString(encoding)`. Node's `Buffer.subarray` returns a
+        // Buffer; without this override `buf.subarray(a,b).toString('utf8')`
+        // falls back to TypedArray's comma-joined `toString` and yields
+        // "104,105,…" instead of the decoded text. The `tar` package
+        // decodes every header field via `subarray().toString('utf8')`,
+        // so the bare-Uint8Array form made every checksum/path parse
+        // garbage and broke `npm install` tarball extraction.
+        u8.subarray = function(start, end) {
+            var s = Uint8Array.prototype.subarray.call(u8, start, end);
+            makeBuffer(s);
+            return s;
+        };
         u8.equals = function(other) {
             if (!other || other.length !== u8.length) return false;
             for (var i = 0; i < u8.length; i++) if (u8[i] !== other[i]) return false;

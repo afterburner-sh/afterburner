@@ -312,9 +312,9 @@ fn raw_tar(entries: &[(&str, u8, &[u8])]) -> Vec<u8> {
         out.extend_from_slice(&h);
         out.extend_from_slice(data);
         if data.len() % 512 != 0 {
-            out.extend(std::iter::repeat(0).take(512 - data.len() % 512));
+            out.extend(std::iter::repeat_n(0, 512 - data.len() % 512));
         }
     }
-    out.extend(std::iter::repeat(0).take(1024)); // two zero blocks = EOF
+    out.extend(std::iter::repeat_n(0, 1024)); // two zero blocks = EOF
     out
 }

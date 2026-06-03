@@ -34,7 +34,7 @@ default-members = [
 exclude = ["examples"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.90"
 authors = ["Theo Bulut <vertexclique@gmail.com>"]
@@ -49,15 +49,15 @@ keywords = ["javascript", "wasm", "sandbox", "runtime"]
 categories = ["wasm", "development-tools"]
 
 [workspace.dependencies]
-afterburner = { version = "0.1.1", path = "crates/afterburner" }
-afterburner-core = { version = "0.1.1", path = "crates/afterburner-core" }
-afterburner-wasi = { version = "0.1.1", path = "crates/afterburner-wasi" }
-afterburner-ignite = { version = "0.1.1", path = "crates/afterburner-ignite" }
-afterburner-flow = { version = "0.1.1", path = "crates/afterburner-flow" }
-afterburner-adaptive = { version = "0.1.1", path = "crates/afterburner-adaptive" }
-afterburner-node-compat = { version = "0.1.1", path = "crates/afterburner-node-compat" }
-afterburner-thrust = { version = "0.1.1", path = "crates/afterburner-thrust" }
-afterburner-afb = { version = "0.1.1", path = "crates/afterburner-afb" }
+afterburner = { version = "0.1.2", path = "crates/afterburner" }
+afterburner-core = { version = "0.1.2", path = "crates/afterburner-core" }
+afterburner-wasi = { version = "0.1.2", path = "crates/afterburner-wasi" }
+afterburner-ignite = { version = "0.1.2", path = "crates/afterburner-ignite" }
+afterburner-flow = { version = "0.1.2", path = "crates/afterburner-flow" }
+afterburner-adaptive = { version = "0.1.2", path = "crates/afterburner-adaptive" }
+afterburner-node-compat = { version = "0.1.2", path = "crates/afterburner-node-compat" }
+afterburner-thrust = { version = "0.1.2", path = "crates/afterburner-thrust" }
+afterburner-afb = { version = "0.1.2", path = "crates/afterburner-afb" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

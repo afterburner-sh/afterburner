@@ -360,7 +360,14 @@
         },
 
         exit: function(code) {
-            try { proc.emit('exit', code || 0); } catch (_) {}
+            // Guard so 'exit' fires at most once. The host also emits
+            // 'exit' when the event loop drains naturally (see the
+            // daemon-event 'lifecycle' dispatch); Node guarantees a
+            // single 'exit' emission regardless of how the process ends.
+            if (!proc.__burnExited) {
+                proc.__burnExited = true;
+                try { proc.emit('exit', code || 0); } catch (_) {}
+            }
             if (globalThis.__host_process_exit) globalThis.__host_process_exit(code || 0);
             var err = new Error('process.exit(' + (code || 0) + ')');
             err.code = 'ERR_PROCESS_EXIT';

@@ -113,6 +113,8 @@ jobs:
               --test b_process_getters
               --test b_process_stdio
               --test b_process_report
+              --test b_process_lifecycle
+              --test b_npm_prereqs
             timeout: 40
 
           # Module resolution + TS strip + ESM pipeline. Only tier that
@@ -330,6 +332,43 @@ jobs:
             --features "bin ts shadow-${{ matrix.shadow }}" \
             --test b_shadow_${{ matrix.shadow }} \
             --no-fail-fast -- --test-threads=1
+
+  # ---------------------------------------------------------------
+  # npm install end-to-end (LIVE npm registry).
+  # b_npm_install_e2e is #[ignore]'d so it stays out of the default
+  # offline `cargo test` (the other tiers must run with no network).
+  # But `burn npm install` is load-bearing and its only coverage is
+  # these tests — when the daemon event loop stopped emitting the
+  # process 'exit' lifecycle, npm silently produced no output and
+  # installed nothing, and NO CI job could see it. This job runs the
+  # ignored tests explicitly with `--ignored` against the real
+  # registry so that class of regression fails CI. Needs node/npm on
+  # PATH: `burn npm` execs the real npm, which re-enters burn through
+  # the `node` PATH shim.
+  # ---------------------------------------------------------------
+  test-npm-e2e:
+    name: test / npm-install-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip1
+          rustflags: ''
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: npm-e2e
+      - name: cargo test (npm install e2e, live registry)
+        run: |
+          cargo test -p afterburner \
+            --features "bin ts" \
+            --test b_npm_install_e2e \
+            --no-fail-fast -- --ignored --test-threads=1
 
   doc:
     name: cargo doc

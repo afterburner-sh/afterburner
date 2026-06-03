@@ -659,7 +659,22 @@ fn shard_event_loop(
             break;
         }
         if !daemon.has_refs() {
-            // Listener closed and timers cleared — natural exit.
+            // Event loop drained — emit Node's shutdown lifecycle
+            // before tearing the shard down so `process.on('beforeExit')`
+            // / `process.on('exit')` handlers run. npm (and many CLIs)
+            // buffer ALL their output and flush it from an 'exit'
+            // handler — without this the script that completed by
+            // draining the loop (rather than calling `process.exit()`)
+            // prints nothing and never finalizes. A 'beforeExit' handler
+            // may schedule new work (a timer / async I/O); if it does,
+            // `has_refs()` flips back true and we keep looping (Node
+            // re-fires 'beforeExit' each time the loop empties). 'exit'
+            // fires exactly once, right before we break.
+            emit_lifecycle(shard_idx, daemon, "beforeExit", stdout_hw, stderr_hw);
+            if daemon.has_refs() {
+                continue;
+            }
+            emit_lifecycle(shard_idx, daemon, "exit", stdout_hw, stderr_hw);
             has_refs.store(false, Ordering::Release);
             break;
         }
@@ -893,6 +908,29 @@ fn cancel_pending_reply(coord: &Arc<DaemonHttp>, req_id: i64) {
             body: b"burn: shard dispatch failed".to_vec(),
         });
     }
+}
+
+/// Emit a Node process lifecycle event ('beforeExit' / 'exit') into the
+/// shard's JS Store, then flush whatever the handler printed. Routed
+/// through the same panic-isolated dispatch as timers/HTTP so a throwing
+/// handler can't take down the shard thread, and so a `process.exit()`
+/// from inside a handler still propagates as `ProcessExit`. This is what
+/// makes `process.on('exit')` flushers (npm buffers all its output there)
+/// actually run when a script finishes by draining the event loop rather
+/// than calling `process.exit()`.
+fn emit_lifecycle(
+    shard_idx: usize,
+    daemon: &mut DaemonRuntime,
+    event_name: &'static str,
+    stdout_hw: &mut usize,
+    stderr_hw: &mut usize,
+) {
+    let envelope = serde_json::json!({
+        "kind": "lifecycle",
+        "event_name": event_name,
+    });
+    dispatch_with_panic_isolation(shard_idx, daemon, envelope, "lifecycle", stdout_hw, stderr_hw);
+    let _ = flush_streams(daemon, stdout_hw, stderr_hw);
 }
 
 fn flush_streams(

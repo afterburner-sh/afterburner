@@ -357,6 +357,28 @@ const DISPATCH_SOURCE: &str = r#"
         // Unknown req_id (resolver missing) is silently dropped — the
         // Rust side may have hit a race between the response queue
         // and a JS-side abort that already cleared the slot.
+    } else if (kind === 'lifecycle') {
+        // Node process shutdown lifecycle, driven by the host when the
+        // event loop drains (see daemon_shard_pool::emit_lifecycle).
+        // npm — and many CLIs — buffer ALL their output and flush it
+        // from a `process.on('exit')` handler, so without this they
+        // print nothing and never finalize. 'exit' fires exactly once
+        // (guarded so an explicit `process.exit()` can't double-fire
+        // it); 'beforeExit' may re-arm the loop and fire again.
+        const p = globalThis.process;
+        if (p && typeof p.emit === 'function') {
+            const name = ev.event_name || '';
+            if (name === 'exit') {
+                if (!p.__burnExited) {
+                    p.__burnExited = true;
+                    try { p.emit('exit', ev.code | 0); }
+                    catch (e) { try { console.error('exit handler error:', (e && e.stack) || e); } catch (_) {} }
+                }
+            } else {
+                try { p.emit(name, ev.code | 0); }
+                catch (e) { try { console.error(name + ' handler error:', (e && e.stack) || e); } catch (_) {} }
+            }
+        }
     } else {
         // Unknown event kind — surface on stderr for diagnosis.
         try { console.error('daemon-event: unknown kind=' + kind); } catch (_) {}

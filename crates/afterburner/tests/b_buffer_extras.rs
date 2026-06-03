@@ -53,6 +53,30 @@ fn buffer_compare_returns_signed_byte_order() {
 }
 
 #[test]
+fn buffer_subarray_returns_decodable_buffer() {
+    // `Buffer.subarray()` MUST return a Buffer (not a bare Uint8Array)
+    // so the returned view still decodes via `.toString(encoding)`.
+    // The `tar` package — and many npm deps — read header fields with
+    // `buf.subarray(off, end).toString('utf8')`; a bare Uint8Array
+    // there yields comma-joined byte values ("68,69,70") instead of
+    // "DEF", which made every tar checksum parse as garbage and broke
+    // `npm install` tarball extraction.
+    let out = run_inline(
+        r#"
+        const b = Buffer.from('ABCDEFGHIJ');
+        const s = b.subarray(3, 6);
+        const ok = s.toString('utf8') === 'DEF'
+            && Buffer.isBuffer(s)
+            && s.toString('hex') === '444546'
+            && b.subarray(3).toString('utf8') === 'DEFGHIJ'
+            && b.subarray(3, 6).toString('ascii') === 'DEF';
+        console.log(ok ? 'SUBARRAY-OK' : ('FAIL:' + JSON.stringify(s.toString('utf8'))));
+        "#,
+    );
+    assert_marker(&out, "SUBARRAY-OK");
+}
+
+#[test]
 fn buffer_is_encoding_recognises_canonical_set() {
     let out = run_inline(
         r#"

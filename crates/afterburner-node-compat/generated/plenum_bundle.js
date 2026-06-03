@@ -340,36 +340,134 @@
     // the first string entry. Strings are returned as-is.
     function pickConditional(entry) {
         if (typeof entry === 'string') return entry;
-        if (entry && typeof entry === 'object') {
-            if (typeof entry.node === 'string') return entry.node;
-            if (typeof entry.default === 'string') return entry.default;
-            // Object form with `import`/`require` — prefer require shape
-            // since we resolve through a CJS lens.
-            if (typeof entry.require === 'string') return entry.require;
-            if (typeof entry.import === 'string') return entry.import;
-            // Recurse into nested condition objects (e.g. `node: {default}`).
-            for (var k in entry) {
-                if (typeof entry[k] === 'object') {
-                    var nested = pickConditional(entry[k]);
-                    if (nested) return nested;
-                }
+        if (!entry || typeof entry !== 'object') return null;
+        // CJS-lens condition priority. `require`/`node` MUST win over
+        // `import`: dual-build packages (e.g. glob → import:esm,
+        // require:commonjs) ship a CommonJS build our `require()` can
+        // load directly, whereas the `import` build is ESM that often
+        // won't parse as-is. Crucially we resolve by this fixed
+        // priority rather than package.json key order — otherwise a
+        // package that lists `import` before `require` (glob does)
+        // would pick the ESM build. `import` is the last resort (it
+        // would need transpiling). Each condition may be a string or a
+        // nested condition object, so recurse.
+        var order = ['node', 'require', 'default', 'import'];
+        for (var i = 0; i < order.length; i++) {
+            var v = entry[order[i]];
+            if (typeof v === 'string') return v;
+            if (v && typeof v === 'object') {
+                var nested = pickConditional(v);
+                if (nested) return nested;
+            }
+        }
+        // Custom/unknown conditions as a last resort — but never
+        // `types` (a `.d.ts` pointer, not a runtime target).
+        for (var k in entry) {
+            if (k === 'types' || order.indexOf(k) !== -1) continue;
+            if (typeof entry[k] === 'string') return entry[k];
+            if (entry[k] && typeof entry[k] === 'object') {
+                var n2 = pickConditional(entry[k]);
+                if (n2) return n2;
             }
         }
         return null;
     }
 
-    // Walk up `fromDir` looking for `node_modules/<name>`. Returns the
-    // absolute resolved file path, or null if nothing matches up to
-    // the filesystem root.
+    // Split a bare specifier into the package name and an optional
+    // subpath. Scoped packages (`@scope/name/sub`) keep the first two
+    // segments as the package name.
+    function splitPackageSpecifier(name) {
+        if (name.charAt(0) === '@') {
+            var parts = name.split('/');
+            return { pkg: parts.slice(0, 2).join('/'), sub: parts.slice(2).join('/') };
+        }
+        var idx = name.indexOf('/');
+        if (idx === -1) return { pkg: name, sub: '' };
+        return { pkg: name.slice(0, idx), sub: name.slice(idx + 1) };
+    }
+
+    // Pattern-subpath exports: `"./foo/*": "./dist/foo/*.js"`. Match
+    // `key` against the `*`-bearing export keys and substitute the
+    // captured segment into the (conditional-resolved) target.
+    function matchExportsPattern(exp, key) {
+        for (var pat in exp) {
+            var star = pat.indexOf('*');
+            if (star === -1) continue;
+            var prefix = pat.slice(0, star);
+            var suffix = pat.slice(star + 1);
+            if (key.length >= prefix.length + suffix.length
+                && key.slice(0, prefix.length) === prefix
+                && (suffix === '' || key.slice(key.length - suffix.length) === suffix)) {
+                var mid = key.slice(prefix.length, key.length - suffix.length);
+                var tgt = pickConditional(exp[pat]);
+                if (typeof tgt === 'string') return tgt.split('*').join(mid);
+            }
+        }
+        return null;
+    }
+
+    // Resolve a package + subpath through the package.json `exports`
+    // field — the modern, authoritative map and the ONLY way to reach
+    // subpath exports like `@scope/pkg/sub` whose target lives where
+    // `main`/index can't see (e.g. `@sigstore/protobuf-specs/rekor/v2`
+    // → `./dist/rekor/v2/index.js`). Returns an absolute path or null
+    // (null falls back to legacy main/index resolution).
+    function resolveViaExports(pkgRoot, sub) {
+        var pkgJson = pkgRoot + '/package.json';
+        if (!fsExists(pkgJson)) return null;
+        var raw = fsRead(pkgJson);
+        if (typeof raw !== 'string') return null;
+        var pkg;
+        try { pkg = JSON.parse(raw); } catch (_) { return null; }
+        if (!pkg || pkg.exports === undefined || pkg.exports === null) return null;
+        var exp = pkg.exports;
+        var key = sub ? ('./' + sub) : '.';
+        var target = null;
+        if (typeof exp === 'string') {
+            // String shorthand describes the `.` entry only.
+            if (key === '.') target = exp;
+        } else if (typeof exp === 'object') {
+            // If no key looks like a subpath (`.`/`./…`), the object is
+            // a bare condition map for `.` (e.g. `{ require, import }`).
+            var hasSubpathKeys = false;
+            for (var k in exp) {
+                if (k === '.' || k.charAt(0) === '.') { hasSubpathKeys = true; break; }
+            }
+            if (!hasSubpathKeys) {
+                if (key === '.') target = pickConditional(exp);
+            } else if (Object.prototype.hasOwnProperty.call(exp, key)) {
+                target = pickConditional(exp[key]);
+            } else {
+                target = matchExportsPattern(exp, key);
+            }
+        }
+        if (typeof target !== 'string') return null;
+        var abs = resolveJoin(pkgRoot, target);
+        return resolveCandidate(abs) || (fsExists(abs) && !fsIsDir(abs) ? abs : null);
+    }
+
+    // Walk up `fromDir` looking for `node_modules/<pkg>`. Consults the
+    // package's `exports` map first (authoritative for subpaths), then
+    // falls back to legacy main/index + filesystem-join resolution.
+    // Returns the absolute resolved file path, or null.
     function resolvePackage(name, fromDir) {
         var dir = fromDir;
         // Guard against pathological inputs (empty dir, etc.).
         if (typeof dir !== 'string' || dir.length === 0) dir = '/';
+        var spec = splitPackageSpecifier(name);
         // Safety bound: 64 parent walks is far more than any real tree.
         for (var i = 0; i < 64; i++) {
-            var cand = dir + '/node_modules/' + name;
-            var r = resolveCandidate(cand);
-            if (r) return r;
+            var pkgRoot = dir + '/node_modules/' + spec.pkg;
+            if (fsIsDir(pkgRoot)) {
+                var viaExports = resolveViaExports(pkgRoot, spec.sub);
+                if (viaExports) return viaExports;
+                // Legacy: bare name → main/index; subpath → join onto
+                // the package root and resolve (covers packages with no
+                // `exports` and deep imports they still permit).
+                var cand = spec.sub ? (pkgRoot + '/' + spec.sub) : pkgRoot;
+                var r = resolveCandidate(cand);
+                if (r) return r;
+            }
             var parent = dirname(dir);
             if (parent === dir) break;
             dir = parent;
@@ -460,36 +558,46 @@
         // user-visible outputs; `require` is the scoped copy; the two
         // `__filename` / `__dirname` bindings match Node.
         var modObj = { exports: {}, filename: absPath, loaded: false };
+        var dir = dirname(absPath);
+        // Compile first so a parse error can name the module. QuickJS
+        // SyntaxErrors carry no source context; without the path, a
+        // failed dependency surfaces as a bare "Unexpected token …"
+        // with no hint which file is at fault.
+        var fn;
+        try {
+            fn = new Function(
+                'module', 'exports', 'require', '__filename', '__dirname',
+                source
+            );
+        } catch (compileErr) {
+            if (compileErr && typeof compileErr.message === 'string'
+                && compileErr.message.indexOf(absPath) === -1) {
+                compileErr.message += ' (while compiling ' + absPath + ')';
+            }
+            throw compileErr;
+        }
         // Install the MODULE record (not the exports snapshot) before
         // invoking the user body. Cycles look up `cache[absPath]` and
         // pull `.exports` at access time — so any
         // `module.exports = NewClass` reassignment inside the user
         // body is visible to a re-entrant require immediately.
         cache[absPath] = modObj;
-        var dir = dirname(absPath);
+        // Stash the current scoped require before running the user body
+        // so dynamic `import(...)` (rewritten to `__ab_dyn_import`)
+        // walks `node_modules` from the importing file's dir. JS is
+        // single-threaded so the save/restore is race-free; nested
+        // requires nest their saves naturally.
+        var prevActive = globalThis.__ab_active_require;
+        globalThis.__ab_active_require = scopedRequire;
         try {
-            var fn = new Function(
-                'module', 'exports', 'require', '__filename', '__dirname',
-                source
-            );
-            // Stash the current scoped require before running the
-            // user body so dynamic `import(...)` (rewritten to
-            // `__ab_dyn_import(spec)`) walks `node_modules` from the
-            // importing file's dir. JS is single-threaded so the
-            // simple save/restore is race-free; nested requires nest
-            // their saves naturally.
-            var prevActive = globalThis.__ab_active_require;
-            globalThis.__ab_active_require = scopedRequire;
-            try {
-                fn(modObj, modObj.exports, scopedRequire, absPath, dir);
-            } finally {
-                globalThis.__ab_active_require = prevActive;
-            }
+            fn(modObj, modObj.exports, scopedRequire, absPath, dir);
         } catch (e) {
             // Broken module — evict so a retry can re-run the factory
             // cleanly.
             delete cache[absPath];
             throw e;
+        } finally {
+            globalThis.__ab_active_require = prevActive;
         }
         modObj.loaded = true;
         return modObj.exports;
@@ -1535,6 +1643,20 @@ __register_module('buffer', function(module, exports, require) {
             throw new Error('Unknown encoding: ' + encoding);
         };
         u8.slice = function(start, end) {
+            var s = Uint8Array.prototype.subarray.call(u8, start, end);
+            makeBuffer(s);
+            return s;
+        };
+        // `subarray` MUST return a Buffer (not a bare Uint8Array) so the
+        // returned view still has Buffer methods — most importantly
+        // `toString(encoding)`. Node's `Buffer.subarray` returns a
+        // Buffer; without this override `buf.subarray(a,b).toString('utf8')`
+        // falls back to TypedArray's comma-joined `toString` and yields
+        // "104,105,…" instead of the decoded text. The `tar` package
+        // decodes every header field via `subarray().toString('utf8')`,
+        // so the bare-Uint8Array form made every checksum/path parse
+        // garbage and broke `npm install` tarball extraction.
+        u8.subarray = function(start, end) {
             var s = Uint8Array.prototype.subarray.call(u8, start, end);
             makeBuffer(s);
             return s;
@@ -12202,7 +12324,14 @@ __register_module('perf_hooks', function(module, exports, require) {
         },
 
         exit: function(code) {
-            try { proc.emit('exit', code || 0); } catch (_) {}
+            // Guard so 'exit' fires at most once. The host also emits
+            // 'exit' when the event loop drains naturally (see the
+            // daemon-event 'lifecycle' dispatch); Node guarantees a
+            // single 'exit' emission regardless of how the process ends.
+            if (!proc.__burnExited) {
+                proc.__burnExited = true;
+                try { proc.emit('exit', code || 0); } catch (_) {}
+            }
             if (globalThis.__host_process_exit) globalThis.__host_process_exit(code || 0);
             var err = new Error('process.exit(' + (code || 0) + ')');
             err.code = 'ERR_PROCESS_EXIT';
@@ -16808,18 +16937,25 @@ __register_module('util', function(module, exports, require) {
     // keeps `console.log("a", "b")` producing `"a b"` (no quotes) and
     // `console.log("a", ["b"])` producing `"a [ 'b' ]"` (quotes on the
     // ARRAY element via inspect, not on the top-level "a").
-    function renderArg(arg) {
-        return typeof arg === 'string' ? arg : exports.inspect(arg);
+    function renderArg(arg, inspectOpts) {
+        return typeof arg === 'string' ? arg : exports.inspect(arg, inspectOpts);
     }
 
-    exports.format = function(fmt) {
+    // Core printf-style formatter shared by `format` and
+    // `formatWithOptions`. `args` is the full arguments object, `start`
+    // is the index of the format string, and `inspectOpts` (used by
+    // `formatWithOptions`) threads inspect options through `%o`/`%O`
+    // and the trailing non-string args. For plain `format`, inspectOpts
+    // is undefined, which `inspect` treats as the default options — so
+    // `format`'s behaviour is unchanged.
+    function formatImpl(args, start, inspectOpts) {
+        var fmt = args[start];
         if (typeof fmt !== 'string') {
             var parts = [];
-            for (var i = 0; i < arguments.length; i++) parts.push(renderArg(arguments[i]));
+            for (var i = start; i < args.length; i++) parts.push(renderArg(args[i], inspectOpts));
             return parts.join(' ');
         }
-        var args = arguments;
-        var argIdx = 1;
+        var argIdx = start + 1;
         var out = '';
         var i = 0;
         while (i < fmt.length) {
@@ -16831,13 +16967,33 @@ __register_module('util', function(module, exports, require) {
             else if (spec === 'd' || spec === 'i') out += Number(val).toFixed(0);
             else if (spec === 'f') out += Number(val);
             else if (spec === 'j') { try { out += JSON.stringify(val); } catch (_) { out += '[Circular]'; } }
-            else if (spec === 'o' || spec === 'O') out += exports.inspect(val);
+            else if (spec === 'o' || spec === 'O') out += exports.inspect(val, inspectOpts);
+            else if (spec === 'c') { /* CSS directive — consumed, no output (Node parity) */ }
             else if (spec === '%') { out += '%'; argIdx--; }
             else { out += ch; argIdx--; i++; continue; }
             i += 2;
         }
-        while (argIdx < args.length) out += ' ' + renderArg(args[argIdx++]);
+        while (argIdx < args.length) out += ' ' + renderArg(args[argIdx++], inspectOpts);
         return out;
+    }
+
+    exports.format = function() {
+        return formatImpl(arguments, 0, undefined);
+    };
+
+    // `util.formatWithOptions(inspectOptions, format, ...args)` — like
+    // `format`, but the leading options object is forwarded to
+    // `inspect` for `%o`/`%O` and object args. npm formats ALL of its
+    // log/output through this (via `node:util`); without it npm's
+    // command pipeline throws inside `formatWithOptions` and silently
+    // produces no output.
+    exports.formatWithOptions = function(inspectOptions) {
+        if (inspectOptions === null || typeof inspectOptions !== 'object') {
+            var e = new TypeError('The "inspectOptions" argument must be of type object. Received ' + typeof inspectOptions);
+            e.code = 'ERR_INVALID_ARG_TYPE';
+            throw e;
+        }
+        return formatImpl(arguments, 1, inspectOptions);
     };
 
     /// `util.inspect.custom` — Node 6.6+ symbol used by libraries to

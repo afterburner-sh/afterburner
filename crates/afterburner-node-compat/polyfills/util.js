@@ -8,18 +8,25 @@ __register_module('util', function(module, exports, require) {
     // keeps `console.log("a", "b")` producing `"a b"` (no quotes) and
     // `console.log("a", ["b"])` producing `"a [ 'b' ]"` (quotes on the
     // ARRAY element via inspect, not on the top-level "a").
-    function renderArg(arg) {
-        return typeof arg === 'string' ? arg : exports.inspect(arg);
+    function renderArg(arg, inspectOpts) {
+        return typeof arg === 'string' ? arg : exports.inspect(arg, inspectOpts);
     }
 
-    exports.format = function(fmt) {
+    // Core printf-style formatter shared by `format` and
+    // `formatWithOptions`. `args` is the full arguments object, `start`
+    // is the index of the format string, and `inspectOpts` (used by
+    // `formatWithOptions`) threads inspect options through `%o`/`%O`
+    // and the trailing non-string args. For plain `format`, inspectOpts
+    // is undefined, which `inspect` treats as the default options — so
+    // `format`'s behaviour is unchanged.
+    function formatImpl(args, start, inspectOpts) {
+        var fmt = args[start];
         if (typeof fmt !== 'string') {
             var parts = [];
-            for (var i = 0; i < arguments.length; i++) parts.push(renderArg(arguments[i]));
+            for (var i = start; i < args.length; i++) parts.push(renderArg(args[i], inspectOpts));
             return parts.join(' ');
         }
-        var args = arguments;
-        var argIdx = 1;
+        var argIdx = start + 1;
         var out = '';
         var i = 0;
         while (i < fmt.length) {
@@ -31,13 +38,33 @@ __register_module('util', function(module, exports, require) {
             else if (spec === 'd' || spec === 'i') out += Number(val).toFixed(0);
             else if (spec === 'f') out += Number(val);
             else if (spec === 'j') { try { out += JSON.stringify(val); } catch (_) { out += '[Circular]'; } }
-            else if (spec === 'o' || spec === 'O') out += exports.inspect(val);
+            else if (spec === 'o' || spec === 'O') out += exports.inspect(val, inspectOpts);
+            else if (spec === 'c') { /* CSS directive — consumed, no output (Node parity) */ }
             else if (spec === '%') { out += '%'; argIdx--; }
             else { out += ch; argIdx--; i++; continue; }
             i += 2;
         }
-        while (argIdx < args.length) out += ' ' + renderArg(args[argIdx++]);
+        while (argIdx < args.length) out += ' ' + renderArg(args[argIdx++], inspectOpts);
         return out;
+    }
+
+    exports.format = function() {
+        return formatImpl(arguments, 0, undefined);
+    };
+
+    // `util.formatWithOptions(inspectOptions, format, ...args)` — like
+    // `format`, but the leading options object is forwarded to
+    // `inspect` for `%o`/`%O` and object args. npm formats ALL of its
+    // log/output through this (via `node:util`); without it npm's
+    // command pipeline throws inside `formatWithOptions` and silently
+    // produces no output.
+    exports.formatWithOptions = function(inspectOptions) {
+        if (inspectOptions === null || typeof inspectOptions !== 'object') {
+            var e = new TypeError('The "inspectOptions" argument must be of type object. Received ' + typeof inspectOptions);
+            e.code = 'ERR_INVALID_ARG_TYPE';
+            throw e;
+        }
+        return formatImpl(arguments, 1, inspectOptions);
     };
 
     /// `util.inspect.custom` — Node 6.6+ symbol used by libraries to
