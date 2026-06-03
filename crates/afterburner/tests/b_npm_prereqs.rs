@@ -20,6 +20,12 @@
 //!   `require`/`node` conditions must win over `import`; dual-build
 //!   packages (glob: import→esm, require→commonjs) otherwise loaded
 //!   their ESM build and failed to parse.
+//! * `fs.stat` **ENOENT code** — cacache treats a missing content
+//!   file as a cache miss only when the failed stat carries
+//!   `code === 'ENOENT'`; the host emits Linux's "No such file or
+//!   directory (os error 2)" text, which the mapper has to translate.
+//!   Without it, every COLD-cache `npm install` aborted on the first
+//!   content stat (warm caches masked it — hence CI-only failures).
 
 #![cfg(feature = "bin")]
 
@@ -154,6 +160,41 @@ fn exports_pattern_subpath_resolves() {
         "#,
     );
     assert_marker(&out, "PAT-OK");
+}
+
+#[test]
+fn fs_stat_missing_file_yields_enoent_code() {
+    // npm's content cache (cacache) treats a missing content file as a
+    // cache MISS — but ONLY when the failed `fs.stat` rejects with an
+    // error whose `.code === 'ENOENT'`. Any other shape is rethrown as
+    // fatal, which aborted `npm install` the moment the cache was cold
+    // (warm caches hid it: the file existed, so stat never threw). The
+    // host surfaces Linux's raw "No such file or directory (os error
+    // 2)", which the error mapper previously didn't recognise as
+    // ENOENT. Verify both the sync call (`fs.statSync`, what the error
+    // text named) AND the promise twin (`fs.promises.stat`, what
+    // cacache actually awaits) carry the Node-shaped code/errno.
+    let dir = fresh("enoent");
+    let out = run_in(
+        &dir,
+        r#"
+        const fs = require('fs');
+        const missing = '/burn-no-such-dir-xyz/deep/none.bin';
+        var syncOk = false;
+        try { fs.statSync(missing); }
+        catch (e) { syncOk = !!(e && e.code === 'ENOENT' && e.errno === -2); }
+        // This `.then(reject)` branch is exactly cacache hasContent()'s guard.
+        fs.promises.stat(missing).then(
+          function() { console.log('FAIL: promise resolved'); },
+          function(e) {
+            var promOk = !!(e && e.code === 'ENOENT');
+            console.log((syncOk && promOk) ? 'STAT-ENOENT-OK'
+              : ('FAIL: sync=' + syncOk + ' code=' + (e && e.code) + ' errno=' + (e && e.errno)));
+          }
+        );
+        "#,
+    );
+    assert_marker(&out, "STAT-ENOENT-OK");
 }
 
 #[test]

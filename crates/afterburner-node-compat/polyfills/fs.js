@@ -17,14 +17,37 @@ __register_module('fs', function(module, exports, require) {
         return fn;
     }
 
+    // Map a host error message to the Node.js errno `code`. The host
+    // surfaces raw `std::io::Error` text, which carries BOTH a human
+    // phrase ("No such file or directory") and an "(os error N)"
+    // suffix; we match either form. Getting `code` right is load-
+    // bearing: cacache (npm's content-addressable cache) treats a
+    // missing content file as a cache MISS only when
+    // `err.code === 'ENOENT'` — otherwise it rethrows the failed
+    // `stat` as fatal and the entire `npm install` aborts on a cold
+    // cache. tar/mkdirp similarly branch on 'EEXIST'/'ENOTDIR'/etc.
+    // The "(os error N)" forms are matched WITH their parens so that
+    // "(os error 2)" can't accidentally match "(os error 20/21)".
+    function hostErrCode(lower) {
+        if (lower.indexOf('permission denied') !== -1 || lower.indexOf('(os error 13)') !== -1) return 'EACCES';
+        if (lower.indexOf('operation not permitted') !== -1 || lower.indexOf('(os error 1)') !== -1) return 'EPERM';
+        if (lower.indexOf('no such file or directory') !== -1 || lower.indexOf('not found') !== -1 || lower.indexOf('(os error 2)') !== -1) return 'ENOENT';
+        if (lower.indexOf('file exists') !== -1 || lower.indexOf('already exists') !== -1 || lower.indexOf('(os error 17)') !== -1) return 'EEXIST';
+        if (lower.indexOf('not a directory') !== -1 || lower.indexOf('(os error 20)') !== -1) return 'ENOTDIR';
+        if (lower.indexOf('is a directory') !== -1 || lower.indexOf('(os error 21)') !== -1) return 'EISDIR';
+        if (lower.indexOf('directory not empty') !== -1 || lower.indexOf('(os error 39)') !== -1) return 'ENOTEMPTY';
+        return undefined;
+    }
+    var HOST_ERRNO = { EPERM: -1, ENOENT: -2, EACCES: -13, EEXIST: -17, ENOTDIR: -20, EISDIR: -21, ENOTEMPTY: -39 };
+
     function checkHostError(result, op) {
         if (typeof result === 'string' && result.indexOf('__HOST_ERR__:') === 0) {
             var msg = result.slice('__HOST_ERR__:'.length);
             var err = new Error("fs." + op + ": " + msg);
-            if (msg.toLowerCase().indexOf('permission denied') !== -1) {
-                err.code = 'EACCES';
-            } else if (msg.toLowerCase().indexOf('not found') !== -1) {
-                err.code = 'ENOENT';
+            var code = hostErrCode(msg.toLowerCase());
+            if (code) {
+                err.code = code;
+                err.errno = HOST_ERRNO[code];
             }
             throw err;
         }
