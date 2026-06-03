@@ -174,53 +174,47 @@ fn npm_install_express_then_serve_works() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn server");
-    // Poll until the server binds the port. Loading express + its ~66
-    // deps through the debug-built engine is CPU-bound and slow on a
-    // cold CI runner — locally ~6s, several multiples of that on CI —
-    // so the budget is deliberately generous. The loop returns the
-    // instant the port is connectable, so a high ceiling only costs
-    // wall-clock on a genuine failure (cf. b7_dgram's 60s cold-spawn
-    // budget, commit f690d57).
-    let start = std::time::Instant::now();
-    let mut listening = false;
-    while start.elapsed() < Duration::from_secs(60) {
-        std::thread::sleep(Duration::from_millis(100));
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            listening = true;
-            break;
-        }
-    }
-    if !listening {
-        // Surface the child's own output — the previous blind
-        // "didn't start" panic told us nothing when this tripped in CI.
-        let _ = child.kill();
-        let (so, se) = child
-            .wait_with_output()
-            .map(|o| {
-                (
-                    String::from_utf8_lossy(&o.stdout).into_owned(),
-                    String::from_utf8_lossy(&o.stderr).into_owned(),
-                )
-            })
-            .unwrap_or_default();
-        panic!("express server didn't start on port {port} within 60s. stdout={so}\nstderr={se}");
-    }
-    // GET /
-    let body = curl_get(&format!("http://127.0.0.1:{port}/"));
+    // Drive the server with real GETs, retrying through startup, the
+    // readiness race, and any single refused connect. Loading express
+    // + its ~66 deps through the debug-built engine is CPU-bound and
+    // slow on a cold CI runner (locally ~6s, several multiples of that
+    // on CI), so the budget is deliberately generous; the loop returns
+    // the instant a GET succeeds, so the ceiling only costs wall-clock
+    // on a real failure. Retrying real requests — rather than poking
+    // the single-shard server with throwaway readiness connects — keeps
+    // the probe from disturbing the very server under test. (cf.
+    // b7_dgram's 60s cold-spawn budget, commit f690d57.)
+    let body = curl_get_retry(
+        &format!("http://127.0.0.1:{port}/"),
+        Duration::from_secs(60),
+    );
+    // Tear down and capture the server's own output, so a never-served
+    // GET (empty body) or an outright crash is diagnosable instead of
+    // an opaque assertion.
     let _ = child.kill();
-    let _ = child.wait();
+    let (so, se) = child
+        .wait_with_output()
+        .map(|o| {
+            (
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+                String::from_utf8_lossy(&o.stderr).into_owned(),
+            )
+        })
+        .unwrap_or_default();
     assert!(
         body.contains("hello from burn-installed-express"),
-        "unexpected body: {body}"
+        "express never served a valid response within 60s. body={body:?} server stdout={so}\nstderr={se}"
     );
 }
 
-fn curl_get(url: &str) -> String {
+fn curl_get_once(url: &str) -> Option<String> {
     // Cheap one-shot HTTP client — parse a `http://host:port/path`
     // URL by hand (the only shape our test issues), open a TCP
     // socket, write a `GET / HTTP/1.0` line, read until EOF. Keeps
     // the test self-contained — no extra workspace deps just to
-    // make a single GET request to localhost.
+    // make a single GET request to localhost. Returns `None` on a
+    // connect/IO failure so the caller can retry through a readiness
+    // race instead of panicking on the first refused connect.
     let stripped = url.strip_prefix("http://").expect("http:// scheme");
     let (host_port, path) = match stripped.find('/') {
         Some(i) => (&stripped[..i], &stripped[i..]),
@@ -233,12 +227,34 @@ fn curl_get(url: &str) -> String {
         ),
         None => (host_port.to_string(), 80u16),
     };
-    let mut sock = std::net::TcpStream::connect((host.as_str(), port)).expect("tcp connect");
-    sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut sock = std::net::TcpStream::connect((host.as_str(), port)).ok()?;
+    sock.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     let req = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    sock.write_all(req.as_bytes()).unwrap();
+    sock.write_all(req.as_bytes()).ok()?;
     let mut buf = String::new();
     use std::io::Read;
     let _ = sock.read_to_string(&mut buf);
-    buf
+    Some(buf)
+}
+
+fn curl_get_retry(url: &str, budget: Duration) -> String {
+    // Retry until a NON-EMPTY response comes back or `budget` elapses.
+    // Retrying on an empty body too covers the brief window where the
+    // port accepts but the server hasn't produced a response yet.
+    // Returns the last body seen ("" if it never connected), so the
+    // caller's assertion fails with the server's captured output.
+    let start = std::time::Instant::now();
+    let mut last = String::new();
+    loop {
+        if let Some(body) = curl_get_once(url) {
+            if !body.is_empty() {
+                return body;
+            }
+            last = body;
+        }
+        if start.elapsed() >= budget {
+            return last;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
