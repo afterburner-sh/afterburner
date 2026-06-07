@@ -151,7 +151,7 @@ h3-quinn = "0.0.10"
 # itself is the only public surface; the C is encapsulated. Gated
 # behind `shadow-sqlite3` so non-SQLite builds don't compile the
 # amalgamation (~2 MB compile-time cost).
-rusqlite = { version = "0.32", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
 
 # L3 shadow for `sharp`. Both crates are 100% pure Rust:
 #   * `image` — codec layer (PNG, JPEG, WebP, GIF, BMP, TIFF)

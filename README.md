@@ -70,12 +70,12 @@ iwr -useb https://afterburner.sh | iex
 Pin a specific version with `BURN_VERSION`:
 
 ```sh
-# POSIX
+# POSIX (put the latest version if you want, below command might be outdated)
 BURN_VERSION=v0.1.1 curl -fsSL https://afterburner.sh | sh
 ```
 
 ```powershell
-# PowerShell
+# PowerShell (put the latest version if you want, below command might be outdated)
 $env:BURN_VERSION = 'v0.1.1'; iwr -useb https://afterburner.sh | iex
 ```
 
