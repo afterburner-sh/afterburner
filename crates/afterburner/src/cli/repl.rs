@@ -73,7 +73,7 @@ pub fn repl(cli: &Cli) -> Result<()> {
                         Ok(ReplAction::Continue) => continue,
                         Ok(ReplAction::Exit) => break,
                         Err(e) => {
-                            eprintln!("  {}", super::style::fail(&e.to_string()));
+                            eprintln!("  {}", super::style::fail(&clean_repl_err(&e.to_string())));
                             continue;
                         }
                     }
@@ -94,7 +94,9 @@ pub fn repl(cli: &Cli) -> Result<()> {
                             );
                         }
                     }
-                    Err(e) => eprintln!("  {}", super::style::fail(&e.to_string())),
+                    Err(e) => {
+                        eprintln!("  {}", super::style::fail(&clean_repl_err(&e.to_string())))
+                    }
                 }
             }
             Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
@@ -110,6 +112,11 @@ pub fn repl(cli: &Cli) -> Result<()> {
 enum ReplAction {
     Continue,
     Exit,
+}
+
+fn clean_repl_err(raw: &str) -> String {
+    let s = super::style::humanize_error(raw);
+    s.strip_prefix("compile failed: ").unwrap_or(&s).to_string()
 }
 
 fn dispatch_meta(rest: &str, cli: &mut Cli, ab: &mut Afterburner) -> Result<ReplAction> {

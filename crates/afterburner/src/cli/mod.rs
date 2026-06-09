@@ -40,6 +40,13 @@ pub use manifold::{build_manifold, has_wildcard, is_implicit_open, parse_allow_l
 
 /// Entry point. `main()` in the `burn` binary delegates here.
 pub fn run() -> Result<()> {
+    // Animated brand banner ahead of clap's top-level help.
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--help" | "-h" | "help")
+    ) {
+        style::banner(env!("CARGO_PKG_VERSION"));
+    }
     let cli = Cli::parse();
     dispatch(cli)
 }
@@ -47,7 +54,11 @@ pub fn run() -> Result<()> {
 /// Print a top-level error in the brand's alert color (honors NO_COLOR /
 /// non-tty). Called by the `burn` binary entrypoint.
 pub fn report_error(e: &anyhow::Error) {
-    eprintln!("{} {:#}", style::error_prefix(), e);
+    eprintln!(
+        "{} {}",
+        style::error_prefix(),
+        style::humanize_error(&format!("{e:#}"))
+    );
 }
 
 fn dispatch(mut cli: Cli) -> Result<()> {
@@ -141,6 +152,7 @@ fn dispatch(mut cli: Cli) -> Result<()> {
         Cmd::New { spec, opts } => registry::new_package(&cli, &spec, &opts),
         Cmd::Init { path, opts } => registry::init_package(&cli, path.as_deref(), &opts),
         Cmd::Package { dir, out } => registry::package(dir.as_deref(), out.as_deref()),
+        Cmd::Test { dir } => registry::test(&cli, dir.as_deref()),
         Cmd::Publish {
             afb,
             dir,

@@ -157,6 +157,22 @@ fn main_js(template: &str, namespace: &str, name: &str) -> String {
     format!("{header}{body}")
 }
 
+fn test_js(template: &str, name: &str) -> String {
+    let header = "const test = require('node:test');\nconst assert = require('node:assert');\nconst pkg = require('../source/main.js');\n\n";
+    let body = match template {
+        "udf" => format!(
+            "test('{name} passes a record through', () => {{\n  const record = {{ id: 1, value: 'x' }};\n  assert.deepStrictEqual(pkg(record), record);\n}});\n"
+        ),
+        "http" | "llm" => format!(
+            "test('{name} exports a function', () => {{\n  // Keep `burn test` offline; put real network calls in integration tests.\n  assert.strictEqual(typeof pkg, 'function');\n}});\n"
+        ),
+        _ => format!(
+            "test('{name} greets', () => {{\n  assert.strictEqual(pkg({{ name: 'world' }}).hello, 'world');\n}});\n"
+        ),
+    };
+    format!("{header}{body}")
+}
+
 fn is_ident(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
@@ -275,7 +291,7 @@ fn scaffold(
     let caps = summarize(&manifold);
 
     let readme = format!(
-        "# {namespace}/{name}\n\nAn Afterburner `.afb` package.\n\n## Capabilities\n\n{}\n\n## Develop\n\n```sh\nburn package        # build the .afb locally\nburn publish        # build + upload to the registry\n```\n",
+        "# {namespace}/{name}\n\nAn Afterburner `.afb` package.\n\n## Capabilities\n\n{}\n\n## Develop\n\n```sh\nburn test           # run tests/ through the runtime\nburn package        # build the .afb locally\nburn publish        # build + upload to the registry\n```\n",
         caps.iter()
             .map(|c| format!("- {c}"))
             .collect::<Vec<_>>()
@@ -291,6 +307,11 @@ fn scaffold(
     write_new_file(
         &dir.join("source/main.js"),
         main_js(&template, namespace, name).as_bytes(),
+        o.force,
+    )?;
+    write_new_file(
+        &dir.join("tests").join(format!("{name}.test.js")),
+        test_js(&template, name).as_bytes(),
         o.force,
     )?;
     write_new_file(&dir.join("README.md"), readme.as_bytes(), o.force)?;

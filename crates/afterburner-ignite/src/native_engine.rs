@@ -373,9 +373,16 @@ impl Combustor for NativeCombustor {
         with_thread_rt(|rt| {
             rt.context.with(|ctx| -> Result<()> {
                 let probe = format!("(function(){{ {source}\nreturn undefined; }})");
-                let _: RqValue<'_> = ctx
-                    .eval(probe.as_bytes())
-                    .map_err(|e| AfterburnerError::CompileFailed(format!("{e}")))?;
+                let _: RqValue<'_> = ctx.eval(probe.as_bytes()).map_err(|e| {
+                    // For a thrown exception (e.g. a SyntaxError), pull the real
+                    // message out of the context instead of the engine's opaque
+                    // generic Display.
+                    if matches!(e, RquickjsError::Exception) {
+                        AfterburnerError::CompileFailed(exception_detail(&ctx.catch()))
+                    } else {
+                        AfterburnerError::CompileFailed(format!("{e}"))
+                    }
+                })?;
                 Ok(())
             })
         })?;
@@ -595,13 +602,9 @@ fn run_script_stage(ctx: &Ctx<'_>, stage: &str) -> Result<()> {
         .map_err(|e| map_script_err(ctx, e))
 }
 
-/// Script-mode error mapper. Unlike [`map_rquickjs_err`] (used by UDF
-/// mode), this variant extracts the real exception detail via
-/// `ctx.catch()` so the captured stderr carries the actual error
-/// message rather than a generic "uncaught exception" placeholder.
-/// The distinction matters for user debugging: a Node-like
-/// `TypeError: foo is not a function` is far more actionable than
-/// the opaque fallback.
+/// Maps an rquickjs error to the typed `AfterburnerError` set, extracting the
+/// real exception detail via `ctx.catch()` so users see the actual error
+/// (e.g. `ReferenceError: x is not defined`) instead of a generic placeholder.
 fn map_script_err(ctx: &Ctx<'_>, err: RquickjsError) -> AfterburnerError {
     match err {
         RquickjsError::Allocation => AfterburnerError::MemoryLimit,
@@ -745,7 +748,9 @@ fn run_script(ctx: &Ctx<'_>, source: &str, input_json: &str) -> Result<String> {
         input = js_string_literal(input_json),
         user_source = source,
     );
-    let result_val: rquickjs::Value<'_> = ctx.eval(stage.as_bytes()).map_err(map_rquickjs_err)?;
+    let result_val: rquickjs::Value<'_> = ctx
+        .eval(stage.as_bytes())
+        .map_err(|e| map_script_err(ctx, e))?;
 
     // Fast path: plain string result — done.
     if let Some(s) = result_val.as_string() {
@@ -777,27 +782,9 @@ fn run_script(ctx: &Ctx<'_>, source: &str, input_json: &str) -> Result<String> {
     }
     let promise = rquickjs::Promise::from_value(result_val.clone())
         .map_err(|e| AfterburnerError::Engine(format!("Promise::from_value: {e}")))?;
-    promise.finish::<String>().map_err(map_rquickjs_err)
-}
-
-/// Convert rquickjs errors to the typed `AfterburnerError` set.
-fn map_rquickjs_err(err: RquickjsError) -> AfterburnerError {
-    match err {
-        RquickjsError::Allocation => AfterburnerError::MemoryLimit,
-        RquickjsError::Unknown => AfterburnerError::Engine("unknown rquickjs error".into()),
-        ref other => {
-            let msg = format!("{other}");
-            if msg.contains("interrupt") || msg.contains("Interrupt") {
-                AfterburnerError::FuelExhausted
-            } else if msg.contains("out of memory") || msg.contains("OutOfMemory") {
-                AfterburnerError::MemoryLimit
-            } else if matches!(other, RquickjsError::Exception) {
-                AfterburnerError::CompileFailed("uncaught exception".into())
-            } else {
-                AfterburnerError::Engine(msg)
-            }
-        }
-    }
+    promise
+        .finish::<String>()
+        .map_err(|e| map_script_err(ctx, e))
 }
 
 /// Escape a Rust string so it can be embedded as a JS string literal.

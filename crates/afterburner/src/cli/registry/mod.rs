@@ -12,7 +12,7 @@ use afterburner_cloud::afterburner_afb::digest::hex;
 use afterburner_cloud::scaffold::{ScaffoldOpts, Scaffolded};
 use afterburner_cloud::{Coord, RegistryClient, cache, config, pkg, scaffold};
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn login(token: Option<&str>, registry: Option<&str>) -> Result<()> {
     let base = match config::resolve(registry, None) {
@@ -143,7 +143,7 @@ fn report_scaffold(s: &Scaffolded) {
     );
     println!(
         "  {}",
-        style::value("afb.toml  manifold.json  source/main.js  README.md")
+        style::value("afb.toml  manifold.json  source/main.js  tests/  README.md")
     );
     println!(
         "  {} {}",
@@ -460,6 +460,150 @@ pub fn owner(
         "`burn owner` is not available yet — the registry's owners API is on the roadmap. \
          (Read-only owner info is shown by `burn info <pkg>`.)"
     )
+}
+
+/// `burn test` — run every test file under `<dir>/tests/` through the runtime.
+/// Each file is executed as its own `burn run` (clean process per file so
+/// `node:test`'s exit-code semantics hold); output is shown only on failure.
+pub fn test(cli: &Cli, dir: Option<&Path>) -> Result<()> {
+    let dir = dir.unwrap_or_else(|| Path::new("."));
+    let tests_dir = dir.join("tests");
+    if !tests_dir.is_dir() {
+        anyhow::bail!(
+            "no tests/ directory in {} — `burn new`/`init` scaffolds one",
+            dir.display()
+        );
+    }
+    let mut files = Vec::new();
+    collect_test_files(&tests_dir, &mut files)?;
+    files.sort();
+    if files.is_empty() {
+        anyhow::bail!("no test files under {}", tests_dir.display());
+    }
+
+    let exe = std::env::current_exe().context("locating the burn executable")?;
+    let forwarded = forwarded_flags(cli);
+    let (mut total_pass, mut total_fail, mut failed) = (0usize, 0usize, 0usize);
+
+    for file in &files {
+        let rel = file.strip_prefix(dir).unwrap_or(file).display().to_string();
+        let output = style::spin(&format!("test {rel}"), || {
+            std::process::Command::new(&exe)
+                .env("BURN_QUIET", "1")
+                .arg("run")
+                .arg(file)
+                .args(&forwarded)
+                .current_dir(dir)
+                .stdin(std::process::Stdio::null())
+                .output()
+        })
+        .with_context(|| format!("running {rel}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let (pass, fail) = parse_tap_counts(&stdout);
+        total_pass += pass;
+        total_fail += fail;
+
+        if output.status.success() && fail == 0 {
+            let detail = if pass > 0 {
+                format!("  ({pass} passed)")
+            } else {
+                String::new()
+            };
+            println!(
+                "{}",
+                style::ok(&format!("{}{}", style::value(&rel), style::muted(&detail)))
+            );
+        } else {
+            failed += 1;
+            println!("{}", style::fail(&style::value(&rel)));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            for line in stdout.lines().chain(stderr.lines()) {
+                println!("    {}", style::muted(line));
+            }
+        }
+    }
+
+    let summary = format!(
+        "{} file(s), {total_pass} passed, {total_fail} failed",
+        files.len()
+    );
+    if failed == 0 {
+        println!("{}", style::ok(&summary));
+        Ok(())
+    } else {
+        println!("{}", style::fail(&summary));
+        anyhow::bail!("{failed} test file(s) failed")
+    }
+}
+
+fn collect_test_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            collect_test_files(&path, out)?;
+        } else if let Some(ext) = path.extension().and_then(|e| e.to_str())
+            && matches!(ext, "js" | "mjs" | "cjs" | "ts")
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn parse_tap_counts(tap: &str) -> (usize, usize) {
+    let (mut pass, mut fail) = (0usize, 0usize);
+    for line in tap.lines() {
+        let l = line.trim();
+        if let Some(n) = l.strip_prefix("# pass:") {
+            pass = n.trim().parse().unwrap_or(0);
+        } else if let Some(n) = l.strip_prefix("# fail:") {
+            fail = n.trim().parse().unwrap_or(0);
+        }
+    }
+    (pass, fail)
+}
+
+/// Forward the runtime/capability flags from `burn test` to each `burn run`.
+fn forwarded_flags(cli: &Cli) -> Vec<String> {
+    let mut a = Vec::new();
+    if cli.sandbox {
+        a.push("--sandbox".into());
+    }
+    if cli.allow_all {
+        a.push("-A".into());
+    }
+    for (flag, val) in [
+        ("--allow-net", &cli.allow_net),
+        ("--allow-fs", &cli.allow_fs),
+        ("--allow-env", &cli.allow_env),
+        ("--allow-fs-read", &cli.allow_fs_read),
+        ("--allow-fs-write", &cli.allow_fs_write),
+        ("--mode", &cli.mode),
+    ] {
+        if let Some(v) = val {
+            a.push(flag.to_string());
+            a.push(v.clone());
+        }
+    }
+    if let Some(f) = cli.fuel {
+        a.push("--fuel".into());
+        a.push(f.to_string());
+    }
+    if let Some(t) = cli.timeout_ms {
+        a.push("--timeout".into());
+        a.push(t.to_string());
+    }
+    if let Some(m) = cli.memory {
+        a.push("--memory".into());
+        a.push(m.to_string());
+    }
+    for ef in &cli.env_file {
+        a.push("--env-file".into());
+        a.push(ef.display().to_string());
+    }
+    a
 }
 
 fn coord_str(p: &pkg::LocalPackage) -> String {

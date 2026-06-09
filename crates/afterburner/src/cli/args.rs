@@ -287,6 +287,12 @@ pub enum Cmd {
         #[arg(short = 'o', long = "out", value_name = "FILE")]
         out: Option<PathBuf>,
     },
+    /// Run the package's tests (every file under `tests/`).
+    Test {
+        /// Package directory (default: current).
+        #[arg(value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
     /// Build (or upload a prebuilt) `.afb` to the registry.
     Publish {
         /// A prebuilt `.afb` to upload. If omitted, the package dir is built.
