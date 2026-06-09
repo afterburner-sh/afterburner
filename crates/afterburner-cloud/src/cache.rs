@@ -59,7 +59,7 @@ pub fn verify_and_store(expected_hex: &str, bytes: &[u8]) -> Result<Stored> {
         Ok(_) => {}
         Err(afterburner_afb::error::AfbError::RuntimeTooOld { required, running }) => {
             warning = Some(format!(
-                "package needs runtime >= {required}, this burn is {running} — cached, but it may not run here"
+                "package needs runtime >= {required}, this burn is {running}; cached, but it may not run here"
             ));
         }
         Err(e) => return Err(CloudError::Afb(e)),

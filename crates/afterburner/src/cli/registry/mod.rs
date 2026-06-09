@@ -154,7 +154,7 @@ fn report_scaffold(s: &Scaffolded) {
         println!(
             "  {}",
             style::warn(
-                "namespace defaulted to a placeholder — set --namespace <you> or `burn login`"
+                "namespace defaulted to a placeholder. Set --namespace <you> or `burn login`"
             )
         );
     }
@@ -202,7 +202,7 @@ pub fn publish(
     let max = afterburner_cloud::afterburner_afb::MAX_AFB_BYTES;
     if bytes.len() > max {
         anyhow::bail!(
-            "package is {:.1} MiB — over the registry's {} MiB limit",
+            "package is {:.1} MiB, over the registry's {} MiB limit",
             bytes.len() as f64 / 1_048_576.0,
             max / (1024 * 1024)
         );
@@ -465,7 +465,7 @@ pub fn owner(
     _remove: Option<&str>,
 ) -> Result<()> {
     anyhow::bail!(
-        "`burn owner` is not available yet — the registry's owners API is on the roadmap. \
+        "`burn owner` is not available yet. The registry's owners API is on the roadmap. \
          (Read-only owner info is shown by `burn info <pkg>`.)"
     )
 }
@@ -478,7 +478,7 @@ pub fn test(cli: &Cli, dir: Option<&Path>) -> Result<()> {
     let tests_dir = dir.join("tests");
     if !tests_dir.is_dir() {
         anyhow::bail!(
-            "no tests/ directory in {} — `burn new`/`init` scaffolds one",
+            "no tests/ directory in {}: `burn new`/`init` scaffolds one",
             dir.display()
         );
     }

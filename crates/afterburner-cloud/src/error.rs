@@ -22,7 +22,7 @@ pub enum CloudError {
     Transport(String),
 
     /// 401 — no/invalid token.
-    #[error("authentication failed — run `burn login` (or pass --token / set BURN_REGISTRY_TOKEN)")]
+    #[error("authentication failed: run `burn login` (or pass --token / set BURN_REGISTRY_TOKEN)")]
     Unauthorized,
 
     /// 403 — authenticated but not the owner/admin.
@@ -50,12 +50,12 @@ pub enum CloudError {
     Decode(String),
 
     /// No credentials are configured for the active registry.
-    #[error("not logged in — run `burn login` first")]
+    #[error("not logged in: run `burn login` first")]
     NotLoggedIn,
 
     /// `--registry NAME` referenced a registry not present in the credentials file.
     #[error(
-        "unknown registry {0:?} — add it under [registries.{0}] in the credentials file or `burn login --registry {0}`"
+        "unknown registry {0:?}: add it under [registries.{0}] in the credentials file or `burn login --registry {0}`"
     )]
     UnknownRegistry(String),
 

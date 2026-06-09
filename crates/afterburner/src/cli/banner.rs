@@ -31,7 +31,7 @@ use super::manifold::is_implicit_open;
 use super::style;
 
 const ACK_FILENAME: &str = "opened";
-const BANNER: &str = "running with open capabilities — --sandbox to seal, BURN_QUIET=1 to silence";
+const BANNER: &str = "running with open capabilities. --sandbox to seal, BURN_QUIET=1 to silence";
 
 /// Show the open-capabilities banner if the current invocation is
 /// running under the implicit-open default and we haven't shown it to

@@ -179,7 +179,7 @@ fn dispatch_meta(rest: &str, cli: &mut Cli, ab: &mut Afterburner) -> Result<Repl
             eprintln!("  {}", super::style::ok(&format!("{k} = {v}")));
         }
         "exit" | "quit" => return Ok(ReplAction::Exit),
-        other => anyhow::bail!("unknown command :{other} — try :help"),
+        other => anyhow::bail!("unknown command :{other}, try :help"),
     }
     Ok(ReplAction::Continue)
 }

@@ -139,7 +139,7 @@ pub fn summarize(m: &Manifold) -> Vec<String> {
 }
 
 fn main_js(template: &str, namespace: &str, name: &str) -> String {
-    let header = format!("// {namespace}/{name} — an Afterburner package.\n\"use strict\";\n\n");
+    let header = format!("// {namespace}/{name}: an Afterburner package.\n\"use strict\";\n\n");
     let body = match template {
         "udf" => {
             "// A UDF: one record in, the transformed record out.\nmodule.exports = function (record) {\n  // transform `record` and return the result\n  return record;\n};\n"

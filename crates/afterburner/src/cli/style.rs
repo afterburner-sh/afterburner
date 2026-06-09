@@ -359,7 +359,7 @@ pub fn banner(version: &str) {
 /// REPL welcome banner — animated wordmark on a terminal, one plain line otherwise.
 pub fn repl_banner(version: &str) {
     if !animations_enabled() {
-        eprintln!("burn {version} — Afterburner sandbox REPL. :help for commands, :exit to quit.");
+        eprintln!("burn {version}: Afterburner sandbox REPL. :help for commands, :exit to quit.");
         return;
     }
     animate_wordmark();
