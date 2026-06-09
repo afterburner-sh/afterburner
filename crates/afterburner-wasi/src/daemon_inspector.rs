@@ -276,7 +276,7 @@ async fn json_version(State(inner): State<Arc<InspectorInner>>) -> Json<serde_js
         "Browser": "burn/1.0",
         "Protocol-Version": "1.3",
         "User-Agent": "burn-cdp/1.0",
-        "V8-Version": "QuickJS-via-Javy",
+        "V8-Version": "Afterburner",
         "WebKit-Version": "0.0",
         "webSocketDebuggerUrl": format!("ws://127.0.0.1:{port}/devtools/page/burn-{port}"),
     }))

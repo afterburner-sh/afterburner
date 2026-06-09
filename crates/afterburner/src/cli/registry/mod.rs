@@ -6,11 +6,19 @@
 //! `burn` registry + package-management subcommands. Thin handlers over
 //! [`afterburner_cloud`]; all output is styled via [`super::style`].
 
+mod progress;
+
 use super::args::{Cli, ScaffoldArgs};
 use super::style;
 use afterburner_cloud::afterburner_afb::digest::hex;
+use afterburner_cloud::lock::{LOCKFILE_NAME, Lockfile};
+use afterburner_cloud::resolve::{Req, resolve, runtime_version};
 use afterburner_cloud::scaffold::{ScaffoldOpts, Scaffolded};
-use afterburner_cloud::{Coord, RegistryClient, cache, config, pkg, scaffold};
+use afterburner_cloud::source::RegistrySource;
+use afterburner_cloud::{
+    CacheInstaller, Coord, InstallSummary, Manifest, RegistryClient, config, install_concurrent,
+    pkg, scaffold,
+};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -250,57 +258,132 @@ pub fn yank(pkg: &str, undo: bool, registry: Option<&str>, token: Option<&str>) 
     Ok(())
 }
 
-pub fn install(pkg: &str, registry: Option<&str>) -> Result<()> {
-    let coord = Coord::parse(pkg)?;
+/// `burn install [pkg]` — resolve the full dependency set (PubGrub) and fetch it
+/// concurrently into the content-addressed cache, with an animated progress bar.
+///
+/// With `pkg`, installs that package plus its transitive dependencies. With no
+/// `pkg`, installs the current directory's `afb.toml` dependencies and writes a
+/// `burn.lock`. `--locked` reuses an existing `burn.lock` without re-resolving.
+pub fn install(
+    pkg: Option<&str>,
+    registry: Option<&str>,
+    jobs: Option<usize>,
+    locked: bool,
+) -> Result<()> {
     let resolved = config::resolve(registry, None)?;
     let client = RegistryClient::from_resolved(resolved);
 
-    let (version, expected_digest, bytes) = match &coord.version {
-        Some(v) => {
-            let meta = style::spin("resolving", || {
-                client.get_version(&coord.namespace, &coord.name, v)
+    let plan = build_install_plan(pkg, &client, locked)?;
+    let items = plan.lockfile.install_items();
+    if items.is_empty() {
+        println!("{}", style::muted("nothing to install"));
+        return Ok(());
+    }
+
+    let jobs = jobs.unwrap_or_else(default_jobs).clamp(1, items.len());
+    let installer = CacheInstaller { client: &client };
+    let (prog, renderer) = progress::InstallProgress::new();
+
+    let summary = std::thread::scope(|scope| {
+        let handle = renderer.map(|r| scope.spawn(move || r.run()));
+        let out = install_concurrent(&items, &installer, jobs, &prog);
+        if let Some(h) = handle {
+            let _ = h.join();
+        }
+        out
+    })?;
+
+    if let Some(dir) = &plan.write_lock_to {
+        let path = dir.join(LOCKFILE_NAME);
+        std::fs::write(&path, plan.lockfile.to_toml()?)
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
+
+    report_install(&plan.lockfile, &summary);
+    Ok(())
+}
+
+struct InstallPlan {
+    lockfile: Lockfile,
+    /// `Some(dir)` writes `burn.lock` there after a successful install.
+    write_lock_to: Option<PathBuf>,
+}
+
+fn build_install_plan(pkg: Option<&str>, client: &RegistryClient, locked: bool) -> Result<InstallPlan> {
+    let runtime = runtime_version(env!("CARGO_PKG_VERSION"));
+    let source = RegistrySource::new(client);
+
+    match pkg {
+        Some(spec) => {
+            let coord = Coord::parse(spec)?;
+            let req = Req::from_cli_version(coord.version.as_deref())?;
+            let res = style::spin("resolving", || {
+                resolve(&[(coord.qualified(), req)], &source, &runtime)
             })?;
-            let bytes = style::spin("downloading", || {
-                client.download(&coord.namespace, &coord.name, v)
-            })?;
-            (meta.version, meta.digest, bytes)
+            Ok(InstallPlan { lockfile: Lockfile::from_resolution(&res), write_lock_to: None })
         }
         None => {
-            let meta = style::spin("resolving", || {
-                client.get_package(&coord.namespace, &coord.name)
-            })?;
-            let latest = meta.latest.clone().ok_or_else(|| {
-                anyhow::anyhow!("{} has no published versions", coord.qualified())
-            })?;
-            let digest = meta
-                .digest_for(&latest)
-                .ok_or_else(|| anyhow::anyhow!("registry omitted a digest for {latest}"))?
-                .to_string();
-            let bytes = style::spin("downloading", || {
-                client.download_latest(&coord.namespace, &coord.name)
-            })?;
-            (latest, digest, bytes)
+            let dir = PathBuf::from(".");
+            if locked {
+                let path = dir.join(LOCKFILE_NAME);
+                let text = std::fs::read_to_string(&path).map_err(|_| {
+                    anyhow::anyhow!("--locked needs an existing {LOCKFILE_NAME}; run `burn install` first")
+                })?;
+                return Ok(InstallPlan { lockfile: Lockfile::parse(&text)?, write_lock_to: None });
+            }
+            let local = pkg::LocalPackage::load(&dir)?;
+            let roots = manifest_roots(&local.manifest)?;
+            let res = style::spin("resolving", || resolve(&roots, &source, &runtime))?;
+            Ok(InstallPlan {
+                lockfile: Lockfile::from_resolution(&res),
+                write_lock_to: Some(dir),
+            })
         }
-    };
+    }
+}
 
-    let stored = cache::verify_and_store(&expected_digest, &bytes)?;
+fn manifest_roots(m: &Manifest) -> Result<Vec<(String, Req)>> {
+    m.dependencies
+        .iter()
+        .map(|(coord, spec)| Ok((coord.clone(), Req::parse(spec)?)))
+        .collect()
+}
+
+fn default_jobs() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8)
+}
+
+fn report_install(lock: &Lockfile, summary: &InstallSummary) {
+    let total = lock.packages.len();
+    let cached: std::collections::HashSet<&str> = summary.cached.iter().map(String::as_str).collect();
+    let detail = if !cached.is_empty() {
+        style::muted(&format!(" ({} already cached)", cached.len()))
+    } else {
+        String::new()
+    };
     println!(
         "{}",
         style::ok(&format!(
-            "installed {}",
-            style::accent(&format!("{}/{}@{}", coord.namespace, coord.name, version))
+            "installed {total} package{}{detail}",
+            if total == 1 { "" } else { "s" }
         ))
     );
-    print_digest(bytes.len() as u64, &expected_digest);
-    println!(
-        "  {} {}",
-        style::muted("cached"),
-        style::value(&stored.path.display().to_string())
-    );
-    if let Some(w) = stored.warning {
-        eprintln!("{}", style::warn(&w));
+    for p in &lock.packages {
+        let tag = if cached.contains(p.name.as_str()) {
+            style::muted("  cached")
+        } else {
+            String::new()
+        };
+        println!(
+            "  {} {}{}",
+            style::bullet(),
+            style::value(&format!("{}@{}", p.name, p.version)),
+            tag
+        );
     }
-    Ok(())
+    for (coord, w) in &summary.warnings {
+        eprintln!("{}", style::warn(&format!("{coord}: {w}")));
+    }
 }
 
 pub fn add(pkg: &str, dir: Option<&Path>, registry: Option<&str>) -> Result<()> {

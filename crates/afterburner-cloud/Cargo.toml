@@ -24,6 +24,10 @@ semver = { workspace = true }
 pubgrub = { workspace = true }
 sha2 = { workspace = true }
 ureq = { workspace = true }
+# Lock-free worker -> collector channel for `burn install`'s concurrent fetch
+# pool. The engine bans Mutex/RwLock workspace-wide; kovan is the standard
+# lock-free primitive (atomics for counters, kovan_channel for events).
+kovan-channel = { workspace = true }
 secrecy = { workspace = true }
 zeroize = { workspace = true }
 dirs = { workspace = true }

@@ -138,6 +138,7 @@ dependencies = [
  "afterburner-core",
  "dirs",
  "httpmock",
+ "kovan-channel",
  "pubgrub",
  "secrecy",
  "semver",

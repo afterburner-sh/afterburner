@@ -227,9 +227,9 @@ struct ThreadRuntime {
 impl ThreadRuntime {
     fn new() -> std::result::Result<Self, AfterburnerError> {
         let runtime = Runtime::new()
-            .map_err(|e| AfterburnerError::Engine(format!("rquickjs runtime init: {e}")))?;
+            .map_err(|e| AfterburnerError::Engine(format!("engine runtime init: {e}")))?;
         let context = Context::full(&runtime)
-            .map_err(|e| AfterburnerError::Engine(format!("rquickjs context init: {e}")))?;
+            .map_err(|e| AfterburnerError::Engine(format!("engine context init: {e}")))?;
 
         // Eval the plenum bundle once per thread-local Runtime so every
         // thrust on this thread can `require('path')` etc. without
@@ -608,7 +608,7 @@ fn run_script_stage(ctx: &Ctx<'_>, stage: &str) -> Result<()> {
 fn map_script_err(ctx: &Ctx<'_>, err: RquickjsError) -> AfterburnerError {
     match err {
         RquickjsError::Allocation => AfterburnerError::MemoryLimit,
-        RquickjsError::Unknown => AfterburnerError::Engine("unknown rquickjs error".into()),
+        RquickjsError::Unknown => AfterburnerError::Engine("unknown engine error".into()),
         ref other => {
             let base = format!("{other}");
             if base.contains("interrupt") || base.contains("Interrupt") {

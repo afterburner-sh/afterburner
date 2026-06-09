@@ -8,6 +8,7 @@
 //! recorded digests, so it is both faster and deterministic.
 
 use crate::error::{CloudError, Result};
+use crate::install::InstallItem;
 use crate::resolve::Resolution;
 use serde::{Deserialize, Serialize};
 
@@ -78,6 +79,21 @@ impl Lockfile {
         self.packages
             .iter()
             .map(|p| (p.name.clone(), p.digest.trim_start_matches("sha256:").to_string()))
+            .collect()
+    }
+
+    /// The locked packages as [`InstallItem`]s for [`crate::install_concurrent`]
+    /// (coord + version + bare-hex digest).
+    pub fn install_items(&self) -> Vec<InstallItem> {
+        self.packages
+            .iter()
+            .map(|p| {
+                InstallItem::new(
+                    p.name.clone(),
+                    p.version.clone(),
+                    p.digest.trim_start_matches("sha256:").to_string(),
+                )
+            })
             .collect()
     }
 }

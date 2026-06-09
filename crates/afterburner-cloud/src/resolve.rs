@@ -50,6 +50,34 @@ impl Req {
             .map(Req::Range)
             .map_err(|e| CloudError::BadCoord(format!("bad version requirement {value:?}: {e}")))
     }
+
+    /// Build the *root* requirement from a CLI `@version` argument. `None`
+    /// resolves the latest non-yanked version (`*`). A plain semver version
+    /// (`1.2.3`) pins it exactly (`=1.2.3`, matching `burn install foo@1.2.3`'s
+    /// historical exact behavior); a range (`^1.2`, `>=1, <2`) or a digest
+    /// (`sha256:…`) is parsed as written.
+    pub fn from_cli_version(version: Option<&str>) -> Result<Self> {
+        match version {
+            None => Ok(Req::Range(VersionReq::STAR)),
+            Some(v) => {
+                let t = v.trim();
+                if let Ok(exact) = Version::parse(t) {
+                    let req = VersionReq::parse(&format!("={exact}"))
+                        .expect("`=<version>` is always a valid requirement");
+                    return Ok(Req::Range(req));
+                }
+                Req::parse(t)
+            }
+        }
+    }
+}
+
+/// Parse the host runtime version string (the `burn`/engine version) used to
+/// gate a candidate's `runtime_min`. A non-semver string falls back to `0.0.0`,
+/// which keeps newer-than-us packages installable (the cache surfaces a
+/// `RuntimeTooOld` warning at install time rather than silently dropping them).
+pub fn runtime_version(s: &str) -> Version {
+    Version::parse(s.trim()).unwrap_or_else(|_| Version::new(0, 0, 0))
 }
 
 /// One available version of a package, as the resolver sees it.

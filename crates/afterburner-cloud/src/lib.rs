@@ -32,6 +32,7 @@ pub mod lock;
 pub mod pkg;
 pub mod resolve;
 pub mod scaffold;
+pub mod source;
 pub mod types;
 
 pub use client::RegistryClient;
@@ -40,7 +41,8 @@ pub use coord::Coord;
 pub use error::{CloudError, Result};
 pub use install::{install_concurrent, CacheInstaller, InstallItem, InstallSummary, Installer, Outcome, Progress};
 pub use lock::Lockfile;
-pub use resolve::{Candidate, Req, Resolution, Source};
+pub use resolve::{resolve, runtime_version, Candidate, Req, Resolution, Source};
+pub use source::RegistrySource;
 
 // Re-export the `.afb` surface callers most often touch so the `burn` CLI can
 // depend on this crate alone.

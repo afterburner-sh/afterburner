@@ -170,7 +170,12 @@ fn dispatch(mut cli: Cli) -> Result<()> {
             registry: reg,
             token,
         } => registry::yank(&pkg, undo, reg.as_deref(), token.as_deref()),
-        Cmd::Install { pkg, registry: reg } => registry::install(&pkg, reg.as_deref()),
+        Cmd::Install {
+            pkg,
+            registry: reg,
+            jobs,
+            locked,
+        } => registry::install(pkg.as_deref(), reg.as_deref(), jobs, locked),
         Cmd::Search {
             query,
             registry: reg,

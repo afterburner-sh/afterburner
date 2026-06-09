@@ -696,7 +696,7 @@ fn build_engine() -> Result<Engine> {
 
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
-    Engine::new(&config).map_err(|e| AfterburnerError::Engine(format!("wasmtime engine: {e}")))
+    Engine::new(&config).map_err(|e| AfterburnerError::Engine(format!("engine init: {e}")))
 }
 
 impl Combustor for WasmCombustor {

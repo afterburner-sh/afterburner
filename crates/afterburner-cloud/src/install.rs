@@ -5,15 +5,20 @@
 
 //! Concurrent installs. Packages are content-addressed and independent, so the
 //! resolved set is fetched in parallel across a small pool of worker threads
-//! (the client is `ureq`/blocking, so threads are the right tool). The
-//! orchestrator is UI-free: progress is reported through a [`Progress`] trait so
-//! the CLI can plug in an `indicatif` bar, and the IO sits behind [`Installer`]
-//! so the concurrency is unit-testable without a network or a real cache.
+//! (the client is `ureq`/blocking, so threads are the right tool).
+//!
+//! The orchestrator is **lock-free**, following the engine's daemon idiom:
+//! atomics for the work cursor + cancellation, and a `kovan_channel` to ship
+//! each worker's outcome back to the spawning thread, which merges them once the
+//! scope joins. No `Mutex`/`RwLock` anywhere. It is also UI-free: progress is
+//! reported through a [`Progress`] trait so the CLI can plug in an animated bar,
+//! and the IO sits behind [`Installer`] so the concurrency is unit-testable
+//! without a network or a real cache.
 
 use crate::cache;
 use crate::client::RegistryClient;
-use crate::error::Result;
-use std::sync::Mutex;
+use crate::error::{CloudError, Result};
+use kovan_channel::flavors::unbounded::channel;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// One package to install: a `namespace/name`, its version, and its content
@@ -51,7 +56,8 @@ pub trait Installer: Sync {
 }
 
 /// Progress sink, called from worker threads (so `Sync`). Default no-ops let an
-/// impl override only what it needs.
+/// impl override only what it needs. Implementors must coordinate lock-free
+/// (atomics / channels) — these hooks must never block.
 pub trait Progress: Sync {
     fn begin(&self, _total: usize) {}
     fn started(&self, _coord: &str) {}
@@ -75,6 +81,12 @@ pub struct InstallSummary {
     pub warnings: Vec<(String, String)>,
 }
 
+/// One worker's report for a single item, shipped back over the channel.
+enum Report {
+    Ok { coord: String, outcome: Outcome, warning: Option<String> },
+    Err(CloudError),
+}
+
 /// Install `items` concurrently across `jobs` workers. Already-cached digests
 /// are skipped. On the first failure, in-flight work drains and the error is
 /// returned (no partial-success ambiguity for the caller).
@@ -93,12 +105,15 @@ pub fn install_concurrent(
     let jobs = jobs.clamp(1, items.len());
     let next = AtomicUsize::new(0);
     let abort = AtomicBool::new(false);
-    let summary = Mutex::new(InstallSummary::default());
-    let first_err = Mutex::new(None);
+    let (tx, rx) = channel::<Report>();
 
     std::thread::scope(|scope| {
+        // Shared, `Copy` references the per-worker `move` closures can each
+        // capture (the atomics themselves are not `Copy`).
+        let (next, abort) = (&next, &abort);
         for _ in 0..jobs {
-            scope.spawn(|| {
+            let tx = tx.clone();
+            scope.spawn(move || {
                 while !abort.load(Ordering::Relaxed) {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     if i >= items.len() {
@@ -108,24 +123,19 @@ pub fn install_concurrent(
                     progress.started(&item.coord);
                     match installer.ensure(item) {
                         Ok((outcome, warning)) => {
-                            let mut s = summary.lock().unwrap();
-                            match outcome {
-                                Outcome::Installed => s.installed.push(item.coord.clone()),
-                                Outcome::Cached => s.cached.push(item.coord.clone()),
-                            }
-                            if let Some(w) = warning {
-                                s.warnings.push((item.coord.clone(), w));
-                            }
-                            drop(s);
                             progress.done(&item.coord, &outcome);
+                            let _ = tx.send(Report::Ok {
+                                coord: item.coord.clone(),
+                                outcome,
+                                warning,
+                            });
                         }
                         Err(e) => {
                             progress.failed(&item.coord, &e.to_string());
-                            let mut fe = first_err.lock().unwrap();
-                            if fe.is_none() {
-                                *fe = Some(e);
-                            }
+                            // Stop the pool before reporting so peers wind down
+                            // promptly; the error rides the channel.
                             abort.store(true, Ordering::Relaxed);
+                            let _ = tx.send(Report::Err(e));
                             break;
                         }
                     }
@@ -133,16 +143,38 @@ pub fn install_concurrent(
             });
         }
     });
-
+    // Drop our keep-alive handle; every worker clone is already gone (the scope
+    // joined them), so the channel is closed and `try_recv` drains to empty.
+    drop(tx);
     progress.finish();
-    if let Some(e) = first_err.into_inner().unwrap() {
+
+    let mut summary = InstallSummary::default();
+    let mut first_err = None;
+    while let Some(report) = rx.try_recv() {
+        match report {
+            Report::Ok { coord, outcome, warning } => {
+                match outcome {
+                    Outcome::Installed => summary.installed.push(coord.clone()),
+                    Outcome::Cached => summary.cached.push(coord.clone()),
+                }
+                if let Some(w) = warning {
+                    summary.warnings.push((coord, w));
+                }
+            }
+            Report::Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+    }
+    if let Some(e) = first_err {
         return Err(e);
     }
-    let mut s = summary.into_inner().unwrap();
-    s.installed.sort();
-    s.cached.sort();
-    s.warnings.sort();
-    Ok(s)
+    summary.installed.sort();
+    summary.cached.sort();
+    summary.warnings.sort();
+    Ok(summary)
 }
 
 /// The real installer: content-cache check, then download + verify + store.
@@ -159,7 +191,7 @@ impl Installer for CacheInstaller<'_> {
         let (ns, name) = item
             .coord
             .split_once('/')
-            .ok_or_else(|| crate::error::CloudError::BadCoord(item.coord.clone()))?;
+            .ok_or_else(|| CloudError::BadCoord(item.coord.clone()))?;
         let bytes = self.client.download(ns, name, &item.version)?;
         let stored = cache::verify_and_store(digest, &bytes)?;
         Ok((Outcome::Installed, stored.warning))
@@ -169,14 +201,13 @@ impl Installer for CacheInstaller<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::CloudError;
     use std::collections::HashSet;
-    use std::sync::Mutex as StdMutex;
 
-    /// Records which items it saw; returns Cached for a configured set, an error
-    /// for a configured coord, else Installed.
+    /// Counts how many `ensure` calls it saw and the peak concurrency; returns
+    /// `Cached` for a configured set, an error for a configured coord, else
+    /// `Installed`. Entirely lock-free (atomics only).
     struct MockInstaller {
-        seen: StdMutex<Vec<String>>,
+        calls: AtomicUsize,
         cached: HashSet<String>,
         fail: Option<String>,
         concurrent_peak: AtomicUsize,
@@ -185,7 +216,7 @@ mod tests {
     impl MockInstaller {
         fn new(cached: &[&str], fail: Option<&str>) -> Self {
             Self {
-                seen: StdMutex::new(vec![]),
+                calls: AtomicUsize::new(0),
                 cached: cached.iter().map(|s| s.to_string()).collect(),
                 fail: fail.map(String::from),
                 concurrent_peak: AtomicUsize::new(0),
@@ -198,7 +229,7 @@ mod tests {
             let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             self.concurrent_peak.fetch_max(now, Ordering::SeqCst);
             std::thread::sleep(std::time::Duration::from_millis(5));
-            self.seen.lock().unwrap().push(item.coord.clone());
+            self.calls.fetch_add(1, Ordering::SeqCst);
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
             if self.fail.as_deref() == Some(item.coord.as_str()) {
                 return Err(CloudError::Transport(format!("boom on {}", item.coord)));
@@ -211,10 +242,20 @@ mod tests {
         }
     }
 
+    /// Lock-free progress recorder: pure atomic counters.
     struct CountingProgress {
         begun: AtomicUsize,
         done: AtomicUsize,
         finished: AtomicBool,
+    }
+    impl CountingProgress {
+        fn new() -> Self {
+            Self {
+                begun: AtomicUsize::new(0),
+                done: AtomicUsize::new(0),
+                finished: AtomicBool::new(false),
+            }
+        }
     }
     impl Progress for CountingProgress {
         fn begin(&self, total: usize) {
@@ -236,14 +277,10 @@ mod tests {
     fn installs_all_concurrently_with_progress() {
         let its = items(&["a/1", "a/2", "a/3", "a/4", "a/5", "a/6"]);
         let inst = MockInstaller::new(&[], None);
-        let prog = CountingProgress {
-            begun: AtomicUsize::new(0),
-            done: AtomicUsize::new(0),
-            finished: AtomicBool::new(false),
-        };
+        let prog = CountingProgress::new();
         let s = install_concurrent(&its, &inst, 4, &prog).unwrap();
         assert_eq!(s.installed.len(), 6);
-        assert_eq!(inst.seen.lock().unwrap().len(), 6);
+        assert_eq!(inst.calls.load(Ordering::SeqCst), 6);
         assert_eq!(prog.begun.load(Ordering::SeqCst), 6);
         assert_eq!(prog.done.load(Ordering::SeqCst), 6);
         assert!(prog.finished.load(Ordering::SeqCst));
@@ -252,8 +289,8 @@ mod tests {
     }
 
     #[test]
-    fn cached_are_skipped_not_reinstalled() {
-        let its = items(&["a/1", "a/2", "a/3"]);
+    fn results_are_sorted_and_split_by_outcome() {
+        let its = items(&["a/3", "a/1", "a/2"]);
         let inst = MockInstaller::new(&["a/2"], None);
         let s = install_concurrent(&its, &inst, 3, &NoProgress).unwrap();
         assert_eq!(s.cached, vec!["a/2".to_string()]);

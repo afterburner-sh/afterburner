@@ -200,8 +200,11 @@ fn build_eval(decls: &[(String, String)], line: &str) -> String {
         body.push_str(line);
         body.push_str("\nreturn undefined;");
     } else {
+        // Strip a trailing semicolon so `1 + 1;` wraps as `return (1 + 1)`,
+        // not `return (1 + 1;)` (a syntax error).
+        let expr = line.trim_end().trim_end_matches(';').trim_end();
         body.push_str("return (");
-        body.push_str(line);
+        body.push_str(expr);
         body.push_str(");");
     }
     format!("module.exports = () => {{\n{body}\n}};\n")
@@ -299,6 +302,13 @@ mod tests {
     #[test]
     fn expression_is_returned() {
         assert!(build_eval(&[], "1 + 1").contains("return (1 + 1)"));
+    }
+
+    #[test]
+    fn trailing_semicolon_on_expression_is_stripped() {
+        let w = build_eval(&[], "1 + 1;");
+        assert!(w.contains("return (1 + 1)"));
+        assert!(!w.contains("1 + 1;)"));
     }
 
     #[test]

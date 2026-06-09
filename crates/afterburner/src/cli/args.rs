@@ -318,13 +318,21 @@ pub enum Cmd {
         #[arg(long, value_name = "TOKEN")]
         token: Option<String>,
     },
-    /// Download, verify (SHA-256), and cache a package.
+    /// Resolve a package's full dependency set and fetch it concurrently into
+    /// the cache. Omit PKG inside a package dir to install its afb.toml
+    /// dependencies and write burn.lock.
     Install {
         /// `namespace/name[@version]`.
         #[arg(value_name = "PKG")]
-        pkg: String,
+        pkg: Option<String>,
         #[arg(long, value_name = "NAME")]
         registry: Option<String>,
+        /// Concurrent download workers (default: CPU count, capped at 8).
+        #[arg(long, value_name = "N")]
+        jobs: Option<usize>,
+        /// Reuse the existing burn.lock without re-resolving.
+        #[arg(long)]
+        locked: bool,
     },
     /// Search the registry (full-text over name, namespace, description, keywords).
     Search {
