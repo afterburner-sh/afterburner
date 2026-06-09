@@ -24,17 +24,43 @@ use serde_json::Value;
 use super::args::Cli;
 use super::build::build_afterburner;
 
-pub fn repl(cli: &Cli) -> Result<()> {
-    use rustyline::DefaultEditor;
-    use rustyline::error::ReadlineError;
+// rustyline helper: colors the prompt via the Highlighter so rustyline still
+// measures width on the plain prompt (no `\x01`/`\x02` width markers).
+struct ReplHelper;
+impl rustyline::completion::Completer for ReplHelper {
+    type Candidate = String;
+}
+impl rustyline::hint::Hinter for ReplHelper {
+    type Hint = String;
+}
+impl rustyline::validate::Validator for ReplHelper {}
+impl rustyline::highlight::Highlighter for ReplHelper {
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        _default: bool,
+    ) -> std::borrow::Cow<'b, str> {
+        match super::style::highlight_prompt(prompt) {
+            Some(s) => std::borrow::Cow::Owned(s),
+            None => std::borrow::Cow::Borrowed(prompt),
+        }
+    }
+}
+impl rustyline::Helper for ReplHelper {}
 
-    let mut rl = DefaultEditor::new().context("rustyline init")?;
+pub fn repl(cli: &Cli) -> Result<()> {
+    use rustyline::Editor;
+    use rustyline::error::ReadlineError;
+    use rustyline::history::FileHistory;
+
+    let mut rl: Editor<ReplHelper, FileHistory> = Editor::new().context("rustyline init")?;
+    rl.set_helper(Some(ReplHelper));
     let mut live_cli = cli.clone();
     let mut ab = build_afterburner(&live_cli)?;
 
     super::style::repl_banner(env!("CARGO_PKG_VERSION"));
     loop {
-        match rl.readline(&super::style::repl_prompt()) {
+        match rl.readline("burn> ") {
             Ok(line) => {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
@@ -93,23 +119,31 @@ fn dispatch_meta(rest: &str, cli: &mut Cli, ab: &mut Afterburner) -> Result<Repl
     };
     match cmd {
         "help" | "?" => {
-            eprintln!("  :fuel N                   set per-call fuel");
-            eprintln!("  :mode native|wasm|adaptive");
-            eprintln!("  :allow net=*|host,list");
-            eprintln!("  :allow fs=*|/path,list");
-            eprintln!("  :allow env=*|VAR,list");
-            eprintln!("  :exit | :quit");
+            for (cmd, desc) in [
+                (":fuel N", "set the per-call fuel cap"),
+                (":mode native|wasm|adaptive", "rebuild the engine in a mode"),
+                (":allow net=*|host,list", "grant outbound HTTP"),
+                (":allow fs=*|/path,list", "grant filesystem access"),
+                (":allow env=*|VAR,list", "grant env-var access"),
+                (":exit | :quit", "leave the REPL"),
+            ] {
+                eprintln!(
+                    "  {} {}",
+                    super::style::accent(&format!("{cmd:<28}")),
+                    super::style::muted(desc)
+                );
+            }
         }
         "fuel" => {
             let n: u64 = arg.parse().context("parse fuel")?;
             cli.fuel = Some(n);
             *ab = build_afterburner(cli)?;
-            eprintln!("  fuel = {n}");
+            eprintln!("  {}", super::style::ok(&format!("fuel = {n}")));
         }
         "mode" => {
             cli.mode = Some(arg.to_string());
             *ab = build_afterburner(cli)?;
-            eprintln!("  mode = {arg}");
+            eprintln!("  {}", super::style::ok(&format!("mode = {arg}")));
         }
         "allow" => {
             let (k, v) = arg.split_once('=').context(":allow expects key=value")?;
@@ -121,7 +155,7 @@ fn dispatch_meta(rest: &str, cli: &mut Cli, ab: &mut Afterburner) -> Result<Repl
                 other => anyhow::bail!("unknown capability '{other}' (expected: net|fs|env|all)"),
             }
             *ab = build_afterburner(cli)?;
-            eprintln!("  {k} = {v}");
+            eprintln!("  {}", super::style::ok(&format!("{k} = {v}")));
         }
         "exit" | "quit" => return Ok(ReplAction::Exit),
         other => anyhow::bail!("unknown command :{other} — try :help"),

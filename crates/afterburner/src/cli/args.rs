@@ -11,13 +11,32 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
+/// clap help/usage styling in the afterburner.sh brand palette.
+fn brand_styles() -> clap::builder::Styles {
+    use clap::builder::styling::{Color, RgbColor, Style};
+    let orange = Color::Rgb(RgbColor(255, 97, 24));
+    let teal = Color::Rgb(RgbColor(39, 199, 199));
+    let gold = Color::Rgb(RgbColor(255, 207, 94));
+    let green = Color::Rgb(RgbColor(94, 195, 76));
+    let red = Color::Rgb(RgbColor(255, 46, 84));
+    clap::builder::Styles::styled()
+        .header(Style::new().bold().fg_color(Some(orange)))
+        .usage(Style::new().bold().fg_color(Some(orange)))
+        .literal(Style::new().fg_color(Some(teal)))
+        .placeholder(Style::new().fg_color(Some(gold)))
+        .valid(Style::new().fg_color(Some(green)))
+        .invalid(Style::new().bold().fg_color(Some(red)))
+        .error(Style::new().bold().fg_color(Some(red)))
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "burn",
     version,
     about = "Sandboxed JavaScript runtime",
     long_about = "Execute JavaScript in the Afterburner sandbox. \
-                  Reads .js files, evaluates inline code, pipes UDFs through stdin."
+                  Reads .js files, evaluates inline code, pipes UDFs through stdin.",
+    styles = brand_styles()
 )]
 pub struct Cli {
     #[command(subcommand)]

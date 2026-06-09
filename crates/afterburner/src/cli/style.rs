@@ -140,20 +140,15 @@ pub fn error_prefix() -> String {
     paint_bold("burn:", FLAME_RED)
 }
 
-/// The REPL prompt, accent-colored. Non-printing escapes are wrapped in
-/// `\x01`/`\x02` so rustyline computes the cursor column correctly.
-pub fn repl_prompt() -> String {
+/// Color a REPL prompt for rustyline's `Highlighter`. `None` when styling is
+/// off. rustyline measures width on the plain prompt and only *displays* this,
+/// so no readline width markers (`\x01`/`\x02`) are needed — using them here is
+/// what corrupted cursor positioning.
+pub fn highlight_prompt(prompt: &str) -> Option<String> {
     if !colors_enabled() {
-        return "burn> ".to_string();
+        return None;
     }
-    use crossterm::style::{Attribute, ResetColor, SetAttribute, SetForegroundColor};
-    let set = format!(
-        "{}{}",
-        SetAttribute(Attribute::Bold),
-        SetForegroundColor(ACCENT)
-    );
-    let reset = format!("{ResetColor}");
-    format!("\x01{set}\x02burn>\x01{reset}\x02 ")
+    Some(prompt.with(ACCENT).bold().to_string())
 }
 
 // ── flame gradient ──────────────────────────────────────────────────────────
