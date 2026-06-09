@@ -1,0 +1,33 @@
+[package]
+name = "afterburner-cloud"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+# BSL 1.1 like the rest of the engine (NOT the Apache-2.0 that afterburner-afb
+# uses): this is client tooling, not the portable package format.
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Afterburner registry client — login/publish/install/search/scaffold for .afb packages (the engine behind burn's package-management subcommands)"
+
+[dependencies]
+afterburner-core = { workspace = true }
+afterburner-afb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+semver = { workspace = true }
+sha2 = { workspace = true }
+ureq = { workspace = true }
+secrecy = { workspace = true }
+zeroize = { workspace = true }
+dirs = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+httpmock = { workspace = true }
+tempfile = { workspace = true }

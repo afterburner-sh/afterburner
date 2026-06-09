@@ -8,7 +8,7 @@
 
 use crate::Mode;
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug, Clone)]
@@ -221,6 +221,164 @@ pub enum Cmd {
     Repl,
     /// Print the build version + enabled features.
     Version,
+
+    // ── registry + package management (cargo-style; afterburner-cloud) ──────
+    /// Log in to a registry. With no TOKEN, prompts for username + password and
+    /// exchanges them for a token; with a TOKEN (a dashboard-minted `afbpat_…`),
+    /// validates and stores it. The token is written to the credentials file.
+    Login {
+        /// A dashboard-minted `afbpat_…` token to store (skips the prompt).
+        #[arg(value_name = "TOKEN")]
+        token: Option<String>,
+        /// Operate on a named registry from the credentials file.
+        #[arg(long, value_name = "NAME")]
+        registry: Option<String>,
+    },
+    /// Remove the stored token for a registry (it stays revocable server-side).
+    Logout {
+        #[arg(long, value_name = "NAME")]
+        registry: Option<String>,
+    },
+    /// Print the authenticated user behind the stored token.
+    Whoami {
+        #[arg(long, value_name = "NAME")]
+        registry: Option<String>,
+    },
+    /// Scaffold a new package project in `./<name>`.
+    New {
+        /// `name` or `namespace/name`.
+        #[arg(value_name = "NAME")]
+        spec: String,
+        #[command(flatten)]
+        opts: ScaffoldArgs,
+    },
+    /// Scaffold a package into an existing directory (default: current).
+    Init {
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+        #[command(flatten)]
+        opts: ScaffoldArgs,
+    },
+    /// Build the package's `.afb` locally without uploading.
+    Package {
+        /// Package directory (default: current).
+        #[arg(value_name = "DIR")]
+        dir: Option<PathBuf>,
+        /// Output path (default: `./<ns>-<name>-<ver>.afb`).
+        #[arg(short = 'o', long = "out", value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
+    /// Build (or upload a prebuilt) `.afb` to the registry.
+    Publish {
+        /// A prebuilt `.afb` to upload. If omitted, the package dir is built.
+        #[arg(value_name = "AFB")]
+        afb: Option<PathBuf>,
+        /// Package directory to build when no prebuilt AFB is given.
+        #[arg(short = 'C', long = "dir", value_name = "DIR")]
+        dir: Option<PathBuf>,
+        #[arg(long, value_name = "NAME")]
+        registry: Option<String>,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Hide a version from resolution (or restore it with `--undo`).
+    Yank {
+        /// `namespace/name@version`.
+        #[arg(value_name = "PKG")]
+        pkg: String,
+        #[arg(long)]
+        undo: bool,
+        #[arg(long, value_name = "NAME")]
+        registry: Option<String>,
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+    },
+    /// Download, verify (SHA-256), and cache a package.
+    Install {
+        /// `namespace/name[@version]`.
+        #[arg(value_name = "PKG")]
+        pkg: String,
+        #[arg(long, value_name = "NAME")]
+        registry: Option<String>,
+    },
+    /// Search the registry (full-text over name, namespace, description, keywords).
+    Search {
+        #[arg(value_name = "QUERY")]
+        query: String,
+        #[arg(long, value_name = "NAME")]
+        registry: Option<String>,
+    },
+    /// Add a dependency to the local `afb.toml`, pinned by digest.
+    Add {
+        /// `namespace/name[@version]`.
+        #[arg(value_name = "PKG")]
+        pkg: String,
+        /// Package directory whose `afb.toml` to edit (default: current).
+        #[arg(short = 'C', long = "dir", value_name = "DIR")]
+        dir: Option<PathBuf>,
+        #[arg(long, value_name = "NAME")]
+        registry: Option<String>,
+    },
+    /// Show package or version metadata (versions, capabilities, digest).
+    Info {
+        /// `namespace/name[@version]`.
+        #[arg(value_name = "PKG")]
+        pkg: String,
+        #[arg(long, value_name = "NAME")]
+        registry: Option<String>,
+    },
+    /// Manage package owners (registry owners API — roadmap).
+    Owner {
+        #[arg(value_name = "PKG")]
+        pkg: Option<String>,
+        #[arg(long)]
+        list: bool,
+        #[arg(long, value_name = "USER")]
+        add: Option<String>,
+        #[arg(long, value_name = "USER")]
+        remove: Option<String>,
+    },
+}
+
+/// Shared flags for `burn new` / `burn init`.
+///
+/// Capability grants reuse the runtime's global flags (`--allow-net`,
+/// `--allow-fs`, `--allow-env`, `-A`/`--allow-all`, `--allow-child-process`) —
+/// the registry docs' "same grant vocabulary as the runtime." Only the
+/// package-shaped knobs (and `--allow-crypto`/`--allow-run`, which have no
+/// runtime global) live here.
+#[derive(Args, Debug, Clone)]
+pub struct ScaffoldArgs {
+    /// Package namespace (defaults to your logged-in username, else a placeholder).
+    #[arg(long, value_name = "NS")]
+    pub namespace: Option<String>,
+    /// Package name (overrides the positional; may itself be `ns/name`).
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// Manifest version (default `0.1.0`).
+    #[arg(long = "version", value_name = "VER")]
+    pub pkg_version: Option<String>,
+    /// Manifest description.
+    #[arg(long, value_name = "TEXT")]
+    pub description: Option<String>,
+    /// SPDX license (default `Apache-2.0`).
+    #[arg(long, value_name = "LICENSE")]
+    pub license: Option<String>,
+    /// Entry-point template: `module` (default) | `udf` | `http` | `llm`.
+    #[arg(long, value_name = "TEMPLATE")]
+    pub template: Option<String>,
+    /// Grant the `crypto` capability in the scaffolded `manifold.json`.
+    #[arg(long = "allow-crypto")]
+    pub allow_crypto: bool,
+    /// Grant the `child_process` capability in the scaffolded `manifold.json`.
+    #[arg(long = "allow-run")]
+    pub allow_run: bool,
+    /// Write VCS ignore files (`--vcs git`).
+    #[arg(long, value_name = "VCS")]
+    pub vcs: Option<String>,
+    /// Overwrite existing files.
+    #[arg(long)]
+    pub force: bool,
 }
 
 pub fn parse_mode(s: &str) -> Result<Mode> {

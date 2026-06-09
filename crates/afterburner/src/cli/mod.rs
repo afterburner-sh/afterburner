@@ -21,10 +21,12 @@ mod check;
 mod daemon;
 mod manifold;
 mod passthrough;
+mod registry;
 mod repl;
 mod run;
 mod script;
 mod shim;
+mod style;
 mod thrust;
 mod version;
 mod worker;
@@ -40,6 +42,12 @@ pub use manifold::{build_manifold, has_wildcard, is_implicit_open, parse_allow_l
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     dispatch(cli)
+}
+
+/// Print a top-level error in the brand's alert color (honors NO_COLOR /
+/// non-tty). Called by the `burn` binary entrypoint.
+pub fn report_error(e: &anyhow::Error) {
+    eprintln!("{} {:#}", style::error_prefix(), e);
 }
 
 fn dispatch(mut cli: Cli) -> Result<()> {
@@ -97,10 +105,8 @@ fn dispatch(mut cli: Cli) -> Result<()> {
                     rest_args: std::mem::take(&mut cli.rest_args),
                 }
             } else {
-                anyhow::bail!(
-                    "usage: burn <command> | burn <file.js> [args…] | burn -e '<code>' [args…]\n\
-                     run `burn --help` for subcommands"
-                );
+                // Bare `burn` (no subcommand, file, or eval) drops into the REPL.
+                Cmd::Repl
             }
         }
     };
@@ -127,5 +133,47 @@ fn dispatch(mut cli: Cli) -> Result<()> {
         } => bench::bench(&cli, &file, iters, workers),
         Cmd::Repl => repl::repl(&cli),
         Cmd::Version => version::print_version(),
+
+        // ── registry + package management ──────────────────────────────────
+        Cmd::Login { token, registry } => registry::login(token.as_deref(), registry.as_deref()),
+        Cmd::Logout { registry } => registry::logout(registry.as_deref()),
+        Cmd::Whoami { registry } => registry::whoami(registry.as_deref()),
+        Cmd::New { spec, opts } => registry::new_package(&cli, &spec, &opts),
+        Cmd::Init { path, opts } => registry::init_package(&cli, path.as_deref(), &opts),
+        Cmd::Package { dir, out } => registry::package(dir.as_deref(), out.as_deref()),
+        Cmd::Publish {
+            afb,
+            dir,
+            registry: reg,
+            token,
+        } => registry::publish(
+            afb.as_deref(),
+            dir.as_deref(),
+            reg.as_deref(),
+            token.as_deref(),
+        ),
+        Cmd::Yank {
+            pkg,
+            undo,
+            registry: reg,
+            token,
+        } => registry::yank(&pkg, undo, reg.as_deref(), token.as_deref()),
+        Cmd::Install { pkg, registry: reg } => registry::install(&pkg, reg.as_deref()),
+        Cmd::Search {
+            query,
+            registry: reg,
+        } => registry::search(&query, reg.as_deref()),
+        Cmd::Add {
+            pkg,
+            dir,
+            registry: reg,
+        } => registry::add(&pkg, dir.as_deref(), reg.as_deref()),
+        Cmd::Info { pkg, registry: reg } => registry::info(&pkg, reg.as_deref()),
+        Cmd::Owner {
+            pkg,
+            list,
+            add,
+            remove,
+        } => registry::owner(pkg.as_deref(), list, add.as_deref(), remove.as_deref()),
     }
 }

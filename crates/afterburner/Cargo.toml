@@ -28,6 +28,9 @@ afterburner-ignite = { workspace = true, optional = true }
 afterburner-adaptive = { workspace = true, optional = true }
 afterburner-flow = { workspace = true, optional = true }
 afterburner-thrust = { workspace = true, optional = true }
+# Registry + package management (`burn login/publish/install/new/…`). Optional;
+# pulled in only by the `bin` feature (the CLI), never by library consumers.
+afterburner-cloud = { workspace = true, optional = true }
 serde_json = { workspace = true }
 # bin-only — gated behind `bin` feature so library consumers don't pull them.
 clap = { version = "4", features = ["derive"], optional = true }
@@ -46,6 +49,10 @@ oxc = { version = "=0.127.0", default-features = false, features = [
     "ast_visit",
 ], optional = true }
 thiserror = { workspace = true, optional = true }
+# bin-only — hidden password entry for interactive `burn login` (termios on unix).
+libc = { workspace = true, optional = true }
+# bin-only — colored, animated CLI output (brand palette + spinners).
+crossterm = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Serialize tests that spawn long-lived `burn` subprocesses. Each
@@ -115,6 +122,9 @@ bin = [
     "dep:rustyline",
     "dep:anyhow",
     "dep:tokio",
+    "dep:afterburner-cloud",
+    "dep:libc",
+    "dep:crossterm",
     "adaptive",
     "thrust",
     "ts",

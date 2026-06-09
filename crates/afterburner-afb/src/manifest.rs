@@ -70,6 +70,11 @@ pub struct Package {
     pub homepage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
+    /// Free-form search keywords. The registry full-text-indexes these.
+    /// An older reader tolerates-then-drops the key (it is descriptive, not a
+    /// gate); serialized only when non-empty so sealed packages stay terse.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
 }
 
 /// `[runtime]`. Tolerant of unknown keys — the actual gate is the semver

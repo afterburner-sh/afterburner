@@ -9,7 +9,7 @@
 
 fn main() {
     if let Err(e) = afterburner::cli::run() {
-        eprintln!("burn: {e:#}");
+        afterburner::cli::report_error(&e);
         std::process::exit(1);
     }
 }

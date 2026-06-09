@@ -32,9 +32,9 @@ pub fn repl(cli: &Cli) -> Result<()> {
     let mut live_cli = cli.clone();
     let mut ab = build_afterburner(&live_cli)?;
 
-    eprintln!("burn repl — type :help for commands, :exit to quit.");
+    super::style::repl_banner(env!("CARGO_PKG_VERSION"));
     loop {
-        match rl.readline("burn> ") {
+        match rl.readline(&super::style::repl_prompt()) {
             Ok(line) => {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
@@ -47,7 +47,7 @@ pub fn repl(cli: &Cli) -> Result<()> {
                         Ok(ReplAction::Continue) => continue,
                         Ok(ReplAction::Exit) => break,
                         Err(e) => {
-                            eprintln!("  error: {e}");
+                            eprintln!("  {}", super::style::fail(&e.to_string()));
                             continue;
                         }
                     }
@@ -62,15 +62,18 @@ pub fn repl(cli: &Cli) -> Result<()> {
                 {
                     Ok(v) => {
                         if !v.is_null() {
-                            println!("{}", serde_json::to_string(&v).unwrap_or_default());
+                            println!(
+                                "{}",
+                                super::style::value(&serde_json::to_string(&v).unwrap_or_default())
+                            );
                         }
                     }
-                    Err(e) => eprintln!("  error: {e}"),
+                    Err(e) => eprintln!("  {}", super::style::fail(&e.to_string())),
                 }
             }
             Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
             Err(e) => {
-                eprintln!("  readline error: {e}");
+                eprintln!("  {}", super::style::fail(&format!("readline error: {e}")));
                 break;
             }
         }
