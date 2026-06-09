@@ -154,3 +154,14 @@ fn cache_rejects_wrong_digest() {
     let err = cache::verify_and_store(&wrong, b"not that content").unwrap_err();
     assert!(matches!(err, CloudError::DigestMismatch { .. }));
 }
+
+#[test]
+fn afb_size_cap_is_in_sync_with_the_registry() {
+    // The registry caps a published .afb at 50 MiB (afterburner-registry
+    // src/afb/mod.rs). The client's afb crate must match, or downloads/installs
+    // would reject packages the registry happily serves.
+    assert_eq!(
+        afterburner_cloud::afterburner_afb::MAX_AFB_BYTES,
+        50 * 1024 * 1024
+    );
+}

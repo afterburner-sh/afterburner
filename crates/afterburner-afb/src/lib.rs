@@ -48,9 +48,9 @@ pub fn reader_format_version() -> String {
     format!("{FORMAT_MAJOR}.{FORMAT_MINOR}")
 }
 
-/// Hard cap on a compressed `.afb`, mirroring the server-side limit
-/// (§3.3: 32 MiB). `from_bytes` rejects anything larger before touching zstd.
-pub const MAX_AFB_BYTES: usize = 32 * 1024 * 1024;
+/// Hard cap on a compressed `.afb`, mirroring the registry's published-package
+/// limit (50 MiB). `from_bytes` rejects anything larger before touching zstd.
+pub const MAX_AFB_BYTES: usize = 50 * 1024 * 1024;
 
 /// Hard cap on total decompressed bytes — zip-bomb defense (§3.3: 256 MiB).
 pub const MAX_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;

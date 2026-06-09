@@ -199,6 +199,14 @@ pub fn publish(
             style::spin("packing", || local.build())?.0
         }
     };
+    let max = afterburner_cloud::afterburner_afb::MAX_AFB_BYTES;
+    if bytes.len() > max {
+        anyhow::bail!(
+            "package is {:.1} MiB — over the registry's {} MiB limit",
+            bytes.len() as f64 / 1_048_576.0,
+            max / (1024 * 1024)
+        );
+    }
     let resolved = config::resolve(registry, token)?;
     let client = RegistryClient::from_resolved(resolved);
     let resp = style::spin("uploading", || client.publish(&bytes))?;

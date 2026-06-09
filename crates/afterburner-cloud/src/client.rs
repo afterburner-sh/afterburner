@@ -17,7 +17,7 @@ use std::time::Duration;
 
 /// Mirror of `afterburner_afb::MAX_AFB_BYTES` — never buffer more than a valid
 /// package could be (zip-bomb / hostile-server defense on download).
-const MAX_DOWNLOAD_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES: u64 = afterburner_afb::MAX_AFB_BYTES as u64;
 
 /// Speaks the registry HTTP API. Construct via [`RegistryClient::new`].
 pub struct RegistryClient {
