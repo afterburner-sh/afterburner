@@ -46,7 +46,7 @@ impl InstallProgress {
 
     fn emit(&self, ev: Ev) {
         if let Some(tx) = &self.tx {
-            let _ = tx.send(ev);
+            tx.send(ev);
         }
     }
 }

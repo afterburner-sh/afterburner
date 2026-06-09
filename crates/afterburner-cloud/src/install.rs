@@ -124,18 +124,14 @@ pub fn install_concurrent(
                     match installer.ensure(item) {
                         Ok((outcome, warning)) => {
                             progress.done(&item.coord, &outcome);
-                            let _ = tx.send(Report::Ok {
-                                coord: item.coord.clone(),
-                                outcome,
-                                warning,
-                            });
+                            tx.send(Report::Ok { coord: item.coord.clone(), outcome, warning });
                         }
                         Err(e) => {
                             progress.failed(&item.coord, &e.to_string());
                             // Stop the pool before reporting so peers wind down
                             // promptly; the error rides the channel.
                             abort.store(true, Ordering::Relaxed);
-                            let _ = tx.send(Report::Err(e));
+                            tx.send(Report::Err(e));
                             break;
                         }
                     }
