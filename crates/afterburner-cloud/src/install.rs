@@ -5,7 +5,7 @@
 
 //! Concurrent installs. The resolved, content-addressed set is fetched across a
 //! pool of worker threads. Lock-free: atomics for the work cursor and
-//! cancellation, a `kovan_channel` for results (no `Mutex`/`RwLock`). Progress
+//! cancellation, a `kovan_channel` for results (no shared locks). Progress
 //! goes through [`Progress`] and IO through [`Installer`], so the pool is
 //! testable without a network or a terminal.
 
@@ -25,8 +25,16 @@ pub struct InstallItem {
 }
 
 impl InstallItem {
-    pub fn new(coord: impl Into<String>, version: impl Into<String>, digest: impl Into<String>) -> Self {
-        Self { coord: coord.into(), version: version.into(), digest: digest.into() }
+    pub fn new(
+        coord: impl Into<String>,
+        version: impl Into<String>,
+        digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            coord: coord.into(),
+            version: version.into(),
+            digest: digest.into(),
+        }
     }
     fn digest_hex(&self) -> &str {
         self.digest.trim_start_matches("sha256:")
@@ -77,7 +85,11 @@ pub struct InstallSummary {
 
 /// One worker's report for a single item, shipped back over the channel.
 enum Report {
-    Ok { coord: String, outcome: Outcome, warning: Option<String> },
+    Ok {
+        coord: String,
+        outcome: Outcome,
+        warning: Option<String>,
+    },
     Err(CloudError),
 }
 
@@ -117,7 +129,11 @@ pub fn install_concurrent(
                     match installer.ensure(item) {
                         Ok((outcome, warning)) => {
                             progress.done(&item.coord, &outcome);
-                            tx.send(Report::Ok { coord: item.coord.clone(), outcome, warning });
+                            tx.send(Report::Ok {
+                                coord: item.coord.clone(),
+                                outcome,
+                                warning,
+                            });
                         }
                         Err(e) => {
                             progress.failed(&item.coord, &e.to_string());
@@ -138,7 +154,11 @@ pub fn install_concurrent(
     let mut first_err = None;
     while let Some(report) = rx.try_recv() {
         match report {
-            Report::Ok { coord, outcome, warning } => {
+            Report::Ok {
+                coord,
+                outcome,
+                warning,
+            } => {
                 match outcome {
                     Outcome::Installed => summary.installed.push(coord.clone()),
                     Outcome::Cached => summary.cached.push(coord.clone()),
@@ -256,7 +276,10 @@ mod tests {
     }
 
     fn items(coords: &[&str]) -> Vec<InstallItem> {
-        coords.iter().map(|c| InstallItem::new(*c, "1.0.0", "deadbeef")).collect()
+        coords
+            .iter()
+            .map(|c| InstallItem::new(*c, "1.0.0", "deadbeef"))
+            .collect()
     }
 
     #[test]
@@ -271,7 +294,10 @@ mod tests {
         assert_eq!(prog.done.load(Ordering::SeqCst), 6);
         assert!(prog.finished.load(Ordering::SeqCst));
         // Proof of actual concurrency: more than one ensure() ran at once.
-        assert!(inst.concurrent_peak.load(Ordering::SeqCst) >= 2, "expected concurrent work");
+        assert!(
+            inst.concurrent_peak.load(Ordering::SeqCst) >= 2,
+            "expected concurrent work"
+        );
     }
 
     #[test]
@@ -303,8 +329,20 @@ mod tests {
         // jobs=0 and jobs>len must both work.
         let its = items(&["a/1", "a/2"]);
         let inst = MockInstaller::new(&[], None);
-        assert_eq!(install_concurrent(&its, &inst, 0, &NoProgress).unwrap().installed.len(), 2);
+        assert_eq!(
+            install_concurrent(&its, &inst, 0, &NoProgress)
+                .unwrap()
+                .installed
+                .len(),
+            2
+        );
         let inst2 = MockInstaller::new(&[], None);
-        assert_eq!(install_concurrent(&its, &inst2, 99, &NoProgress).unwrap().installed.len(), 2);
+        assert_eq!(
+            install_concurrent(&its, &inst2, 99, &NoProgress)
+                .unwrap()
+                .installed
+                .len(),
+            2
+        );
     }
 }

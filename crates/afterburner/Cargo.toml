@@ -99,8 +99,8 @@ wat = "1"
 # `sha1` is the smallest workspace dep that does it.
 sha1 = { workspace = true }
 # Shared subprocess test helpers (`tests/common/mod.rs`) collect stdout
-# lines from a background reader thread into a lock-free queue. Mutex
-# is banned workspace-wide; kovan-channel is the standard primitive.
+# lines from a background reader thread into a lock-free queue. Shared
+# locking is avoided workspace-wide; kovan-channel is the standard primitive.
 kovan-channel.workspace = true
 
 [features]

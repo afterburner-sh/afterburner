@@ -39,9 +39,11 @@ pub use client::RegistryClient;
 pub use config::{DEFAULT_REGISTRY_URL, Resolved};
 pub use coord::Coord;
 pub use error::{CloudError, Result};
-pub use install::{install_concurrent, CacheInstaller, InstallItem, InstallSummary, Installer, Outcome, Progress};
+pub use install::{
+    CacheInstaller, InstallItem, InstallSummary, Installer, Outcome, Progress, install_concurrent,
+};
 pub use lock::Lockfile;
-pub use resolve::{resolve, runtime_version, Candidate, Req, Resolution, Source};
+pub use resolve::{Candidate, Req, Resolution, Source, resolve, runtime_version};
 pub use source::RegistrySource;
 
 // Re-export the `.afb` surface callers most often touch so the `burn` CLI can

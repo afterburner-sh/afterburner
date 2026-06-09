@@ -106,8 +106,12 @@ impl Afb {
             .source
             .get(&self.manifest.package.entry)
             .ok_or_else(|| AfbError::EntryMissing(self.manifest.package.entry.clone()))?;
-        std::str::from_utf8(bytes)
-            .map_err(|_| AfbError::Corrupt(format!("entry {:?} is not UTF-8", self.manifest.package.entry)))
+        std::str::from_utf8(bytes).map_err(|_| {
+            AfbError::Corrupt(format!(
+                "entry {:?} is not UTF-8",
+                self.manifest.package.entry
+            ))
+        })
     }
 
     /// Raw bytes of a bundled `source/` file by archive path (e.g.

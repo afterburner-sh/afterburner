@@ -51,7 +51,10 @@ impl Lockfile {
                 dependencies: p.deps.clone(),
             })
             .collect();
-        Lockfile { version: LOCK_VERSION, packages }
+        Lockfile {
+            version: LOCK_VERSION,
+            packages,
+        }
     }
 
     /// Serialize to TOML for writing to `burn.lock`.
@@ -78,7 +81,12 @@ impl Lockfile {
     pub fn fetch_set(&self) -> Vec<(String, String)> {
         self.packages
             .iter()
-            .map(|p| (p.name.clone(), p.digest.trim_start_matches("sha256:").to_string()))
+            .map(|p| {
+                (
+                    p.name.clone(),
+                    p.digest.trim_start_matches("sha256:").to_string(),
+                )
+            })
             .collect()
     }
 
@@ -118,17 +126,35 @@ mod tests {
         );
         selected.insert(
             "psila/b".to_string(),
-            SelectedPkg { version: Version::parse("0.3.1").unwrap(), digest: "bb".to_string(), deps: vec![] },
+            SelectedPkg {
+                version: Version::parse("0.3.1").unwrap(),
+                digest: "bb".to_string(),
+                deps: vec![],
+            },
         );
-        let res = Resolution { order: vec!["psila/b".into(), "psila/a".into()], selected };
+        let res = Resolution {
+            order: vec!["psila/b".into(), "psila/a".into()],
+            selected,
+        };
 
         let lock = Lockfile::from_resolution(&res);
         let toml = lock.to_toml().unwrap();
         let back = Lockfile::parse(&toml).unwrap();
         assert_eq!(lock, back);
         assert_eq!(back.packages.len(), 2);
-        assert!(back.packages.iter().any(|p| p.name == "psila/a" && p.digest == "sha256:aa"));
-        assert_eq!(back.fetch_set().iter().find(|(n, _)| n == "psila/a").unwrap().1, "aa");
+        assert!(
+            back.packages
+                .iter()
+                .any(|p| p.name == "psila/a" && p.digest == "sha256:aa")
+        );
+        assert_eq!(
+            back.fetch_set()
+                .iter()
+                .find(|(n, _)| n == "psila/a")
+                .unwrap()
+                .1,
+            "aa"
+        );
     }
 
     #[test]

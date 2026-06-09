@@ -309,7 +309,11 @@ struct InstallPlan {
     write_lock_to: Option<PathBuf>,
 }
 
-fn build_install_plan(pkg: Option<&str>, client: &RegistryClient, locked: bool) -> Result<InstallPlan> {
+fn build_install_plan(
+    pkg: Option<&str>,
+    client: &RegistryClient,
+    locked: bool,
+) -> Result<InstallPlan> {
     let runtime = runtime_version(env!("CARGO_PKG_VERSION"));
     let source = RegistrySource::new(client);
 
@@ -320,16 +324,24 @@ fn build_install_plan(pkg: Option<&str>, client: &RegistryClient, locked: bool) 
             let res = style::spin("resolving", || {
                 resolve(&[(coord.qualified(), req)], &source, &runtime)
             })?;
-            Ok(InstallPlan { lockfile: Lockfile::from_resolution(&res), write_lock_to: None })
+            Ok(InstallPlan {
+                lockfile: Lockfile::from_resolution(&res),
+                write_lock_to: None,
+            })
         }
         None => {
             let dir = PathBuf::from(".");
             if locked {
                 let path = dir.join(LOCKFILE_NAME);
                 let text = std::fs::read_to_string(&path).map_err(|_| {
-                    anyhow::anyhow!("--locked needs an existing {LOCKFILE_NAME}; run `burn install` first")
+                    anyhow::anyhow!(
+                        "--locked needs an existing {LOCKFILE_NAME}; run `burn install` first"
+                    )
                 })?;
-                return Ok(InstallPlan { lockfile: Lockfile::parse(&text)?, write_lock_to: None });
+                return Ok(InstallPlan {
+                    lockfile: Lockfile::parse(&text)?,
+                    write_lock_to: None,
+                });
             }
             let local = pkg::LocalPackage::load(&dir)?;
             let roots = manifest_roots(&local.manifest)?;
@@ -350,12 +362,16 @@ fn manifest_roots(m: &Manifest) -> Result<Vec<(String, Req)>> {
 }
 
 fn default_jobs() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 8)
 }
 
 fn report_install(lock: &Lockfile, summary: &InstallSummary) {
     let total = lock.packages.len();
-    let cached: std::collections::HashSet<&str> = summary.cached.iter().map(String::as_str).collect();
+    let cached: std::collections::HashSet<&str> =
+        summary.cached.iter().map(String::as_str).collect();
     let detail = if !cached.is_empty() {
         style::muted(&format!(" ({} already cached)", cached.len()))
     } else {

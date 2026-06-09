@@ -7,8 +7,8 @@
 //!
 //! The [`Progress`] hooks (called from worker threads) only push events onto a
 //! `kovan_channel`; a single [`Renderer`] thread drains them and repaints one
-//! sunburst-gradient bar on stderr. No `Mutex`, and workers never touch the
-//! terminal. Silent when animation is off (non-TTY / `NO_COLOR`).
+//! sunburst-gradient bar on stderr, and workers never touch the terminal.
+//! Silent when animation is off (non-TTY / `NO_COLOR`).
 
 use crate::cli::style;
 use afterburner_cloud::{Outcome, Progress};
@@ -109,7 +109,11 @@ fn paint(err: &mut impl Write, total: usize, done: usize, current: &str, frame: 
     use crossterm::{cursor, execute, terminal};
     let cols = terminal::size().map(|(c, _)| c as usize).unwrap_or(80);
 
-    let ratio = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+    let ratio = if total == 0 {
+        0.0
+    } else {
+        done as f32 / total as f32
+    };
     let bar_w = 24usize;
     let glyph = style::spinner_frame(frame);
     let bar = style::flame_bar(ratio, bar_w, -(frame as f32) * 0.06);
@@ -119,7 +123,11 @@ fn paint(err: &mut impl Write, total: usize, done: usize, current: &str, frame: 
     let fixed = 1 + 1 + (bar_w + 2) + 2 + counts.len() + 2;
     let label = truncate(current, cols.saturating_sub(fixed + 1));
 
-    let line = format!("{glyph} {bar}  {}  {}", style::muted(&counts), style::value(&label));
+    let line = format!(
+        "{glyph} {bar}  {}  {}",
+        style::muted(&counts),
+        style::value(&label)
+    );
     let _ = execute!(
         err,
         cursor::MoveToColumn(0),

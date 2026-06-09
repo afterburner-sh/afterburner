@@ -422,7 +422,11 @@ mod tests {
         );
         assert!(!humanize_error("internal QuickJS detail").contains("QuickJS"));
         assert!(!humanize_error("rquickjs panic").contains("quickjs"));
-        assert!(!humanize_error("wasmtime trap at 0x0").to_lowercase().contains("wasmtime"));
+        assert!(
+            !humanize_error("wasmtime trap at 0x0")
+                .to_lowercase()
+                .contains("wasmtime")
+        );
         assert_eq!(
             humanize_error("ReferenceError: a is not defined"),
             "ReferenceError: a is not defined"

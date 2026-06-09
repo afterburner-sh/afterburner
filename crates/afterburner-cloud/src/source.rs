@@ -52,7 +52,13 @@ impl Source for RegistrySource<'_> {
                 deps_from_json(&vm.dependencies, coord)?
             };
 
-            out.push(Candidate { version, digest: vs.digest.clone(), yanked: vs.yanked, runtime_min, deps });
+            out.push(Candidate {
+                version,
+                digest: vs.digest.clone(),
+                yanked: vs.yanked,
+                runtime_min,
+                deps,
+            });
         }
         Ok(out)
     }
@@ -74,7 +80,9 @@ fn deps_from_json(v: &serde_json::Value, coord: &str) -> Result<Vec<(String, Req
     if let Some(map) = v.as_object() {
         for (dcoord, val) in map {
             let spec = val.as_str().ok_or_else(|| {
-                CloudError::Resolve(format!("{coord}: dependency {dcoord} value must be a string"))
+                CloudError::Resolve(format!(
+                    "{coord}: dependency {dcoord} value must be a string"
+                ))
             })?;
             deps.push((dcoord.clone(), Req::parse(spec)?));
         }
@@ -119,12 +127,18 @@ mod tests {
         let cands = src.candidates("psila/a").unwrap();
 
         assert_eq!(cands.len(), 2);
-        let v1c = cands.iter().find(|c| c.version.to_string() == "1.0.0").unwrap();
+        let v1c = cands
+            .iter()
+            .find(|c| c.version.to_string() == "1.0.0")
+            .unwrap();
         assert_eq!(v1c.deps.len(), 1);
         assert_eq!(v1c.deps[0].0, "psila/b");
         assert!(matches!(v1c.deps[0].1, Req::Digest(_)));
         assert_eq!(v1c.runtime_min.as_ref().unwrap().to_string(), "0.1.0");
-        let v2c = cands.iter().find(|c| c.version.to_string() == "2.0.0").unwrap();
+        let v2c = cands
+            .iter()
+            .find(|c| c.version.to_string() == "2.0.0")
+            .unwrap();
         assert!(v2c.yanked && v2c.deps.is_empty());
 
         pkg.assert();
@@ -166,7 +180,12 @@ mod tests {
 
         let client = RegistryClient::new(server.base_url(), None);
         let src = RegistrySource::new(&client);
-        let res = resolve(&[("psila/a".to_string(), Req::from_cli_version(None).unwrap())], &src, &rt()).unwrap();
+        let res = resolve(
+            &[("psila/a".to_string(), Req::from_cli_version(None).unwrap())],
+            &src,
+            &rt(),
+        )
+        .unwrap();
 
         assert_eq!(res.selected.len(), 2);
         assert_eq!(res.selected["psila/a"].version.to_string(), "1.0.0");
@@ -185,6 +204,9 @@ mod tests {
         });
         let client = RegistryClient::new(server.base_url(), None);
         let src = RegistrySource::new(&client);
-        assert!(matches!(src.candidates("psila/ghost"), Err(CloudError::NotFound)));
+        assert!(matches!(
+            src.candidates("psila/ghost"),
+            Err(CloudError::NotFound)
+        ));
     }
 }

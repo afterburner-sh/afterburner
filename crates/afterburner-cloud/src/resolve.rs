@@ -187,7 +187,7 @@ fn comparator_to_ranges(c: &semver::Comparator) -> Ranges<Version> {
                 v(1, 0, 0)
             };
             Ranges::between(lo, hi)
-        },
+        }
         Op::Wildcard => match mi {
             Some(mi) => Ranges::between(v(ma, mi, 0), v(ma, mi + 1, 0)),
             None => Ranges::between(v(ma, 0, 0), v(ma + 1, 0, 0)),
@@ -258,7 +258,9 @@ impl DependencyProvider for Provider<'_> {
 
     fn choose_version(&self, package: &Pkg, range: &Ranges<Version>) -> Result<Option<Version>> {
         match package {
-            Pkg::Root => Ok(range.contains(&self.root_version).then(|| self.root_version.clone())),
+            Pkg::Root => Ok(range
+                .contains(&self.root_version)
+                .then(|| self.root_version.clone())),
             Pkg::Dep(coord) => {
                 let cands = self.cands(coord)?;
                 Ok(cands
@@ -294,7 +296,11 @@ impl DependencyProvider for Provider<'_> {
     ) -> Result<Dependencies<Pkg, Ranges<Version>, String>> {
         let deps: Vec<(String, Req)> = match package {
             Pkg::Root => self.roots.clone(),
-            Pkg::Dep(coord) => match self.cands(coord)?.into_iter().find(|c| &c.version == version) {
+            Pkg::Dep(coord) => match self
+                .cands(coord)?
+                .into_iter()
+                .find(|c| &c.version == version)
+            {
                 Some(c) => c.deps,
                 None => return Ok(Dependencies::Available(std::iter::empty().collect())),
             },
@@ -309,7 +315,11 @@ impl DependencyProvider for Provider<'_> {
 
 /// Resolve `roots` (top-level `(coord, Req)`) against `source` for a host
 /// `runtime` version. Returns the pinned, ordered set or a precise error.
-pub fn resolve(roots: &[(String, Req)], source: &dyn Source, runtime: &Version) -> Result<Resolution> {
+pub fn resolve(
+    roots: &[(String, Req)],
+    source: &dyn Source,
+    runtime: &Version,
+) -> Result<Resolution> {
     let root_version = Version::new(0, 0, 0);
     let provider = Provider {
         source,
@@ -359,7 +369,11 @@ pub fn resolve(roots: &[(String, Req)], source: &dyn Source, runtime: &Version) 
         deps.dedup();
         selected.insert(
             coord.clone(),
-            SelectedPkg { version: version.clone(), digest: cand.digest, deps },
+            SelectedPkg {
+                version: version.clone(),
+                digest: cand.digest,
+                deps,
+            },
         );
     }
 
@@ -380,8 +394,11 @@ fn kahn_order(selected: &BTreeMap<String, SelectedPkg>) -> Result<Vec<String>> {
             }
         }
     }
-    let mut frontier: BTreeSet<&str> =
-        indegree.iter().filter(|(_, d)| **d == 0).map(|(k, _)| *k).collect();
+    let mut frontier: BTreeSet<&str> = indegree
+        .iter()
+        .filter(|(_, d)| **d == 0)
+        .map(|(k, _)| *k)
+        .collect();
     let mut order = Vec::with_capacity(selected.len());
     while let Some(&node) = frontier.iter().next() {
         frontier.remove(node);
@@ -399,8 +416,11 @@ fn kahn_order(selected: &BTreeMap<String, SelectedPkg>) -> Result<Vec<String>> {
         }
     }
     if order.len() != selected.len() {
-        let mut cyclic: Vec<&str> =
-            indegree.iter().filter(|(_, d)| **d > 0).map(|(k, _)| *k).collect();
+        let mut cyclic: Vec<&str> = indegree
+            .iter()
+            .filter(|(_, d)| **d > 0)
+            .map(|(k, _)| *k)
+            .collect();
         cyclic.sort();
         return Err(CloudError::Resolve(format!(
             "dependency cycle involving: {}",
@@ -426,11 +446,18 @@ mod tests {
             digest: format!("{:0>64}", v.replace('.', "")),
             yanked: false,
             runtime_min: None,
-            deps: deps.iter().map(|(c, r)| (c.to_string(), Req::parse(r).unwrap())).collect(),
+            deps: deps
+                .iter()
+                .map(|(c, r)| (c.to_string(), Req::parse(r).unwrap()))
+                .collect(),
         }
     }
     fn src(pkgs: &[(&str, Vec<Candidate>)]) -> Mock {
-        Mock(pkgs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
+        Mock(
+            pkgs.iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        )
     }
     fn rt() -> Version {
         Version::parse("1.0.0").unwrap()
@@ -441,7 +468,10 @@ mod tests {
 
     #[test]
     fn picks_highest_in_range() {
-        let s = src(&[("a/x", vec![cand("1.0.0", &[]), cand("1.4.0", &[]), cand("2.0.0", &[])])]);
+        let s = src(&[(
+            "a/x",
+            vec![cand("1.0.0", &[]), cand("1.4.0", &[]), cand("2.0.0", &[])],
+        )]);
         let r = resolve(&[root("a/x", "^1.0")], &s, &rt()).unwrap();
         assert_eq!(r.selected["a/x"].version.to_string(), "1.4.0");
     }
@@ -452,7 +482,10 @@ mod tests {
             ("a/a", vec![cand("1.0.0", &[("a/b", "^1"), ("a/c", "^1")])]),
             ("a/b", vec![cand("1.0.0", &[("a/d", ">=1, <2")])]),
             ("a/c", vec![cand("1.2.0", &[("a/d", "^1.1")])]),
-            ("a/d", vec![cand("1.1.0", &[]), cand("1.5.0", &[]), cand("2.0.0", &[])]),
+            (
+                "a/d",
+                vec![cand("1.1.0", &[]), cand("1.5.0", &[]), cand("2.0.0", &[])],
+            ),
         ]);
         let r = resolve(&[root("a/a", "^1")], &s, &rt()).unwrap();
         assert_eq!(r.selected.len(), 4);
@@ -470,7 +503,10 @@ mod tests {
             ("a/d", vec![cand("1.0.0", &[]), cand("2.0.0", &[])]),
         ]);
         let err = resolve(&[root("a/a", "^1")], &s, &rt()).unwrap_err();
-        assert!(matches!(err, CloudError::Resolve(_)), "expected conflict, got {err:?}");
+        assert!(
+            matches!(err, CloudError::Resolve(_)),
+            "expected conflict, got {err:?}"
+        );
     }
 
     #[test]
@@ -488,7 +524,10 @@ mod tests {
     fn digest_pin_selects_exact() {
         let want = cand("1.3.0", &[]);
         let pin = format!("sha256:{}", want.digest);
-        let s = src(&[("a/x", vec![cand("1.0.0", &[]), want.clone(), cand("2.0.0", &[])])]);
+        let s = src(&[(
+            "a/x",
+            vec![cand("1.0.0", &[]), want.clone(), cand("2.0.0", &[])],
+        )]);
         let r = resolve(&[("a/x".to_string(), Req::parse(&pin).unwrap())], &s, &rt()).unwrap();
         assert_eq!(r.selected["a/x"].version.to_string(), "1.3.0");
     }
@@ -515,7 +554,10 @@ mod tests {
         let s = src(&[
             (
                 "a/a",
-                vec![cand("1.0.0", &[("a/c", "^1")]), cand("2.0.0", &[("a/c", "^2")])],
+                vec![
+                    cand("1.0.0", &[("a/c", "^1")]),
+                    cand("2.0.0", &[("a/c", "^2")]),
+                ],
             ),
             ("a/c", vec![cand("1.0.0", &[]), cand("2.0.0", &[])]),
         ]);
@@ -536,8 +578,8 @@ mod tests {
         .map(|v| Version::parse(v).unwrap())
         .collect();
         for spec in [
-            "^1.2.3", "^1.2", "^1", "^0.2.3", "^0.0.3", "~1.2.3", "~1.2", "~1", "=1.2.3", ">=1.2.3",
-            ">1.2.3", "<2.0.0", "<=1.2.3", ">=1, <2", "1.2.*", "*",
+            "^1.2.3", "^1.2", "^1", "^0.2.3", "^0.0.3", "~1.2.3", "~1.2", "~1", "=1.2.3",
+            ">=1.2.3", ">1.2.3", "<2.0.0", "<=1.2.3", ">=1, <2", "1.2.*", "*",
         ] {
             let req = VersionReq::parse(spec).unwrap();
             let ranges = req_to_ranges(&req);
