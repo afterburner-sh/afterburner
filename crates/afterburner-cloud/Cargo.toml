@@ -21,6 +21,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 semver = { workspace = true }
+pubgrub = { workspace = true }
 sha2 = { workspace = true }
 ureq = { workspace = true }
 secrecy = { workspace = true }

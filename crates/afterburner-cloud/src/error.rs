@@ -81,6 +81,10 @@ pub enum CloudError {
     #[error("invalid package coordinate: {0}")]
     BadCoord(String),
 
+    /// Dependency resolution failed (version conflict, dependency cycle, …).
+    #[error("dependency resolution failed: {0}")]
+    Resolve(String),
+
     #[error("local package error: {0}")]
     Package(String),
 

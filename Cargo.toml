@@ -75,6 +75,7 @@ tar = { version = "0.4", default-features = false }
 zstd = "0.13"
 toml = "0.8"
 semver = { version = "1", features = ["serde"] }
+pubgrub = "0.4"
 dirs = "5"
 secrecy = "0.10"
 zeroize = "1"
