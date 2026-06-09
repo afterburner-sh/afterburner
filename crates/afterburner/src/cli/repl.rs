@@ -57,6 +57,9 @@ pub fn repl(cli: &Cli) -> Result<()> {
     rl.set_helper(Some(ReplHelper));
     let mut live_cli = cli.clone();
     let mut ab = build_afterburner(&live_cli)?;
+    // Accumulated declarations (var/let/const/function/class) so REPL state
+    // persists across lines — the engine runs each line isolated.
+    let mut decls: Vec<(String, String)> = Vec::new();
 
     super::style::repl_banner(env!("CARGO_PKG_VERSION"));
     loop {
@@ -69,6 +72,11 @@ pub fn repl(cli: &Cli) -> Result<()> {
                 let _ = rl.add_history_entry(trimmed);
 
                 if let Some(rest) = trimmed.strip_prefix(':') {
+                    if matches!(rest.trim(), "clear" | "reset") {
+                        decls.clear();
+                        eprintln!("  {}", super::style::muted("session cleared"));
+                        continue;
+                    }
                     match dispatch_meta(rest, &mut live_cli, &mut ab) {
                         Ok(ReplAction::Continue) => continue,
                         Ok(ReplAction::Exit) => break,
@@ -79,14 +87,19 @@ pub fn repl(cli: &Cli) -> Result<()> {
                     }
                 }
 
-                // Evaluate as script. We wrap so a naked expression
-                // gets its value back (not via module.exports).
-                let wrapped = wrap_repl_line(trimmed);
+                // Evaluate the line against the accumulated session so vars and
+                // functions defined earlier are in scope.
+                let wrapped = build_eval(&decls, trimmed);
                 match ab
                     .register(&wrapped)
                     .and_then(|id| ab.run(&id, &Value::Null))
                 {
                     Ok(v) => {
+                        // A successful declaration joins the session (latest wins).
+                        if let Some(name) = declared_name(trimmed) {
+                            decls.retain(|(n, _)| n != &name);
+                            decls.push((name, trimmed.to_string()));
+                        }
                         if !v.is_null() {
                             println!(
                                 "{}",
@@ -132,6 +145,7 @@ fn dispatch_meta(rest: &str, cli: &mut Cli, ab: &mut Afterburner) -> Result<Repl
                 (":allow net=*|host,list", "grant outbound HTTP"),
                 (":allow fs=*|/path,list", "grant filesystem access"),
                 (":allow env=*|VAR,list", "grant env-var access"),
+                (":clear", "forget all session declarations"),
                 (":exit | :quit", "leave the REPL"),
             ] {
                 eprintln!(
@@ -170,36 +184,53 @@ fn dispatch_meta(rest: &str, cli: &mut Cli, ab: &mut Afterburner) -> Result<Repl
     Ok(ReplAction::Continue)
 }
 
-/// Wrap a raw REPL line into a module-exports shape so naked
-/// expressions yield their value back to the user.
-///
-/// Two cases:
-///
-/// * **Expressions** (`1 + 1`, `Math.sqrt(16)`, `[1,2,3].map(x=>x*2)`):
-///   wrapped as `module.exports = () => (LINE);` — the parens
-///   force expression position, the arrow returns the value.
-///
-/// * **Statements** (`var a = 32;`, `let x = ...`, `function f(){}`,
-///   `if (...) ...`, etc.): can't sit inside parens (syntax error).
-///   Wrapped as a body block: `() => { LINE; return undefined; }`.
-///   Statements don't have a value; user sees `undefined` in the
-///   output (and any side effects on `globalThis` if relevant —
-///   though state doesn't persist across lines per the
-///   fresh-per-call invariant).
-///
-/// Detection is a static prefix check on the trimmed line. Covers
-/// the practical REPL inputs; false positives (e.g., a bare
-/// identifier `var` used as a variable name in some hypothetical
-/// dialect) would only mis-classify, not crash.
-pub(super) fn wrap_repl_line(line: &str) -> String {
+/// Build the eval wrapper for a REPL line, replaying the session's accumulated
+/// declarations first so earlier state is in scope. Expressions are returned
+/// (their value is shown); statements run for their effect.
+fn build_eval(decls: &[(String, String)], line: &str) -> String {
     if line.contains("module.exports") {
-        return line.to_string();
+        return format!("{line}\n");
+    }
+    let mut body = String::new();
+    for (_, d) in decls {
+        body.push_str(d);
+        body.push('\n');
     }
     if is_statement(line) {
-        format!("module.exports = () => {{ {line}; return undefined; }};\n")
+        body.push_str(line);
+        body.push_str("\nreturn undefined;");
     } else {
-        format!("module.exports = () => ({line});\n")
+        body.push_str("return (");
+        body.push_str(line);
+        body.push_str(");");
     }
+    format!("module.exports = () => {{\n{body}\n}};\n")
+}
+
+/// The identifier a `var`/`let`/`const`/`function`/`class` line declares.
+fn declared_name(line: &str) -> Option<String> {
+    let t = line.trim_start();
+    for kw in [
+        "async function ",
+        "function*",
+        "function ",
+        "class ",
+        "const ",
+        "let ",
+        "var ",
+    ] {
+        if let Some(rest) = t.strip_prefix(kw) {
+            let name: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                .collect();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
 }
 
 /// Heuristic: does this line look like a statement that can't be
@@ -266,45 +297,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wrap_expression_uses_parens() {
-        assert!(wrap_repl_line("1 + 1").contains("(1 + 1)"));
-        assert!(wrap_repl_line("Math.sqrt(16)").contains("(Math.sqrt(16))"));
+    fn expression_is_returned() {
+        assert!(build_eval(&[], "1 + 1").contains("return (1 + 1)"));
     }
 
     #[test]
-    fn wrap_var_statement_uses_block() {
-        let w = wrap_repl_line("var a = 32;");
-        assert!(w.contains("{ var a = 32;"));
+    fn statement_runs_for_effect() {
+        let w = build_eval(&[], "var a = 32;");
+        assert!(w.contains("var a = 32;"));
         assert!(w.contains("return undefined"));
     }
 
     #[test]
-    fn wrap_let_statement_uses_block() {
-        let w = wrap_repl_line("let x = [1, 2, 3];");
-        assert!(w.contains("{ let x = [1, 2, 3];"));
+    fn session_declarations_are_replayed() {
+        let decls = vec![("a".to_string(), "var a = 3;".to_string())];
+        let w = build_eval(&decls, "a");
+        assert!(w.contains("var a = 3;"));
+        assert!(w.contains("return (a)"));
     }
 
     #[test]
-    fn wrap_const_statement_uses_block() {
-        let w = wrap_repl_line("const k = 42;");
-        assert!(w.contains("{ const k = 42;"));
+    fn module_exports_passes_through() {
+        assert_eq!(
+            build_eval(&[], "module.exports = () => 42"),
+            "module.exports = () => 42\n"
+        );
     }
 
     #[test]
-    fn wrap_function_decl_uses_block() {
-        let w = wrap_repl_line("function f() { return 1; }");
-        assert!(w.contains("{ function f"));
-    }
-
-    #[test]
-    fn wrap_if_statement_uses_block() {
-        let w = wrap_repl_line("if (true) console.log('hi');");
-        assert!(w.contains("{ if (true)"));
-    }
-
-    #[test]
-    fn wrap_module_exports_passthrough() {
-        let w = wrap_repl_line("module.exports = () => 42");
-        assert_eq!(w, "module.exports = () => 42");
+    fn declared_name_extracts_identifier() {
+        assert_eq!(declared_name("var a = 3;").as_deref(), Some("a"));
+        assert_eq!(declared_name("let foo = 1").as_deref(), Some("foo"));
+        assert_eq!(declared_name("const K = 2").as_deref(), Some("K"));
+        assert_eq!(declared_name("function bar() {}").as_deref(), Some("bar"));
+        assert_eq!(declared_name("class Widget {}").as_deref(), Some("Widget"));
+        assert_eq!(declared_name("a + 1"), None);
+        assert_eq!(declared_name("console.log(a)"), None);
     }
 }
