@@ -135,6 +135,8 @@ jobs:
               --test b_process_report
               --test b_process_lifecycle
               --test b_npm_prereqs
+              --test b_pkg_dev
+              --lib
             timeout: 40
 
           # Module resolution + TS strip + ESM pipeline. Only tier that

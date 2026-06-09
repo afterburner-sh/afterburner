@@ -406,7 +406,13 @@ mod tests {
             assert_eq!(s.template, t);
 
             // Files exist.
-            for f in ["afb.toml", "manifold.json", "source/main.js", "README.md"] {
+            for f in [
+                "afb.toml",
+                "manifold.json",
+                "source/main.js",
+                "tests/widget.test.js",
+                "README.md",
+            ] {
                 assert!(dir.path().join(f).exists(), "{t}: missing {f}");
             }
 
