@@ -115,8 +115,7 @@ fn paint(err: &mut impl Write, total: usize, done: usize, current: &str, frame: 
     let bar = style::flame_bar(ratio, bar_w, -(frame as f32) * 0.06);
     let counts = format!("{done}/{total}");
 
-    // Bound the label so the line never wraps (a wrap defeats the single-line
-    // repaint): cols minus the fixed glyph + bar + counts + spacing.
+    // Bound the label so the line never wraps (that would break the repaint).
     let fixed = 1 + 1 + (bar_w + 2) + 2 + counts.len() + 2;
     let label = truncate(current, cols.saturating_sub(fixed + 1));
 

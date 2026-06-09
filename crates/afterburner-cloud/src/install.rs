@@ -3,17 +3,11 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Concurrent installs. Packages are content-addressed and independent, so the
-//! resolved set is fetched in parallel across a small pool of worker threads
-//! (the client is `ureq`/blocking, so threads are the right tool).
-//!
-//! The orchestrator is **lock-free**, following the engine's daemon idiom:
-//! atomics for the work cursor + cancellation, and a `kovan_channel` to ship
-//! each worker's outcome back to the spawning thread, which merges them once the
-//! scope joins. No `Mutex`/`RwLock` anywhere. It is also UI-free: progress is
-//! reported through a [`Progress`] trait so the CLI can plug in an animated bar,
-//! and the IO sits behind [`Installer`] so the concurrency is unit-testable
-//! without a network or a real cache.
+//! Concurrent installs. The resolved, content-addressed set is fetched across a
+//! pool of worker threads. Lock-free: atomics for the work cursor and
+//! cancellation, a `kovan_channel` for results (no `Mutex`/`RwLock`). Progress
+//! goes through [`Progress`] and IO through [`Installer`], so the pool is
+//! testable without a network or a terminal.
 
 use crate::cache;
 use crate::client::RegistryClient;
@@ -108,8 +102,7 @@ pub fn install_concurrent(
     let (tx, rx) = channel::<Report>();
 
     std::thread::scope(|scope| {
-        // Shared, `Copy` references the per-worker `move` closures can each
-        // capture (the atomics themselves are not `Copy`).
+        // `&` so each `move` closure captures a copy; the atomics aren't `Copy`.
         let (next, abort) = (&next, &abort);
         for _ in 0..jobs {
             let tx = tx.clone();
@@ -128,8 +121,6 @@ pub fn install_concurrent(
                         }
                         Err(e) => {
                             progress.failed(&item.coord, &e.to_string());
-                            // Stop the pool before reporting so peers wind down
-                            // promptly; the error rides the channel.
                             abort.store(true, Ordering::Relaxed);
                             tx.send(Report::Err(e));
                             break;
@@ -139,8 +130,7 @@ pub fn install_concurrent(
             });
         }
     });
-    // Drop our keep-alive handle; every worker clone is already gone (the scope
-    // joined them), so the channel is closed and `try_recv` drains to empty.
+    // Worker clones are gone after the scope join; drop ours so the drain ends.
     drop(tx);
     progress.finish();
 

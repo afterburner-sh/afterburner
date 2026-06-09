@@ -13,15 +13,10 @@ use crate::error::{CloudError, Result};
 use crate::resolve::{Candidate, Req, Source};
 use semver::Version;
 
-/// Resolver [`Source`] over a [`RegistryClient`].
-///
-/// `candidates` issues one `GET /packages/{ns}/{name}` for the version list,
-/// then one `GET …/{ver}` per **non-yanked** version to read its pinned
-/// dependencies (the list endpoint omits them). Yanked versions are never
-/// selected by the solver, so their dependencies are left empty rather than
-/// fetched. The solver memoizes per coord, so this runs at most once per
-/// distinct package in the dependency graph — an install only ever touches its
-/// own subgraph, never the whole registry.
+/// Resolver [`Source`] over a [`RegistryClient`]: one `GET /packages/{ns}/{name}`
+/// for the version list, then one `GET …/{ver}` per non-yanked version for its
+/// pinned dependencies (the list endpoint omits them). The solver memoizes per
+/// coord, so an install only ever touches its own subgraph.
 pub struct RegistrySource<'a> {
     client: &'a RegistryClient,
 }
@@ -49,8 +44,7 @@ impl Source for RegistrySource<'_> {
             })?;
             let runtime_min = parse_opt_version(vs.runtime_min.as_deref(), coord)?;
 
-            // Yanked candidates are filtered out before selection, so the solver
-            // never reads their dependencies; skip the extra round-trip.
+            // Yanked versions are never selected, so their deps are never read.
             let deps = if vs.yanked {
                 Vec::new()
             } else {
@@ -134,8 +128,7 @@ mod tests {
         assert!(v2c.yanked && v2c.deps.is_empty());
 
         pkg.assert();
-        v1.assert(); // the non-yanked version's deps were fetched exactly once.
-        // The yanked 2.0.0 has no /2.0.0 mock; had we fetched it, ureq would 404.
+        v1.assert();
     }
 
     #[test]
