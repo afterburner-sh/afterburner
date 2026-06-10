@@ -2826,17 +2826,25 @@ __register_module('crypto', function(module, exports, require) {
     Hash.prototype.digest = function(encoding) {
         if (this._finalized) throw new Error('Digest already called');
         this._finalized = true;
-        var enc = encoding || 'hex';
+        // Node semantics: digest() with no encoding (or 'buffer') returns a
+        // Buffer of RAW BYTES. The host bridge speaks text, so fetch base64
+        // and decode — defaulting to a hex STRING here silently breaks every
+        // binary consumer (keyed-HMAC chains, signatures, key derivation).
+        var wantRaw = encoding === undefined || encoding === null || encoding === 'buffer';
+        var enc = wantRaw ? 'base64' : encoding;
+        var out;
         if (this._streaming) {
-            return checkErr(
+            out = checkErr(
                 globalThis.__host_crypto_hash_digest(this._handle, enc),
                 'hash'
             );
+        } else {
+            out = checkErr(
+                ensureHost('hash')(this._algo, this._chunks.join(''), enc),
+                'hash'
+            );
         }
-        return checkErr(
-            ensureHost('hash')(this._algo, this._chunks.join(''), enc),
-            'hash'
-        );
+        return wantRaw ? require('buffer').Buffer.from(out, 'base64') : out;
     };
 
     function Hmac(algorithm, key) {
@@ -2872,17 +2880,22 @@ __register_module('crypto', function(module, exports, require) {
     Hmac.prototype.digest = function(encoding) {
         if (this._finalized) throw new Error('Digest already called');
         this._finalized = true;
-        var enc = encoding || 'hex';
+        // Same Node semantics as Hash.digest: no encoding → raw-byte Buffer.
+        var wantRaw = encoding === undefined || encoding === null || encoding === 'buffer';
+        var enc = wantRaw ? 'base64' : encoding;
+        var out;
         if (this._streaming) {
-            return checkErr(
+            out = checkErr(
                 globalThis.__host_crypto_hash_digest(this._handle, enc),
                 'hmac'
             );
+        } else {
+            out = checkErr(
+                ensureHost('hmac')(this._algo, this._key, this._chunks.join(''), enc),
+                'hmac'
+            );
         }
-        return checkErr(
-            ensureHost('hmac')(this._algo, this._key, this._chunks.join(''), enc),
-            'hmac'
-        );
+        return wantRaw ? require('buffer').Buffer.from(out, 'base64') : out;
     };
 
     exports.createHash = function(algorithm) { return new Hash(algorithm); };
@@ -5332,6 +5345,7 @@ __register_module('events', function(module, exports, require) {
             this.method = url.method;
             this.headers = new Headers(url.headers);
             this.body = url.body;
+            this._bodyBytes = url._bodyBytes || null;
             this.signal = url.signal;
             this.redirect = url.redirect;
             this.cache = url.cache;
@@ -5346,6 +5360,7 @@ __register_module('events', function(module, exports, require) {
             this.method = 'GET';
             this.headers = new Headers();
             this.body = null;
+            this._bodyBytes = null;
             this.signal = null;
             this.redirect = 'follow';
             this.cache = 'default';
@@ -5359,7 +5374,24 @@ __register_module('events', function(module, exports, require) {
         // Apply init overlays on top.
         if (init.method) this.method = String(init.method).toUpperCase();
         if (init.headers) this.headers = new Headers(init.headers);
-        if (init.body != null) this.body = String(init.body);
+        if (init.body != null) {
+            // Binary BodyInit (ArrayBuffer / TypedArray / Buffer) must NOT
+            // be stringified — `String(uint8array)` yields "0,97,115,…".
+            // Keep the exact bytes; the send path frames them as base64
+            // for the host, which decodes and sends the original bytes.
+            var _b = init.body;
+            if (typeof ArrayBuffer !== 'undefined' && _b instanceof ArrayBuffer) {
+                this._bodyBytes = new Uint8Array(_b.slice(0));
+                this.body = null;
+            } else if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(_b)) {
+                this._bodyBytes = new Uint8Array(
+                    _b.buffer.slice(_b.byteOffset, _b.byteOffset + _b.byteLength));
+                this.body = null;
+            } else {
+                this._bodyBytes = null;
+                this.body = String(_b);
+            }
+        }
         if (init.signal !== undefined) this.signal = init.signal;
         if (init.redirect) this.redirect = init.redirect;
         if (init.cache) this.cache = init.cache;
@@ -5372,12 +5404,21 @@ __register_module('events', function(module, exports, require) {
     }
     Request.prototype.clone = function() { return new Request(this); };
     Request.prototype.text = function() {
+        if (this._bodyBytes) {
+            var Buffer = require('buffer').Buffer;
+            return Promise.resolve(Buffer.from(this._bodyBytes).toString('utf8'));
+        }
         return Promise.resolve(this.body != null ? String(this.body) : '');
     };
     Request.prototype.json = function() {
         return this.text().then(function(s) { return JSON.parse(s); });
     };
     Request.prototype.arrayBuffer = function() {
+        if (this._bodyBytes) {
+            return Promise.resolve(this._bodyBytes.buffer.slice(
+                this._bodyBytes.byteOffset,
+                this._bodyBytes.byteOffset + this._bodyBytes.byteLength));
+        }
         var Buffer = require('buffer').Buffer;
         var s = this.body != null ? String(this.body) : '';
         return Promise.resolve(Buffer.from(s, 'utf8').buffer);
@@ -5558,7 +5599,26 @@ __register_module('events', function(module, exports, require) {
         if (typeof globalThis.__host_http_request !== 'function') {
             return Promise.reject(new Error('fetch: net capability not granted'));
         }
-        var raw = globalThis.__host_http_request(req.method, req.url, req.body);
+        var raw;
+        if (typeof globalThis.__host_http_request_v2 === 'function') {
+            // v2: request headers travel with the request (the legacy
+            // import drops them) and the body — string or binary — is
+            // base64-framed so the host sends the exact original bytes.
+            var BufB = globalThis.Buffer || require('buffer').Buffer;
+            var bodyB64 = '';
+            if (req._bodyBytes && req._bodyBytes.length) {
+                bodyB64 = BufB.from(req._bodyBytes).toString('base64');
+            } else if (req.body != null && req.body !== '') {
+                bodyB64 = BufB.from(String(req.body), 'utf8').toString('base64');
+            }
+            raw = globalThis.__host_http_request_v2(
+                req.method, req.url, JSON.stringify(req.headers._m), bodyB64);
+        } else if (req._bodyBytes && req._bodyBytes.length) {
+            return Promise.reject(new Error(
+                'fetch: this host does not support binary request bodies'));
+        } else {
+            raw = globalThis.__host_http_request(req.method, req.url, req.body);
+        }
         var parsed;
         try { parsed = JSON.parse(raw); }
         catch (e) { return Promise.reject(new Error('fetch: malformed host response: ' + e.message)); }
