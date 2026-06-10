@@ -1333,7 +1333,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><td><code>--memory=&lt;BYTES&gt;</code></td><td>Linear-memory cap.</td></tr>
           <tr><td><code>--timeout=&lt;MS&gt;</code></td><td>Wall-clock cap. The portable safety knob.</td></tr>
           <tr><td><code>--allow-fs=&lt;roots&gt;</code></td><td>Comma list of FS roots. <code>*</code> grants all paths.</td></tr>
-          <tr><td><code>--allow-net=&lt;hosts&gt;</code></td><td>Comma list of hostnames. Wildcards (<code>*.trusted.io</code>) supported. <code>*</code> grants any host.</td></tr>
+          <tr><td><code>--allow-net=&lt;hosts&gt;</code></td><td>Comma list of hostnames. Wildcards (<code>*.trusted.io</code>) supported. Optional <code>:port</code> pins an entry to one port (<code>127.0.0.1:9000</code>); port-less entries match any port. <code>*</code> grants any host.</td></tr>
           <tr><td><code>--allow-env=&lt;keys&gt;</code></td><td>Comma list of env-var keys. <code>*</code> grants every variable.</td></tr>
           <tr><td><code>--sandbox</code></td><td>Seal the manifold (deny everything) and combine with <code>--allow-*</code> to opt in.</td></tr>
           <tr><td><code>-A</code> · <code>--allow-all</code></td><td>Grant every capability. Use only for trusted scripts.</td></tr>

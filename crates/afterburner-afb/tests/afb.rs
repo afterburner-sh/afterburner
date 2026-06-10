@@ -13,7 +13,7 @@ const HELLO_SOURCE: &str = "module.exports = (d) => d.n + 1\n";
 
 /// SHA-256 of the canonical `hello.afb`. Reproducible build ⇒ this is stable
 /// across machines and Rust versions; the committed fixture must match it.
-const HELLO_DIGEST_HEX: &str = "5868d4ae7011433a933a709f8818fa1eaca88de1d5f0be99c74d930f9794a901";
+const HELLO_DIGEST_HEX: &str = "395b4c15bc7cfee6b49eac5ea1697056f619d7c3b605edc0d891d6f8dc63346c";
 
 fn hello_manifest() -> Manifest {
     Manifest::parse(
@@ -23,7 +23,7 @@ version = "1.0"
 
 [package]
 name = "hello"
-namespace = "psila"
+namespace = "burn"
 version = "0.1.0"
 language = "js"
 entry = "source/main.js"
@@ -56,7 +56,7 @@ fn pack_unpack_roundtrip() {
     let afb = Afb::from_bytes(&bytes).expect("unpacks");
     assert_eq!(afb.digest, d);
     assert_eq!(afb.manifest.package.name, "hello");
-    assert_eq!(afb.qualified_name(), "psila/hello");
+    assert_eq!(afb.qualified_name(), "burn/hello");
     assert_eq!(afb.entry_source().unwrap(), HELLO_SOURCE);
     assert_eq!(afb.manifold, Manifold::sealed());
 }

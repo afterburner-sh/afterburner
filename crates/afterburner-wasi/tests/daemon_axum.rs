@@ -223,3 +223,134 @@ fn headers_and_status_roundtrip() {
     dispatcher.join().ok();
     rt.shutdown_timeout(Duration::from_secs(2));
 }
+
+#[test]
+fn sealed_manifold_denies_listen() {
+    // The `listen` axis gates the daemon bind exactly like `net` gates
+    // outbound: a sealed manifold's `.listen(port)` must be refused
+    // BEFORE any socket bind, surfacing the permission-denied detail
+    // on the server's 'error' event.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio");
+    let daemon_http = DaemonHttp::with_runtime(rt.handle().clone(), 64);
+    let port = pick_port();
+    let source = format!(
+        r#"
+        const http = require('http');
+        const server = http.createServer(function(_req, res) {{ res.end('nope'); }});
+        server.on('error', function(e) {{
+            console.log('LISTEN_ERR code=' + e.code + ' msg=' + e.message);
+        }});
+        server.listen({port});
+        "#
+    );
+    let c = WasmCombustor::new(WasmConfig::default()).expect("combustor");
+    let daemon = c
+        .spawn_daemon_with(&source, Manifold::sealed(), Arc::clone(&daemon_http))
+        .expect("spawn daemon");
+    assert!(
+        !daemon.has_listeners(),
+        "sealed manifold must not register a listener"
+    );
+    assert!(
+        !wait_for_listener(port, Duration::from_millis(300)),
+        "sealed manifold must not bind :{port}"
+    );
+    let stdout = String::from_utf8_lossy(&daemon.drain_stdout()).into_owned();
+    assert!(
+        stdout.contains("LISTEN_ERR code=EACCES"),
+        "expected an EACCES listen error, stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("permission denied"),
+        "expected the permission-denied detail, stdout:\n{stdout}"
+    );
+    rt.shutdown_timeout(Duration::from_secs(2));
+}
+
+#[test]
+fn listen_granted_port_binds_and_other_port_is_denied() {
+    // A `Ports([p])` grant lets the daemon bind exactly p — and
+    // nothing else (checked here via a second server on p2).
+    use afterburner_core::ListenAccess;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio");
+    let daemon_http = DaemonHttp::with_runtime(rt.handle().clone(), 64);
+    let port = pick_port();
+    let denied_port = pick_port();
+    let mut manifold = Manifold::sealed();
+    manifold.listen = ListenAccess::Ports(vec![port]);
+    let source = format!(
+        r#"
+        const http = require('http');
+        http.createServer(function(_req, res) {{
+            res.end('granted\n');
+        }}).listen({port});
+        const second = http.createServer(function(_req, res) {{ res.end('x'); }});
+        second.on('error', function(e) {{
+            console.log('SECOND_ERR code=' + e.code);
+        }});
+        second.listen({denied_port});
+        "#
+    );
+    let c = WasmCombustor::new(WasmConfig::default()).expect("combustor");
+    let mut daemon = c
+        .spawn_daemon_with(&source, manifold, Arc::clone(&daemon_http))
+        .expect("spawn daemon");
+    assert!(daemon.has_listeners(), "granted port must register");
+
+    let done = Arc::new(AtomicBool::new(false));
+    let dispatcher = {
+        let dh = Arc::clone(&daemon_http);
+        let d = Arc::clone(&done);
+        std::thread::spawn(move || {
+            while !d.load(Ordering::Relaxed) {
+                if let Some(event) = dh.try_recv_event() {
+                    let envelope = serde_json::json!({
+                        "kind": "http-request",
+                        "server_id": event.server_id,
+                        "req_id": event.req_id,
+                        "req": {
+                            "method": event.method,
+                            "url": event.url,
+                            "headers": {},
+                            "body": "",
+                        }
+                    });
+                    let _ = daemon.dispatch_event(envelope);
+                } else {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            daemon
+        })
+    };
+
+    assert!(
+        wait_for_listener(port, Duration::from_secs(3)),
+        "granted port :{port} must bind"
+    );
+    assert!(
+        !wait_for_listener(denied_port, Duration::from_millis(200)),
+        "ungranted port :{denied_port} must not bind"
+    );
+    let resp = http_raw(
+        port,
+        &format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"),
+    );
+    assert!(resp.starts_with("HTTP/1.1 200"), "got:\n{resp}");
+    assert!(resp.contains("granted"), "got:\n{resp}");
+
+    done.store(true, Ordering::Relaxed);
+    let daemon = dispatcher.join().expect("dispatcher join");
+    let stdout = String::from_utf8_lossy(&daemon.drain_stdout()).into_owned();
+    assert!(
+        stdout.contains("SECOND_ERR code=EACCES"),
+        "second server should be denied with EACCES, stdout:\n{stdout}"
+    );
+    rt.shutdown_timeout(Duration::from_secs(2));
+}

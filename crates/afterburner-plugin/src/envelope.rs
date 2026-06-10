@@ -120,12 +120,30 @@ pub fn wrap_user_source(user: &str, input_json: &str) -> String {
 }
 
 /// Bytecode-cache variant of [`wrap_user_source`]. The compiled
-/// bytecode is *input-agnostic* — it pulls the per-call input JSON
-/// directly from the host via the `__AB_GET_INPUT__` global installed
-/// in `globals::install`. Identical Promise / await semantics to the
+/// bytecode is *input-agnostic* — it pulls the per-call input directly
+/// from the host via the `__AB_GET_INPUT_VALUE__` global installed in
+/// `globals::install`. Identical Promise / await semantics to the
 /// inlined-input version above; the only difference is the input
 /// source. Skipping the per-call preamble compile cuts ~150 µs from
 /// the hot path.
+///
+/// One bytecode serves both input framings: the getter returns a JS
+/// string under JSON framing (parsed here with QuickJS's native
+/// `JSON.parse`) and a `Uint8Array` under raw framing (handed to the
+/// module as-is — no string materialization, no parse). The branch is
+/// a single `typeof` per invocation; raw framing can never produce a
+/// string, so the dispatch is unambiguous.
+///
+/// The same bytecode also serves both **output** framings, branching
+/// on the module's return value: a `Uint8Array` / `ArrayBuffer`
+/// result crosses the boundary as raw bytes through
+/// `__AB_RAW_OUTPUT__` (→ the `host_raw_output` import →
+/// `OutputValue::Bytes` host-side) with no `JSON.stringify`, no
+/// string materialization, and no stdout framing; every other value
+/// keeps the JSON-over-stdout contract. The two `instanceof` checks
+/// are O(1) per invocation. (The legacy [`wrap_user_source`] envelope
+/// keeps JSON-only output: its host path predates — and never reads —
+/// the raw-output slot.)
 pub fn wrap_user_source_with_input_global(user: &str) -> String {
     let user = normalize_leading_hashbang(user);
     let user_lit = js_string_literal(&user);
@@ -134,7 +152,8 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
         function __ab_write_stdout(s) {{
             Javy.IO.writeSync(1, new TextEncoder().encode(s));
         }}
-        const __ab_data = JSON.parse(__AB_GET_INPUT__());
+        const __ab_input = __AB_GET_INPUT_VALUE__();
+        const __ab_data = (typeof __ab_input === 'string') ? JSON.parse(__ab_input) : __ab_input;
         const __ab_module = {{ exports: undefined }};
         const __ab_user = new Function('module', 'exports', 'require', {user_lit});
         __ab_user(__ab_module, __ab_module.exports, globalThis.require);
@@ -143,7 +162,14 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
         const __ab_result = (__ab_maybe !== null && typeof __ab_maybe === 'object' && typeof __ab_maybe.then === 'function')
             ? await __ab_maybe
             : __ab_maybe;
-        __ab_write_stdout(JSON.stringify(__ab_result === undefined ? null : __ab_result));
+        const __ab_out = (__ab_result === undefined) ? null : __ab_result;
+        if (__ab_out instanceof Uint8Array) {{
+            __AB_RAW_OUTPUT__(__ab_out);
+        }} else if (__ab_out instanceof ArrayBuffer) {{
+            __AB_RAW_OUTPUT__(new Uint8Array(__ab_out));
+        }} else {{
+            __ab_write_stdout(JSON.stringify(__ab_out));
+        }}
         "#
     )
 }
@@ -153,7 +179,8 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
 /// dispatch goes through the JS-side `__ab_columnar_dispatch` helper
 /// (installed at modify_runtime time by
 /// `globals::columnar::install_dispatcher_js`) instead of via
-/// `__AB_GET_INPUT__` + `JSON.parse` / `JSON.stringify` to stdout.
+/// `__AB_GET_INPUT_VALUE__` + `JSON.parse` / `JSON.stringify` to
+/// stdout.
 ///
 /// Synchronous in Phase 1 — the dispatcher throws a clean error if
 /// the user UDF returns a Promise. Async columnar UDFs land in
@@ -197,6 +224,18 @@ pub fn wrap_user_source_columnar(user: &str) -> String {
 /// module, so a rejecting Promise surfaces as a module-evaluation
 /// error that `invoke` returns as `Err` — exactly how we want script
 /// errors to flow back to the host as a WASM trap.
+///
+/// **Exported promises are awaited.** A script whose final
+/// `module.exports` is a thenable (`module.exports =
+/// someAsyncMain()`) gets that value awaited after the top-level code
+/// finishes: a rejection surfaces exactly like a top-level `throw` —
+/// the error message + stack reach stderr and the process exits
+/// nonzero (exit code 1, Node's convention for an unhandled
+/// error/rejection). A resolved exported promise changes nothing —
+/// the value is discarded and the script exits 0. Without this await,
+/// a rejected exported promise would vanish: the assignment itself is
+/// synchronous, nothing ever observed the rejection, and the run
+/// exited 0 with no output.
 pub fn wrap_script_source(user: &str, argv_json: &str, env_json: &str, cwd_json: &str) -> String {
     let user = normalize_leading_hashbang(user);
     let user_lit = js_string_literal(&user);
@@ -250,6 +289,17 @@ pub fn wrap_script_source(user: &str, argv_json: &str, env_json: &str, cwd_json:
             __ab_module, __ab_module.exports, globalThis.require,
             __ab_filename, __ab_dirname
         );
+        // Await an exported thenable so its rejection cannot vanish:
+        // `module.exports = Promise.reject(e)` must fail the run the
+        // same way a top-level `throw e` does (message + stack on
+        // stderr, exit code 1). A resolved value is discarded —
+        // script-mode output stays console-only.
+        const __ab_exported = __ab_module.exports;
+        if (__ab_exported !== null
+            && (typeof __ab_exported === 'object' || typeof __ab_exported === 'function')
+            && typeof __ab_exported.then === 'function') {{
+            await __ab_exported;
+        }}
         "#
     )
 }

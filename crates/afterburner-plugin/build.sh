@@ -94,3 +94,12 @@ printf '%s\n' "$sha" > "$dest.bundle-sha256"
 
 echo "wrote $(stat -c %s "$dest") bytes to $dest (Wizer-preinitialized)"
 echo "recorded bundle sha256: $sha → $dest.bundle-sha256"
+
+# The plugin ships inside the afterburner-wasi .crate (include_bytes!), and
+# crates.io rejects compressed crates over 10 MiB. Warn at 8 MiB gzipped so
+# growth is caught at build time, not at publish time.
+gz=$(gzip -9 -c "$dest" | wc -c)
+echo "plugin gzip size: $((gz / 1048576)) MiB ($gz bytes; crates.io crate limit is 10 MiB compressed)"
+if [ "$gz" -gt $((8 * 1048576)) ]; then
+    echo "WARNING: gzipped plugin exceeds 8 MiB — approaching the 10 MiB crates.io crate limit" >&2
+fi

@@ -19,17 +19,21 @@
 //!    which builds `require()` and the Node-stdlib modules on top of
 //!    the bridges — so the bridges MUST exist first.
 
+mod codec;
 mod columnar;
 mod crypto;
 mod fs;
+mod input;
 mod misc;
+mod output;
 
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
+use alloc::vec::Vec;
 use javy_plugin_api::javy::quickjs::Ctx;
 
-use crate::host_api::host_last_error;
+use crate::host_api::{host_get_input, host_get_input_len, host_last_error};
 
 /// Default buffer size for variable-length host responses. The retry
 /// loop in [`call_read`] doubles until the host confirms it fits.
@@ -94,6 +98,9 @@ pub fn install(ctx: Ctx<'_>) {
     fs::install(&globals);
     crypto::install(&globals);
     misc::install(&globals);
+    input::install(&globals);
+    output::install(&globals);
+    codec::install(&globals);
     columnar::install(&globals);
 
     // Eval the plenum bundle so Wizer preinit captures `require()` and
@@ -140,6 +147,39 @@ where
         }
         return Err(read_last_error(n));
     }
+}
+
+/// Exact-fit read of `HostState::pending_input`. Sizes the destination
+/// once via `host_get_input_len` — no retry-doubling: each doubling
+/// step zeroes the resized region (O(n) metered instructions) and
+/// triggers another host-side clone of the full input, so on multi-MiB
+/// inputs the old guess-and-retry protocol cost several full passes
+/// over the payload before the real copy even happened. The buffer is
+/// deliberately *not* pre-zeroed either — the host overwrites every
+/// byte it reports, and the memset would be one more wasted metered
+/// pass over a multi-MiB payload.
+pub(super) fn read_pending_input() -> Result<Vec<u8>, String> {
+    let len = unsafe { host_get_input_len() };
+    let Ok(cap) = usize::try_from(len) else {
+        return Err(format!("host_get_input_len returned {len}"));
+    };
+    let mut buf: Vec<u8> = Vec::with_capacity(cap);
+    let n = unsafe { host_get_input(buf.as_mut_ptr(), cap as u32) };
+    let Ok(filled) = usize::try_from(n) else {
+        return Err(format!("host_get_input returned {n}"));
+    };
+    if filled > cap {
+        return Err(format!(
+            "host_get_input overran its buffer ({filled} > {cap})"
+        ));
+    }
+    // SAFETY: `host_get_input` wrote exactly `filled` bytes into the
+    // buffer (host-side `write_out` copies `filled <= cap` bytes or
+    // returns a negative code, and the overrun guard above re-checks);
+    // every element below `filled` is initialized, and `filled` does
+    // not exceed the capacity allocated above.
+    unsafe { buf.set_len(filled) };
+    Ok(buf)
 }
 
 pub(super) fn read_last_error(code: i32) -> String {

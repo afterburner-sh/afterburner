@@ -12,7 +12,7 @@
 
 use afterburner_core::{
     AfterburnerError, BurnCache, BurnCacheBackend, Combustor, FuelGauge, HostContext,
-    InMemoryStateStore, Manifold, Result, ScriptId, ScriptInvocation, ScriptOutcome,
+    InMemoryStateStore, Manifold, OutputValue, Result, ScriptId, ScriptInvocation, ScriptOutcome,
     SharedStateStore,
 };
 use serde_json::Value;
@@ -208,6 +208,109 @@ impl Afterburner {
         }
     }
 
+    /// Run a registered script with a **raw byte** input — the module
+    /// receives a `Uint8Array` instead of a parsed JSON value. This is
+    /// the bulk-payload fast path: [`run`](Self::run) frames the input
+    /// as JSON text, which the sandboxed runtime must re-materialize
+    /// as a JS string and `JSON.parse` — both O(n) in the input size
+    /// and fuel-metered, dominating the cost of large calls (measured
+    /// ~125 fuel/byte crossing in as JSON versus ~28 through this
+    /// path; see `examples/input_framing_bench.rs`). With raw input
+    /// the O(n) byte movement happens host-side; the only metered
+    /// per-byte work is one copy into the runtime's heap.
+    ///
+    /// The output contract is unchanged — the script's return value
+    /// comes back as JSON, so the natural shape is "bulk bytes in,
+    /// small summary out". Scripts moving bulk *typed* data in both
+    /// directions should use [`run_columnar`](Self::run_columnar).
+    ///
+    /// **Engine-mode behaviour** mirrors `run_columnar`: wasm executes
+    /// directly; adaptive routes to the wasm tier (waiting up to 5 s
+    /// for an in-flight background compile); native surfaces a clean
+    /// [`AfterburnerError::Engine`]; the threaded engine bypasses the
+    /// worker pipeline and dispatches into the inner combustor.
+    /// Sandbox properties are identical to `run`: fresh Store per
+    /// call, fuel + epoch + memory caps enforced, capability gates
+    /// honoured.
+    pub fn run_raw(&self, id: &ScriptId, input: &[u8]) -> Result<Value> {
+        self.run_raw_with(id, input, &self.defaults)
+    }
+
+    /// Like [`run_raw`](Self::run_raw) but with explicit per-call
+    /// limits.
+    pub fn run_raw_with(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
+        match &self.engine {
+            EngineHolder::Cache(c) => c.execute_raw(id, input, limits),
+            #[cfg(feature = "thrust")]
+            EngineHolder::Thrust(t) => t.thrust_raw(id, input, limits),
+        }
+    }
+
+    /// Output-framing-aware run: the **module's return value** picks
+    /// the result shape — the output-side mirror of the input
+    /// framings. A `Uint8Array` / `ArrayBuffer` return comes back as
+    /// [`OutputValue::Bytes`] (raw bytes through a host import; no
+    /// `JSON.stringify`, no guest-side string materialization, no
+    /// base64 — all O(n) fuel-metered work the JSON framing pays);
+    /// every other value comes back as [`OutputValue::Json`] via the
+    /// unchanged stdout contract. One registered script (one compiled
+    /// bytecode) serves both shapes — the invoke wrapper branches on
+    /// the return type, exactly like the input side branches on
+    /// framing — so the same module can return JSON for one call and
+    /// bytes for the next.
+    ///
+    /// Results are bounded by `FuelGauge::output_bytes` (default
+    /// 64 MiB); past the ceiling the call fails with the structured
+    /// [`AfterburnerError::OutputTooLarge`], never a bare trap.
+    ///
+    /// **Engine-mode behaviour** mirrors [`run_raw`](Self::run_raw):
+    /// wasm executes directly; adaptive routes to the wasm tier;
+    /// native surfaces a clean [`AfterburnerError::Engine`]; the
+    /// threaded engine dispatches into the inner combustor.
+    pub fn run_out(&self, id: &ScriptId, input: &Value) -> Result<OutputValue> {
+        self.run_out_with(id, input, &self.defaults)
+    }
+
+    /// Like [`run_out`](Self::run_out) but with explicit per-call
+    /// limits.
+    pub fn run_out_with(
+        &self,
+        id: &ScriptId,
+        input: &Value,
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        match &self.engine {
+            EngineHolder::Cache(c) => c.execute_out(id, input, limits),
+            #[cfg(feature = "thrust")]
+            EngineHolder::Thrust(t) => t.thrust_out(id, input, limits),
+        }
+    }
+
+    /// Raw bytes in **and** output-framing-aware result — the
+    /// full-duplex bulk-payload path. Composition of
+    /// [`run_raw`](Self::run_raw)'s input framing (module receives a
+    /// `Uint8Array`) and [`run_out`](Self::run_out)'s output
+    /// contract: "bytes in, bytes out" crosses the engine boundary
+    /// with zero JSON / string / base64 work in either direction.
+    pub fn run_raw_out(&self, id: &ScriptId, input: &[u8]) -> Result<OutputValue> {
+        self.run_raw_out_with(id, input, &self.defaults)
+    }
+
+    /// Like [`run_raw_out`](Self::run_raw_out) but with explicit
+    /// per-call limits.
+    pub fn run_raw_out_with(
+        &self,
+        id: &ScriptId,
+        input: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        match &self.engine {
+            EngineHolder::Cache(c) => c.execute_raw_out(id, input, limits),
+            #[cfg(feature = "thrust")]
+            EngineHolder::Thrust(t) => t.thrust_raw_out(id, input, limits),
+        }
+    }
+
     /// Run a registered script against a typed [`ColumnarBatch`] and
     /// receive the result columns directly — no JSON parse / stringify
     /// on either side. Phase 1 of the UDF perf push: the data path
@@ -380,10 +483,12 @@ pub struct AfterburnerBuilder {
     fuel: Option<u64>,
     memory_bytes: Option<usize>,
     timeout_ms: Option<u64>,
+    output_bytes: Option<usize>,
     manifold: Option<Manifold>,
     host_context: Option<Arc<dyn HostContext>>,
     state_store: Option<SharedStateStore>,
     cache_backend: Option<Arc<dyn BurnCacheBackend>>,
+    compile_cache_dir: Option<PathBuf>,
     cwd: Option<PathBuf>,
     /// Optional shard count for daemon-mode (multi-shard pool).
     /// `None` → `available_parallelism()` at daemon spawn time.
@@ -425,10 +530,12 @@ impl fmt::Debug for AfterburnerBuilder {
             .field("fuel", &self.fuel)
             .field("memory_bytes", &self.memory_bytes)
             .field("timeout_ms", &self.timeout_ms)
+            .field("output_bytes", &self.output_bytes)
             .field("manifold", &self.manifold)
             .field("host_context", &self.host_context.is_some())
             .field("state_store", &self.state_store.is_some())
             .field("cache_backend", &self.cache_backend.is_some())
+            .field("compile_cache_dir", &self.compile_cache_dir)
             .finish_non_exhaustive()
     }
 }
@@ -459,6 +566,17 @@ impl AfterburnerBuilder {
         self
     }
 
+    /// `FuelGauge::output_bytes` — per-call ceiling on the result
+    /// capture (JSON result, raw result bytes, script-mode stdout).
+    /// Unset means the engine default
+    /// ([`FuelGauge::DEFAULT_OUTPUT_BYTES`], 64 MiB) — output is
+    /// always a bounded resource; exceeding the ceiling surfaces as
+    /// the structured [`AfterburnerError::OutputTooLarge`].
+    pub fn output_bytes(mut self, bytes: usize) -> Self {
+        self.output_bytes = Some(bytes);
+        self
+    }
+
     /// Capability profile (fs/net/crypto/env/http_timeout_ms).
     pub fn manifold(mut self, m: Manifold) -> Self {
         self.manifold = Some(m);
@@ -480,6 +598,24 @@ impl AfterburnerBuilder {
     /// Attach a shared (cluster-wide) bytecode/source cache backend.
     pub fn cache_backend(mut self, backend: Arc<dyn BurnCacheBackend>) -> Self {
         self.cache_backend = Some(backend);
+        self
+    }
+
+    /// Enable the on-disk compilation cache for the WASM backend,
+    /// rooted at `dir` (must be an absolute path).
+    ///
+    /// The sandbox's native-code compilation is persisted there and
+    /// reused by every later engine construction in any process —
+    /// removing the cold-start compile cost for short-lived or
+    /// freshly-forked embedders. Entries are keyed by module contents,
+    /// compiler configuration, and runtime version, so upgrades miss
+    /// cleanly; corrupt or stale files are ignored and recompiled.
+    /// If the cache cannot be initialised (e.g. unwritable directory)
+    /// the engine logs a warning and proceeds without it — this is an
+    /// optimisation only and never affects correctness or sandbox
+    /// behaviour. Ignored by the `native` mode (nothing to cache).
+    pub fn compile_cache_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.compile_cache_dir = Some(dir.into());
         self
     }
 
@@ -599,6 +735,7 @@ impl AfterburnerBuilder {
             fuel: self.fuel,
             memory_bytes: self.memory_bytes,
             timeout_ms: self.timeout_ms,
+            output_bytes: self.output_bytes,
             manifold: manifold.clone(),
         };
 
@@ -614,8 +751,12 @@ impl AfterburnerBuilder {
 
         // Build the concrete combustor for the chosen mode. `host_context`
         // and `state_store` thread through per-backend constructors.
-        let combustor: Box<dyn Combustor> =
-            build_combustor(mode, state_store.clone(), self.host_context.clone())?;
+        let combustor: Box<dyn Combustor> = build_combustor(
+            mode,
+            state_store.clone(),
+            self.host_context.clone(),
+            self.compile_cache_dir.clone(),
+        )?;
 
         let mut cache = BurnCache::new(combustor);
         if let Some(b) = self.cache_backend.clone() {
@@ -640,13 +781,14 @@ fn build_combustor(
     mode: Mode,
     state_store: SharedStateStore,
     host_context: Option<Arc<dyn HostContext>>,
+    compile_cache_dir: Option<PathBuf>,
 ) -> Result<Box<dyn Combustor>> {
     match mode {
         Mode::Native => build_native(state_store, host_context),
         #[cfg(feature = "wasm")]
-        Mode::Wasm => build_wasm(state_store, host_context),
+        Mode::Wasm => build_wasm(state_store, host_context, compile_cache_dir),
         #[cfg(feature = "adaptive")]
-        Mode::Adaptive => build_adaptive(state_store, host_context),
+        Mode::Adaptive => build_adaptive(state_store, host_context, compile_cache_dir),
     }
 }
 
@@ -676,11 +818,13 @@ fn build_native(
 fn build_wasm(
     state_store: SharedStateStore,
     host_context: Option<Arc<dyn HostContext>>,
+    compile_cache_dir: Option<PathBuf>,
 ) -> Result<Box<dyn Combustor>> {
     let cfg = afterburner_wasi::WasmConfig {
         state_store: Some(state_store),
         host_context,
         transpile_hook: None,
+        compile_cache_dir,
     };
     Ok(Box::new(afterburner_wasi::WasmCombustor::new(cfg)?))
 }
@@ -689,11 +833,13 @@ fn build_wasm(
 fn build_adaptive(
     state_store: SharedStateStore,
     host_context: Option<Arc<dyn HostContext>>,
+    compile_cache_dir: Option<PathBuf>,
 ) -> Result<Box<dyn Combustor>> {
     let cfg = afterburner_wasi::WasmConfig {
         state_store: Some(state_store),
         host_context,
         transpile_hook: None,
+        compile_cache_dir,
     };
     Ok(Box::new(
         afterburner_adaptive::AdaptiveCombustor::with_wasm_config(cfg)?,
@@ -780,6 +926,7 @@ impl ThreadedBuilder {
             fuel: self.parent.fuel,
             memory_bytes: self.parent.memory_bytes,
             timeout_ms: self.parent.timeout_ms,
+            output_bytes: self.parent.output_bytes,
             manifold: manifold.clone(),
         };
 
@@ -787,6 +934,7 @@ impl ThreadedBuilder {
             state_store: Some(state_store.clone()),
             host_context: self.parent.host_context.clone(),
             transpile_hook: None,
+            compile_cache_dir: self.parent.compile_cache_dir.clone(),
         };
 
         let cfg = afterburner_thrust::ThrustEngineConfig {

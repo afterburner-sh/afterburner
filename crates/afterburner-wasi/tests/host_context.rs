@@ -120,7 +120,7 @@ fn wasm_host_context_round_trip() {
     let cfg = WasmConfig {
         state_store: None,
         host_context: Some(ctx.clone() as Arc<dyn HostContext>),
-        transpile_hook: None,
+        ..WasmConfig::default()
     };
     let c = WasmCombustor::new(cfg).unwrap();
     let out = run_on(&c);
@@ -149,11 +149,7 @@ fn wasm_host_context_round_trip() {
 fn wasm_without_host_context_defaults_are_harmless() {
     // No context wired — readColumn returns [], emitRow is a no-op,
     // getEnv returns undefined. Must not crash.
-    let cfg = WasmConfig {
-        state_store: None,
-        host_context: None,
-        transpile_hook: None,
-    };
+    let cfg = WasmConfig::default();
     let c = WasmCombustor::new(cfg).unwrap();
     let id = c
         .ignite(

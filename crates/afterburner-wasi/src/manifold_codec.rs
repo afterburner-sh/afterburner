@@ -25,7 +25,7 @@
 //! tightest expressible flags and the child gets a slightly *narrower*
 //! manifold. Narrowing is safe; widening is not.
 
-use afterburner_core::{EnvAccess, FsAccess, Manifold, NetAccess};
+use afterburner_core::{EnvAccess, FsAccess, ListenAccess, Manifold, NetAccess};
 
 /// Render `m` as `burn` CLI flags. The argument order is stable across
 /// calls (handy for tests). An empty result means "fully open" — the
@@ -47,6 +47,9 @@ pub fn manifold_to_cli_args(m: &Manifold) -> Vec<String> {
     if let Some(s) = encode_env(&m.env) {
         out.push(format!("--allow-env={s}"));
     }
+    if let Some(s) = encode_listen(&m.listen) {
+        out.push(format!("--allow-listen={s}"));
+    }
     out
 }
 
@@ -57,6 +60,7 @@ fn is_open(m: &Manifold) -> bool {
     matches!(&m.fs, FsAccess::ReadWrite(roots) if roots.is_empty())
         && matches!(&m.net, NetAccess::OutboundFull(None))
         && matches!(&m.env, EnvAccess::Full)
+        && matches!(&m.listen, ListenAccess::Any)
 }
 
 fn encode_fs(fs: &FsAccess) -> Option<String> {
@@ -101,6 +105,28 @@ fn encode_env(env: &EnvAccess) -> Option<String> {
                 Some(keys.join(","))
             }
         }
+    }
+}
+
+fn encode_listen(listen: &ListenAccess) -> Option<String> {
+    match listen {
+        ListenAccess::None => None,
+        ListenAccess::Any => Some("*".to_string()),
+        ListenAccess::Ports(ports) => {
+            if ports.is_empty() {
+                // An empty allow-list grants nothing — same as None.
+                None
+            } else {
+                Some(
+                    ports
+                        .iter()
+                        .map(u16::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+            }
+        }
+        ListenAccess::PortRange(lo, hi) => Some(format!("{lo}-{hi}")),
     }
 }
 

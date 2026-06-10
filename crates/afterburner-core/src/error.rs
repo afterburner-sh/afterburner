@@ -41,11 +41,22 @@ pub enum AfterburnerError {
     #[error("serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
 
-    /// The script wrote more bytes to stdout than the host's buffer
-    /// permits. Surfaces as a typed error rather than a confusing JSON
-    /// parse failure on truncated bytes.
-    #[error("script output exceeded {limit} byte capture buffer")]
+    /// The script's result exceeded the per-call output ceiling
+    /// (`FuelGauge::output_bytes`, default 64 MiB). Applies uniformly
+    /// to the JSON result capture, raw result bytes, and script-mode
+    /// stdout. Surfaces as a typed error rather than an opaque
+    /// guest-side I/O trap or a JSON parse failure on truncated bytes.
+    #[error("script output exceeded {limit} byte ceiling (raise FuelGauge::output_bytes)")]
     OutputTooLarge { limit: usize },
+
+    /// The module returned raw bytes (`Uint8Array` / `ArrayBuffer`)
+    /// through a `Value`-shaped API (`run` / `run_raw`). Use the
+    /// `OutputValue`-returning variants (`run_out` / `run_raw_out`)
+    /// to receive raw results.
+    #[error(
+        "script returned {len} raw bytes; use run_out / run_raw_out (OutputValue) to receive them"
+    )]
+    UnexpectedRawOutput { len: usize },
 
     /// A host function returned an error to the script.
     #[error("host error: {0}")]

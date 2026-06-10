@@ -11,7 +11,7 @@
 //! (`afterburner-adaptive`) composes both.
 
 use crate::error::{AfterburnerError, Result};
-use crate::types::{FuelGauge, ScriptId, ScriptInvocation, ScriptOutcome};
+use crate::types::{FuelGauge, OutputValue, ScriptId, ScriptInvocation, ScriptOutcome};
 use serde_json::Value;
 
 /// The engine contract. Implementations must be `Send + Sync` so a single
@@ -50,6 +50,67 @@ pub trait Combustor: Send + Sync {
         _cwd: Option<&str>,
     ) -> Result<Value> {
         self.thrust(id, input, limits)
+    }
+
+    /// Raw-input fast path: execute a compiled script with `input`
+    /// delivered to the module as a `Uint8Array` instead of a JSON
+    /// value. For bulk binary payloads this skips the whole
+    /// input-framing tax of [`thrust`](Self::thrust) — host-side JSON
+    /// serialization, guest-side string materialization, and
+    /// guest-side `JSON.parse` (all O(n) in the input size, and the
+    /// guest-side parts are fuel-metered). The script's return value
+    /// still comes back as JSON, same output contract as `thrust`.
+    ///
+    /// Default impl errors — backends without a linear-memory bridge
+    /// inherit it and surface a clean diagnostic, mirroring
+    /// [`thrust_columnar_bytes`](Self::thrust_columnar_bytes).
+    /// Currently only `WasmCombustor` overrides; `AdaptiveCombustor`
+    /// routes to its wasm tier.
+    fn thrust_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
+        let _ = (id, input, limits);
+        Err(AfterburnerError::Engine(
+            "raw input path not implemented for this backend".into(),
+        ))
+    }
+
+    /// Output-framing-aware variant of [`thrust`](Self::thrust): the
+    /// module's return value decides the result shape. A `Uint8Array`
+    /// / `ArrayBuffer` return comes back as [`OutputValue::Bytes`]
+    /// (raw bytes through a host import — no `JSON.stringify`, no
+    /// guest-side string materialization, both O(n) fuel-metered
+    /// work); anything else comes back as [`OutputValue::Json`] via
+    /// the unchanged stdout contract. One compiled bytecode serves
+    /// both shapes — the invoke wrapper branches on the return type,
+    /// exactly mirroring how the input side branches on framing.
+    ///
+    /// Default impl forwards to [`thrust`](Self::thrust) and wraps in
+    /// [`OutputValue::Json`] — correct for backends without a raw
+    /// output bridge, where a bytes-shaped return would already have
+    /// surfaced as that backend's JSON encoding of it.
+    fn thrust_out(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<OutputValue> {
+        self.thrust(id, input, limits).map(OutputValue::Json)
+    }
+
+    /// Raw input **and** output-framing-aware result: bulk bytes in
+    /// (module receives a `Uint8Array`, see
+    /// [`thrust_raw`](Self::thrust_raw)), and the module's return
+    /// type picks the result framing (see
+    /// [`thrust_out`](Self::thrust_out)). This is the full-duplex
+    /// bulk-payload path: "bytes in, bytes out" crosses the boundary
+    /// with zero JSON / string / base64 work in either direction.
+    ///
+    /// Default impl errors — backends without a linear-memory bridge
+    /// inherit it, mirroring [`thrust_raw`](Self::thrust_raw).
+    fn thrust_raw_out(
+        &self,
+        id: &ScriptId,
+        input: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        let _ = (id, input, limits);
+        Err(AfterburnerError::Engine(
+            "raw input path not implemented for this backend".into(),
+        ))
     }
 
     /// Release any resources associated with a compiled script. After this

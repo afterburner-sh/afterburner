@@ -48,9 +48,9 @@ pub fn reader_format_version() -> String {
     format!("{FORMAT_MAJOR}.{FORMAT_MINOR}")
 }
 
-/// Hard cap on a compressed `.afb`, mirroring the server-side limit
-/// (§3.3: 32 MiB). `from_bytes` rejects anything larger before touching zstd.
-pub const MAX_AFB_BYTES: usize = 32 * 1024 * 1024;
+/// Hard cap on a compressed `.afb`, mirroring the registry's published-package
+/// limit (50 MiB). `from_bytes` rejects anything larger before touching zstd.
+pub const MAX_AFB_BYTES: usize = 50 * 1024 * 1024;
 
 /// Hard cap on total decompressed bytes — zip-bomb defense (§3.3: 256 MiB).
 pub const MAX_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
@@ -82,8 +82,9 @@ pub struct Afb {
     /// runtime's own `Manifold` type (no schema duplication).
     pub manifold: Manifold,
     /// `source/` files, keyed by their archive-relative path
-    /// (e.g. `source/main.js`), sorted for reproducible iteration.
-    pub source: BTreeMap<String, String>,
+    /// (e.g. `source/main.js`), sorted for reproducible iteration. Stored
+    /// **byte-exact** so binary bundled assets (images, fonts, …) survive.
+    pub source: BTreeMap<String, Vec<u8>>,
 }
 
 impl Afb {
@@ -98,12 +99,26 @@ impl Afb {
         unpack::unpack(bytes)
     }
 
-    /// The entry-point source named by `manifest.package.entry`.
+    /// The entry-point source named by `manifest.package.entry` (always JS, so
+    /// UTF-8). Errors if the entry is missing or not valid UTF-8.
     pub fn entry_source(&self) -> Result<&str> {
-        self.source
+        let bytes = self
+            .source
             .get(&self.manifest.package.entry)
-            .map(String::as_str)
-            .ok_or_else(|| AfbError::EntryMissing(self.manifest.package.entry.clone()))
+            .ok_or_else(|| AfbError::EntryMissing(self.manifest.package.entry.clone()))?;
+        std::str::from_utf8(bytes).map_err(|_| {
+            AfbError::Corrupt(format!(
+                "entry {:?} is not UTF-8",
+                self.manifest.package.entry
+            ))
+        })
+    }
+
+    /// Raw bytes of a bundled `source/` file by archive path (e.g.
+    /// `source/assets/logo.png`), if present. Lets a package read its own
+    /// bundled assets, binary or text.
+    pub fn asset(&self, path: &str) -> Option<&[u8]> {
+        self.source.get(path).map(Vec::as_slice)
     }
 
     /// `namespace/name` — the registry-facing package identifier.

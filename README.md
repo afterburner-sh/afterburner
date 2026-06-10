@@ -98,6 +98,7 @@ Deno-style capability grants (deny by default):
 
 ```bash
 burn --allow-net=api.example.com,*.trusted.io script.js
+burn --allow-listen=8080 server.js         # inbound: port list or a lo-hi range
 burn --allow-fs=/tmp,/var/data etl.js
 burn --allow-env=HOME,PATH launcher.js
 burn -A runall.js                          # grant everything
@@ -138,7 +139,7 @@ release** (its per-version Change Date). Versions released *before* the relicens
 
 The Apache-2.0 components shipped alongside the engine — everything under
 `examples/` (see [`examples/LICENSE`](examples/LICENSE)), plus the planned
-`afterburner-afb`, `pg_burn`, and `psila/*` packages — are Apache-2.0 via
+`afterburner-afb` and `burn/*` packages — are Apache-2.0 via
 their own `LICENSE` / `license` metadata and **not** subject to the BSL.
 
 **Free for non-commercial and non-production use.** Individuals on personal

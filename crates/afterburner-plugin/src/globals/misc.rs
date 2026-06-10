@@ -4,9 +4,9 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 //! Grab-bag globals: `os`, `http`, `dns`, `zlib`, host-context hooks
-//! (`readColumn` / `emitRow` / `getEnv`), the state store, the
-//! per-thrust input bridge (`__AB_GET_INPUT__`), and the error-message
-//! bridge (`__host_last_error`).
+//! (`readColumn` / `emitRow` / `getEnv`), the state store, and the
+//! error-message bridge (`__host_last_error`). The per-thrust input
+//! bridges live in `globals::input`.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -47,36 +47,8 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         }),
     );
 
-    // Bytecode-cache invoke path: pulls the per-thrust input JSON bytes
-    // from `HostState::pending_input`. The cached wrapped source calls
-    // this at the top of every invocation, replacing what would
-    // otherwise be a per-thrust preamble compile.
-    let _ = globals.set(
-        "__AB_GET_INPUT__",
-        Func::from(|| -> String {
-            // 64 KiB initial buffer covers the vast majority of typical
-            // UDF inputs in one call. The host returns
-            // `E_BUF_TOO_SMALL = -4` if more is needed; we retry
-            // doubling.
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = unsafe { host_get_input(buf.as_mut_ptr(), buf.len() as u32) };
-                if n >= 0 {
-                    buf.truncate(n as usize);
-                    return String::from_utf8_lossy(&buf).into_owned();
-                }
-                if n == -4 {
-                    // BufTooSmall — double and retry.
-                    let new_cap = buf.len().saturating_mul(2);
-                    buf.resize(new_cap, 0);
-                    continue;
-                }
-                // Any other error → empty input. Caller's JSON.parse
-                // will surface the failure clearly.
-                return String::new();
-            }
-        }),
-    );
+    // Per-thrust input bridges (`__AB_GET_INPUT__` /
+    // `__AB_GET_INPUT_VALUE__`) live in `globals::input`.
 
     // Daemon-mode envelope getter. Same shape as __AB_GET_INPUT__ but
     // routes to `HostState::pending_envelope` — the long-lived Store
@@ -681,8 +653,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     let _ = globals.set(
         "__host_worker_data",
         Func::from(|| -> String {
-            // Reuse the variable-length read pattern from
-            // `__AB_GET_INPUT__`: 64 KiB initial buffer covers nearly
+            // Variable-length read: 64 KiB initial buffer covers nearly
             // every workerData payload; -4 doubles + retries.
             let mut buf = alloc::vec![0u8; 64 * 1024];
             loop {
@@ -1398,6 +1369,38 @@ fn install_http_dns<'js>(globals: &Object<'js>) {
                         ub.len() as u32,
                         body_vec.as_ptr(),
                         body_vec.len() as u32,
+                        out,
+                        cap,
+                    )
+                }) {
+                    Ok(s) => s,
+                    Err(e) => format!(r#"{{"status":0,"body":"__HOST_ERR__:{e}"}}"#),
+                }
+            },
+        ),
+    );
+
+    // v2 request path: headers travel as a JSON object; the body is
+    // base64-framed (raw bytes cannot cross the JS string boundary
+    // unmangled) and the host sends the exact original bytes.
+    let _ = globals.set(
+        "__host_http_request_v2",
+        Func::from(
+            |method: String, url: String, headers_json: String, body_b64: String| -> String {
+                let mb = method.as_bytes();
+                let ub = url.as_bytes();
+                let hb = headers_json.as_bytes();
+                let bb = body_b64.as_bytes();
+                match call_read(|out, cap| unsafe {
+                    host_http_request_v2(
+                        mb.as_ptr(),
+                        mb.len() as u32,
+                        ub.as_ptr(),
+                        ub.len() as u32,
+                        hb.as_ptr(),
+                        hb.len() as u32,
+                        bb.as_ptr(),
+                        bb.len() as u32,
                         out,
                         cap,
                     )

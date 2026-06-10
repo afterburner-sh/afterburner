@@ -15,6 +15,15 @@
 //! The UDF shape (`module.exports = (data) => …`) remains available
 //! via `burn thrust`.
 //!
+//! **Exit codes** follow Node's convention: clean completion → 0,
+//! `process.exit(n)` → n, and any uncaught error → 1 — including a
+//! top-level `throw`, a rejected promise assigned to
+//! `module.exports`, and an exported async function that throws (the
+//! script envelope awaits an exported thenable; see
+//! `afterburner-plugin/src/envelope.rs::wrap_script_source`). The
+//! error message + stack go to stderr. A *resolved* exported promise
+//! exits 0 with its value discarded.
+//!
 //! `.ts` / `.mts` / `.cts` files are transpiled via `oxc` before
 //! dispatch when the crate is built with the `ts` feature. Without
 //! `ts`, running a `.ts` file surfaces a typed error pointing at the
@@ -27,6 +36,56 @@ use std::path::PathBuf;
 
 use super::args::Cli;
 use super::daemon::{execute, script_label};
+
+/// Recover a script's `process.argv[2..]` straight from the raw process
+/// argv, slicing everything after the FILE token.
+///
+/// Needed because when a script's own arguments collide with a burn
+/// subcommand name (`burn app.js install foo`, or npm's internal
+/// `node npm-cli.js install foo` re-entering through the PATH shim as
+/// `burn npm-cli.js install foo`), clap binds the colliding token as a
+/// `Cmd` and swallows the rest, so they never reach `cli.rest_args`.
+/// The script is an explicit "run this file", so its args are whatever
+/// followed the FILE token in argv.
+pub fn script_args_from_argv(file: &std::path::Path) -> Vec<String> {
+    let file_str = file.to_string_lossy();
+    let argv: Vec<String> = std::env::args().collect();
+    match argv.iter().skip(1).position(|a| *a == *file_str) {
+        // `position` is relative to `skip(1)`; +1 back to the full-argv
+        // index of the FILE token, +1 more to start after it.
+        Some(pos) => argv[pos + 2..].to_vec(),
+        None => Vec::new(),
+    }
+}
+
+/// Recover an eval script's `process.argv[1..]` from raw argv when a
+/// trailing arg collided with a subcommand name and clap swallowed the
+/// positionals into `cli.command` (`burn -e CODE install foo`).
+///
+/// The args are every argv token after the eval `CODE` value. `CODE`
+/// arrives via `-e`/`--eval` in any of `-e CODE`, `-eCODE`,
+/// `--eval CODE`, `--eval=CODE`; we slice after the token that *equals*
+/// `code` (the separate-value forms) or, failing that, after the first
+/// token that carries `code` as an attached value.
+pub fn eval_args_from_argv(code: &str) -> Vec<String> {
+    let argv: Vec<String> = std::env::args().collect();
+    let tail = argv.iter().skip(1).enumerate();
+    // Separate-value form: a token equal to CODE preceded by -e/--eval.
+    for (i, tok) in tail.clone() {
+        if tok == code {
+            return argv[i + 2..].to_vec();
+        }
+    }
+    // Attached-value form: `-eCODE` / `--eval=CODE`.
+    for (i, tok) in tail {
+        let attached =
+            tok.strip_prefix("-e") == Some(code) || tok.strip_prefix("--eval=") == Some(code);
+        if attached {
+            return argv[i + 2..].to_vec();
+        }
+    }
+    Vec::new()
+}
 
 pub fn run_file(cli: &Cli, path: &PathBuf, user_args: &[String]) -> Result<()> {
     if cli.watch {

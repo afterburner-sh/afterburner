@@ -31,8 +31,8 @@
 
 use afterburner_core::log::Level;
 use afterburner_core::{
-    AfterburnerError, Combustor, EngineMode, FuelGauge, Result, ScriptId, ScriptInvocation,
-    ScriptOutcome, ab_event,
+    AfterburnerError, Combustor, EngineMode, FuelGauge, OutputValue, Result, ScriptId,
+    ScriptInvocation, ScriptOutcome, ab_event,
 };
 use afterburner_ignite::NativeCombustor;
 use afterburner_wasi::{WasmCombustor, WasmConfig};
@@ -129,6 +129,61 @@ impl AdaptiveCombustor {
             }
             thread::sleep(step);
         }
+    }
+
+    /// Gate for wasm-only execution paths (columnar, raw input): the
+    /// native (rquickjs) tier has no TypedArray-over-linmem mechanism,
+    /// so these calls must route to the wasm tier. If the background
+    /// wasm compile is still in flight, block-wait for it; the worker
+    /// normally finishes within a few ms. FAILED / CANCELLED slots
+    /// surface as a clean error rather than silently routing to
+    /// native. Returns the wasm-mode `ScriptId` to dispatch with;
+    /// `what` names the calling path in diagnostics.
+    fn require_wasm_tier(&self, id: &ScriptId, what: &str) -> Result<ScriptId> {
+        let slot_state = self
+            .state
+            .get(&id.hash)
+            .map(|s| s.state.load(Ordering::Acquire));
+        match slot_state {
+            Some(READY) => {}
+            Some(COMPILING) | None => {
+                // Block up to 5 s for the worker to finish. 5 s is
+                // ~10× the worst-case observed compile (~2-4 ms each
+                // for the regular + columnar wrappers); anything
+                // beyond that points at a deeper failure (worker
+                // wedged, missing plugin .wasm, etc.).
+                match self.wait_for_compile(id, 5_000) {
+                    CompileOutcome::Ready => {}
+                    CompileOutcome::Pending => {
+                        return Err(AfterburnerError::Engine(format!(
+                            "{what}: wasm compile still in flight after 5s — \
+                             check that the plugin worker is healthy and that the \
+                             script ignited cleanly"
+                        )));
+                    }
+                    CompileOutcome::Failed => {
+                        return Err(AfterburnerError::Engine(format!(
+                            "{what}: wasm compile failed for this script — \
+                             see prior `wasm.ignite.compile_failed` event for details"
+                        )));
+                    }
+                    CompileOutcome::Cancelled => {
+                        return Err(AfterburnerError::ScriptNotFound);
+                    }
+                }
+            }
+            Some(FAILED) => {
+                return Err(AfterburnerError::Engine(format!(
+                    "{what}: wasm compile failed for this script (sticky)"
+                )));
+            }
+            Some(CANCELLED) => return Err(AfterburnerError::ScriptNotFound),
+            Some(_) => {}
+        }
+        Ok(ScriptId {
+            hash: id.hash,
+            mode: EngineMode::Wasm,
+        })
     }
 
     /// Test/diagnostic accessor — which tier would service the next thrust?
@@ -266,61 +321,33 @@ impl Combustor for AdaptiveCombustor {
         encoded: &[u8],
         limits: &FuelGauge,
     ) -> Result<Vec<u8>> {
-        // Columnar UDFs are wasm-only — the native (rquickjs) path
-        // has no TypedArray-over-linmem mechanism, so adaptive must
-        // route every columnar call to the wasm tier. If the wasm
-        // compile is still in flight, block-wait for it; the
-        // background worker normally finishes within a few ms.
-        // FAILED / CANCELLED slots surface as a clean Engine error
-        // rather than silently routing to native.
-        let slot_state = self
-            .state
-            .get(&id.hash)
-            .map(|s| s.state.load(Ordering::Acquire));
-        match slot_state {
-            Some(READY) => {}
-            Some(COMPILING) | None => {
-                // Block up to 5 s for the worker to finish. 5 s is
-                // ~10× the worst-case observed compile (~2-4 ms each
-                // for the regular + columnar wrappers); anything
-                // beyond that points at a deeper failure (worker
-                // wedged, missing plugin .wasm, etc.).
-                match self.wait_for_compile(id, 5_000) {
-                    CompileOutcome::Ready => {}
-                    CompileOutcome::Pending => {
-                        return Err(AfterburnerError::Engine(
-                            "columnar UDF: wasm compile still in flight after 5s — \
-                             check that the plugin worker is healthy and that the \
-                             script ignited cleanly"
-                                .into(),
-                        ));
-                    }
-                    CompileOutcome::Failed => {
-                        return Err(AfterburnerError::Engine(
-                            "columnar UDF: wasm compile failed for this script — \
-                             see prior `wasm.ignite.compile_failed` event for details"
-                                .into(),
-                        ));
-                    }
-                    CompileOutcome::Cancelled => {
-                        return Err(AfterburnerError::ScriptNotFound);
-                    }
-                }
-            }
-            Some(FAILED) => {
-                return Err(AfterburnerError::Engine(
-                    "columnar UDF: wasm compile failed for this script (sticky)".into(),
-                ));
-            }
-            Some(CANCELLED) => return Err(AfterburnerError::ScriptNotFound),
-            Some(_) => {}
-        }
-
-        let wasm_id = ScriptId {
-            hash: id.hash,
-            mode: EngineMode::Wasm,
-        };
+        let wasm_id = self.require_wasm_tier(id, "columnar UDF")?;
         self.wasm.thrust_columnar_bytes(&wasm_id, encoded, limits)
+    }
+
+    fn thrust_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
+        let wasm_id = self.require_wasm_tier(id, "raw input")?;
+        self.wasm.thrust_raw(&wasm_id, input, limits)
+    }
+
+    /// Output-framing-aware paths route to the wasm tier like the
+    /// other wasm-only calls (columnar, raw input): only the wasm
+    /// backend has the `host_raw_output` bridge, and letting the
+    /// native tier serve a bytes-returning module would mangle the
+    /// result into rquickjs's JSON view of a `Uint8Array`.
+    fn thrust_out(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<OutputValue> {
+        let wasm_id = self.require_wasm_tier(id, "raw output")?;
+        self.wasm.thrust_out(&wasm_id, input, limits)
+    }
+
+    fn thrust_raw_out(
+        &self,
+        id: &ScriptId,
+        input: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        let wasm_id = self.require_wasm_tier(id, "raw output")?;
+        self.wasm.thrust_raw_out(&wasm_id, input, limits)
     }
 
     fn extinguish(&self, id: &ScriptId) {

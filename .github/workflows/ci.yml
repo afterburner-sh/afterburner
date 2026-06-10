@@ -56,6 +56,8 @@ jobs:
         run: cargo clippy --workspace --exclude afterburner-plugin --all-targets -- -D warnings
       - name: clippy (afterburner with release-cli features)
         run: cargo clippy -p afterburner --all-targets --features release-cli -- -D warnings
+      - name: clippy (afb + cloud package crates)
+        run: cargo clippy -p afterburner-afb -p afterburner-cloud --all-targets -- -D warnings
 
   # ---------------------------------------------------------------
   # Workspace-wide library tests (no `bin` feature).
@@ -81,6 +83,24 @@ jobs:
           key: lib-workspace
       - name: cargo test (workspace, default features)
         run: cargo test --workspace --no-fail-fast -- --test-threads=1
+
+  # Pure host-only package crates: the `.afb` format and the registry
+  # client. No wasm target, libclang, or 8 MB plugin cold-start — fast,
+  # isolated coverage so a failure points straight at one of these crates.
+  test-pkg-crates:
+    name: test / pkg-crates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ''
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pkg-crates
+      - name: cargo test (afterburner-afb + afterburner-cloud)
+        run: cargo test -p afterburner-afb -p afterburner-cloud --all-targets --no-fail-fast -- --test-threads=1
 
   # ---------------------------------------------------------------
   # CLI architectural matrix.
@@ -115,6 +135,8 @@ jobs:
               --test b_process_report
               --test b_process_lifecycle
               --test b_npm_prereqs
+              --test b_pkg_dev
+              --lib
             timeout: 40
 
           # Module resolution + TS strip + ESM pipeline. Only tier that

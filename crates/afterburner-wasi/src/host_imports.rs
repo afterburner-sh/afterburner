@@ -52,10 +52,12 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_http(linker)?;
     wrap_dns(linker)?;
     wrap_zlib(linker)?;
+    wrap_b64(linker)?;
     wrap_state(linker)?;
     wrap_host_context(linker)?;
     wrap_last_error(linker)?;
     wrap_input(linker)?;
+    wrap_raw_output(linker)?;
     wrap_envelope(linker)?;
     wrap_columnar(linker)?;
     wrap_http_server(linker)?;
@@ -1276,10 +1278,22 @@ fn wrap_crypto(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         .func_wrap(
             NS,
             "host_http3_listen",
-            |caller: Caller<'_, HostState>, port: u32, server_id: i32| -> i32 {
+            |mut caller: Caller<'_, HostState>, port: u32, server_id: i32| -> i32 {
                 let Some(daemon) = caller.data().daemon_http.clone() else {
                     return crate::daemon_http::LISTEN_ERR_NO_DAEMON;
                 };
+                // Same `listen`-axis gate as `host_http_listen`: the QUIC/UDP
+                // bind is inbound listening and obeys the same port grant.
+                if u16::try_from(port)
+                    .map(|p| !caller.data().manifold.listen.allows(p))
+                    .unwrap_or(true)
+                {
+                    caller.data_mut().last_error = format!(
+                        "permission denied: listen on port {port} is not granted by the manifold \
+                         (grant it via the `listen` capability / --allow-listen)"
+                    );
+                    return crate::daemon_http::LISTEN_ERR_PERMISSION;
+                }
                 let Some((cert, key)) = crate::daemon_http3::take_pending_cert() else {
                     return crate::daemon_http::LISTEN_ERR_IO;
                 };
@@ -1510,7 +1524,100 @@ fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 let m = caller.data().manifold.clone();
                 match http_host::request(&method, &url, &[], body.as_deref(), &m) {
                     Ok(resp) => {
-                        let body_text = String::from_utf8_lossy(&resp.body).into_owned();
+                        // Binary bodies must not be lossy-stringified into the envelope:
+                        // U+FFFD replacement trebles random bytes and double-encodes
+                        // alongside body_b64, blowing the guest read cap on large
+                        // responses. body_b64 is authoritative for non-UTF-8 bodies.
+                        let body_text = match std::str::from_utf8(&resp.body) {
+                            Ok(s) => s.to_owned(),
+                            Err(_) => String::new(),
+                        };
+                        let body_b64 = B64.encode(&resp.body);
+                        let json = format!(
+                            r#"{{"status":{},"body":{},"body_b64":{}}}"#,
+                            resp.status,
+                            js_string_literal(&body_text),
+                            js_string_literal(&body_b64),
+                        );
+                        write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
+                    }
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    // v2 request path: carries request HEADERS (the legacy import drops
+    // them) and frames the body as base64 — arbitrary bytes cannot cross
+    // the JS string boundary unmangled (lone surrogates / UTF-8 coercion),
+    // so the guest encodes and this import decodes immediately before the
+    // request. The wire body is the exact original bytes; headers arrive
+    // as a JSON object of name→value.
+    linker
+        .func_wrap(
+            NS,
+            "host_http_request_v2",
+            |mut caller: Caller<'_, HostState>,
+             method_ptr: i32,
+             method_len: i32,
+             url_ptr: i32,
+             url_len: i32,
+             headers_ptr: i32,
+             headers_len: i32,
+             body_b64_ptr: i32,
+             body_b64_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let method = match read_str(&memory, &caller, method_ptr, method_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let url = match read_str(&memory, &caller, url_ptr, url_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let headers: Vec<(String, String)> = if headers_len > 0 {
+                    let raw = match read_str(&memory, &caller, headers_ptr, headers_len) {
+                        Some(s) => s,
+                        None => return E_OTHER,
+                    };
+                    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw) {
+                        Ok(map) => map
+                            .into_iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+                            .collect(),
+                        Err(_) => return E_OTHER,
+                    }
+                } else {
+                    Vec::new()
+                };
+                let body = if body_b64_len > 0 {
+                    let b64 = match read_bytes(&memory, &caller, body_b64_ptr, body_b64_len) {
+                        Some(b) => b,
+                        None => return E_OTHER,
+                    };
+                    match B64.decode(&b64) {
+                        Ok(decoded) => Some(decoded),
+                        Err(_) => return E_OTHER,
+                    }
+                } else {
+                    None
+                };
+                let m = caller.data().manifold.clone();
+                match http_host::request(&method, &url, &headers, body.as_deref(), &m) {
+                    Ok(resp) => {
+                        // Binary bodies must not be lossy-stringified into the envelope:
+                        // U+FFFD replacement trebles random bytes and double-encodes
+                        // alongside body_b64, blowing the guest read cap on large
+                        // responses. body_b64 is authoritative for non-UTF-8 bodies.
+                        let body_text = match std::str::from_utf8(&resp.body) {
+                            Ok(s) => s.to_owned(),
+                            Err(_) => String::new(),
+                        };
                         let body_b64 = B64.encode(&resp.body);
                         let json = format!(
                             r#"{{"status":{},"body":{},"body_b64":{}}}"#,
@@ -2809,6 +2916,88 @@ fn wrap_zlib(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     Ok(())
 }
 
+// ---- base64 codec (no manifold gate) --------------------------------------
+//
+// Unlike the zlib bridges (whose JS-visible API is string-shaped, so they
+// frame bytes as base64 on the wire), these two imports *implement* the
+// guest's base64 fast path — double-encoding would defeat their purpose.
+// They therefore use raw framing: `encode` reads raw bytes from guest
+// memory and writes the ASCII encoding into the out region; `decode`
+// reads ASCII and writes raw bytes back. Output sizes are exactly
+// computable from input sizes, so the guest allocates exact-fit buffers
+// and no retry-doubling protocol is needed.
+
+/// Lenient decode engine: accepts both padded and unpadded input and
+/// tolerates non-canonical trailing bits, matching the forgiving decode
+/// semantics scripts expect from `Buffer.from(str, 'base64')`. Inputs
+/// containing characters outside the standard alphabet still fail; the
+/// guest falls back to its interpreter-side decoder for those.
+const B64_LENIENT: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    base64::engine::GeneralPurposeConfig::new()
+        .with_decode_allow_trailing_bits(true)
+        .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+);
+
+fn wrap_b64(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_b64_encode",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32,
+             len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                // Encode straight off the guest-memory slice — no input
+                // copy. The borrow ends before `write_out` needs `&mut`.
+                let encoded = {
+                    let Some(input) = guest_slice(&memory, &caller, ptr, len) else {
+                        return E_OTHER;
+                    };
+                    B64.encode(input)
+                };
+                write_out(&mut caller, &memory, out_ptr, out_cap, encoded.as_bytes())
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_b64_decode",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32,
+             len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let decoded = {
+                    let Some(input) = guest_slice(&memory, &caller, ptr, len) else {
+                        return E_OTHER;
+                    };
+                    B64_LENIENT.decode(input)
+                };
+                match decoded {
+                    Ok(bytes) => write_out(&mut caller, &memory, out_ptr, out_cap, &bytes),
+                    Err(e) => {
+                        record(&mut caller, &format!("base64 decode: {e}"));
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum ZlibOp {
     Deflate,
@@ -2936,11 +3125,12 @@ fn wrap_last_error(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErro
 // ---- input slot (bytecode-cache invoke path) ----------------------------
 //
 // The plugin's bytecode-cache `invoke` mode reads the per-thrust input
-// JSON from `HostState::pending_input` via this import — which lets us
-// skip the per-thrust preamble compile that would otherwise publish
-// the input as a JS global. The cached wrapped source calls
-// `__AB_GET_INPUT__()` (installed in `modify_runtime`) which routes
-// here.
+// (JSON text or raw bytes, per `host_input_format`) from
+// `HostState::pending_input` via this import — which lets us skip the
+// per-thrust preamble compile that would otherwise publish the input
+// as a JS global. The cached wrapped source calls
+// `__AB_GET_INPUT_VALUE__()` (installed in `modify_runtime`) which
+// routes here after sizing its buffer via `host_get_input_len`.
 fn wrap_input(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     linker
         .func_wrap(
@@ -2955,6 +3145,71 @@ fn wrap_input(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 // shared borrow on `pending_input` simultaneously.
                 let input = caller.data().pending_input.clone();
                 write_out(&mut caller, &memory, out_ptr, out_cap, &input)
+            },
+        )
+        .map_err(link_err)?;
+
+    // Framing flag for `pending_input` — `InputFormat` discriminant
+    // (0 = JSON text, 1 = raw bytes). The plugin's input getter reads
+    // this once per invocation to decide whether to materialize a JS
+    // string for `JSON.parse` or hand the module a `Uint8Array`.
+    linker
+        .func_wrap(
+            NS,
+            "host_input_format",
+            |caller: Caller<'_, HostState>| -> i32 { caller.data().input_format as i32 },
+        )
+        .map_err(link_err)?;
+    Ok(())
+}
+
+// ---- raw output (output-framing mirror of the raw input path) -----------
+//
+// When the invoke wrapper sees the module return a `Uint8Array` /
+// `ArrayBuffer`, it posts the bytes here instead of JSON-stringifying
+// to stdout — the output-side twin of `InputFormat::Raw`. The host
+// stashes them in `HostState::pending_raw_output`;
+// `WasmCombustor::invoke_with_input` surfaces them as
+// `OutputValue::Bytes` after `_start` returns. The per-call output
+// ceiling (`HostState::output_ceiling`) applies exactly as it does to
+// the stdout capture: an over-ceiling reply sets the overflow flag
+// (mapped to the structured `OutputTooLarge` by `chamber::fire`) and
+// fails the import so the guest stops immediately.
+fn wrap_raw_output(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_raw_output",
+            |mut caller: Caller<'_, HostState>, blob_ptr: i32, blob_len: i32| -> i32 {
+                if blob_len < 0 {
+                    record(&mut caller, "raw output: negative blob_len");
+                    return E_OTHER;
+                }
+                let ceiling = caller.data().output_ceiling;
+                if blob_len as usize > ceiling {
+                    caller.data_mut().raw_output_overflow = true;
+                    record(
+                        &mut caller,
+                        &format!(
+                            "raw output: {blob_len} bytes exceeds the {ceiling} byte ceiling (FuelGauge::output_bytes)"
+                        ),
+                    );
+                    return E_OTHER;
+                }
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                // `guest_slice` (not `read_bytes`): unsigned wasm32
+                // address arithmetic with overflow-safe bounds — raw
+                // results are exactly the multi-MiB payloads that can
+                // sit high in linear memory.
+                let Some(bytes) = guest_slice(&memory, &caller, blob_ptr, blob_len).map(Vec::from)
+                else {
+                    record(&mut caller, "raw output: blob slice out of bounds");
+                    return E_OTHER;
+                };
+                caller.data_mut().pending_raw_output = Some(bytes);
+                0
             },
         )
         .map_err(link_err)?;
@@ -3085,6 +3340,17 @@ fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                 if !(1..=65535).contains(&port) {
                     caller.data_mut().last_error = format!("http.listen: invalid port {port}");
                     return E_OTHER;
+                }
+                // The manifold's `listen` axis gates every inbound bind,
+                // exactly like `net` gates outbound requests. Checked
+                // BEFORE the port-claim arbitration so a denied port
+                // never reserves a server_id or claims the port map.
+                if !caller.data().manifold.listen.allows(port as u16) {
+                    caller.data_mut().last_error = format!(
+                        "permission denied: listen on port {port} is not granted by the manifold \
+                         (grant it via the `listen` capability / --allow-listen)"
+                    );
+                    return crate::daemon_http::LISTEN_ERR_PERMISSION;
                 }
                 dh.bind_listener(port as u16)
             },
@@ -6100,6 +6366,21 @@ fn read_str(memory: &Memory, caller: &Caller<'_, HostState>, ptr: i32, len: i32)
     let data = memory.data(caller);
     let slice = data.get((ptr as usize)..((ptr + len) as usize))?;
     std::str::from_utf8(slice).ok().map(String::from)
+}
+
+/// Borrow a `(ptr, len)` region of guest memory without copying.
+/// Treats `ptr` / `len` as unsigned (wasm32 addresses) and bounds-checks
+/// with overflow-safe arithmetic — large payloads high in linear memory
+/// must not wrap the range computation.
+fn guest_slice<'a>(
+    memory: &Memory,
+    caller: &'a Caller<'_, HostState>,
+    ptr: i32,
+    len: i32,
+) -> Option<&'a [u8]> {
+    let start = ptr as u32 as usize;
+    let end = start.checked_add(len as u32 as usize)?;
+    memory.data(caller).get(start..end)
 }
 
 fn read_bytes(

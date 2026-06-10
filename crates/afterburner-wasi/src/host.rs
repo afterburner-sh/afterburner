@@ -17,6 +17,8 @@ use wasmtime::{ResourceLimiter, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 
+use crate::capture::CapturePipe;
+
 /// Host-managed timer entry. Lives in `HostState::timers` and is
 /// manipulated by the `__host_timer_*` imports. The CLI event loop
 /// drains expired entries via `DaemonRuntime::drain_expired_timers`.
@@ -32,14 +34,36 @@ pub struct TimerSlot {
     pub is_ref: bool,
 }
 
+/// Framing of `HostState::pending_input`, read by the guest through
+/// the `host_input_format` import (as the discriminant value). One
+/// compiled invoke wrapper serves both framings — the guest-side input
+/// getter branches on this flag per invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(i32)]
+pub enum InputFormat {
+    /// JSON text (`serde_json::to_vec` of the call's input value); the
+    /// invoke wrapper materializes a JS string and `JSON.parse`s it.
+    #[default]
+    Json = 0,
+    /// Opaque bytes; the invoke wrapper hands the module a
+    /// `Uint8Array` directly. Used by the `thrust_raw` fast path.
+    Raw = 1,
+}
+
 /// Per-`thrust` host state. A fresh instance is created for every call so
 /// invocations are fully isolated (no shared JS globals, no stdout leak
 /// between calls).
 pub struct HostState {
     pub wasi: WasiP1Ctx,
-    pub stdout: MemoryOutputPipe,
+    /// Result / stdout capture: grows on demand, hard-capped at
+    /// [`Self::output_ceiling`]. Overflow is recorded on the pipe and
+    /// surfaced by the host as `AfterburnerError::OutputTooLarge`.
+    pub stdout: CapturePipe,
     pub stderr: MemoryOutputPipe,
-    pub stdout_capacity: usize,
+    /// Per-call output ceiling (`FuelGauge::output_ceiling()` at
+    /// `HostState` build time). Bounds the stdout capture and the
+    /// `host_raw_output` reply alike.
+    pub output_ceiling: usize,
     pub limits: StoreLimits,
     /// Capability profile consulted by every `afterburner:host` import.
     pub manifold: Manifold,
@@ -57,11 +81,20 @@ pub struct HostState {
     /// this via the `host_last_error` import when a syscall returned a
     /// negative error code, and the JS glue surfaces it to the user.
     pub last_error: String,
-    /// JSON-serialized input bytes for the bytecode-cache invoke path.
-    /// Plugin reads this via the `host_get_input` import; lets us skip
-    /// the per-thrust preamble compile that would otherwise publish the
-    /// input as a JS global. Empty if the call uses the legacy envelope.
+    /// Input bytes for the bytecode-cache invoke path. Plugin reads
+    /// this via the `host_get_input` import; lets us skip the
+    /// per-thrust preamble compile that would otherwise publish the
+    /// input as a JS global. Empty if the call uses the legacy
+    /// envelope. Framing is described by [`Self::input_format`].
     pub pending_input: Vec<u8>,
+    /// Framing of [`Self::pending_input`], surfaced to the guest via
+    /// the `host_input_format` import. [`InputFormat::Json`] (the
+    /// default) means JSON text the invoke wrapper `JSON.parse`s;
+    /// [`InputFormat::Raw`] means opaque bytes the wrapper hands the
+    /// module as a `Uint8Array` — the large-payload fast path that
+    /// skips guest-side string materialization and `JSON.parse`
+    /// entirely (both are O(n) fuel-metered work).
+    pub input_format: InputFormat,
     /// JSON-serialized envelope for the daemon path's `daemon_step`
     /// re-entry. Separate from `pending_input` because daemon mode
     /// re-uses the same Store across many calls and we don't want one
@@ -121,6 +154,18 @@ pub struct HostState {
     /// a listener.
     #[cfg(feature = "daemon")]
     pub daemon_inspector: Option<Arc<crate::daemon_inspector::DaemonInspector>>,
+    /// Raw result bytes posted by the guest via the `host_raw_output`
+    /// import when the module returned a `Uint8Array` / `ArrayBuffer`.
+    /// The output-side mirror of `pending_input`'s raw framing: the
+    /// invoke wrapper branches on the module's return type, and a
+    /// bytes-shaped return crosses here instead of JSON-over-stdout.
+    /// `None` means the call produced a JSON result (or nothing).
+    pub pending_raw_output: Option<Vec<u8>>,
+    /// Set by `host_raw_output` when the posted reply exceeded
+    /// [`Self::output_ceiling`] — the raw-path twin of the stdout
+    /// pipe's overflow flag, consulted by
+    /// [`Self::output_overflowed`].
+    pub raw_output_overflow: bool,
     /// Cross-process `SharedArrayBuffer` + `Atomics.wait`/`notify`
     /// coordinator. Always present (cheap to construct — no listener
     /// or socket) so the JS side's `new SharedArrayBuffer(...)` and
@@ -164,18 +209,19 @@ pub struct HostState {
 pub type TranspileFn = Arc<dyn Fn(&str, &str) -> Result<String, String> + Send + Sync>;
 
 impl HostState {
-    /// Build a `HostState` with the given input JSON piped to stdin and
-    /// bounded capture buffers for stdout and stderr.
+    /// Build a `HostState` with the given input JSON piped to stdin, a
+    /// growable ceiling-bounded stdout capture, and a bounded stderr
+    /// buffer.
     pub fn new(
         input: &[u8],
         memory_bytes: Option<usize>,
-        stdout_capacity: usize,
+        output_ceiling: usize,
         manifold: Manifold,
         state_store: SharedStateStore,
         host_context: Option<Arc<dyn HostContext>>,
     ) -> Self {
         let stdin = MemoryInputPipe::new(input.to_vec());
-        let stdout = MemoryOutputPipe::new(stdout_capacity);
+        let stdout = CapturePipe::new(output_ceiling);
         // Stderr is bounded too — preserving it unbounded is a memory-
         // exhaustion vector. Surfaced to the caller via WasmTrap on error.
         let stderr = MemoryOutputPipe::new(64 * 1024);
@@ -195,7 +241,7 @@ impl HostState {
             wasi,
             stdout,
             stderr,
-            stdout_capacity,
+            output_ceiling,
             limits,
             manifold,
             state_store,
@@ -204,8 +250,11 @@ impl HostState {
             hash_handles: HashHandleStore::new(),
             last_error: String::new(),
             pending_input: Vec::new(),
+            input_format: InputFormat::Json,
             pending_envelope: Vec::new(),
             pending_columnar_reply: None,
+            pending_raw_output: None,
+            raw_output_overflow: false,
             daemon_http: None,
             daemon_workers: None,
             #[cfg(feature = "daemon")]
@@ -231,13 +280,15 @@ impl HostState {
     }
 
     /// Like `new` but pre-populates `pending_input` for the bytecode-
-    /// cache invoke path. The plugin reads this via `host_get_input`.
+    /// cache invoke path. The plugin reads the bytes via
+    /// `host_get_input` and their framing via `host_input_format`.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_input(
         envelope: &[u8],
-        input_json: Vec<u8>,
+        input: Vec<u8>,
+        input_format: InputFormat,
         memory_bytes: Option<usize>,
-        stdout_capacity: usize,
+        output_ceiling: usize,
         manifold: Manifold,
         state_store: SharedStateStore,
         host_context: Option<Arc<dyn HostContext>>,
@@ -245,16 +296,26 @@ impl HostState {
         let mut s = Self::new(
             envelope,
             memory_bytes,
-            stdout_capacity,
+            output_ceiling,
             manifold,
             state_store,
             host_context,
         );
-        s.pending_input = input_json;
+        s.pending_input = input;
+        s.input_format = input_format;
         s
     }
 
     pub fn limiter(&mut self) -> &mut dyn ResourceLimiter {
         &mut self.limits
+    }
+
+    /// `true` when this call's output exceeded [`Self::output_ceiling`]
+    /// on either delivery channel (stdout capture or raw-output
+    /// reply). The chamber and the script-mode path map a set flag to
+    /// `AfterburnerError::OutputTooLarge` — a structured error in the
+    /// existing taxonomy, never a bare trap.
+    pub fn output_overflowed(&self) -> bool {
+        self.raw_output_overflow || self.stdout.overflowed()
     }
 }

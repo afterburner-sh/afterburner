@@ -14,5 +14,5 @@
 
 pub use crate::{
     Afterburner, AfterburnerBuilder, AfterburnerError, FuelGauge, HostContext, Manifold, Mode,
-    Result, ScriptId,
+    OutputValue, Result, ScriptId,
 };

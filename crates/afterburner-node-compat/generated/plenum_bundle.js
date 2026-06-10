@@ -26,7 +26,21 @@
 //
 // Filesystem lookups go through `__host_fs_*`; if the active
 // Manifold denies fs access, filesystem-backed requires throw a
-// clean EACCES the same way `fs.readFileSync` would.
+// clean EACCES naming the denied path ("permission denied reading
+// '<path>' …") — distinguishable from a genuinely absent file, which
+// stays the Node-shaped MODULE_NOT_FOUND. See `moduleNotFound` below
+// for how the boolean `exists` probe (which collapses denied and
+// absent to `false`) is disambiguated on the failure path.
+//
+// Resolution bases (Node-equivalent, all file-relative):
+//   * Modules loaded through require() get a scoped require rooted at
+//     THEIR OWN directory (`makeRequire(dirname(absPath))`), so
+//     `require('./sibling')` inside a loaded file resolves next to
+//     that file — never against the process CWD.
+//   * The entry script's require is rooted at `dirname(argv[1])` for
+//     `burn run file.js` (argv[1] is canonicalized absolute).
+//   * Only `-e` / stdin eval mode (argv[1] === '[eval]') falls back
+//     to the host CWD — there is no requiring file to be relative to.
 
 (function plenumRequire() {
     var factories = Object.create(null);
@@ -68,13 +82,32 @@
     // fs host functions have two failure shapes depending on the
     // backend: the WASI path returns a string prefixed with
     // `__HOST_ERR__:`, and the native (rquickjs) path throws
-    // directly. Both collapse here to "module not found" so a
-    // sealed-Manifold `require('no-such-module')` surfaces the
-    // Node-shaped "Cannot find module" error rather than leaking
-    // a permission-denied message that sounds like a misconfigured
-    // sandbox.
+    // directly. A failure that is a manifold PERMISSION DENIAL is
+    // surfaced as an EACCES error naming the path — silently
+    // collapsing it to "module not found" sent operators chasing
+    // phantom missing files when the truth was an ungranted fs
+    // capability. Every other failure (genuinely absent file,
+    // I/O error) still reads as "not found" to the resolver.
+
+    function isDenialDetail(msg) {
+        return typeof msg === 'string'
+            && msg.toLowerCase().indexOf('permission denied') !== -1;
+    }
+
+    function permissionDeniedError(path) {
+        var e = new Error(
+            "permission denied reading '" + path + "' (fs capability not " +
+            "granted to the active manifold; grant fs read access, e.g. " +
+            "--allow-fs=<dir> / --allow-fs-read=<dir> on the CLI)");
+        e.code = 'EACCES';
+        e.path = String(path);
+        return e;
+    }
 
     function fsExists(p) {
+        // NOTE: the boolean host probe cannot distinguish "absent"
+        // from "denied" — denials are recovered on the resolution
+        // failure path via `fsReadDenied` (see `moduleNotFound`).
         var fn = globalThis.__host_fs_exists_sync;
         if (typeof fn !== 'function') return false;
         try { return !!fn(String(p)); } catch (_) { return false; }
@@ -89,15 +122,67 @@
             // contract). Decode to a UTF-8 string here; require()
             // never reads non-text files.
             var b64 = fn(String(p), 'base64');
-            if (typeof b64 === 'string' && b64.indexOf('__HOST_ERR__:') === 0) return null;
+            if (typeof b64 === 'string' && b64.indexOf('__HOST_ERR__:') === 0) {
+                if (isDenialDetail(b64.slice('__HOST_ERR__:'.length))) {
+                    throw permissionDeniedError(p);
+                }
+                return null;
+            }
             // We can't `require('buffer')` from inside require.js
             // (circular bootstrap), so decode base64 inline. The
             // implementation matches `Buffer.from(b64, 'base64')` →
             // UTF-8 decode but without crossing the module boundary.
             return base64ToUtf8(b64);
-        } catch (_) {
+        } catch (e) {
+            if (e && e.code === 'EACCES') throw e;
+            // Native (rquickjs) backend throws directly — recognise
+            // its denial message shape too.
+            if (e && isDenialDetail(e.message)) throw permissionDeniedError(p);
             return null;
         }
+    }
+
+    // One real read attempt against `p`, purely to learn whether the
+    // failure is a manifold denial. Used only on the resolution
+    // FAILURE path (zero extra host calls on successful requires).
+    function fsReadDenied(p) {
+        var fn = globalThis.__host_fs_read_file_sync;
+        if (typeof fn !== 'function') return false;
+        try {
+            var out = fn(String(p), 'base64');
+            return typeof out === 'string'
+                && out.indexOf('__HOST_ERR__:') === 0
+                && isDenialDetail(out.slice('__HOST_ERR__:'.length));
+        } catch (e) {
+            return !!(e && (e.code === 'EACCES' || isDenialDetail(e.message)));
+        }
+    }
+
+    // Build the resolution-failure error. The `exists` probes collapse
+    // "denied" and "absent" to false, so before reporting Node's
+    // MODULE_NOT_FOUND we make one real read attempt at the primary
+    // candidate: a manifold denial becomes EACCES naming the path.
+    // The MODULE_NOT_FOUND message carries the resolved base so a
+    // failed relative require shows WHICH directory it resolved
+    // against (CWD-vs-requiring-file misdiagnosis killer).
+    //
+    // `resolvedBase` is only passed for RELATIVE/ABSOLUTE specifiers
+    // — the user named a concrete file, so "denied" vs "absent" is a
+    // meaningful, actionable distinction there. Bare names (`null`
+    // base) keep the plain Node-shaped message: the node_modules walk
+    // spans many directories, the package may genuinely not be
+    // installed, and the default-sealed embedding (UDF mode) would
+    // otherwise report every missing package as a permission problem.
+    function moduleNotFound(name, resolvedBase) {
+        if (resolvedBase && fsReadDenied(resolvedBase)) {
+            return permissionDeniedError(resolvedBase);
+        }
+        var e = new Error("Cannot find module '" + name + "'"
+            + (resolvedBase && resolvedBase !== name
+                ? " (resolved against '" + resolvedBase + "')"
+                : ''));
+        e.code = 'MODULE_NOT_FOUND';
+        return e;
     }
 
     // Tiny inlined base64→UTF-8 decoder. Used only by the require
@@ -502,11 +587,12 @@
     function loadAbsoluteFile(absPath, scopedRequire) {
         var cached = getCached(absPath);
         if (cached !== undefined) return cached;
+        // A manifold denial throws EACCES from fsRead directly; a
+        // null here means the file vanished between the exists probe
+        // and the read (or an I/O error) — report it as not found.
         var source = fsRead(absPath);
         if (source === null) {
-            var ePerm = new Error("Cannot find module '" + absPath + "'");
-            ePerm.code = 'MODULE_NOT_FOUND';
-            throw ePerm;
+            throw moduleNotFound(absPath, absPath);
         }
         if (absPath.slice(-5) === '.json') {
             var parsed = JSON.parse(source);
@@ -621,18 +707,12 @@
             if (isRelativeOrAbsolute(name)) {
                 var base = name.charAt(0) === '/' ? name : resolveJoin(fromDir, name);
                 var r = resolveCandidate(base);
-                if (!r) {
-                    var e = new Error("Cannot find module '" + name + "'");
-                    e.code = 'MODULE_NOT_FOUND';
-                    throw e;
-                }
+                if (!r) throw moduleNotFound(name, base);
                 return r;
             }
             var pkg = resolvePackage(name, fromDir);
             if (pkg) return pkg;
-            var notFound = new Error("Cannot find module '" + name + "'");
-            notFound.code = 'MODULE_NOT_FOUND';
-            throw notFound;
+            throw moduleNotFound(name, null);
         }
 
         function req(name) {
@@ -665,19 +745,13 @@
             if (isRelativeOrAbsolute(name)) {
                 var base = name.charAt(0) === '/' ? name : resolveJoin(fromDir, name);
                 var r = resolveCandidate(base);
-                if (!r) {
-                    var e = new Error("Cannot find module '" + name + "'");
-                    e.code = 'MODULE_NOT_FOUND';
-                    throw e;
-                }
+                if (!r) throw moduleNotFound(name, base);
                 return loadAbsoluteFile(r, makeRequire(dirname(r)));
             }
             // Bare name — fall through to `node_modules` walk.
             var pkg = resolvePackage(name, fromDir);
             if (pkg) return loadAbsoluteFile(pkg, makeRequire(dirname(pkg)));
-            var notFound = new Error("Cannot find module '" + name + "'");
-            notFound.code = 'MODULE_NOT_FOUND';
-            throw notFound;
+            throw moduleNotFound(name, null);
         }
 
         req.cache = cache;
@@ -757,6 +831,14 @@
     // starting dir. Called from the plugin's script/daemon-init
     // wrappers immediately after they set `__host_cwd`.
     globalThis.__plenum_refresh_entry_require = installEntryRequire;
+
+    // File-relative require for `module.createRequire(filename)`:
+    // resolve `id` exactly as a module living at `base` would —
+    // relative specifiers and the node_modules walk start at
+    // dirname(base), not at the entry script's dir.
+    globalThis.__plenum_require_from = function(id, base) {
+        return makeRequire(dirname(String(base)))(id);
+    };
 
     // Dynamic-import shim. QuickJS has no registered module loader,
     // so bare `import('foo')` throws "could not load module" the
@@ -1552,7 +1634,36 @@ __register_module('buffer', function(module, exports, require) {
         return a;
     })();
 
+    // Host-native base64 bridges (raw-byte framing). Present whenever
+    // the runtime installs the codec globals; the interpreter-side
+    // implementations below stay as the fallback for other embeddings
+    // and for inputs the host's stricter decoder rejects.
+    var hostB64Encode = typeof __host_b64_encode === 'function' ? __host_b64_encode : null;
+    var hostB64Decode = typeof __host_b64_decode === 'function' ? __host_b64_decode : null;
+
     function b64Encode(bytes) {
+        if (hostB64Encode && bytes.length > 0) {
+            try { return hostB64Encode(bytes); } catch (_) { /* fall back */ }
+        }
+        return b64EncodeJs(bytes);
+    }
+
+    function b64Decode(str) {
+        str = String(str);
+        if (hostB64Decode) {
+            // First attempt: the raw input. Covers canonical payloads
+            // (padded or not) without an O(n) sanitize pass.
+            try { return hostB64Decode(str); } catch (_) { /* sanitize */ }
+            // Second attempt: strip characters outside the standard
+            // alphabet (whitespace, line breaks, data-URL noise) the
+            // same way the interpreter path does, then retry.
+            var clean = str.replace(/[^A-Za-z0-9+/=]/g, '');
+            try { return hostB64Decode(clean); } catch (_) { /* fall back */ }
+        }
+        return b64DecodeJs(str);
+    }
+
+    function b64EncodeJs(bytes) {
         // Bulk-encode by chunk into an array, join once at the end.
         // QuickJS's `+=` string concat creates a fresh string per
         // step which goes quadratic on multi-KB inputs (50 KB took
@@ -1591,7 +1702,7 @@ __register_module('buffer', function(module, exports, require) {
         return chunks.join('');
     }
 
-    function b64Decode(str) {
+    function b64DecodeJs(str) {
         str = String(str).replace(/[^A-Za-z0-9+/=]/g, '');
         var pad = 0;
         if (str.charAt(str.length - 1) === '=') pad++;
@@ -2826,17 +2937,25 @@ __register_module('crypto', function(module, exports, require) {
     Hash.prototype.digest = function(encoding) {
         if (this._finalized) throw new Error('Digest already called');
         this._finalized = true;
-        var enc = encoding || 'hex';
+        // Node semantics: digest() with no encoding (or 'buffer') returns a
+        // Buffer of RAW BYTES. The host bridge speaks text, so fetch base64
+        // and decode — defaulting to a hex STRING here silently breaks every
+        // binary consumer (keyed-HMAC chains, signatures, key derivation).
+        var wantRaw = encoding === undefined || encoding === null || encoding === 'buffer';
+        var enc = wantRaw ? 'base64' : encoding;
+        var out;
         if (this._streaming) {
-            return checkErr(
+            out = checkErr(
                 globalThis.__host_crypto_hash_digest(this._handle, enc),
                 'hash'
             );
+        } else {
+            out = checkErr(
+                ensureHost('hash')(this._algo, this._chunks.join(''), enc),
+                'hash'
+            );
         }
-        return checkErr(
-            ensureHost('hash')(this._algo, this._chunks.join(''), enc),
-            'hash'
-        );
+        return wantRaw ? require('buffer').Buffer.from(out, 'base64') : out;
     };
 
     function Hmac(algorithm, key) {
@@ -2872,17 +2991,22 @@ __register_module('crypto', function(module, exports, require) {
     Hmac.prototype.digest = function(encoding) {
         if (this._finalized) throw new Error('Digest already called');
         this._finalized = true;
-        var enc = encoding || 'hex';
+        // Same Node semantics as Hash.digest: no encoding → raw-byte Buffer.
+        var wantRaw = encoding === undefined || encoding === null || encoding === 'buffer';
+        var enc = wantRaw ? 'base64' : encoding;
+        var out;
         if (this._streaming) {
-            return checkErr(
+            out = checkErr(
                 globalThis.__host_crypto_hash_digest(this._handle, enc),
                 'hmac'
             );
+        } else {
+            out = checkErr(
+                ensureHost('hmac')(this._algo, this._key, this._chunks.join(''), enc),
+                'hmac'
+            );
         }
-        return checkErr(
-            ensureHost('hmac')(this._algo, this._key, this._chunks.join(''), enc),
-            'hmac'
-        );
+        return wantRaw ? require('buffer').Buffer.from(out, 'base64') : out;
     };
 
     exports.createHash = function(algorithm) { return new Hash(algorithm); };
@@ -5332,6 +5456,7 @@ __register_module('events', function(module, exports, require) {
             this.method = url.method;
             this.headers = new Headers(url.headers);
             this.body = url.body;
+            this._bodyBytes = url._bodyBytes || null;
             this.signal = url.signal;
             this.redirect = url.redirect;
             this.cache = url.cache;
@@ -5346,6 +5471,7 @@ __register_module('events', function(module, exports, require) {
             this.method = 'GET';
             this.headers = new Headers();
             this.body = null;
+            this._bodyBytes = null;
             this.signal = null;
             this.redirect = 'follow';
             this.cache = 'default';
@@ -5359,7 +5485,24 @@ __register_module('events', function(module, exports, require) {
         // Apply init overlays on top.
         if (init.method) this.method = String(init.method).toUpperCase();
         if (init.headers) this.headers = new Headers(init.headers);
-        if (init.body != null) this.body = String(init.body);
+        if (init.body != null) {
+            // Binary BodyInit (ArrayBuffer / TypedArray / Buffer) must NOT
+            // be stringified — `String(uint8array)` yields "0,97,115,…".
+            // Keep the exact bytes; the send path frames them as base64
+            // for the host, which decodes and sends the original bytes.
+            var _b = init.body;
+            if (typeof ArrayBuffer !== 'undefined' && _b instanceof ArrayBuffer) {
+                this._bodyBytes = new Uint8Array(_b.slice(0));
+                this.body = null;
+            } else if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(_b)) {
+                this._bodyBytes = new Uint8Array(
+                    _b.buffer.slice(_b.byteOffset, _b.byteOffset + _b.byteLength));
+                this.body = null;
+            } else {
+                this._bodyBytes = null;
+                this.body = String(_b);
+            }
+        }
         if (init.signal !== undefined) this.signal = init.signal;
         if (init.redirect) this.redirect = init.redirect;
         if (init.cache) this.cache = init.cache;
@@ -5372,12 +5515,21 @@ __register_module('events', function(module, exports, require) {
     }
     Request.prototype.clone = function() { return new Request(this); };
     Request.prototype.text = function() {
+        if (this._bodyBytes) {
+            var Buffer = require('buffer').Buffer;
+            return Promise.resolve(Buffer.from(this._bodyBytes).toString('utf8'));
+        }
         return Promise.resolve(this.body != null ? String(this.body) : '');
     };
     Request.prototype.json = function() {
         return this.text().then(function(s) { return JSON.parse(s); });
     };
     Request.prototype.arrayBuffer = function() {
+        if (this._bodyBytes) {
+            return Promise.resolve(this._bodyBytes.buffer.slice(
+                this._bodyBytes.byteOffset,
+                this._bodyBytes.byteOffset + this._bodyBytes.byteLength));
+        }
         var Buffer = require('buffer').Buffer;
         var s = this.body != null ? String(this.body) : '';
         return Promise.resolve(Buffer.from(s, 'utf8').buffer);
@@ -5558,7 +5710,26 @@ __register_module('events', function(module, exports, require) {
         if (typeof globalThis.__host_http_request !== 'function') {
             return Promise.reject(new Error('fetch: net capability not granted'));
         }
-        var raw = globalThis.__host_http_request(req.method, req.url, req.body);
+        var raw;
+        if (typeof globalThis.__host_http_request_v2 === 'function') {
+            // v2: request headers travel with the request (the legacy
+            // import drops them) and the body — string or binary — is
+            // base64-framed so the host sends the exact original bytes.
+            var BufB = globalThis.Buffer || require('buffer').Buffer;
+            var bodyB64 = '';
+            if (req._bodyBytes && req._bodyBytes.length) {
+                bodyB64 = BufB.from(req._bodyBytes).toString('base64');
+            } else if (req.body != null && req.body !== '') {
+                bodyB64 = BufB.from(String(req.body), 'utf8').toString('base64');
+            }
+            raw = globalThis.__host_http_request_v2(
+                req.method, req.url, JSON.stringify(req.headers._m), bodyB64);
+        } else if (req._bodyBytes && req._bodyBytes.length) {
+            return Promise.reject(new Error(
+                'fetch: this host does not support binary request bodies'));
+        } else {
+            raw = globalThis.__host_http_request(req.method, req.url, req.body);
+        }
         var parsed;
         try { parsed = JSON.parse(raw); }
         catch (e) { return Promise.reject(new Error('fetch: malformed host response: ' + e.message)); }
@@ -7469,11 +7640,20 @@ function __plenum_install_http(moduleName) {
                 var id = globalThis.__host_http_listen(port);
                 if (id <= 0) {
                     // B2b: -1 = no daemon (EACCES), -2 = EADDRINUSE,
-                    // -3 = other IO. Node emits 'error' async — we
-                    // match so `server.on('error', …)` handlers run.
+                    // -3 = other IO, -4 = manifold listen denial
+                    // (EACCES with the host's permission-denied
+                    // detail). Node emits 'error' async — we match so
+                    // `server.on('error', …)` handlers run.
                     queueMicrotask(function() {
-                        var err = new Error('http.listen failed (code ' + id + ')');
-                        if (id === -1) err.code = 'EACCES';
+                        var msg = 'http.listen failed (code ' + id + ')';
+                        if (id === -4 && typeof globalThis.__host_last_error === 'function') {
+                            try {
+                                var detail = globalThis.__host_last_error();
+                                if (detail) msg = 'http.listen: ' + detail;
+                            } catch (_) {}
+                        }
+                        var err = new Error(msg);
+                        if (id === -1 || id === -4) err.code = 'EACCES';
                         else if (id === -2) err.code = 'EADDRINUSE';
                         else err.code = 'EIO';
                         err.port = port;
@@ -12986,6 +13166,7 @@ __register_module('quic', function(module, exports, require) {
             if (typeof h3id === 'number' && h3id < 0) {
                 var msg = h3id === -1 ? 'no daemon attached'
                         : h3id === -2 ? 'EADDRINUSE (UDP)'
+                        : h3id === -4 ? 'permission denied (manifold listen)'
                         : 'h3 listen error';
                 self.emit('error', _err('ERR_QUIC_LISTEN',
                     'QuicEndpoint.listen: ' + msg));

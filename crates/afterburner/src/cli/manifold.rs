@@ -6,14 +6,16 @@
 //! `--allow-*` flag translation into a [`Manifold`].
 //!
 //! * `--allow-all` / `-A` → `Manifold::open()` (every flap wide open).
-//! * Each of `--allow-net`, `--allow-fs`, `--allow-env` grants exactly
-//!   the capability it names. Absent flags stay at the `sealed()`
-//!   default — `PermissionDenied` on use.
+//! * Each of `--allow-net`, `--allow-listen`, `--allow-fs`,
+//!   `--allow-env` grants exactly the capability it names. Absent
+//!   flags stay at the `sealed()` default — `PermissionDenied` on use.
 //! * `*` in the value = unrestricted for that capability. Otherwise
-//!   the value is a comma-separated allow-list (hosts / paths / var
-//!   names).
+//!   the value is a comma-separated allow-list (hosts / ports / paths /
+//!   var names). Net entries may pin a port (`host:port`); see
+//!   [`parse_allow_net_arg`]. Listen takes ports or a single `lo-hi`
+//!   range; see [`parse_allow_listen_arg`].
 
-use crate::{EnvAccess, FsAccess, Manifold, NetAccess};
+use crate::{EnvAccess, FsAccess, ListenAccess, Manifold, NetAccess};
 use std::path::PathBuf;
 
 use super::args::Cli;
@@ -38,12 +40,14 @@ pub fn build_manifold(cli: &Cli) -> Manifold {
     // legacy `--allow-net` / `--allow-fs` / `--allow-env` flags are
     // absent.
     let any_allow = cli.allow_net.is_some()
+        || cli.allow_listen.is_some()
         || cli.allow_fs.is_some()
         || cli.allow_env.is_some()
         || cli.allow_fs_read.is_some()
         || cli.allow_fs_write.is_some()
         || cli.allow_child_process
         || cli.allow_worker
+        || cli.allow_crypto
         || cli.permission;
     let explicit_sandbox = cli.sandbox || any_allow;
     if !explicit_sandbox {
@@ -108,7 +112,122 @@ pub fn build_manifold(cli: &Cli) -> Manifold {
         };
     }
 
+    if let Some(s) = cli.allow_listen.as_deref() {
+        m.listen = listen_from_arg(s);
+    }
+
+    if cli.allow_crypto {
+        m.crypto = true;
+    }
+
     m
+}
+
+/// Translate a validated `--allow-listen` value into a [`ListenAccess`].
+/// `*` (or an empty value) = any port; `lo-hi` as the single entry = a
+/// range; otherwise a comma-separated port allow-list. The value has
+/// already passed [`parse_allow_listen_arg`], so unparseable entries
+/// only arise if the two functions drift — those entries are dropped
+/// (narrowing, never widening).
+fn listen_from_arg(s: &str) -> ListenAccess {
+    let entries = parse_allow_list(s);
+    if entries.is_empty() || has_wildcard(&entries) {
+        return ListenAccess::Any;
+    }
+    if let [only] = entries.as_slice()
+        && let Some((lo, hi)) = parse_port_range(only)
+    {
+        return ListenAccess::PortRange(lo, hi);
+    }
+    ListenAccess::Ports(
+        entries
+            .iter()
+            .filter_map(|e| e.parse::<u16>().ok())
+            .collect(),
+    )
+}
+
+/// `"9000-9100"` → `Some((9000, 9100))`; anything else → `None`.
+fn parse_port_range(entry: &str) -> Option<(u16, u16)> {
+    let (lo, hi) = entry.split_once('-')?;
+    Some((lo.trim().parse().ok()?, hi.trim().parse().ok()?))
+}
+
+/// Clap value-parser for `--allow-listen`: `*`, a comma-separated list
+/// of ports, or a single inclusive `lo-hi` range. Mirrors the
+/// `--allow-net` philosophy — reject unmatchable entries at parse time
+/// rather than producing a silent deny-everything grant.
+pub fn parse_allow_listen_arg(s: &str) -> Result<String, String> {
+    let entries = parse_allow_list(s);
+    if has_wildcard(&entries) {
+        return Ok(s.to_string());
+    }
+    if let [only] = entries.as_slice()
+        && only.contains('-')
+    {
+        let (lo, hi) = parse_port_range(only).ok_or_else(|| {
+            format!("invalid --allow-listen range '{only}': expected LO-HI with ports in 1-65535")
+        })?;
+        if lo == 0 || lo > hi {
+            return Err(format!(
+                "invalid --allow-listen range '{only}': expected 1 <= LO <= HI <= 65535"
+            ));
+        }
+        return Ok(s.to_string());
+    }
+    for entry in &entries {
+        match entry.parse::<u16>() {
+            Ok(0) | Err(_) => {
+                return Err(format!(
+                    "invalid --allow-listen entry '{entry}': expected a port (1-65535), \
+                     a comma-separated port list, a single LO-HI range, or *"
+                ));
+            }
+            Ok(_) => {}
+        }
+    }
+    Ok(s.to_string())
+}
+
+/// Clap value-parser for `--allow-net`: accept the comma-separated
+/// host list, rejecting entries whose `:port` suffix is not a valid
+/// port number. Without this gate a typo like `--allow-net
+/// host:90o0` would produce an allow-list entry that can never match
+/// — i.e. a silent deny-everything sandbox.
+///
+/// Entry grammar (shared with the runtime matcher,
+/// `afterburner_node_compat::http_host::split_host_port_pattern`):
+/// `host`, `host:port`, `*.suffix[:port]`, `*`, `[v6][:port]`, or a
+/// bare IPv6 host (two or more colons, any port).
+pub fn parse_allow_net_arg(s: &str) -> Result<String, String> {
+    for entry in parse_allow_list(s) {
+        // Bracketed IPv6 with a non-numeric port and `host:NaN` both
+        // reduce to the same check: a declared port part must parse.
+        let port_part = if let Some(v6) = entry.strip_prefix('[') {
+            match v6.split_once(']') {
+                Some((_, after)) => after.strip_prefix(':'),
+                None => {
+                    return Err(format!(
+                        "invalid --allow-net entry '{entry}': unterminated '[' in IPv6 host"
+                    ));
+                }
+            }
+        } else if entry.matches(':').count() == 1 {
+            entry.split_once(':').map(|(_, p)| p)
+        } else {
+            // No colon (bare host) or ≥2 colons (bare IPv6 host).
+            None
+        };
+        if let Some(p) = port_part
+            && p.parse::<u16>().is_err()
+        {
+            return Err(format!(
+                "invalid --allow-net entry '{entry}': '{p}' is not a valid port \
+                 (use host, host:port, *.suffix[:port], or [v6][:port])"
+            ));
+        }
+    }
+    Ok(s.to_string())
 }
 
 /// Split `"a,b, c"` into `["a", "b", "c"]`, trimming whitespace and
@@ -134,12 +253,94 @@ pub fn is_implicit_open(cli: &Cli) -> bool {
         return false;
     }
     let any_allow = cli.allow_net.is_some()
+        || cli.allow_listen.is_some()
         || cli.allow_fs.is_some()
         || cli.allow_env.is_some()
         || cli.allow_fs_read.is_some()
         || cli.allow_fs_write.is_some()
         || cli.allow_child_process
         || cli.allow_worker
+        || cli.allow_crypto
         || cli.permission;
     !(cli.sandbox || any_allow)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allow_net_accepts_hosts_and_host_port_entries() {
+        for ok in [
+            "api.example.com",
+            "*.trusted.io",
+            "*",
+            "127.0.0.1:9000",
+            "*.trusted.io:8443",
+            "a.com,b.com:81, c.com",
+            "[::1]:9000",
+            "[::1]",
+            "::1", // bare IPv6 host — colons are not a port suffix
+        ] {
+            assert!(
+                parse_allow_net_arg(ok).is_ok(),
+                "expected '{ok}' to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_listen_accepts_ports_ranges_and_wildcard() {
+        for ok in [
+            "8080",
+            "8080,9090",
+            " 80 , 443 ",
+            "9000-9100",
+            "1-65535",
+            "*",
+        ] {
+            assert!(
+                parse_allow_listen_arg(ok).is_ok(),
+                "expected '{ok}' to be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_listen_rejects_invalid_entries() {
+        for bad in [
+            "0",
+            "65536",
+            "http",
+            "8o80",
+            "8080,nope",
+            "9100-9000", // inverted range
+            "0-100",     // port 0 in a range
+            "80-90,100", // a range must be the single entry
+            "-1",
+        ] {
+            assert!(
+                parse_allow_listen_arg(bad).is_err(),
+                "expected '{bad}' to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_net_rejects_invalid_port_suffixes() {
+        for bad in [
+            "127.0.0.1:90o0",
+            "host:",
+            "host:-1",
+            "host:65536",
+            "good.com,host:nope",
+            "[::1]:abc",
+            "[::1",
+        ] {
+            assert!(
+                parse_allow_net_arg(bad).is_err(),
+                "expected '{bad}' to be rejected"
+            );
+        }
+    }
 }

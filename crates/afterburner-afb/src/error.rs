@@ -2,7 +2,7 @@
 //! Typed errors for `.afb` pack/unpack.
 //!
 //! Every hostile-input rejection path has its own variant so tests read as a
-//! spec and callers (e.g. `pg_burn`) can map failures to precise host errors.
+//! spec and callers (e.g. `burndb`) can map failures to precise host errors.
 
 use thiserror::Error;
 

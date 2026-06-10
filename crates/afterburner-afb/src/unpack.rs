@@ -104,7 +104,7 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
     let mut archive = tar::Archive::new(capped);
     let mut manifest_toml: Option<String> = None;
     let mut manifold_json: Option<String> = None;
-    let mut source: BTreeMap<String, String> = BTreeMap::new();
+    let mut source: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
     let to_afb_err = |e: io::Error| {
         if tripped.get() {
@@ -172,10 +172,9 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
                         AfbError::ManifoldParse("manifold.json is not UTF-8".into())
                     })?);
             }
+            // source/* files are stored byte-exact, so binary assets are allowed.
             _ => {
-                let text = String::from_utf8(buf)
-                    .map_err(|_| AfbError::Corrupt(format!("source file {rel:?} is not UTF-8")))?;
-                source.insert(rel, text);
+                source.insert(rel, buf);
             }
         }
     }

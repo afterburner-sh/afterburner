@@ -25,7 +25,7 @@ mod admission;
 mod numa;
 
 use admission::TokenBucketAdmission;
-use afterburner_core::{AfterburnerError, Combustor, FuelGauge, Result, ScriptId};
+use afterburner_core::{AfterburnerError, Combustor, FuelGauge, OutputValue, Result, ScriptId};
 use afterburner_wasi::{WasmCombustor, WasmConfig};
 use kovan_channel::flavors::unbounded::{Receiver, Sender};
 use kovan_channel::unbounded;
@@ -655,6 +655,44 @@ impl ThrustEngine {
         limits: &FuelGauge,
     ) -> Result<Vec<u8>> {
         self.combustor.thrust_columnar_bytes(id, encoded, limits)
+    }
+
+    /// Raw-input fast path. Bypasses the per-job dispatch pipeline and
+    /// calls directly into the inner [`WasmCombustor`]'s raw path, for
+    /// the same three reasons as
+    /// [`thrust_columnar_bytes`](Self::thrust_columnar_bytes): the
+    /// pooling allocator is thread-safe, the payload is a `&[u8]` that
+    /// doesn't fit the `Job` enum without an extra copy, and submitter
+    /// parallelism comes from the caller fanning out threads.
+    pub fn thrust_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
+        self.combustor.thrust_raw(id, input, limits)
+    }
+
+    /// Output-framing-aware invoke (JSON input): the module's return
+    /// type picks the result shape — `Uint8Array` / `ArrayBuffer`
+    /// comes back as [`OutputValue::Bytes`], everything else as
+    /// [`OutputValue::Json`]. Bypasses the per-job dispatch pipeline
+    /// for the same reasons as [`thrust_raw`](Self::thrust_raw).
+    pub fn thrust_out(
+        &self,
+        id: &ScriptId,
+        input: &Value,
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        self.combustor.thrust_out(id, input, limits)
+    }
+
+    /// Raw input + output-framing-aware result — the full-duplex bulk
+    /// path ("bytes in, bytes out"). Bypasses the per-job dispatch
+    /// pipeline for the same reasons as
+    /// [`thrust_raw`](Self::thrust_raw).
+    pub fn thrust_raw_out(
+        &self,
+        id: &ScriptId,
+        input: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        self.combustor.thrust_raw_out(id, input, limits)
     }
 
     /// Snapshot of operational counters.

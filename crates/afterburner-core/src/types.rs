@@ -62,22 +62,48 @@ pub struct FuelGauge {
     pub memory_bytes: Option<usize>,
     /// Wall-clock cap. Same meaning across all backends.
     pub timeout_ms: Option<u64>,
+    /// Ceiling on the bytes a single invocation may produce as its
+    /// result — the host-side capture of the script's output (result
+    /// JSON, raw result bytes, script-mode stdout). `None` means the
+    /// engine default ([`Self::DEFAULT_OUTPUT_BYTES`], 64 MiB), **not**
+    /// unlimited: the capture buffer is host RAM, so output stays a
+    /// bounded resource even under [`Self::unlimited`]. Exceeding the
+    /// ceiling surfaces as
+    /// [`AfterburnerError::OutputTooLarge`](crate::AfterburnerError::OutputTooLarge)
+    /// — a structured error, never a bare trap.
+    pub output_bytes: Option<usize>,
     /// Capability gate for Node-style built-in modules. Defaults to
     /// [`Manifold::sealed`] — no host-backed modules accessible.
     pub manifold: Manifold,
 }
 
 impl FuelGauge {
+    /// Default result-capture ceiling applied when
+    /// [`output_bytes`](Self::output_bytes) is `None`: 64 MiB.
+    /// Generous enough for bulk result payloads while keeping a
+    /// runaway script's host-side output capture bounded.
+    pub const DEFAULT_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+
     /// Unrestricted resource limits, sealed manifold. Useful for tests
     /// and for trusted code that still needs a capability-free starting
-    /// point — override individual fields as needed.
+    /// point — override individual fields as needed. Output capture
+    /// stays at the [`Self::DEFAULT_OUTPUT_BYTES`] ceiling (host RAM
+    /// is never an unbounded resource); raise `output_bytes`
+    /// explicitly for larger results.
     pub const fn unlimited() -> Self {
         Self {
             fuel: None,
             memory_bytes: None,
             timeout_ms: None,
+            output_bytes: None,
             manifold: Manifold::sealed(),
         }
+    }
+
+    /// The effective output ceiling for this gauge —
+    /// [`output_bytes`](Self::output_bytes) or the engine default.
+    pub fn output_ceiling(&self) -> usize {
+        self.output_bytes.unwrap_or(Self::DEFAULT_OUTPUT_BYTES)
     }
 }
 
@@ -132,6 +158,53 @@ pub struct ScriptOutcome {
     /// exception in user code. Other values come from `process.exit(N)`
     /// when that lands in a later phase.
     pub exit_code: i32,
+}
+
+/// Result of an output-framing-aware invocation
+/// ([`thrust_out`](crate::engine::Combustor::thrust_out) /
+/// [`thrust_raw_out`](crate::engine::Combustor::thrust_raw_out)) —
+/// the output-side mirror of the input framings.
+///
+/// One compiled bytecode serves both shapes: the invoke wrapper
+/// branches on the **module's return value**. A `Uint8Array` /
+/// `ArrayBuffer` return crosses the boundary as opaque bytes through a
+/// host import ([`Bytes`](Self::Bytes)) — no `JSON.stringify`, no
+/// string materialization, no base64, all O(n) and fuel-metered work
+/// the JSON framing pays. Every other return value takes the
+/// unchanged JSON-over-stdout contract ([`Json`](Self::Json)).
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutputValue {
+    /// The module returned a JSON-serializable value.
+    Json(serde_json::Value),
+    /// The module returned a `Uint8Array` / `ArrayBuffer`; these are
+    /// its bytes, delivered verbatim (NULs, newlines, invalid UTF-8
+    /// all preserved).
+    Bytes(Vec<u8>),
+}
+
+impl OutputValue {
+    /// Unwrap the JSON shape; a raw-bytes result becomes
+    /// [`AfterburnerError::UnexpectedRawOutput`](crate::AfterburnerError::UnexpectedRawOutput).
+    /// Used by the `Value`-returning convenience APIs (`run` /
+    /// `run_raw`) whose signatures predate raw output.
+    pub fn into_json(self) -> crate::Result<serde_json::Value> {
+        match self {
+            OutputValue::Json(v) => Ok(v),
+            OutputValue::Bytes(b) => {
+                Err(crate::AfterburnerError::UnexpectedRawOutput { len: b.len() })
+            }
+        }
+    }
+
+    /// Unwrap the raw-bytes shape; a JSON result serializes to its
+    /// canonical text bytes. Total — callers that want "give me bytes
+    /// whatever the module returned" use this.
+    pub fn into_bytes(self) -> crate::Result<Vec<u8>> {
+        match self {
+            OutputValue::Json(v) => Ok(serde_json::to_vec(&v)?),
+            OutputValue::Bytes(b) => Ok(b),
+        }
+    }
 }
 
 /// SHA-256 the given bytes. Shared helper so every engine hashes sources

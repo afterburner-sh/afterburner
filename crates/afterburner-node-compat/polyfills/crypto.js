@@ -87,17 +87,25 @@ __register_module('crypto', function(module, exports, require) {
     Hash.prototype.digest = function(encoding) {
         if (this._finalized) throw new Error('Digest already called');
         this._finalized = true;
-        var enc = encoding || 'hex';
+        // Node semantics: digest() with no encoding (or 'buffer') returns a
+        // Buffer of RAW BYTES. The host bridge speaks text, so fetch base64
+        // and decode — defaulting to a hex STRING here silently breaks every
+        // binary consumer (keyed-HMAC chains, signatures, key derivation).
+        var wantRaw = encoding === undefined || encoding === null || encoding === 'buffer';
+        var enc = wantRaw ? 'base64' : encoding;
+        var out;
         if (this._streaming) {
-            return checkErr(
+            out = checkErr(
                 globalThis.__host_crypto_hash_digest(this._handle, enc),
                 'hash'
             );
+        } else {
+            out = checkErr(
+                ensureHost('hash')(this._algo, this._chunks.join(''), enc),
+                'hash'
+            );
         }
-        return checkErr(
-            ensureHost('hash')(this._algo, this._chunks.join(''), enc),
-            'hash'
-        );
+        return wantRaw ? require('buffer').Buffer.from(out, 'base64') : out;
     };
 
     function Hmac(algorithm, key) {
@@ -133,17 +141,22 @@ __register_module('crypto', function(module, exports, require) {
     Hmac.prototype.digest = function(encoding) {
         if (this._finalized) throw new Error('Digest already called');
         this._finalized = true;
-        var enc = encoding || 'hex';
+        // Same Node semantics as Hash.digest: no encoding → raw-byte Buffer.
+        var wantRaw = encoding === undefined || encoding === null || encoding === 'buffer';
+        var enc = wantRaw ? 'base64' : encoding;
+        var out;
         if (this._streaming) {
-            return checkErr(
+            out = checkErr(
                 globalThis.__host_crypto_hash_digest(this._handle, enc),
                 'hmac'
             );
+        } else {
+            out = checkErr(
+                ensureHost('hmac')(this._algo, this._key, this._chunks.join(''), enc),
+                'hmac'
+            );
         }
-        return checkErr(
-            ensureHost('hmac')(this._algo, this._key, this._chunks.join(''), enc),
-            'hmac'
-        );
+        return wantRaw ? require('buffer').Buffer.from(out, 'base64') : out;
     };
 
     exports.createHash = function(algorithm) { return new Hash(algorithm); };

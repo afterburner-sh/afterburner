@@ -21,10 +21,12 @@ mod check;
 mod daemon;
 mod manifold;
 mod passthrough;
+mod registry;
 mod repl;
 mod run;
 mod script;
 mod shim;
+mod style;
 mod thrust;
 mod version;
 mod worker;
@@ -38,69 +40,129 @@ pub use manifold::{build_manifold, has_wildcard, is_implicit_open, parse_allow_l
 
 /// Entry point. `main()` in the `burn` binary delegates here.
 pub fn run() -> Result<()> {
+    // Animated brand banner ahead of clap's top-level help.
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--help" | "-h" | "help")
+    ) {
+        style::banner(env!("CARGO_PKG_VERSION"));
+    }
     let cli = Cli::parse();
     dispatch(cli)
 }
 
+/// Print a top-level error in the brand's alert color (honors NO_COLOR /
+/// non-tty). Called by the `burn` binary entrypoint.
+pub fn report_error(e: &anyhow::Error) {
+    eprintln!(
+        "{} {}",
+        style::error_prefix(),
+        style::humanize_error(&format!("{e:#}"))
+    );
+}
+
 fn dispatch(mut cli: Cli) -> Result<()> {
+    // Pass-through targets (`burn node foo.js`, `burn npm install`, …)
+    // must be resolved before *any* subcommand dispatch.
+    //
+    // The first positional (`cli.file`) is the pass-through target. It
+    // takes precedence even when clap also parsed a `cli.command`: that
+    // happens whenever the target's own arguments collide with a burn
+    // subcommand name — `burn npm install express` makes clap bind
+    // `install` as `Cmd::Install`, `burn pnpm run dev` as `Cmd::Run`,
+    // etc. Those tokens belong to npm/pnpm, not to burn, so a detected
+    // pass-through target wins and the trailing args are recovered from
+    // raw argv inside the pass-through path.
+    //
+    // Eval-mode caveat: in `-e CODE` invocations clap binds the first
+    // positional into `cli.file`. For arbitrary names that happen to
+    // resolve on PATH we prefer "script arg" (so `burn -e CODE hello`
+    // still works when `hello` is `/usr/bin/hello`), but the hard-coded
+    // Node-ecosystem names are explicit user intent and still dispatch.
+    if let Some(ref file) = cli.file {
+        match passthrough::detect(file) {
+            passthrough::Detected::KnownTarget(target) => {
+                return passthrough::dispatch(&mut cli, &target);
+            }
+            passthrough::Detected::PathTarget(target) if cli.eval_code.is_none() => {
+                return passthrough::dispatch(&mut cli, &target);
+            }
+            passthrough::Detected::Unknown(name)
+                if cli.eval_code.is_none() && cli.command.is_none() =>
+            {
+                // Q5-2: never let an exec proceed with a ghost binary;
+                // emit a clean typed error first. Suppressed when clap
+                // parsed a real subcommand (the positional was the
+                // subcommand's own argument, not a ghost target).
+                anyhow::bail!("burn: unknown command '{name}'");
+            }
+            _ => {}
+        }
+    }
+
+    // A top-level positional FILE *plus* a parsed subcommand is clap
+    // mis-binding the script's own arguments. `burn app.js install foo`
+    // (or, via the PATH shim, npm's internal `node npm-cli.js install
+    // foo` re-entering as `burn npm-cli.js install foo`) makes clap bind
+    // `app.js` to `cli.file` and then steal `install`/`run`/`test`/… as
+    // `cli.command` because those tokens collide with registry
+    // subcommand names. The file is an explicit "run this script", so it
+    // wins; the subcommand tokens are script argv recovered from raw
+    // argv. Registry subcommands proper never carry a leading FILE
+    // positional, so this only triggers on the mis-binding.
+    //
+    // Skipped under `-e CODE`: there the positional + trailing tokens are
+    // *eval* script args (handled below by folding `cli.file` back into
+    // `rest_args`), not a file to run.
+    if cli.command.is_some()
+        && cli.eval_code.is_none()
+        && let Some(file) = cli.file.clone()
+    {
+        let rest_args = run::script_args_from_argv(&file);
+        banner::maybe_show(&cli);
+        return run::run_file(&cli, &file, &rest_args);
+    }
+
+    // `-e CODE` is an explicit eval flag and always wins, even when a
+    // trailing script arg collided with a subcommand name and clap bound
+    // it as `cli.command` (`burn -e CODE install foo`). The positional +
+    // trailing tokens are the eval script's argv; recover them from raw
+    // argv when a hijacked command swallowed them.
+    if let Some(code) = cli.eval_code.clone() {
+        let rest = if cli.command.is_some() {
+            // Hijacked: one or more eval script args collided with a
+            // subcommand name, so clap pulled them out of `cli.file` /
+            // `cli.rest_args` into `cli.command`. Recover the full
+            // positional tail straight from raw argv.
+            run::eval_args_from_argv(&code)
+        } else {
+            // Clean: clap bound the first positional to `cli.file` (its
+            // declared slot) and the rest into `cli.rest_args`. Fold the
+            // file back in so `process.argv` matches the user's intent.
+            let mut rest = Vec::new();
+            if let Some(f) = cli.file.take() {
+                rest.push(f.to_string_lossy().into_owned());
+            }
+            rest.extend(std::mem::take(&mut cli.rest_args));
+            rest
+        };
+        cli.file = None;
+        cli.command = None;
+        banner::maybe_show(&cli);
+        return run::run_source(&cli, &code, &rest);
+    }
+
     let cmd = match cli.command.take() {
         Some(c) => c,
         None => {
-            // pass-through targets (`burn node foo.js`, `burn
-            // npm install`, …). Must run before the positional-file
-            // fallback so `burn node` isn't misinterpreted as "run a
-            // file called node".
-            //
-            // Eval-mode caveat: in `-e CODE` invocations, clap binds
-            // the first positional into `cli.file`. For arbitrary
-            // names that happen to resolve on PATH we prefer "script
-            // arg" (so `burn -e CODE hello` still works when `hello`
-            // is `/usr/bin/hello`), but the hard-coded Node-ecosystem
-            // names are an explicit user intent and still dispatch.
-            if let Some(ref file) = cli.file {
-                match passthrough::detect(file) {
-                    passthrough::Detected::KnownTarget(target) => {
-                        return passthrough::dispatch(&mut cli, &target);
-                    }
-                    passthrough::Detected::PathTarget(target) if cli.eval_code.is_none() => {
-                        return passthrough::dispatch(&mut cli, &target);
-                    }
-                    passthrough::Detected::Unknown(name) if cli.eval_code.is_none() => {
-                        // Q5-2: never let an exec proceed with a
-                        // ghost binary; emit a clean typed error
-                        // first.
-                        anyhow::bail!("burn: unknown command '{name}'");
-                    }
-                    _ => {}
-                }
-            }
-
-            if let Some(code) = cli.eval_code.clone() {
-                // With `-e CODE arg1 arg2`, clap binds the *first*
-                // positional to `cli.file` (its declared slot), and
-                // the rest into `cli.rest_args`. For eval mode, that
-                // first positional is actually a script arg — fold it
-                // back into `rest_args` so `process.argv` matches the
-                // user's intent.
-                let mut rest = Vec::new();
-                if let Some(f) = cli.file.take() {
-                    rest.push(f.to_string_lossy().into_owned());
-                }
-                rest.extend(std::mem::take(&mut cli.rest_args));
-                Cmd::Eval {
-                    code,
-                    rest_args: rest,
-                }
-            } else if let Some(file) = cli.file.clone() {
+            if let Some(file) = cli.file.clone() {
                 Cmd::Run {
                     file,
                     rest_args: std::mem::take(&mut cli.rest_args),
                 }
             } else {
-                anyhow::bail!(
-                    "usage: burn <command> | burn <file.js> [args…] | burn -e '<code>' [args…]\n\
-                     run `burn --help` for subcommands"
-                );
+                // Bare `burn` (no subcommand, file, or eval) drops into the REPL.
+                Cmd::Repl
             }
         }
     };
@@ -127,5 +189,53 @@ fn dispatch(mut cli: Cli) -> Result<()> {
         } => bench::bench(&cli, &file, iters, workers),
         Cmd::Repl => repl::repl(&cli),
         Cmd::Version => version::print_version(),
+
+        // ── registry + package management ──────────────────────────────────
+        Cmd::Login { token, registry } => registry::login(token.as_deref(), registry.as_deref()),
+        Cmd::Logout { registry } => registry::logout(registry.as_deref()),
+        Cmd::Whoami { registry } => registry::whoami(registry.as_deref()),
+        Cmd::New { spec, opts } => registry::new_package(&cli, &spec, &opts),
+        Cmd::Init { path, opts } => registry::init_package(&cli, path.as_deref(), &opts),
+        Cmd::Package { dir, out } => registry::package(dir.as_deref(), out.as_deref()),
+        Cmd::Test { dir } => registry::test(&cli, dir.as_deref()),
+        Cmd::Publish {
+            afb,
+            dir,
+            registry: reg,
+            token,
+        } => registry::publish(
+            afb.as_deref(),
+            dir.as_deref(),
+            reg.as_deref(),
+            token.as_deref(),
+        ),
+        Cmd::Yank {
+            pkg,
+            undo,
+            registry: reg,
+            token,
+        } => registry::yank(&pkg, undo, reg.as_deref(), token.as_deref()),
+        Cmd::Install {
+            pkg,
+            registry: reg,
+            jobs,
+            locked,
+        } => registry::install(pkg.as_deref(), reg.as_deref(), jobs, locked),
+        Cmd::Search {
+            query,
+            registry: reg,
+        } => registry::search(&query, reg.as_deref()),
+        Cmd::Add {
+            pkg,
+            dir,
+            registry: reg,
+        } => registry::add(&pkg, dir.as_deref(), reg.as_deref()),
+        Cmd::Info { pkg, registry: reg } => registry::info(&pkg, reg.as_deref()),
+        Cmd::Owner {
+            pkg,
+            list,
+            add,
+            remove,
+        } => registry::owner(pkg.as_deref(), list, add.as_deref(), remove.as_deref()),
     }
 }

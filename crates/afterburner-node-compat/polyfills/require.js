@@ -22,7 +22,21 @@
 //
 // Filesystem lookups go through `__host_fs_*`; if the active
 // Manifold denies fs access, filesystem-backed requires throw a
-// clean EACCES the same way `fs.readFileSync` would.
+// clean EACCES naming the denied path ("permission denied reading
+// '<path>' …") — distinguishable from a genuinely absent file, which
+// stays the Node-shaped MODULE_NOT_FOUND. See `moduleNotFound` below
+// for how the boolean `exists` probe (which collapses denied and
+// absent to `false`) is disambiguated on the failure path.
+//
+// Resolution bases (Node-equivalent, all file-relative):
+//   * Modules loaded through require() get a scoped require rooted at
+//     THEIR OWN directory (`makeRequire(dirname(absPath))`), so
+//     `require('./sibling')` inside a loaded file resolves next to
+//     that file — never against the process CWD.
+//   * The entry script's require is rooted at `dirname(argv[1])` for
+//     `burn run file.js` (argv[1] is canonicalized absolute).
+//   * Only `-e` / stdin eval mode (argv[1] === '[eval]') falls back
+//     to the host CWD — there is no requiring file to be relative to.
 
 (function plenumRequire() {
     var factories = Object.create(null);
@@ -64,13 +78,32 @@
     // fs host functions have two failure shapes depending on the
     // backend: the WASI path returns a string prefixed with
     // `__HOST_ERR__:`, and the native (rquickjs) path throws
-    // directly. Both collapse here to "module not found" so a
-    // sealed-Manifold `require('no-such-module')` surfaces the
-    // Node-shaped "Cannot find module" error rather than leaking
-    // a permission-denied message that sounds like a misconfigured
-    // sandbox.
+    // directly. A failure that is a manifold PERMISSION DENIAL is
+    // surfaced as an EACCES error naming the path — silently
+    // collapsing it to "module not found" sent operators chasing
+    // phantom missing files when the truth was an ungranted fs
+    // capability. Every other failure (genuinely absent file,
+    // I/O error) still reads as "not found" to the resolver.
+
+    function isDenialDetail(msg) {
+        return typeof msg === 'string'
+            && msg.toLowerCase().indexOf('permission denied') !== -1;
+    }
+
+    function permissionDeniedError(path) {
+        var e = new Error(
+            "permission denied reading '" + path + "' (fs capability not " +
+            "granted to the active manifold; grant fs read access, e.g. " +
+            "--allow-fs=<dir> / --allow-fs-read=<dir> on the CLI)");
+        e.code = 'EACCES';
+        e.path = String(path);
+        return e;
+    }
 
     function fsExists(p) {
+        // NOTE: the boolean host probe cannot distinguish "absent"
+        // from "denied" — denials are recovered on the resolution
+        // failure path via `fsReadDenied` (see `moduleNotFound`).
         var fn = globalThis.__host_fs_exists_sync;
         if (typeof fn !== 'function') return false;
         try { return !!fn(String(p)); } catch (_) { return false; }
@@ -85,15 +118,67 @@
             // contract). Decode to a UTF-8 string here; require()
             // never reads non-text files.
             var b64 = fn(String(p), 'base64');
-            if (typeof b64 === 'string' && b64.indexOf('__HOST_ERR__:') === 0) return null;
+            if (typeof b64 === 'string' && b64.indexOf('__HOST_ERR__:') === 0) {
+                if (isDenialDetail(b64.slice('__HOST_ERR__:'.length))) {
+                    throw permissionDeniedError(p);
+                }
+                return null;
+            }
             // We can't `require('buffer')` from inside require.js
             // (circular bootstrap), so decode base64 inline. The
             // implementation matches `Buffer.from(b64, 'base64')` →
             // UTF-8 decode but without crossing the module boundary.
             return base64ToUtf8(b64);
-        } catch (_) {
+        } catch (e) {
+            if (e && e.code === 'EACCES') throw e;
+            // Native (rquickjs) backend throws directly — recognise
+            // its denial message shape too.
+            if (e && isDenialDetail(e.message)) throw permissionDeniedError(p);
             return null;
         }
+    }
+
+    // One real read attempt against `p`, purely to learn whether the
+    // failure is a manifold denial. Used only on the resolution
+    // FAILURE path (zero extra host calls on successful requires).
+    function fsReadDenied(p) {
+        var fn = globalThis.__host_fs_read_file_sync;
+        if (typeof fn !== 'function') return false;
+        try {
+            var out = fn(String(p), 'base64');
+            return typeof out === 'string'
+                && out.indexOf('__HOST_ERR__:') === 0
+                && isDenialDetail(out.slice('__HOST_ERR__:'.length));
+        } catch (e) {
+            return !!(e && (e.code === 'EACCES' || isDenialDetail(e.message)));
+        }
+    }
+
+    // Build the resolution-failure error. The `exists` probes collapse
+    // "denied" and "absent" to false, so before reporting Node's
+    // MODULE_NOT_FOUND we make one real read attempt at the primary
+    // candidate: a manifold denial becomes EACCES naming the path.
+    // The MODULE_NOT_FOUND message carries the resolved base so a
+    // failed relative require shows WHICH directory it resolved
+    // against (CWD-vs-requiring-file misdiagnosis killer).
+    //
+    // `resolvedBase` is only passed for RELATIVE/ABSOLUTE specifiers
+    // — the user named a concrete file, so "denied" vs "absent" is a
+    // meaningful, actionable distinction there. Bare names (`null`
+    // base) keep the plain Node-shaped message: the node_modules walk
+    // spans many directories, the package may genuinely not be
+    // installed, and the default-sealed embedding (UDF mode) would
+    // otherwise report every missing package as a permission problem.
+    function moduleNotFound(name, resolvedBase) {
+        if (resolvedBase && fsReadDenied(resolvedBase)) {
+            return permissionDeniedError(resolvedBase);
+        }
+        var e = new Error("Cannot find module '" + name + "'"
+            + (resolvedBase && resolvedBase !== name
+                ? " (resolved against '" + resolvedBase + "')"
+                : ''));
+        e.code = 'MODULE_NOT_FOUND';
+        return e;
     }
 
     // Tiny inlined base64→UTF-8 decoder. Used only by the require
@@ -498,11 +583,12 @@
     function loadAbsoluteFile(absPath, scopedRequire) {
         var cached = getCached(absPath);
         if (cached !== undefined) return cached;
+        // A manifold denial throws EACCES from fsRead directly; a
+        // null here means the file vanished between the exists probe
+        // and the read (or an I/O error) — report it as not found.
         var source = fsRead(absPath);
         if (source === null) {
-            var ePerm = new Error("Cannot find module '" + absPath + "'");
-            ePerm.code = 'MODULE_NOT_FOUND';
-            throw ePerm;
+            throw moduleNotFound(absPath, absPath);
         }
         if (absPath.slice(-5) === '.json') {
             var parsed = JSON.parse(source);
@@ -617,18 +703,12 @@
             if (isRelativeOrAbsolute(name)) {
                 var base = name.charAt(0) === '/' ? name : resolveJoin(fromDir, name);
                 var r = resolveCandidate(base);
-                if (!r) {
-                    var e = new Error("Cannot find module '" + name + "'");
-                    e.code = 'MODULE_NOT_FOUND';
-                    throw e;
-                }
+                if (!r) throw moduleNotFound(name, base);
                 return r;
             }
             var pkg = resolvePackage(name, fromDir);
             if (pkg) return pkg;
-            var notFound = new Error("Cannot find module '" + name + "'");
-            notFound.code = 'MODULE_NOT_FOUND';
-            throw notFound;
+            throw moduleNotFound(name, null);
         }
 
         function req(name) {
@@ -661,19 +741,13 @@
             if (isRelativeOrAbsolute(name)) {
                 var base = name.charAt(0) === '/' ? name : resolveJoin(fromDir, name);
                 var r = resolveCandidate(base);
-                if (!r) {
-                    var e = new Error("Cannot find module '" + name + "'");
-                    e.code = 'MODULE_NOT_FOUND';
-                    throw e;
-                }
+                if (!r) throw moduleNotFound(name, base);
                 return loadAbsoluteFile(r, makeRequire(dirname(r)));
             }
             // Bare name — fall through to `node_modules` walk.
             var pkg = resolvePackage(name, fromDir);
             if (pkg) return loadAbsoluteFile(pkg, makeRequire(dirname(pkg)));
-            var notFound = new Error("Cannot find module '" + name + "'");
-            notFound.code = 'MODULE_NOT_FOUND';
-            throw notFound;
+            throw moduleNotFound(name, null);
         }
 
         req.cache = cache;
@@ -753,6 +827,14 @@
     // starting dir. Called from the plugin's script/daemon-init
     // wrappers immediately after they set `__host_cwd`.
     globalThis.__plenum_refresh_entry_require = installEntryRequire;
+
+    // File-relative require for `module.createRequire(filename)`:
+    // resolve `id` exactly as a module living at `base` would —
+    // relative specifiers and the node_modules walk start at
+    // dirname(base), not at the entry script's dir.
+    globalThis.__plenum_require_from = function(id, base) {
+        return makeRequire(dirname(String(base)))(id);
+    };
 
     // Dynamic-import shim. QuickJS has no registered module loader,
     // so bare `import('foo')` throws "could not load module" the

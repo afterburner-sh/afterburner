@@ -76,6 +76,11 @@ pub struct DaemonEvent {
 pub const LISTEN_ERR_NO_DAEMON: i32 = -1;
 pub const LISTEN_ERR_ADDR_IN_USE: i32 = -2;
 pub const LISTEN_ERR_IO: i32 = -3;
+/// The manifold's `listen` axis does not grant the requested port.
+/// Same `PermissionDenied` taxonomy as outbound net / fs denials: the
+/// host records a "permission denied" `last_error` and the JS polyfill
+/// surfaces `EACCES` with that detail.
+pub const LISTEN_ERR_PERMISSION: i32 = -4;
 
 /// Outcome of `try_claim_port_for`. Sibling-protocol coordinators
 /// branch on this: [`Owner`] performs the bind; [`Follower`] returns

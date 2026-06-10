@@ -195,6 +195,22 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
+    /// v2 of `host_http_request`: carries request headers (JSON object of
+    /// name→value — the legacy import drops them) and a base64-framed body
+    /// (binary bytes cannot cross the JS string boundary unmangled); the
+    /// host decodes and sends the exact original bytes.
+    pub fn host_http_request_v2(
+        method_ptr: *const u8,
+        method_len: u32,
+        url_ptr: *const u8,
+        url_len: u32,
+        headers_ptr: *const u8,
+        headers_len: u32,
+        body_b64_ptr: *const u8,
+        body_b64_len: u32,
+        out_ptr: *mut u8,
+        out_cap: u32,
+    ) -> i32;
     /// Spawn an outbound HTTP request on the daemon's Tokio runtime
     /// and return the new `req_id` immediately. The completed
     /// response lands in JS as a `daemon-event` of kind
@@ -345,6 +361,16 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
+
+    // ---- base64 codec -------------------------------------------------
+    //
+    // Raw framing (NOT base64-of-base64): `encode` takes raw bytes and
+    // writes the ASCII encoding; `decode` takes ASCII and writes raw
+    // bytes. Output sizes are exactly computable from input sizes
+    // (encode: 4·⌈n/3⌉; decode: ≤ ⌊n/4⌋·3), so callers allocate
+    // exact-fit buffers — no `-4` retry loop on this pair.
+    pub fn host_b64_encode(in_ptr: *const u8, in_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
+    pub fn host_b64_decode(in_ptr: *const u8, in_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
 
     // ---- sign / verify (RSA + ECDSA) --------------------------------
     //
@@ -559,6 +585,25 @@ unsafe extern "C" {
     // JS callers use the `__AB_GET_INPUT__` global installed in
     // `globals::install`.
     pub fn host_get_input(out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    // Framing of `pending_input` for this call: `0` = JSON text (the
+    // wrapper must `JSON.parse` it), `1` = raw bytes (the wrapper hands
+    // the module a `Uint8Array` directly — no string materialization,
+    // no parse). Set host-side by `thrust` vs `thrust_raw`; read once
+    // per invocation by `__AB_GET_INPUT_VALUE__`.
+    pub fn host_input_format() -> i32;
+
+    // ---- per-thrust raw output (output mirror of the raw input) -----
+    //
+    // When the module's return value is a `Uint8Array` / `ArrayBuffer`,
+    // the invoke wrapper posts the bytes here (via the
+    // `__AB_RAW_OUTPUT__` global) instead of `JSON.stringify`-ing to
+    // stdout. The host stashes them in `HostState::pending_raw_output`
+    // and surfaces `OutputValue::Bytes` to the caller. Subject to the
+    // same per-call output ceiling as the stdout capture
+    // (`FuelGauge::output_bytes`). Returns 0 on success, negative
+    // error code otherwise.
+    pub fn host_raw_output(blob_ptr: *const u8, blob_len: u32) -> i32;
 
     // ---- columnar UDF path -----------------------------------------
     //

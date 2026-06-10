@@ -130,6 +130,7 @@ __register_module('quic', function(module, exports, require) {
             if (typeof h3id === 'number' && h3id < 0) {
                 var msg = h3id === -1 ? 'no daemon attached'
                         : h3id === -2 ? 'EADDRINUSE (UDP)'
+                        : h3id === -4 ? 'permission denied (manifold listen)'
                         : 'h3 listen error';
                 self.emit('error', _err('ERR_QUIC_LISTEN',
                     'QuicEndpoint.listen: ' + msg));

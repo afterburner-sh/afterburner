@@ -24,13 +24,14 @@
 //!   `{source, input}` onto stdin, instantiates plugin + runs `_start`,
 //!   and reads the JSON result from stdout.
 
-use crate::host::HostState;
+use crate::chamber::{self, TICK_PERIOD_MS, drain_stdout, format_trap_with_stderr};
+use crate::host::{HostState, InputFormat};
 use crate::host_imports;
 use crate::nozzle::parse_output;
 use afterburner_core::log::Level;
 use afterburner_core::{
-    AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Manifold, Result,
-    ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore, ab_event, sha256,
+    AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Manifold, OutputValue,
+    Result, ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore, ab_event, sha256,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -42,7 +43,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use wasmtime::{
     Config, Engine, InstanceAllocationStrategy, InstancePre, Linker, Module, OptLevel,
-    PoolingAllocationConfig, Store, Trap,
+    PoolingAllocationConfig, Trap,
 };
 use wasmtime_wasi::I32Exit;
 use wasmtime_wasi::p1::add_to_linker_sync;
@@ -51,15 +52,11 @@ use wasmtime_wasi::p1::add_to_linker_sync;
 /// repo and baked into the host crate at compile time.
 const PLUGIN_BYTES: &[u8] = include_bytes!("../plugin/afterburner_plugin.wasm");
 
-/// Epoch ticker period. Minimum timeout granularity = one tick.
-const TICK_PERIOD_MS: u64 = 10;
-
-/// Stderr capture limit for trap-diagnosis messages.
-const STDERR_DIAGNOSIS_CAP: usize = 4 * 1024;
-
-/// Per-call stdout buffer. Scripts returning more than this trigger
-/// `AfterburnerError::OutputTooLarge`.
-const STDOUT_CAPACITY: usize = 1024 * 1024;
+// Result capture is ceiling-bounded per call via
+// `FuelGauge::output_ceiling()` (default 64 MiB) — there is no fixed
+// stdout buffer anymore. The old 1 MiB `STDOUT_CAPACITY` gave results
+// a hard cliff: the over-budget `fd_write` failed with errno 29 inside
+// `__ab_write_stdout` and the call surfaced as an opaque trap.
 
 // ---- pooling allocator defaults -----------------------------------------
 //
@@ -151,6 +148,21 @@ pub struct WasmConfig {
     /// parse failure). The CLI wires this to oxc-backed transpile
     /// when built with the `ts` feature.
     pub transpile_hook: Option<crate::host::TranspileFn>,
+    /// Optional directory (absolute path) for wasmtime's on-disk
+    /// compilation cache. When set, the plugin module's native-code
+    /// compilation is persisted there and reused by every subsequent
+    /// `WasmCombustor::new` in any process — removing the cold-start
+    /// compile cost for short-lived or freshly-forked embedders.
+    ///
+    /// Entries are keyed by module contents + compiler configuration +
+    /// wasmtime version, so engine upgrades and config changes miss
+    /// cleanly (old entries are evicted by wasmtime's size-bounded
+    /// cleanup worker). Corrupt or stale files are ignored and
+    /// recompiled, never fatal. If the cache cannot be initialised
+    /// (e.g. unwritable directory), the engine logs a warning and
+    /// proceeds without a cache — this knob is purely an optimisation
+    /// and never affects correctness.
+    pub compile_cache_dir: Option<std::path::PathBuf>,
 }
 
 /// Cached payload for a registered script. Built once in `ignite` so
@@ -221,7 +233,7 @@ pub struct WasmCombustor {
 
 impl WasmCombustor {
     pub fn new(config: WasmConfig) -> Result<Self> {
-        let engine = build_engine()?;
+        let engine = build_engine(config.compile_cache_dir.as_deref())?;
         let plugin_module = Module::new(&engine, PLUGIN_BYTES)
             .map_err(|e| AfterburnerError::Engine(format!("plugin module: {e}")))?;
 
@@ -304,29 +316,17 @@ impl WasmCombustor {
         // Compile mode runs the plugin with a sealed manifold and no
         // host context — the only thing it does is invoke
         // `javy_plugin_api::compile_src` and write base64 to stdout.
+        let limits = FuelGauge::unlimited();
         let state = HostState::new(
             &envelope_bytes,
             None, // no per-call memory cap during compile
-            STDOUT_CAPACITY,
+            limits.output_ceiling(),
             Manifold::sealed(),
             self.state_store.clone(),
             None,
         );
-        let mut store = Store::new(&self.engine, state);
-        store.limiter(|s| &mut s.limits);
-        store
-            .set_fuel(u64::MAX)
-            .map_err(|e| AfterburnerError::Engine(format!("set_fuel: {e}")))?;
-        store.set_epoch_deadline(u64::MAX / 2);
-
-        let instance = self
-            .instance_pre
-            .instantiate(&mut store)
-            .map_err(|e| AfterburnerError::Engine(format!("plugin instantiate: {e}")))?;
-        let start = instance
-            .get_typed_func::<(), ()>(&mut store, "_start")
-            .map_err(|e| AfterburnerError::Engine(format!("_start lookup: {e}")))?;
-        start.call(&mut store, ()).map_err(|trap| {
+        let mut store = chamber::prepare_store(&self.engine, state, &limits)?;
+        chamber::instantiate_and_start(&mut store, &self.instance_pre)?.map_err(|trap| {
             let stderr = format_trap_with_stderr(&format!("compile: {trap}"), &mut store);
             AfterburnerError::CompileFailed(stderr)
         })?;
@@ -380,29 +380,17 @@ impl WasmCombustor {
         // Manifold, no host context, no host coordinators. The only
         // thing the plugin does in this mode is wrap + compile +
         // emit base64 on stdout.
+        let limits = FuelGauge::unlimited();
         let state = HostState::new(
             &envelope_bytes,
             None,
-            STDOUT_CAPACITY,
+            limits.output_ceiling(),
             Manifold::sealed(),
             self.state_store.clone(),
             None,
         );
-        let mut store = Store::new(&self.engine, state);
-        store.limiter(|s| &mut s.limits);
-        store
-            .set_fuel(u64::MAX)
-            .map_err(|e| AfterburnerError::Engine(format!("set_fuel: {e}")))?;
-        store.set_epoch_deadline(u64::MAX / 2);
-
-        let instance = self
-            .instance_pre
-            .instantiate(&mut store)
-            .map_err(|e| AfterburnerError::Engine(format!("plugin instantiate: {e}")))?;
-        let start = instance
-            .get_typed_func::<(), ()>(&mut store, "_start")
-            .map_err(|e| AfterburnerError::Engine(format!("_start lookup: {e}")))?;
-        start.call(&mut store, ()).map_err(|trap| {
+        let mut store = chamber::prepare_store(&self.engine, state, &limits)?;
+        chamber::instantiate_and_start(&mut store, &self.instance_pre)?.map_err(|trap| {
             let stderr = format_trap_with_stderr(&format!("compile-script: {trap}"), &mut store);
             AfterburnerError::CompileFailed(stderr)
         })?;
@@ -545,79 +533,28 @@ impl WasmCombustor {
         let mut state = HostState::new_with_input(
             envelope_bytes,
             encoded_input,
+            // The columnar blob is opaque bytes, not JSON text — the
+            // dispatcher reads it through `__AB_GET_COLUMNAR_INPUT__`
+            // (which ignores the framing flag), but keep the flag
+            // truthful for anything else that consults it.
+            InputFormat::Raw,
             limits.memory_bytes,
-            STDOUT_CAPACITY,
+            limits.output_ceiling(),
             limits.manifold.clone(),
             self.state_store.clone(),
             self.host_context.clone(),
         );
         state.transpile_hook = self.transpile_hook.clone();
-        let mut store = Store::new(&self.engine, state);
-        store.limiter(|s| &mut s.limits);
 
-        let fuel = limits.fuel.unwrap_or(u64::MAX);
-        store
-            .set_fuel(fuel)
-            .map_err(|e| AfterburnerError::Engine(format!("set_fuel: {e}")))?;
-        if let Some(ms) = limits.timeout_ms {
-            let ticks = ms.div_ceil(TICK_PERIOD_MS).max(1);
-            store.set_epoch_deadline(ticks);
-        } else {
-            store.set_epoch_deadline(u64::MAX / 2);
-        }
-
-        let instance = self
-            .instance_pre
-            .instantiate(&mut store)
-            .map_err(|e| AfterburnerError::Engine(format!("plugin instantiate: {e}")))?;
-        let start = instance
-            .get_typed_func::<(), ()>(&mut store, "_start")
-            .map_err(|e| AfterburnerError::Engine(format!("_start lookup: {e}")))?;
-        let call_result = start.call(&mut store, ());
-
-        // Map traps the same way `thrust` does so the surface is
-        // consistent across the two UDF paths.
-        if let Err(trap) = call_result {
-            if let Some(exit) = trap.downcast_ref::<I32Exit>() {
-                if exit.0 != 0 {
-                    ab_event!(
-                        Level::Warn,
-                        "wasm.thrust_columnar.nonzero_exit",
-                        "code" => exit.0,
-                    );
-                    let msg = format_trap_with_stderr(
-                        &format!("script exited with non-zero code {}", exit.0),
-                        &mut store,
-                    );
-                    return Err(AfterburnerError::WasmTrap(msg));
-                }
-            } else if let Some(t) = trap.downcast_ref::<Trap>() {
-                match t {
-                    Trap::Interrupt => {
-                        ab_event!(Level::Warn, "wasm.thrust_columnar.timeout");
-                        return Err(AfterburnerError::Timeout);
-                    }
-                    Trap::OutOfFuel => {
-                        ab_event!(Level::Warn, "wasm.thrust_columnar.fuel_exhausted");
-                        return Err(AfterburnerError::FuelExhausted);
-                    }
-                    other => {
-                        let msg = format_trap_with_stderr(&format!("{other}"), &mut store);
-                        ab_event!(Level::Warn, "wasm.thrust_columnar.trap", "kind" => other);
-                        return Err(AfterburnerError::WasmTrap(msg));
-                    }
-                }
-            } else {
-                let chain: Vec<String> = trap.chain().map(|e| format!("{e}")).collect();
-                let full = chain.join(" => ");
-                if full.contains("memory minimum size") || full.contains("memory size") {
-                    ab_event!(Level::Warn, "wasm.thrust_columnar.memory_limit");
-                    return Err(AfterburnerError::MemoryLimit);
-                }
-                let msg = format_trap_with_stderr(&full, &mut store);
-                return Err(AfterburnerError::WasmTrap(msg));
-            }
-        }
+        // Traps map the same way `thrust` does (shared chamber) so the
+        // surface is consistent across the UDF paths.
+        let mut store = chamber::fire(
+            &self.engine,
+            &self.instance_pre,
+            state,
+            limits,
+            "wasm.thrust_columnar",
+        )?;
 
         // Drain the reply set by the `host_columnar_reply` import.
         // Missing reply means the plugin's `_start` returned cleanly
@@ -640,6 +577,116 @@ impl WasmCombustor {
             })?;
         Ok(reply)
     }
+
+    /// Raw-input fast path: execute a compiled script with `input`
+    /// delivered to the module as a `Uint8Array` — no JSON
+    /// serialization host-side, no guest-side string materialization
+    /// or `JSON.parse`. The O(n) byte movement happens in host code
+    /// (outside fuel metering); the only guest-side per-byte work is
+    /// one copy into a QuickJS-heap `ArrayBuffer`. Same sandbox
+    /// properties, bytecode, and output contract as
+    /// [`Combustor::thrust`] — the script's return value comes back
+    /// as JSON (a bytes-shaped return is the typed
+    /// [`AfterburnerError::UnexpectedRawOutput`]; use
+    /// [`Self::thrust_raw_out`] to receive it). See `docs/principles`
+    /// rule 3: native for O(n) byte work, interpreted only for logic.
+    #[fastrace::trace(name = "WasmCombustor::thrust_raw")]
+    pub fn thrust_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
+        self.invoke_with_input(id, input.to_vec(), InputFormat::Raw, limits)?
+            .into_json()
+    }
+
+    /// Output-framing-aware JSON-input invoke: the module's return
+    /// type picks the result shape. A `Uint8Array` / `ArrayBuffer`
+    /// return crosses the boundary as raw bytes through the
+    /// `host_raw_output` import ([`OutputValue::Bytes`]) — no
+    /// `JSON.stringify`, no stdout framing, no base64; everything
+    /// else takes the unchanged JSON-over-stdout contract
+    /// ([`OutputValue::Json`]). One compiled bytecode serves both
+    /// shapes — the invoke wrapper branches on the return type, the
+    /// exact output-side mirror of the input framings.
+    #[fastrace::trace(name = "WasmCombustor::thrust_out")]
+    pub fn thrust_out(
+        &self,
+        id: &ScriptId,
+        input: &Value,
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        let input_bytes = serde_json::to_vec(input)?;
+        self.invoke_with_input(id, input_bytes, InputFormat::Json, limits)
+    }
+
+    /// Raw input **and** output-framing-aware result — the full-duplex
+    /// bulk-payload path ("bytes in, bytes out" with zero JSON /
+    /// string / base64 work in either direction). Composition of
+    /// [`Self::thrust_raw`]'s input framing and
+    /// [`Self::thrust_out`]'s output contract.
+    #[fastrace::trace(name = "WasmCombustor::thrust_raw_out")]
+    pub fn thrust_raw_out(
+        &self,
+        id: &ScriptId,
+        input: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        self.invoke_with_input(id, input.to_vec(), InputFormat::Raw, limits)
+    }
+
+    /// Shared body of every invoke-shaped path ([`Combustor::thrust`],
+    /// [`Self::thrust_raw`], [`Self::thrust_out`],
+    /// [`Self::thrust_raw_out`]): per-call `Store` setup, plugin
+    /// instantiation, `_start` dispatch, trap mapping, result
+    /// extraction. The invoke envelope (mode + base64 bytecode) was
+    /// built once at `ignite` time and lives in `Arc<CompiledScript>`
+    /// — every call for the same script borrows the cached bytes
+    /// directly, saving ~40 µs/call (base64 encode of ~30 KB bytecode)
+    /// plus the per-call `serde_json::to_vec` on the envelope. One
+    /// bytecode serves both input framings (`format` rides in
+    /// `HostState`, read by the guest through `host_input_format`)
+    /// and both output framings (the wrapper branches on the module's
+    /// return type: bytes through `host_raw_output`, everything else
+    /// JSON over stdout).
+    fn invoke_with_input(
+        &self,
+        id: &ScriptId,
+        input: Vec<u8>,
+        format: InputFormat,
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        let compiled = self
+            .bytecode_cache
+            .get(&id.hash)
+            .ok_or(AfterburnerError::ScriptNotFound)?;
+        let envelope_bytes: &[u8] = &compiled.invoke_envelope_bytes;
+
+        let mut state = HostState::new_with_input(
+            envelope_bytes,
+            input,
+            format,
+            limits.memory_bytes,
+            limits.output_ceiling(),
+            limits.manifold.clone(),
+            self.state_store.clone(),
+            self.host_context.clone(),
+        );
+        state.transpile_hook = self.transpile_hook.clone();
+        let mut store = chamber::fire(
+            &self.engine,
+            &self.instance_pre,
+            state,
+            limits,
+            "wasm.thrust",
+        )?;
+
+        // A bytes-shaped return wins: the wrapper posts `Uint8Array` /
+        // `ArrayBuffer` results through `host_raw_output` and writes
+        // nothing to stdout. Ceiling overflow on either channel was
+        // already mapped to `OutputTooLarge` inside `chamber::fire`.
+        if let Some(bytes) = store.data_mut().pending_raw_output.take() {
+            return Ok(OutputValue::Bytes(bytes));
+        }
+        let stdout_bytes = drain_stdout(&mut store);
+        parse_output(&stdout_bytes).map(OutputValue::Json)
+    }
 }
 
 impl Drop for WasmCombustor {
@@ -658,6 +705,28 @@ impl Drop for WasmCombustor {
 ///
 /// * `consume_fuel(true)` and `epoch_interruption(true)` — required for
 ///   per-call fuel + wall-clock bounds. Available on every platform.
+///
+///   Fuel instrumentation is **unconditional by necessity**, and taxes
+///   even calls that run with an unlimited budget (`fuel: None` →
+///   `set_fuel(u64::MAX)`). `consume_fuel` is an engine-level codegen
+///   flag: the decrement-and-check sequence is baked into the compiled
+///   machine code, so there is no per-`Store` off switch — and this one
+///   `Engine` (plus its single compiled plugin `Module` / `InstancePre`)
+///   is shared by every execution path regardless of budget: bounded
+///   UDF calls, unlimited compile-mode stores, and long-lived daemon
+///   stores all instantiate from it. Measured overhead on guest-CPU-
+///   bound work (release CLI, 3e7-iteration interpreted JS loop):
+///   ~5.5 s with fuel vs ~4.5 s without — roughly a 19 % tax. Making it
+///   conditional would mean a second `Engine` with `consume_fuel(false)`
+///   plus a second module compile and `InstancePre`, routed per call on
+///   `limits.fuel.is_some()`: double the cold-start compile (and double
+///   the on-disk compile-cache footprint, since cache entries are keyed
+///   by compiler configuration), double the pooling allocator's virtual
+///   reservation, and a second epoch-ticker target. That trade is not
+///   worth ~19 % on the unmetered path today, especially now that the
+///   dominant guest-side O(n) hot paths (base64, zlib, crypto, hashing)
+///   are host-hoisted and burn no fuel at all. Revisit if profiling
+///   shows interpreter-bound unmetered workloads dominating again.
 /// * `memory_init_cow(true)` — re-initialize linear memory via copy-on-
 ///   write page mapping. Cross-platform; on Windows the implementation
 ///   uses file-backed sections and is functionally equivalent.
@@ -677,7 +746,12 @@ impl Drop for WasmCombustor {
 /// platform-specific would be runtime-probed here and silently fall
 /// back if unsupported. None are currently enabled — the defaults above
 /// already saturate commodity hardware throughput.
-fn build_engine() -> Result<Engine> {
+///
+/// `compile_cache_dir` (see [`WasmConfig::compile_cache_dir`]) enables
+/// wasmtime's on-disk compilation cache rooted at the given absolute
+/// path. Cache initialisation failure is downgraded to a warning — the
+/// cache is an optimisation, never a correctness dependency.
+fn build_engine(compile_cache_dir: Option<&std::path::Path>) -> Result<Engine> {
     let mut config = Config::new();
     config
         .consume_fuel(true)
@@ -685,6 +759,22 @@ fn build_engine() -> Result<Engine> {
         .memory_init_cow(true)
         .cranelift_opt_level(OptLevel::Speed)
         .parallel_compilation(true);
+
+    if let Some(dir) = compile_cache_dir {
+        let mut cache_config = wasmtime::CacheConfig::new();
+        cache_config.with_directory(dir);
+        match wasmtime::Cache::new(cache_config) {
+            Ok(cache) => {
+                config.cache(Some(cache));
+            }
+            Err(e) => ab_event!(
+                Level::Warn,
+                "wasm.engine.compile_cache_disabled",
+                "dir" => dir.display().to_string(),
+                "error" => e.to_string(),
+            ),
+        }
+    }
 
     let mut pool = PoolingAllocationConfig::default();
     pool.total_core_instances(POOL_TOTAL_MEMORIES);
@@ -696,7 +786,7 @@ fn build_engine() -> Result<Engine> {
 
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
-    Engine::new(&config).map_err(|e| AfterburnerError::Engine(format!("wasmtime engine: {e}")))
+    Engine::new(&config).map_err(|e| AfterburnerError::Engine(format!("engine init: {e}")))
 }
 
 impl Combustor for WasmCombustor {
@@ -764,109 +854,36 @@ impl Combustor for WasmCombustor {
 
     #[fastrace::trace(name = "WasmCombustor::thrust")]
     fn thrust(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value> {
-        let compiled = self
-            .bytecode_cache
-            .get(&id.hash)
-            .ok_or(AfterburnerError::ScriptNotFound)?;
-        // The invoke envelope (mode + base64 bytecode) was built once
-        // at `ignite` time and lives in `Arc<CompiledScript>`. Every
-        // thrust for the same script reads the same bytes — borrow
-        // and go. Saves ~40 µs/call (base64 encode of ~30 KB
-        // bytecode) + the per-call serde_json::to_vec on the envelope.
-        // Input still serializes per-call because it changes per-call;
-        // it goes via `HostState::pending_input` (read by the
+        // Input serializes per-call because it changes per-call; it
+        // goes via `HostState::pending_input` (read by the
         // `host_get_input` linker import) — not via the envelope.
-        let envelope_bytes: &[u8] = &compiled.invoke_envelope_bytes;
         let input_bytes = serde_json::to_vec(input)?;
+        self.invoke_with_input(id, input_bytes, InputFormat::Json, limits)?
+            .into_json()
+    }
 
-        let mut state = HostState::new_with_input(
-            envelope_bytes,
-            input_bytes,
-            limits.memory_bytes,
-            STDOUT_CAPACITY,
-            limits.manifold.clone(),
-            self.state_store.clone(),
-            self.host_context.clone(),
-        );
-        state.transpile_hook = self.transpile_hook.clone();
-        let mut store = Store::new(&self.engine, state);
-        store.limiter(|s| &mut s.limits);
+    /// Combustor-trait override that delegates to the inherent
+    /// [`Self::thrust_raw`] — same delegation shape as
+    /// `thrust_columnar_bytes` below.
+    fn thrust_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
+        WasmCombustor::thrust_raw(self, id, input, limits)
+    }
 
-        let fuel = limits.fuel.unwrap_or(u64::MAX);
-        store
-            .set_fuel(fuel)
-            .map_err(|e| AfterburnerError::Engine(format!("set_fuel: {e}")))?;
+    /// Combustor-trait override delegating to the inherent
+    /// [`Self::thrust_out`].
+    fn thrust_out(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<OutputValue> {
+        WasmCombustor::thrust_out(self, id, input, limits)
+    }
 
-        if let Some(ms) = limits.timeout_ms {
-            let ticks = ms.div_ceil(TICK_PERIOD_MS).max(1);
-            store.set_epoch_deadline(ticks);
-        } else {
-            store.set_epoch_deadline(u64::MAX / 2);
-        }
-
-        // Pre-resolved imports: this is just a slot checkout from the
-        // pooling allocator + a memory-image clone via CoW. No linker
-        // re-walk, no import re-typecheck.
-        let instance = self
-            .instance_pre
-            .instantiate(&mut store)
-            .map_err(|e| AfterburnerError::Engine(format!("plugin instantiate: {e}")))?;
-
-        let start = instance
-            .get_typed_func::<(), ()>(&mut store, "_start")
-            .map_err(|e| AfterburnerError::Engine(format!("_start lookup: {e}")))?;
-        let call_result = start.call(&mut store, ());
-
-        if let Err(trap) = call_result {
-            if let Some(exit) = trap.downcast_ref::<I32Exit>() {
-                if exit.0 != 0 {
-                    ab_event!(Level::Warn, "wasm.thrust.nonzero_exit", "code" => exit.0);
-                    let msg = format_trap_with_stderr(
-                        &format!("script exited with non-zero code {}", exit.0),
-                        &mut store,
-                    );
-                    return Err(AfterburnerError::WasmTrap(msg));
-                }
-                // proc_exit(0): fall through to stdout drain.
-            } else if let Some(t) = trap.downcast_ref::<Trap>() {
-                match t {
-                    Trap::Interrupt => {
-                        ab_event!(Level::Warn, "wasm.thrust.timeout");
-                        return Err(AfterburnerError::Timeout);
-                    }
-                    Trap::OutOfFuel => {
-                        ab_event!(Level::Warn, "wasm.thrust.fuel_exhausted");
-                        return Err(AfterburnerError::FuelExhausted);
-                    }
-                    other => {
-                        let msg = format_trap_with_stderr(&format!("{other}"), &mut store);
-                        ab_event!(Level::Warn, "wasm.thrust.trap", "kind" => other);
-                        return Err(AfterburnerError::WasmTrap(msg));
-                    }
-                }
-            } else {
-                let chain: Vec<String> = trap.chain().map(|e| format!("{e}")).collect();
-                let full = chain.join(" => ");
-                if full.contains("memory minimum size") || full.contains("memory size") {
-                    ab_event!(Level::Warn, "wasm.thrust.memory_limit");
-                    return Err(AfterburnerError::MemoryLimit);
-                }
-                let msg = format_trap_with_stderr(&full, &mut store);
-                return Err(AfterburnerError::WasmTrap(msg));
-            }
-        }
-
-        let stdout_bytes = drain_stdout(&mut store);
-        let capacity = store.data().stdout_capacity;
-        if stdout_bytes.len() >= capacity {
-            ab_event!(
-                Level::Warn,
-                "wasm.thrust.output_too_large",
-                "limit" => capacity,
-            );
-            return Err(AfterburnerError::OutputTooLarge { limit: capacity });
-        }
-        parse_output(&stdout_bytes)
+    /// Combustor-trait override delegating to the inherent
+    /// [`Self::thrust_raw_out`].
+    fn thrust_raw_out(
+        &self,
+        id: &ScriptId,
+        input: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        WasmCombustor::thrust_raw_out(self, id, input, limits)
     }
 
     fn extinguish(&self, id: &ScriptId) {
@@ -916,35 +933,27 @@ impl Combustor for WasmCombustor {
         let mut state = HostState::new(
             &envelope_bytes,
             limits.memory_bytes,
-            STDOUT_CAPACITY,
+            limits.output_ceiling(),
             limits.manifold.clone(),
             self.state_store.clone(),
             self.host_context.clone(),
         );
         state.transpile_hook = self.transpile_hook.clone();
-        let mut store = Store::new(&self.engine, state);
-        store.limiter(|s| &mut s.limits);
+        let mut store = chamber::prepare_store(&self.engine, state, limits)?;
+        // Script mode keeps its own trap contract (proc_exit(N) is an
+        // exit code, not an error), so it maps the raw `_start` result
+        // itself instead of going through `chamber::fire`.
+        let call_result = chamber::instantiate_and_start(&mut store, &self.instance_pre)?;
 
-        let fuel = limits.fuel.unwrap_or(u64::MAX);
-        store
-            .set_fuel(fuel)
-            .map_err(|e| AfterburnerError::Engine(format!("set_fuel: {e}")))?;
-
-        if let Some(ms) = limits.timeout_ms {
-            let ticks = ms.div_ceil(TICK_PERIOD_MS).max(1);
-            store.set_epoch_deadline(ticks);
-        } else {
-            store.set_epoch_deadline(u64::MAX / 2);
+        // Ceiling overflow is an infrastructural failure, not a script
+        // outcome: the stdout capture is truncated, so neither the
+        // exit code nor the captured bytes are trustworthy. Mirrors
+        // the UDF paths' mapping inside `chamber::fire`.
+        if store.data().output_overflowed() {
+            let limit = store.data().output_ceiling;
+            ab_event!(Level::Warn, "wasm.script.output_too_large", "limit" => limit);
+            return Err(AfterburnerError::OutputTooLarge { limit });
         }
-
-        let instance = self
-            .instance_pre
-            .instantiate(&mut store)
-            .map_err(|e| AfterburnerError::Engine(format!("plugin instantiate: {e}")))?;
-        let start = instance
-            .get_typed_func::<(), ()>(&mut store, "_start")
-            .map_err(|e| AfterburnerError::Engine(format!("_start lookup: {e}")))?;
-        let call_result = start.call(&mut store, ());
 
         let stdout_bytes = drain_stdout(&mut store);
         let stderr_bytes = store.data().stderr.contents().to_vec();
@@ -1011,10 +1020,6 @@ fn map_script_trap(stdout: Vec<u8>, stderr: Vec<u8>) -> Result<ScriptOutcome> {
     })
 }
 
-fn drain_stdout(store: &mut Store<HostState>) -> Vec<u8> {
-    store.data().stdout.contents().to_vec()
-}
-
 /// Trim trailing whitespace + null bytes from a stdout capture before
 /// base64-decoding the bytecode emitted by the plugin's `compile` mode.
 fn trim_trailing_whitespace(bytes: &[u8]) -> &[u8] {
@@ -1028,21 +1033,6 @@ fn trim_trailing_whitespace(bytes: &[u8]) -> &[u8] {
         }
     }
     &bytes[..end]
-}
-
-fn format_trap_with_stderr(base: &str, store: &mut Store<HostState>) -> String {
-    let stderr = store.data().stderr.contents();
-    if stderr.is_empty() {
-        return base.to_string();
-    }
-    let visible = &stderr[..stderr.len().min(STDERR_DIAGNOSIS_CAP)];
-    let text = String::from_utf8_lossy(visible);
-    let truncated = if stderr.len() > STDERR_DIAGNOSIS_CAP {
-        " (truncated)"
-    } else {
-        ""
-    };
-    format!("{base}\nstderr{truncated}: {text}")
 }
 
 fn hex8(hash: &[u8; 32]) -> String {
@@ -1168,7 +1158,14 @@ mod tests {
         let out = c
             .thrust(&id, &json!(null), &FuelGauge::unlimited())
             .unwrap();
-        assert_eq!(out, json!("Cannot find module 'no-such-module'"));
+        // The message may carry a "(resolved against '<dir>')" suffix
+        // naming the node_modules base the walk started from — assert
+        // on the Node-shaped prefix.
+        let msg = out.as_str().expect("error message string");
+        assert!(
+            msg.starts_with("Cannot find module 'no-such-module'"),
+            "unexpected require error message: {msg}"
+        );
     }
 
     #[test]
