@@ -133,6 +133,17 @@ pub fn wrap_user_source(user: &str, input_json: &str) -> String {
 /// module as-is — no string materialization, no parse). The branch is
 /// a single `typeof` per invocation; raw framing can never produce a
 /// string, so the dispatch is unambiguous.
+///
+/// The same bytecode also serves both **output** framings, branching
+/// on the module's return value: a `Uint8Array` / `ArrayBuffer`
+/// result crosses the boundary as raw bytes through
+/// `__AB_RAW_OUTPUT__` (→ the `host_raw_output` import →
+/// `OutputValue::Bytes` host-side) with no `JSON.stringify`, no
+/// string materialization, and no stdout framing; every other value
+/// keeps the JSON-over-stdout contract. The two `instanceof` checks
+/// are O(1) per invocation. (The legacy [`wrap_user_source`] envelope
+/// keeps JSON-only output: its host path predates — and never reads —
+/// the raw-output slot.)
 pub fn wrap_user_source_with_input_global(user: &str) -> String {
     let user = normalize_leading_hashbang(user);
     let user_lit = js_string_literal(&user);
@@ -151,7 +162,14 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
         const __ab_result = (__ab_maybe !== null && typeof __ab_maybe === 'object' && typeof __ab_maybe.then === 'function')
             ? await __ab_maybe
             : __ab_maybe;
-        __ab_write_stdout(JSON.stringify(__ab_result === undefined ? null : __ab_result));
+        const __ab_out = (__ab_result === undefined) ? null : __ab_result;
+        if (__ab_out instanceof Uint8Array) {{
+            __AB_RAW_OUTPUT__(__ab_out);
+        }} else if (__ab_out instanceof ArrayBuffer) {{
+            __AB_RAW_OUTPUT__(new Uint8Array(__ab_out));
+        }} else {{
+            __ab_write_stdout(JSON.stringify(__ab_out));
+        }}
         "#
     )
 }

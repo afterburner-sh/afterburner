@@ -12,7 +12,7 @@
 
 use afterburner_core::{
     AfterburnerError, BurnCache, BurnCacheBackend, Combustor, FuelGauge, HostContext,
-    InMemoryStateStore, Manifold, Result, ScriptId, ScriptInvocation, ScriptOutcome,
+    InMemoryStateStore, Manifold, OutputValue, Result, ScriptId, ScriptInvocation, ScriptOutcome,
     SharedStateStore,
 };
 use serde_json::Value;
@@ -246,6 +246,71 @@ impl Afterburner {
         }
     }
 
+    /// Output-framing-aware run: the **module's return value** picks
+    /// the result shape — the output-side mirror of the input
+    /// framings. A `Uint8Array` / `ArrayBuffer` return comes back as
+    /// [`OutputValue::Bytes`] (raw bytes through a host import; no
+    /// `JSON.stringify`, no guest-side string materialization, no
+    /// base64 — all O(n) fuel-metered work the JSON framing pays);
+    /// every other value comes back as [`OutputValue::Json`] via the
+    /// unchanged stdout contract. One registered script (one compiled
+    /// bytecode) serves both shapes — the invoke wrapper branches on
+    /// the return type, exactly like the input side branches on
+    /// framing — so the same module can return JSON for one call and
+    /// bytes for the next.
+    ///
+    /// Results are bounded by `FuelGauge::output_bytes` (default
+    /// 64 MiB); past the ceiling the call fails with the structured
+    /// [`AfterburnerError::OutputTooLarge`], never a bare trap.
+    ///
+    /// **Engine-mode behaviour** mirrors [`run_raw`](Self::run_raw):
+    /// wasm executes directly; adaptive routes to the wasm tier;
+    /// native surfaces a clean [`AfterburnerError::Engine`]; the
+    /// threaded engine dispatches into the inner combustor.
+    pub fn run_out(&self, id: &ScriptId, input: &Value) -> Result<OutputValue> {
+        self.run_out_with(id, input, &self.defaults)
+    }
+
+    /// Like [`run_out`](Self::run_out) but with explicit per-call
+    /// limits.
+    pub fn run_out_with(
+        &self,
+        id: &ScriptId,
+        input: &Value,
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        match &self.engine {
+            EngineHolder::Cache(c) => c.execute_out(id, input, limits),
+            #[cfg(feature = "thrust")]
+            EngineHolder::Thrust(t) => t.thrust_out(id, input, limits),
+        }
+    }
+
+    /// Raw bytes in **and** output-framing-aware result — the
+    /// full-duplex bulk-payload path. Composition of
+    /// [`run_raw`](Self::run_raw)'s input framing (module receives a
+    /// `Uint8Array`) and [`run_out`](Self::run_out)'s output
+    /// contract: "bytes in, bytes out" crosses the engine boundary
+    /// with zero JSON / string / base64 work in either direction.
+    pub fn run_raw_out(&self, id: &ScriptId, input: &[u8]) -> Result<OutputValue> {
+        self.run_raw_out_with(id, input, &self.defaults)
+    }
+
+    /// Like [`run_raw_out`](Self::run_raw_out) but with explicit
+    /// per-call limits.
+    pub fn run_raw_out_with(
+        &self,
+        id: &ScriptId,
+        input: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        match &self.engine {
+            EngineHolder::Cache(c) => c.execute_raw_out(id, input, limits),
+            #[cfg(feature = "thrust")]
+            EngineHolder::Thrust(t) => t.thrust_raw_out(id, input, limits),
+        }
+    }
+
     /// Run a registered script against a typed [`ColumnarBatch`] and
     /// receive the result columns directly — no JSON parse / stringify
     /// on either side. Phase 1 of the UDF perf push: the data path
@@ -418,6 +483,7 @@ pub struct AfterburnerBuilder {
     fuel: Option<u64>,
     memory_bytes: Option<usize>,
     timeout_ms: Option<u64>,
+    output_bytes: Option<usize>,
     manifold: Option<Manifold>,
     host_context: Option<Arc<dyn HostContext>>,
     state_store: Option<SharedStateStore>,
@@ -464,6 +530,7 @@ impl fmt::Debug for AfterburnerBuilder {
             .field("fuel", &self.fuel)
             .field("memory_bytes", &self.memory_bytes)
             .field("timeout_ms", &self.timeout_ms)
+            .field("output_bytes", &self.output_bytes)
             .field("manifold", &self.manifold)
             .field("host_context", &self.host_context.is_some())
             .field("state_store", &self.state_store.is_some())
@@ -496,6 +563,17 @@ impl AfterburnerBuilder {
     /// `FuelGauge::timeout_ms` — wall-clock cap per thrust.
     pub fn timeout_ms(mut self, ms: u64) -> Self {
         self.timeout_ms = Some(ms);
+        self
+    }
+
+    /// `FuelGauge::output_bytes` — per-call ceiling on the result
+    /// capture (JSON result, raw result bytes, script-mode stdout).
+    /// Unset means the engine default
+    /// ([`FuelGauge::DEFAULT_OUTPUT_BYTES`], 64 MiB) — output is
+    /// always a bounded resource; exceeding the ceiling surfaces as
+    /// the structured [`AfterburnerError::OutputTooLarge`].
+    pub fn output_bytes(mut self, bytes: usize) -> Self {
+        self.output_bytes = Some(bytes);
         self
     }
 
@@ -657,6 +735,7 @@ impl AfterburnerBuilder {
             fuel: self.fuel,
             memory_bytes: self.memory_bytes,
             timeout_ms: self.timeout_ms,
+            output_bytes: self.output_bytes,
             manifold: manifold.clone(),
         };
 
@@ -847,6 +926,7 @@ impl ThreadedBuilder {
             fuel: self.parent.fuel,
             memory_bytes: self.parent.memory_bytes,
             timeout_ms: self.parent.timeout_ms,
+            output_bytes: self.parent.output_bytes,
             manifold: manifold.clone(),
         };
 

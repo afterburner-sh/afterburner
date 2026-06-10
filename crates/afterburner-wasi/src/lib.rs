@@ -10,6 +10,7 @@
 //! QuickJS-in-WASM. Produces hard-sandboxed JS execution with fuel,
 //! memory, and wall-clock caps.
 
+pub mod capture;
 mod chamber;
 pub mod columnar;
 #[cfg(feature = "daemon")]

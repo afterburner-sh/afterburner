@@ -94,7 +94,18 @@ pub(crate) fn fire(
     scope: &str,
 ) -> Result<Store<HostState>> {
     let mut store = prepare_store(engine, state, limits)?;
-    if let Err(trap) = instantiate_and_start(&mut store, instance_pre)? {
+    let call_result = instantiate_and_start(&mut store, instance_pre)?;
+    // Output-ceiling overflow wins over whatever the trap looks like:
+    // the guest-visible failure is an opaque errno-29 write error (or
+    // a clean exit if the script swallowed it), but the root cause is
+    // the result exceeding `FuelGauge::output_bytes` — surface the
+    // structured error uniformly, never the bare trap.
+    if store.data().output_overflowed() {
+        let limit = store.data().output_ceiling;
+        ab_event!(Level::Warn, format!("{scope}.output_too_large"), "limit" => limit);
+        return Err(AfterburnerError::OutputTooLarge { limit });
+    }
+    if let Err(trap) = call_result {
         if let Some(exit) = trap.downcast_ref::<I32Exit>() {
             if exit.0 == 0 {
                 // proc_exit(0): clean exit through WASI — fall through

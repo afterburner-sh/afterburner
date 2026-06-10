@@ -104,6 +104,7 @@ host_os_hostname
 host_os_platform
 host_os_tmpdir
 host_process_exit
+host_raw_output
 host_read_column
 host_sab_alloc
 host_sab_atomic_cas

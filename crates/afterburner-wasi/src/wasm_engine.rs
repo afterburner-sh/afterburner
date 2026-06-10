@@ -30,8 +30,8 @@ use crate::host_imports;
 use crate::nozzle::parse_output;
 use afterburner_core::log::Level;
 use afterburner_core::{
-    AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Manifold, Result,
-    ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore, ab_event, sha256,
+    AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Manifold, OutputValue,
+    Result, ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore, ab_event, sha256,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -52,9 +52,11 @@ use wasmtime_wasi::p1::add_to_linker_sync;
 /// repo and baked into the host crate at compile time.
 const PLUGIN_BYTES: &[u8] = include_bytes!("../plugin/afterburner_plugin.wasm");
 
-/// Per-call stdout buffer. Scripts returning more than this trigger
-/// `AfterburnerError::OutputTooLarge`.
-const STDOUT_CAPACITY: usize = 1024 * 1024;
+// Result capture is ceiling-bounded per call via
+// `FuelGauge::output_ceiling()` (default 64 MiB) — there is no fixed
+// stdout buffer anymore. The old 1 MiB `STDOUT_CAPACITY` gave results
+// a hard cliff: the over-budget `fd_write` failed with errno 29 inside
+// `__ab_write_stdout` and the call surfaced as an opaque trap.
 
 // ---- pooling allocator defaults -----------------------------------------
 //
@@ -314,15 +316,16 @@ impl WasmCombustor {
         // Compile mode runs the plugin with a sealed manifold and no
         // host context — the only thing it does is invoke
         // `javy_plugin_api::compile_src` and write base64 to stdout.
+        let limits = FuelGauge::unlimited();
         let state = HostState::new(
             &envelope_bytes,
             None, // no per-call memory cap during compile
-            STDOUT_CAPACITY,
+            limits.output_ceiling(),
             Manifold::sealed(),
             self.state_store.clone(),
             None,
         );
-        let mut store = chamber::prepare_store(&self.engine, state, &FuelGauge::unlimited())?;
+        let mut store = chamber::prepare_store(&self.engine, state, &limits)?;
         chamber::instantiate_and_start(&mut store, &self.instance_pre)?.map_err(|trap| {
             let stderr = format_trap_with_stderr(&format!("compile: {trap}"), &mut store);
             AfterburnerError::CompileFailed(stderr)
@@ -377,15 +380,16 @@ impl WasmCombustor {
         // Manifold, no host context, no host coordinators. The only
         // thing the plugin does in this mode is wrap + compile +
         // emit base64 on stdout.
+        let limits = FuelGauge::unlimited();
         let state = HostState::new(
             &envelope_bytes,
             None,
-            STDOUT_CAPACITY,
+            limits.output_ceiling(),
             Manifold::sealed(),
             self.state_store.clone(),
             None,
         );
-        let mut store = chamber::prepare_store(&self.engine, state, &FuelGauge::unlimited())?;
+        let mut store = chamber::prepare_store(&self.engine, state, &limits)?;
         chamber::instantiate_and_start(&mut store, &self.instance_pre)?.map_err(|trap| {
             let stderr = format_trap_with_stderr(&format!("compile-script: {trap}"), &mut store);
             AfterburnerError::CompileFailed(stderr)
@@ -535,7 +539,7 @@ impl WasmCombustor {
             // truthful for anything else that consults it.
             InputFormat::Raw,
             limits.memory_bytes,
-            STDOUT_CAPACITY,
+            limits.output_ceiling(),
             limits.manifold.clone(),
             self.state_store.clone(),
             self.host_context.clone(),
@@ -581,31 +585,73 @@ impl WasmCombustor {
     /// (outside fuel metering); the only guest-side per-byte work is
     /// one copy into a QuickJS-heap `ArrayBuffer`. Same sandbox
     /// properties, bytecode, and output contract as
-    /// [`Combustor::thrust`] — the script's return value still comes
-    /// back as JSON. See `docs/principles` rule 3: native for O(n)
-    /// byte work, interpreted only for logic.
+    /// [`Combustor::thrust`] — the script's return value comes back
+    /// as JSON (a bytes-shaped return is the typed
+    /// [`AfterburnerError::UnexpectedRawOutput`]; use
+    /// [`Self::thrust_raw_out`] to receive it). See `docs/principles`
+    /// rule 3: native for O(n) byte work, interpreted only for logic.
     #[fastrace::trace(name = "WasmCombustor::thrust_raw")]
     pub fn thrust_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
+        self.invoke_with_input(id, input.to_vec(), InputFormat::Raw, limits)?
+            .into_json()
+    }
+
+    /// Output-framing-aware JSON-input invoke: the module's return
+    /// type picks the result shape. A `Uint8Array` / `ArrayBuffer`
+    /// return crosses the boundary as raw bytes through the
+    /// `host_raw_output` import ([`OutputValue::Bytes`]) — no
+    /// `JSON.stringify`, no stdout framing, no base64; everything
+    /// else takes the unchanged JSON-over-stdout contract
+    /// ([`OutputValue::Json`]). One compiled bytecode serves both
+    /// shapes — the invoke wrapper branches on the return type, the
+    /// exact output-side mirror of the input framings.
+    #[fastrace::trace(name = "WasmCombustor::thrust_out")]
+    pub fn thrust_out(
+        &self,
+        id: &ScriptId,
+        input: &Value,
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        let input_bytes = serde_json::to_vec(input)?;
+        self.invoke_with_input(id, input_bytes, InputFormat::Json, limits)
+    }
+
+    /// Raw input **and** output-framing-aware result — the full-duplex
+    /// bulk-payload path ("bytes in, bytes out" with zero JSON /
+    /// string / base64 work in either direction). Composition of
+    /// [`Self::thrust_raw`]'s input framing and
+    /// [`Self::thrust_out`]'s output contract.
+    #[fastrace::trace(name = "WasmCombustor::thrust_raw_out")]
+    pub fn thrust_raw_out(
+        &self,
+        id: &ScriptId,
+        input: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
         self.invoke_with_input(id, input.to_vec(), InputFormat::Raw, limits)
     }
 
-    /// Shared body of [`Combustor::thrust`] / [`Self::thrust_raw`]:
-    /// per-call `Store` setup, plugin instantiation, `_start`
-    /// dispatch, trap mapping, stdout drain, JSON output parse. The
-    /// invoke envelope (mode + base64 bytecode) was built once at
-    /// `ignite` time and lives in `Arc<CompiledScript>` — every call
-    /// for the same script borrows the cached bytes directly, saving
-    /// ~40 µs/call (base64 encode of ~30 KB bytecode) + the per-call
-    /// `serde_json::to_vec` on the envelope. One bytecode serves both
-    /// input framings; `format` rides in `HostState` and is read by
-    /// the guest through `host_input_format`.
+    /// Shared body of every invoke-shaped path ([`Combustor::thrust`],
+    /// [`Self::thrust_raw`], [`Self::thrust_out`],
+    /// [`Self::thrust_raw_out`]): per-call `Store` setup, plugin
+    /// instantiation, `_start` dispatch, trap mapping, result
+    /// extraction. The invoke envelope (mode + base64 bytecode) was
+    /// built once at `ignite` time and lives in `Arc<CompiledScript>`
+    /// — every call for the same script borrows the cached bytes
+    /// directly, saving ~40 µs/call (base64 encode of ~30 KB bytecode)
+    /// plus the per-call `serde_json::to_vec` on the envelope. One
+    /// bytecode serves both input framings (`format` rides in
+    /// `HostState`, read by the guest through `host_input_format`)
+    /// and both output framings (the wrapper branches on the module's
+    /// return type: bytes through `host_raw_output`, everything else
+    /// JSON over stdout).
     fn invoke_with_input(
         &self,
         id: &ScriptId,
         input: Vec<u8>,
         format: InputFormat,
         limits: &FuelGauge,
-    ) -> Result<Value> {
+    ) -> Result<OutputValue> {
         let compiled = self
             .bytecode_cache
             .get(&id.hash)
@@ -617,7 +663,7 @@ impl WasmCombustor {
             input,
             format,
             limits.memory_bytes,
-            STDOUT_CAPACITY,
+            limits.output_ceiling(),
             limits.manifold.clone(),
             self.state_store.clone(),
             self.host_context.clone(),
@@ -631,17 +677,15 @@ impl WasmCombustor {
             "wasm.thrust",
         )?;
 
-        let stdout_bytes = drain_stdout(&mut store);
-        let capacity = store.data().stdout_capacity;
-        if stdout_bytes.len() >= capacity {
-            ab_event!(
-                Level::Warn,
-                "wasm.thrust.output_too_large",
-                "limit" => capacity,
-            );
-            return Err(AfterburnerError::OutputTooLarge { limit: capacity });
+        // A bytes-shaped return wins: the wrapper posts `Uint8Array` /
+        // `ArrayBuffer` results through `host_raw_output` and writes
+        // nothing to stdout. Ceiling overflow on either channel was
+        // already mapped to `OutputTooLarge` inside `chamber::fire`.
+        if let Some(bytes) = store.data_mut().pending_raw_output.take() {
+            return Ok(OutputValue::Bytes(bytes));
         }
-        parse_output(&stdout_bytes)
+        let stdout_bytes = drain_stdout(&mut store);
+        parse_output(&stdout_bytes).map(OutputValue::Json)
     }
 }
 
@@ -814,7 +858,8 @@ impl Combustor for WasmCombustor {
         // goes via `HostState::pending_input` (read by the
         // `host_get_input` linker import) — not via the envelope.
         let input_bytes = serde_json::to_vec(input)?;
-        self.invoke_with_input(id, input_bytes, InputFormat::Json, limits)
+        self.invoke_with_input(id, input_bytes, InputFormat::Json, limits)?
+            .into_json()
     }
 
     /// Combustor-trait override that delegates to the inherent
@@ -822,6 +867,23 @@ impl Combustor for WasmCombustor {
     /// `thrust_columnar_bytes` below.
     fn thrust_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
         WasmCombustor::thrust_raw(self, id, input, limits)
+    }
+
+    /// Combustor-trait override delegating to the inherent
+    /// [`Self::thrust_out`].
+    fn thrust_out(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<OutputValue> {
+        WasmCombustor::thrust_out(self, id, input, limits)
+    }
+
+    /// Combustor-trait override delegating to the inherent
+    /// [`Self::thrust_raw_out`].
+    fn thrust_raw_out(
+        &self,
+        id: &ScriptId,
+        input: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        WasmCombustor::thrust_raw_out(self, id, input, limits)
     }
 
     fn extinguish(&self, id: &ScriptId) {
@@ -871,7 +933,7 @@ impl Combustor for WasmCombustor {
         let mut state = HostState::new(
             &envelope_bytes,
             limits.memory_bytes,
-            STDOUT_CAPACITY,
+            limits.output_ceiling(),
             limits.manifold.clone(),
             self.state_store.clone(),
             self.host_context.clone(),
@@ -882,6 +944,16 @@ impl Combustor for WasmCombustor {
         // exit code, not an error), so it maps the raw `_start` result
         // itself instead of going through `chamber::fire`.
         let call_result = chamber::instantiate_and_start(&mut store, &self.instance_pre)?;
+
+        // Ceiling overflow is an infrastructural failure, not a script
+        // outcome: the stdout capture is truncated, so neither the
+        // exit code nor the captured bytes are trustworthy. Mirrors
+        // the UDF paths' mapping inside `chamber::fire`.
+        if store.data().output_overflowed() {
+            let limit = store.data().output_ceiling;
+            ab_event!(Level::Warn, "wasm.script.output_too_large", "limit" => limit);
+            return Err(AfterburnerError::OutputTooLarge { limit });
+        }
 
         let stdout_bytes = drain_stdout(&mut store);
         let stderr_bytes = store.data().stderr.contents().to_vec();

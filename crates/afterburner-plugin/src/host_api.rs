@@ -593,6 +593,18 @@ unsafe extern "C" {
     // per invocation by `__AB_GET_INPUT_VALUE__`.
     pub fn host_input_format() -> i32;
 
+    // ---- per-thrust raw output (output mirror of the raw input) -----
+    //
+    // When the module's return value is a `Uint8Array` / `ArrayBuffer`,
+    // the invoke wrapper posts the bytes here (via the
+    // `__AB_RAW_OUTPUT__` global) instead of `JSON.stringify`-ing to
+    // stdout. The host stashes them in `HostState::pending_raw_output`
+    // and surfaces `OutputValue::Bytes` to the caller. Subject to the
+    // same per-call output ceiling as the stdout capture
+    // (`FuelGauge::output_bytes`). Returns 0 on success, negative
+    // error code otherwise.
+    pub fn host_raw_output(blob_ptr: *const u8, blob_len: u32) -> i32;
+
     // ---- columnar UDF path -----------------------------------------
     //
     // Length getter for `pending_input` so the columnar polyfill can

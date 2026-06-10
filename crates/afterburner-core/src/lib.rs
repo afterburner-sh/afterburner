@@ -31,4 +31,6 @@ pub use host::{HostContext, HostFunction, HttpMethod, HttpResponse, LogLevel, Nu
 pub use manifold::{EnvAccess, FsAccess, Manifold, NetAccess};
 pub use registry::{BurnCache, BurnCacheBackend, InProcessCacheBackend, RegistryStats, hex32};
 pub use state_store::{InMemoryStateStore, SharedStateStore, StateStore};
-pub use types::{EngineMode, FuelGauge, ScriptId, ScriptInvocation, ScriptOutcome, sha256};
+pub use types::{
+    EngineMode, FuelGauge, OutputValue, ScriptId, ScriptInvocation, ScriptOutcome, sha256,
+};

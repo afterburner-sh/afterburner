@@ -269,6 +269,23 @@ interface input {
     get-input:     func() -> list<u8>;
 }
 
+// ---- per-thrust raw output slot -------------------------------------------
+
+/// Output-side mirror of the raw input framing. When the module's
+/// return value is a `Uint8Array` / `ArrayBuffer`, the invoke wrapper
+/// posts the bytes here (instead of `JSON.stringify`-ing to stdout);
+/// the host stashes them in `HostState::pending_raw_output` and
+/// surfaces `OutputValue::Bytes` to the caller. Bounded by the same
+/// per-call output ceiling (`FuelGauge::output_bytes`, default
+/// 64 MiB) as the stdout result capture — an over-ceiling reply fails
+/// the import and the call surfaces the structured
+/// `OutputTooLarge` error.
+interface output {
+    /// Hand the module's raw result bytes to the host. Returns 0 on
+    /// success, a negative error code otherwise (read `last-error`).
+    raw-output: func(blob: list<u8>) -> s32;
+}
+
 // ---- error inspection ---------------------------------------------------
 
 /// Reads the detailed message for the most recent host call that
@@ -311,5 +328,6 @@ world afterburner-plugin-v2 {
     import zlib;
     import state;
     import input;
+    import output;
     import diagnostics;
 }

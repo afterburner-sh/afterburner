@@ -26,6 +26,7 @@ fn flow_with_manifold(m: Manifold) -> FlowEngine {
         memory_bytes: Some(64 * 1024 * 1024),
         timeout_ms: Some(30_000),
         manifold: m,
+        ..FuelGauge::unlimited()
     };
     FlowEngine::with_fuel(fuel).unwrap()
 }

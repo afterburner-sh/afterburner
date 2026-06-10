@@ -35,9 +35,13 @@ use std::time::{Duration, Instant};
 use wasmtime::{Engine, InstancePre, Store, Trap, TypedFunc};
 use wasmtime_wasi::I32Exit;
 
-/// Per-call stdout buffer. Matches [`wasm_engine`]'s default so
-/// daemon-mode scripts don't get a surprise capacity shift.
-const DAEMON_STDOUT_CAPACITY: usize = 1024 * 1024;
+/// Cumulative stdout-capture ceiling for the daemon's long-lived
+/// Store. Matches the engine-wide default
+/// (`FuelGauge::DEFAULT_OUTPUT_BYTES`) so daemon-mode scripts don't
+/// get a surprise capacity shift versus the one-shot paths. B2.4
+/// routes daemon stdout to the real process stdout, which removes
+/// this accumulation entirely.
+const DAEMON_STDOUT_CAPACITY: usize = afterburner_core::FuelGauge::DEFAULT_OUTPUT_BYTES;
 
 /// Handle to a long-lived plugin instance. Owns the Store, the
 /// typed `daemon_step` function, and a reference to the HTTP

@@ -273,6 +273,30 @@ impl BurnCache {
         self.engine.thrust_raw(id, input, limits)
     }
 
+    /// Output-framing-aware execute: the module's return type picks
+    /// the result shape. See [`Combustor::thrust_out`].
+    #[fastrace::trace(name = "BurnCache::execute_out")]
+    pub fn execute_out(
+        &self,
+        id: &ScriptId,
+        input: &Value,
+        limits: &FuelGauge,
+    ) -> Result<crate::OutputValue> {
+        self.engine.thrust_out(id, input, limits)
+    }
+
+    /// Raw input + output-framing-aware result — the full-duplex bulk
+    /// path. See [`Combustor::thrust_raw_out`].
+    #[fastrace::trace(name = "BurnCache::execute_raw_out")]
+    pub fn execute_raw_out(
+        &self,
+        id: &ScriptId,
+        input: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<crate::OutputValue> {
+        self.engine.thrust_raw_out(id, input, limits)
+    }
+
     /// Run `source` as a top-level script (no UDF envelope). See
     /// [`Combustor::run_script`] for semantics. Script-mode calls are
     /// **not** cached — every invocation is a fresh compile + run.

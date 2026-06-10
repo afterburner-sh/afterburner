@@ -11,7 +11,7 @@
 //! (`afterburner-adaptive`) composes both.
 
 use crate::error::{AfterburnerError, Result};
-use crate::types::{FuelGauge, ScriptId, ScriptInvocation, ScriptOutcome};
+use crate::types::{FuelGauge, OutputValue, ScriptId, ScriptInvocation, ScriptOutcome};
 use serde_json::Value;
 
 /// The engine contract. Implementations must be `Send + Sync` so a single
@@ -67,6 +67,46 @@ pub trait Combustor: Send + Sync {
     /// Currently only `WasmCombustor` overrides; `AdaptiveCombustor`
     /// routes to its wasm tier.
     fn thrust_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
+        let _ = (id, input, limits);
+        Err(AfterburnerError::Engine(
+            "raw input path not implemented for this backend".into(),
+        ))
+    }
+
+    /// Output-framing-aware variant of [`thrust`](Self::thrust): the
+    /// module's return value decides the result shape. A `Uint8Array`
+    /// / `ArrayBuffer` return comes back as [`OutputValue::Bytes`]
+    /// (raw bytes through a host import — no `JSON.stringify`, no
+    /// guest-side string materialization, both O(n) fuel-metered
+    /// work); anything else comes back as [`OutputValue::Json`] via
+    /// the unchanged stdout contract. One compiled bytecode serves
+    /// both shapes — the invoke wrapper branches on the return type,
+    /// exactly mirroring how the input side branches on framing.
+    ///
+    /// Default impl forwards to [`thrust`](Self::thrust) and wraps in
+    /// [`OutputValue::Json`] — correct for backends without a raw
+    /// output bridge, where a bytes-shaped return would already have
+    /// surfaced as that backend's JSON encoding of it.
+    fn thrust_out(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<OutputValue> {
+        self.thrust(id, input, limits).map(OutputValue::Json)
+    }
+
+    /// Raw input **and** output-framing-aware result: bulk bytes in
+    /// (module receives a `Uint8Array`, see
+    /// [`thrust_raw`](Self::thrust_raw)), and the module's return
+    /// type picks the result framing (see
+    /// [`thrust_out`](Self::thrust_out)). This is the full-duplex
+    /// bulk-payload path: "bytes in, bytes out" crosses the boundary
+    /// with zero JSON / string / base64 work in either direction.
+    ///
+    /// Default impl errors — backends without a linear-memory bridge
+    /// inherit it, mirroring [`thrust_raw`](Self::thrust_raw).
+    fn thrust_raw_out(
+        &self,
+        id: &ScriptId,
+        input: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
         let _ = (id, input, limits);
         Err(AfterburnerError::Engine(
             "raw input path not implemented for this backend".into(),

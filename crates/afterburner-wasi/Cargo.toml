@@ -24,11 +24,9 @@ host-http = ["afterburner-core/host-http"]
 # leave it off and don't pay the cost.
 daemon = [
     "dep:axum",
-    "dep:tokio",
     "dep:hyper",
     "dep:hyper-util",
     "dep:http-body-util",
-    "dep:bytes",
     "dep:rustls",
     "dep:tokio-rustls",
     "dep:rustls-pemfile",
@@ -84,11 +82,16 @@ base64.workspace = true
 # `aws-lc-rs`. x86_64-windows builds clean with these deps in the
 # main `[dependencies]` table.
 axum = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
+# `tokio` + `bytes` are unconditional (not daemon-gated): the
+# `capture::CapturePipe` stdout capture implements wasmtime-wasi's
+# `StdoutStream` / `OutputStream`, whose signatures name
+# `tokio::io::AsyncWrite` and `bytes::Bytes`. Zero added weight —
+# wasmtime-wasi itself depends on both unconditionally.
+tokio = { workspace = true }
 hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
-bytes = { workspace = true, optional = true }
+bytes = { workspace = true }
 rustls = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }

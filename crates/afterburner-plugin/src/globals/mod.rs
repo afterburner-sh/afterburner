@@ -25,6 +25,7 @@ mod crypto;
 mod fs;
 mod input;
 mod misc;
+mod output;
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -98,6 +99,7 @@ pub fn install(ctx: Ctx<'_>) {
     crypto::install(&globals);
     misc::install(&globals);
     input::install(&globals);
+    output::install(&globals);
     codec::install(&globals);
     columnar::install(&globals);
 

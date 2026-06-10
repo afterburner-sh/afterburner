@@ -57,6 +57,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_host_context(linker)?;
     wrap_last_error(linker)?;
     wrap_input(linker)?;
+    wrap_raw_output(linker)?;
     wrap_envelope(linker)?;
     wrap_columnar(linker)?;
     wrap_http_server(linker)?;
@@ -3145,6 +3146,59 @@ fn wrap_input(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
             NS,
             "host_input_format",
             |caller: Caller<'_, HostState>| -> i32 { caller.data().input_format as i32 },
+        )
+        .map_err(link_err)?;
+    Ok(())
+}
+
+// ---- raw output (output-framing mirror of the raw input path) -----------
+//
+// When the invoke wrapper sees the module return a `Uint8Array` /
+// `ArrayBuffer`, it posts the bytes here instead of JSON-stringifying
+// to stdout — the output-side twin of `InputFormat::Raw`. The host
+// stashes them in `HostState::pending_raw_output`;
+// `WasmCombustor::invoke_with_input` surfaces them as
+// `OutputValue::Bytes` after `_start` returns. The per-call output
+// ceiling (`HostState::output_ceiling`) applies exactly as it does to
+// the stdout capture: an over-ceiling reply sets the overflow flag
+// (mapped to the structured `OutputTooLarge` by `chamber::fire`) and
+// fails the import so the guest stops immediately.
+fn wrap_raw_output(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_raw_output",
+            |mut caller: Caller<'_, HostState>, blob_ptr: i32, blob_len: i32| -> i32 {
+                if blob_len < 0 {
+                    record(&mut caller, "raw output: negative blob_len");
+                    return E_OTHER;
+                }
+                let ceiling = caller.data().output_ceiling;
+                if blob_len as usize > ceiling {
+                    caller.data_mut().raw_output_overflow = true;
+                    record(
+                        &mut caller,
+                        &format!(
+                            "raw output: {blob_len} bytes exceeds the {ceiling} byte ceiling (FuelGauge::output_bytes)"
+                        ),
+                    );
+                    return E_OTHER;
+                }
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                // `guest_slice` (not `read_bytes`): unsigned wasm32
+                // address arithmetic with overflow-safe bounds — raw
+                // results are exactly the multi-MiB payloads that can
+                // sit high in linear memory.
+                let Some(bytes) = guest_slice(&memory, &caller, blob_ptr, blob_len).map(Vec::from)
+                else {
+                    record(&mut caller, "raw output: blob slice out of bounds");
+                    return E_OTHER;
+                };
+                caller.data_mut().pending_raw_output = Some(bytes);
+                0
+            },
         )
         .map_err(link_err)?;
     Ok(())

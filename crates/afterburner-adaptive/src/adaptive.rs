@@ -31,8 +31,8 @@
 
 use afterburner_core::log::Level;
 use afterburner_core::{
-    AfterburnerError, Combustor, EngineMode, FuelGauge, Result, ScriptId, ScriptInvocation,
-    ScriptOutcome, ab_event,
+    AfterburnerError, Combustor, EngineMode, FuelGauge, OutputValue, Result, ScriptId,
+    ScriptInvocation, ScriptOutcome, ab_event,
 };
 use afterburner_ignite::NativeCombustor;
 use afterburner_wasi::{WasmCombustor, WasmConfig};
@@ -328,6 +328,26 @@ impl Combustor for AdaptiveCombustor {
     fn thrust_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
         let wasm_id = self.require_wasm_tier(id, "raw input")?;
         self.wasm.thrust_raw(&wasm_id, input, limits)
+    }
+
+    /// Output-framing-aware paths route to the wasm tier like the
+    /// other wasm-only calls (columnar, raw input): only the wasm
+    /// backend has the `host_raw_output` bridge, and letting the
+    /// native tier serve a bytes-returning module would mangle the
+    /// result into rquickjs's JSON view of a `Uint8Array`.
+    fn thrust_out(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<OutputValue> {
+        let wasm_id = self.require_wasm_tier(id, "raw output")?;
+        self.wasm.thrust_out(&wasm_id, input, limits)
+    }
+
+    fn thrust_raw_out(
+        &self,
+        id: &ScriptId,
+        input: &[u8],
+        limits: &FuelGauge,
+    ) -> Result<OutputValue> {
+        let wasm_id = self.require_wasm_tier(id, "raw output")?;
+        self.wasm.thrust_raw_out(&wasm_id, input, limits)
     }
 
     fn extinguish(&self, id: &ScriptId) {
