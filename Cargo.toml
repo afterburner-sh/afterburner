@@ -42,7 +42,7 @@ rust-version = "1.90"
 authors = ["Theo Bulut <vertexclique@gmail.com>"]
 # Engine crates are source-available under BSL 1.1 (each version converts to
 # Apache-2.0 four years after its release). Apache-2.0 crates (afterburner-afb,
-# pg_burn, psila/*) set `license = "Apache-2.0"` explicitly in their [package].
+# burndb, psila/*) set `license = "Apache-2.0"` explicitly in their [package].
 license = "BUSL-1.1"
 repository = "https://github.com/vertexclique/afterburner"
 homepage = "https://github.com/vertexclique/afterburner"
@@ -111,8 +111,8 @@ ureq = { version = "2", features = ["json"] }
 tempfile = "3"
 flate2 = "1"
 brotli = { version = "8", default-features = false, features = ["std"] }
-kovan-map = "0.1"
-kovan-channel = "0.1"
+kovan-map = "0.1.13"
+kovan-channel = "0.1.13"
 libc = "0.2"
 # Colored + animated `burn` CLI output (brand palette spinners/styling). Used
 # only by the `bin` feature.
