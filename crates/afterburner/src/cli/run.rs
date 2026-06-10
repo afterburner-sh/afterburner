@@ -15,6 +15,15 @@
 //! The UDF shape (`module.exports = (data) => …`) remains available
 //! via `burn thrust`.
 //!
+//! **Exit codes** follow Node's convention: clean completion → 0,
+//! `process.exit(n)` → n, and any uncaught error → 1 — including a
+//! top-level `throw`, a rejected promise assigned to
+//! `module.exports`, and an exported async function that throws (the
+//! script envelope awaits an exported thenable; see
+//! `afterburner-plugin/src/envelope.rs::wrap_script_source`). The
+//! error message + stack go to stderr. A *resolved* exported promise
+//! exits 0 with its value discarded.
+//!
 //! `.ts` / `.mts` / `.cts` files are transpiled via `oxc` before
 //! dispatch when the crate is built with the `ts` feature. Without
 //! `ts`, running a `.ts` file surfaces a typed error pointing at the

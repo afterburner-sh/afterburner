@@ -224,6 +224,18 @@ pub fn wrap_user_source_columnar(user: &str) -> String {
 /// module, so a rejecting Promise surfaces as a module-evaluation
 /// error that `invoke` returns as `Err` — exactly how we want script
 /// errors to flow back to the host as a WASM trap.
+///
+/// **Exported promises are awaited.** A script whose final
+/// `module.exports` is a thenable (`module.exports =
+/// someAsyncMain()`) gets that value awaited after the top-level code
+/// finishes: a rejection surfaces exactly like a top-level `throw` —
+/// the error message + stack reach stderr and the process exits
+/// nonzero (exit code 1, Node's convention for an unhandled
+/// error/rejection). A resolved exported promise changes nothing —
+/// the value is discarded and the script exits 0. Without this await,
+/// a rejected exported promise would vanish: the assignment itself is
+/// synchronous, nothing ever observed the rejection, and the run
+/// exited 0 with no output.
 pub fn wrap_script_source(user: &str, argv_json: &str, env_json: &str, cwd_json: &str) -> String {
     let user = normalize_leading_hashbang(user);
     let user_lit = js_string_literal(&user);
@@ -277,6 +289,17 @@ pub fn wrap_script_source(user: &str, argv_json: &str, env_json: &str, cwd_json:
             __ab_module, __ab_module.exports, globalThis.require,
             __ab_filename, __ab_dirname
         );
+        // Await an exported thenable so its rejection cannot vanish:
+        // `module.exports = Promise.reject(e)` must fail the run the
+        // same way a top-level `throw e` does (message + stack on
+        // stderr, exit code 1). A resolved value is discarded —
+        // script-mode output stays console-only.
+        const __ab_exported = __ab_module.exports;
+        if (__ab_exported !== null
+            && (typeof __ab_exported === 'object' || typeof __ab_exported === 'function')
+            && typeof __ab_exported.then === 'function') {{
+            await __ab_exported;
+        }}
         "#
     )
 }

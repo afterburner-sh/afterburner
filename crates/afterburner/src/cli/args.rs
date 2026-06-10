@@ -68,11 +68,15 @@ pub struct Cli {
     #[arg(long = "timeout", value_name = "MS", global = true)]
     pub timeout_ms: Option<u64>,
 
-    /// Grant outbound HTTP access. Values: `*` = any host;
-    /// `api.example.com,*.trusted.io` = comma-separated allow-list with
-    /// optional wildcard subdomains. Without this flag all HTTP is
-    /// denied (`PermissionDenied`).
-    #[arg(long = "allow-net", value_name = "HOSTS", global = true)]
+    /// Grant outbound network access. Values: `*` = any host;
+    /// `api.example.com,*.trusted.io,127.0.0.1:9000` = comma-separated
+    /// allow-list with optional wildcard subdomains and optional
+    /// `:port` pins. An entry without a port matches that host on any
+    /// port; `host:port` matches host and port exactly (for HTTP the
+    /// request port defaults to 80/443 from the scheme). Without this
+    /// flag all network access is denied (`PermissionDenied`).
+    #[arg(long = "allow-net", value_name = "HOSTS", global = true,
+          value_parser = super::manifold::parse_allow_net_arg)]
     pub allow_net: Option<String>,
 
     /// Grant read+write filesystem access. Values: `*` = entire FS;

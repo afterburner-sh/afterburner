@@ -1158,7 +1158,14 @@ mod tests {
         let out = c
             .thrust(&id, &json!(null), &FuelGauge::unlimited())
             .unwrap();
-        assert_eq!(out, json!("Cannot find module 'no-such-module'"));
+        // The message may carry a "(resolved against '<dir>')" suffix
+        // naming the node_modules base the walk started from — assert
+        // on the Node-shaped prefix.
+        let msg = out.as_str().expect("error message string");
+        assert!(
+            msg.starts_with("Cannot find module 'no-such-module'"),
+            "unexpected require error message: {msg}"
+        );
     }
 
     #[test]

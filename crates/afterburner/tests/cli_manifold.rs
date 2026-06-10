@@ -73,6 +73,7 @@ impl CliBuilder {
             allow_fs_write: None,
             allow_child_process: false,
             allow_worker: false,
+            allow_crypto: false,
             internal_worker: false,
             worker_thread_id: None,
             rest_args: Vec::new(),

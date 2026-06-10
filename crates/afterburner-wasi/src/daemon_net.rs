@@ -280,8 +280,8 @@ impl DaemonNet {
     /// bad input. The actual `connect(2)` happens asynchronously;
     /// success / failure is announced via `Connect` / `Error` events.
     pub fn connect(self: &Arc<Self>, host: &str, port: u16, last_error: &mut String) -> i32 {
-        if !net_outbound_allowed(&self.manifold, host) {
-            *last_error = format!("net.connect: not granted by manifold (host {host})");
+        if !net_outbound_allowed(&self.manifold, host, port) {
+            *last_error = format!("net.connect: not granted by manifold (host {host}:{port})");
             return errors::E_PERMISSION;
         }
         if host.is_empty() {
@@ -537,22 +537,36 @@ impl DaemonNet {
 
 /// Manifold gate. `OutboundHttp` is HTTP-only by design; raw TCP
 /// must use `OutboundFull` (with optional host allow-list).
-fn net_outbound_allowed(m: &Manifold, host: &str) -> bool {
+/// Allow-list entries are `host` or `host:port` patterns — see
+/// [`afterburner_node_compat::http_host::split_host_port_pattern`]
+/// for the shared grammar. `port` here is the literal connect port.
+fn net_outbound_allowed(m: &Manifold, host: &str, port: u16) -> bool {
     match &m.net {
         NetAccess::None => false,
         NetAccess::OutboundHttp(_) => false,
         NetAccess::OutboundFull(None) => true,
-        NetAccess::OutboundFull(Some(allow)) => host_allowed(host, allow),
+        NetAccess::OutboundFull(Some(allow)) => host_allowed(host, port, allow),
     }
 }
 
-fn host_allowed(host: &str, allow: &[String]) -> bool {
+fn host_allowed(host: &str, port: u16, allow: &[String]) -> bool {
     if allow.is_empty() {
         return true;
     }
     let host_lc = host.to_ascii_lowercase();
     allow.iter().any(|pat| {
-        let p = pat.to_ascii_lowercase();
+        // `host:port` entries constrain the port; port-less entries
+        // match any port. The split grammar is shared with the HTTP
+        // gate so `--allow-net 127.0.0.1:9000` means the same thing
+        // for fetch and net.connect.
+        let (pat_host, pat_port) =
+            afterburner_node_compat::http_host::split_host_port_pattern(pat);
+        if let Some(pp) = pat_port
+            && !pp.matches(port)
+        {
+            return false;
+        }
+        let p = pat_host.to_ascii_lowercase();
         if p == "*" {
             return true;
         }
@@ -832,45 +846,64 @@ mod tests {
     fn outbound_full_no_allowlist_permits_anything() {
         let mut m = Manifold::sealed();
         m.net = NetAccess::OutboundFull(None);
-        assert!(net_outbound_allowed(&m, "example.com"));
-        assert!(net_outbound_allowed(&m, "127.0.0.1"));
+        assert!(net_outbound_allowed(&m, "example.com", 80));
+        assert!(net_outbound_allowed(&m, "127.0.0.1", 9000));
     }
 
     #[test]
     fn outbound_full_allowlist_filters_hosts() {
         let mut m = Manifold::sealed();
         m.net = NetAccess::OutboundFull(Some(vec!["api.example.com".into()]));
-        assert!(net_outbound_allowed(&m, "api.example.com"));
-        assert!(!net_outbound_allowed(&m, "evil.com"));
+        assert!(net_outbound_allowed(&m, "api.example.com", 80));
+        // Port-less entry: any port.
+        assert!(net_outbound_allowed(&m, "api.example.com", 12345));
+        assert!(!net_outbound_allowed(&m, "evil.com", 80));
+    }
+
+    #[test]
+    fn allowlist_host_port_entries() {
+        let mut m = Manifold::sealed();
+        m.net = NetAccess::OutboundFull(Some(vec!["127.0.0.1:9000".into()]));
+        assert!(net_outbound_allowed(&m, "127.0.0.1", 9000));
+        assert!(!net_outbound_allowed(&m, "127.0.0.1", 9001));
+        assert!(!net_outbound_allowed(&m, "127.0.0.2", 9000));
     }
 
     #[test]
     fn outbound_http_blocks_raw_tcp() {
         let mut m = Manifold::sealed();
         m.net = NetAccess::OutboundHttp(None);
-        assert!(!net_outbound_allowed(&m, "example.com"));
+        assert!(!net_outbound_allowed(&m, "example.com", 80));
     }
 
     #[test]
     fn sealed_blocks_everything() {
         let m = Manifold::sealed();
-        assert!(!net_outbound_allowed(&m, "anything"));
+        assert!(!net_outbound_allowed(&m, "anything", 80));
     }
 
     #[test]
     fn wildcard_subdomain_match() {
         let mut m = Manifold::sealed();
         m.net = NetAccess::OutboundFull(Some(vec!["*.trusted.io".into()]));
-        assert!(net_outbound_allowed(&m, "api.trusted.io"));
-        assert!(net_outbound_allowed(&m, "deeply.nested.trusted.io"));
-        assert!(!net_outbound_allowed(&m, "trusted.io"));
-        assert!(!net_outbound_allowed(&m, "evil.com"));
+        assert!(net_outbound_allowed(&m, "api.trusted.io", 80));
+        assert!(net_outbound_allowed(&m, "deeply.nested.trusted.io", 443));
+        assert!(!net_outbound_allowed(&m, "trusted.io", 80));
+        assert!(!net_outbound_allowed(&m, "evil.com", 80));
+    }
+
+    #[test]
+    fn wildcard_with_port_constrains_port() {
+        let mut m = Manifold::sealed();
+        m.net = NetAccess::OutboundFull(Some(vec!["*.trusted.io:8443".into()]));
+        assert!(net_outbound_allowed(&m, "api.trusted.io", 8443));
+        assert!(!net_outbound_allowed(&m, "api.trusted.io", 443));
     }
 
     #[test]
     fn wildcard_alone_matches_anything() {
         let mut m = Manifold::sealed();
         m.net = NetAccess::OutboundFull(Some(vec!["*".into()]));
-        assert!(net_outbound_allowed(&m, "x.y.z"));
+        assert!(net_outbound_allowed(&m, "x.y.z", 80));
     }
 }
