@@ -208,6 +208,44 @@ impl Afterburner {
         }
     }
 
+    /// Run a registered script with a **raw byte** input — the module
+    /// receives a `Uint8Array` instead of a parsed JSON value. This is
+    /// the bulk-payload fast path: [`run`](Self::run) frames the input
+    /// as JSON text, which the sandboxed runtime must re-materialize
+    /// as a JS string and `JSON.parse` — both O(n) in the input size
+    /// and fuel-metered, dominating the cost of large calls (measured
+    /// ~125 fuel/byte crossing in as JSON versus ~28 through this
+    /// path; see `examples/input_framing_bench.rs`). With raw input
+    /// the O(n) byte movement happens host-side; the only metered
+    /// per-byte work is one copy into the runtime's heap.
+    ///
+    /// The output contract is unchanged — the script's return value
+    /// comes back as JSON, so the natural shape is "bulk bytes in,
+    /// small summary out". Scripts moving bulk *typed* data in both
+    /// directions should use [`run_columnar`](Self::run_columnar).
+    ///
+    /// **Engine-mode behaviour** mirrors `run_columnar`: wasm executes
+    /// directly; adaptive routes to the wasm tier (waiting up to 5 s
+    /// for an in-flight background compile); native surfaces a clean
+    /// [`AfterburnerError::Engine`]; the threaded engine bypasses the
+    /// worker pipeline and dispatches into the inner combustor.
+    /// Sandbox properties are identical to `run`: fresh Store per
+    /// call, fuel + epoch + memory caps enforced, capability gates
+    /// honoured.
+    pub fn run_raw(&self, id: &ScriptId, input: &[u8]) -> Result<Value> {
+        self.run_raw_with(id, input, &self.defaults)
+    }
+
+    /// Like [`run_raw`](Self::run_raw) but with explicit per-call
+    /// limits.
+    pub fn run_raw_with(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
+        match &self.engine {
+            EngineHolder::Cache(c) => c.execute_raw(id, input, limits),
+            #[cfg(feature = "thrust")]
+            EngineHolder::Thrust(t) => t.thrust_raw(id, input, limits),
+        }
+    }
+
     /// Run a registered script against a typed [`ColumnarBatch`] and
     /// receive the result columns directly — no JSON parse / stringify
     /// on either side. Phase 1 of the UDF perf push: the data path

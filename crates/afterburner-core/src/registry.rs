@@ -262,6 +262,17 @@ impl BurnCache {
         self.engine.thrust(id, input, limits)
     }
 
+    /// Raw-input fast path. `input` reaches the module as a
+    /// `Uint8Array`; the JSON framing tax of [`execute`](Self::execute)
+    /// (host-side serialize + guest-side string materialization +
+    /// `JSON.parse`, all O(n) and fuel-metered on the guest side) is
+    /// skipped entirely. Output contract matches `execute` — the
+    /// script's return value comes back as JSON.
+    #[fastrace::trace(name = "BurnCache::execute_raw")]
+    pub fn execute_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
+        self.engine.thrust_raw(id, input, limits)
+    }
+
     /// Run `source` as a top-level script (no UDF envelope). See
     /// [`Combustor::run_script`] for semantics. Script-mode calls are
     /// **not** cached — every invocation is a fresh compile + run.

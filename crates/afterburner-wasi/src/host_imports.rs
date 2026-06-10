@@ -1572,8 +1572,7 @@ fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                         Some(s) => s,
                         None => return E_OTHER,
                     };
-                    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
-                    {
+                    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw) {
                         Ok(map) => map
                             .into_iter()
                             .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
@@ -3113,11 +3112,12 @@ fn wrap_last_error(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErro
 // ---- input slot (bytecode-cache invoke path) ----------------------------
 //
 // The plugin's bytecode-cache `invoke` mode reads the per-thrust input
-// JSON from `HostState::pending_input` via this import — which lets us
-// skip the per-thrust preamble compile that would otherwise publish
-// the input as a JS global. The cached wrapped source calls
-// `__AB_GET_INPUT__()` (installed in `modify_runtime`) which routes
-// here.
+// (JSON text or raw bytes, per `host_input_format`) from
+// `HostState::pending_input` via this import — which lets us skip the
+// per-thrust preamble compile that would otherwise publish the input
+// as a JS global. The cached wrapped source calls
+// `__AB_GET_INPUT_VALUE__()` (installed in `modify_runtime`) which
+// routes here after sizing its buffer via `host_get_input_len`.
 fn wrap_input(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     linker
         .func_wrap(
@@ -3133,6 +3133,18 @@ fn wrap_input(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 let input = caller.data().pending_input.clone();
                 write_out(&mut caller, &memory, out_ptr, out_cap, &input)
             },
+        )
+        .map_err(link_err)?;
+
+    // Framing flag for `pending_input` — `InputFormat` discriminant
+    // (0 = JSON text, 1 = raw bytes). The plugin's input getter reads
+    // this once per invocation to decide whether to materialize a JS
+    // string for `JSON.parse` or hand the module a `Uint8Array`.
+    linker
+        .func_wrap(
+            NS,
+            "host_input_format",
+            |caller: Caller<'_, HostState>| -> i32 { caller.data().input_format as i32 },
         )
         .map_err(link_err)?;
     Ok(())

@@ -657,6 +657,17 @@ impl ThrustEngine {
         self.combustor.thrust_columnar_bytes(id, encoded, limits)
     }
 
+    /// Raw-input fast path. Bypasses the per-job dispatch pipeline and
+    /// calls directly into the inner [`WasmCombustor`]'s raw path, for
+    /// the same three reasons as
+    /// [`thrust_columnar_bytes`](Self::thrust_columnar_bytes): the
+    /// pooling allocator is thread-safe, the payload is a `&[u8]` that
+    /// doesn't fit the `Job` enum without an extra copy, and submitter
+    /// parallelism comes from the caller fanning out threads.
+    pub fn thrust_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
+        self.combustor.thrust_raw(id, input, limits)
+    }
+
     /// Snapshot of operational counters.
     pub fn stats(&self) -> ThrustEngineStats {
         let mut snap = self.stats.snapshot();

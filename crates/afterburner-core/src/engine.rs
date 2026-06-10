@@ -52,6 +52,27 @@ pub trait Combustor: Send + Sync {
         self.thrust(id, input, limits)
     }
 
+    /// Raw-input fast path: execute a compiled script with `input`
+    /// delivered to the module as a `Uint8Array` instead of a JSON
+    /// value. For bulk binary payloads this skips the whole
+    /// input-framing tax of [`thrust`](Self::thrust) — host-side JSON
+    /// serialization, guest-side string materialization, and
+    /// guest-side `JSON.parse` (all O(n) in the input size, and the
+    /// guest-side parts are fuel-metered). The script's return value
+    /// still comes back as JSON, same output contract as `thrust`.
+    ///
+    /// Default impl errors — backends without a linear-memory bridge
+    /// inherit it and surface a clean diagnostic, mirroring
+    /// [`thrust_columnar_bytes`](Self::thrust_columnar_bytes).
+    /// Currently only `WasmCombustor` overrides; `AdaptiveCombustor`
+    /// routes to its wasm tier.
+    fn thrust_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
+        let _ = (id, input, limits);
+        Err(AfterburnerError::Engine(
+            "raw input path not implemented for this backend".into(),
+        ))
+    }
+
     /// Release any resources associated with a compiled script. After this
     /// call, `thrust` with the same `id` returns `ScriptNotFound`.
     fn extinguish(&self, id: &ScriptId);

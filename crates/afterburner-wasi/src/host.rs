@@ -32,6 +32,22 @@ pub struct TimerSlot {
     pub is_ref: bool,
 }
 
+/// Framing of `HostState::pending_input`, read by the guest through
+/// the `host_input_format` import (as the discriminant value). One
+/// compiled invoke wrapper serves both framings — the guest-side input
+/// getter branches on this flag per invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(i32)]
+pub enum InputFormat {
+    /// JSON text (`serde_json::to_vec` of the call's input value); the
+    /// invoke wrapper materializes a JS string and `JSON.parse`s it.
+    #[default]
+    Json = 0,
+    /// Opaque bytes; the invoke wrapper hands the module a
+    /// `Uint8Array` directly. Used by the `thrust_raw` fast path.
+    Raw = 1,
+}
+
 /// Per-`thrust` host state. A fresh instance is created for every call so
 /// invocations are fully isolated (no shared JS globals, no stdout leak
 /// between calls).
@@ -57,11 +73,20 @@ pub struct HostState {
     /// this via the `host_last_error` import when a syscall returned a
     /// negative error code, and the JS glue surfaces it to the user.
     pub last_error: String,
-    /// JSON-serialized input bytes for the bytecode-cache invoke path.
-    /// Plugin reads this via the `host_get_input` import; lets us skip
-    /// the per-thrust preamble compile that would otherwise publish the
-    /// input as a JS global. Empty if the call uses the legacy envelope.
+    /// Input bytes for the bytecode-cache invoke path. Plugin reads
+    /// this via the `host_get_input` import; lets us skip the
+    /// per-thrust preamble compile that would otherwise publish the
+    /// input as a JS global. Empty if the call uses the legacy
+    /// envelope. Framing is described by [`Self::input_format`].
     pub pending_input: Vec<u8>,
+    /// Framing of [`Self::pending_input`], surfaced to the guest via
+    /// the `host_input_format` import. [`InputFormat::Json`] (the
+    /// default) means JSON text the invoke wrapper `JSON.parse`s;
+    /// [`InputFormat::Raw`] means opaque bytes the wrapper hands the
+    /// module as a `Uint8Array` — the large-payload fast path that
+    /// skips guest-side string materialization and `JSON.parse`
+    /// entirely (both are O(n) fuel-metered work).
+    pub input_format: InputFormat,
     /// JSON-serialized envelope for the daemon path's `daemon_step`
     /// re-entry. Separate from `pending_input` because daemon mode
     /// re-uses the same Store across many calls and we don't want one
@@ -204,6 +229,7 @@ impl HostState {
             hash_handles: HashHandleStore::new(),
             last_error: String::new(),
             pending_input: Vec::new(),
+            input_format: InputFormat::Json,
             pending_envelope: Vec::new(),
             pending_columnar_reply: None,
             daemon_http: None,
@@ -231,11 +257,13 @@ impl HostState {
     }
 
     /// Like `new` but pre-populates `pending_input` for the bytecode-
-    /// cache invoke path. The plugin reads this via `host_get_input`.
+    /// cache invoke path. The plugin reads the bytes via
+    /// `host_get_input` and their framing via `host_input_format`.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_input(
         envelope: &[u8],
-        input_json: Vec<u8>,
+        input: Vec<u8>,
+        input_format: InputFormat,
         memory_bytes: Option<usize>,
         stdout_capacity: usize,
         manifold: Manifold,
@@ -250,7 +278,8 @@ impl HostState {
             state_store,
             host_context,
         );
-        s.pending_input = input_json;
+        s.pending_input = input;
+        s.input_format = input_format;
         s
     }
 

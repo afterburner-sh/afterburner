@@ -7,8 +7,10 @@
 //!
 //! Envelope: `{ mode: "invoke", bytecode_b64: string }`. Input is
 //! delivered via the `host_get_input` import (called from JS via
-//! `__AB_GET_INPUT__()`) — not via the envelope. That keeps this path
-//! a single `invoke` with no per-call preamble compile.
+//! `__AB_GET_INPUT_VALUE__()`) — not via the envelope. That keeps this
+//! path a single `invoke` with no per-call preamble compile. The same
+//! bytecode serves JSON and raw input framing; `host_input_format`
+//! tells the getter which shape to materialize.
 
 use alloc::format;
 use base64::Engine;

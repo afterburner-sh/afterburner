@@ -249,6 +249,26 @@ interface state {
     increment: func(key: string, delta: s64) -> s64;
 }
 
+// ---- per-thrust input slot ------------------------------------------------
+
+/// Delivery channel for the per-call input on the bytecode-cache
+/// invoke path (`HostState::pending_input`). The wrapped script calls
+/// `input-format` + `get-input-len` once per invocation, allocates an
+/// exact-fit buffer, and reads the bytes with `get-input`. The
+/// columnar path reuses the same slot for its encoded batch blob.
+interface input {
+    /// Framing of the pending input: `0` = JSON text (wrapper
+    /// `JSON.parse`s it), `1` = raw bytes (wrapper hands the module a
+    /// `Uint8Array` — the large-payload fast path with no string
+    /// materialization or parse).
+    input-format:  func() -> s32;
+    /// Exact byte length of the pending input, so the guest can size
+    /// its buffer in one shot (no retry-doubling).
+    get-input-len: func() -> s32;
+    /// Copy the pending input into the guest buffer.
+    get-input:     func() -> list<u8>;
+}
+
 // ---- error inspection ---------------------------------------------------
 
 /// Reads the detailed message for the most recent host call that
@@ -290,5 +310,6 @@ world afterburner-plugin-v2 {
     import dns;
     import zlib;
     import state;
+    import input;
     import diagnostics;
 }

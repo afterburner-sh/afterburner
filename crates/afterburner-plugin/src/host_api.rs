@@ -369,10 +369,8 @@ unsafe extern "C" {
     // bytes. Output sizes are exactly computable from input sizes
     // (encode: 4·⌈n/3⌉; decode: ≤ ⌊n/4⌋·3), so callers allocate
     // exact-fit buffers — no `-4` retry loop on this pair.
-    pub fn host_b64_encode(in_ptr: *const u8, in_len: u32, out_ptr: *mut u8, out_cap: u32)
-    -> i32;
-    pub fn host_b64_decode(in_ptr: *const u8, in_len: u32, out_ptr: *mut u8, out_cap: u32)
-    -> i32;
+    pub fn host_b64_encode(in_ptr: *const u8, in_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
+    pub fn host_b64_decode(in_ptr: *const u8, in_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
 
     // ---- sign / verify (RSA + ECDSA) --------------------------------
     //
@@ -587,6 +585,13 @@ unsafe extern "C" {
     // JS callers use the `__AB_GET_INPUT__` global installed in
     // `globals::install`.
     pub fn host_get_input(out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    // Framing of `pending_input` for this call: `0` = JSON text (the
+    // wrapper must `JSON.parse` it), `1` = raw bytes (the wrapper hands
+    // the module a `Uint8Array` directly — no string materialization,
+    // no parse). Set host-side by `thrust` vs `thrust_raw`; read once
+    // per invocation by `__AB_GET_INPUT_VALUE__`.
+    pub fn host_input_format() -> i32;
 
     // ---- columnar UDF path -----------------------------------------
     //

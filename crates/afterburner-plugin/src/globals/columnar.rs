@@ -41,13 +41,11 @@
 //! TypedArray view can outlive the call's Store.
 
 use alloc::format;
-use alloc::vec;
-use alloc::vec::Vec;
 use javy_plugin_api::javy::quickjs::{
     ArrayBuffer, Ctx, Exception, Object, Result as JsResult, TypedArray, prelude::Func,
 };
 
-use crate::host_api::{host_columnar_reply, host_get_input, host_get_input_len};
+use crate::host_api::host_columnar_reply;
 
 /// Pure-JS dispatcher installed via `ctx.eval(...)` at modify_runtime
 /// time. Reads the columnar input blob, builds the typed-view batch,
@@ -361,22 +359,8 @@ const COLUMNAR_DISPATCHER: &str = r#"
 /// inferred lifetime and trip the rquickjs Fn trait when the
 /// returned type is `'js`-bound.
 fn ab_get_columnar_input<'js>(ctx: Ctx<'js>) -> JsResult<TypedArray<'js, u8>> {
-    let len = unsafe { host_get_input_len() };
-    if len < 0 {
-        return Err(Exception::throw_message(
-            &ctx,
-            "__AB_GET_COLUMNAR_INPUT__: host returned negative length",
-        ));
-    }
-    let mut buf: Vec<u8> = vec![0u8; len as usize];
-    let n = unsafe { host_get_input(buf.as_mut_ptr(), buf.len() as u32) };
-    if n < 0 {
-        return Err(Exception::throw_message(
-            &ctx,
-            &format!("__AB_GET_COLUMNAR_INPUT__: host_get_input returned {n}"),
-        ));
-    }
-    buf.truncate(n as usize);
+    let buf = super::read_pending_input()
+        .map_err(|e| Exception::throw_message(&ctx, &format!("__AB_GET_COLUMNAR_INPUT__: {e}")))?;
     let ab = ArrayBuffer::new_copy(ctx, &buf)?;
     TypedArray::<u8>::from_arraybuffer(ab)
 }

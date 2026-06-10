@@ -120,12 +120,19 @@ pub fn wrap_user_source(user: &str, input_json: &str) -> String {
 }
 
 /// Bytecode-cache variant of [`wrap_user_source`]. The compiled
-/// bytecode is *input-agnostic* — it pulls the per-call input JSON
-/// directly from the host via the `__AB_GET_INPUT__` global installed
-/// in `globals::install`. Identical Promise / await semantics to the
+/// bytecode is *input-agnostic* — it pulls the per-call input directly
+/// from the host via the `__AB_GET_INPUT_VALUE__` global installed in
+/// `globals::install`. Identical Promise / await semantics to the
 /// inlined-input version above; the only difference is the input
 /// source. Skipping the per-call preamble compile cuts ~150 µs from
 /// the hot path.
+///
+/// One bytecode serves both input framings: the getter returns a JS
+/// string under JSON framing (parsed here with QuickJS's native
+/// `JSON.parse`) and a `Uint8Array` under raw framing (handed to the
+/// module as-is — no string materialization, no parse). The branch is
+/// a single `typeof` per invocation; raw framing can never produce a
+/// string, so the dispatch is unambiguous.
 pub fn wrap_user_source_with_input_global(user: &str) -> String {
     let user = normalize_leading_hashbang(user);
     let user_lit = js_string_literal(&user);
@@ -134,7 +141,8 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
         function __ab_write_stdout(s) {{
             Javy.IO.writeSync(1, new TextEncoder().encode(s));
         }}
-        const __ab_data = JSON.parse(__AB_GET_INPUT__());
+        const __ab_input = __AB_GET_INPUT_VALUE__();
+        const __ab_data = (typeof __ab_input === 'string') ? JSON.parse(__ab_input) : __ab_input;
         const __ab_module = {{ exports: undefined }};
         const __ab_user = new Function('module', 'exports', 'require', {user_lit});
         __ab_user(__ab_module, __ab_module.exports, globalThis.require);
@@ -153,7 +161,8 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
 /// dispatch goes through the JS-side `__ab_columnar_dispatch` helper
 /// (installed at modify_runtime time by
 /// `globals::columnar::install_dispatcher_js`) instead of via
-/// `__AB_GET_INPUT__` + `JSON.parse` / `JSON.stringify` to stdout.
+/// `__AB_GET_INPUT_VALUE__` + `JSON.parse` / `JSON.stringify` to
+/// stdout.
 ///
 /// Synchronous in Phase 1 — the dispatcher throws a clean error if
 /// the user UDF returns a Promise. Async columnar UDFs land in
