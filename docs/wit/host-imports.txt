@@ -15,6 +15,8 @@
 # remains the typed contract — update it alongside this manifest
 # when adding new imports so reviewers can see the shape.
 
+host_b64_decode
+host_b64_encode
 host_child_process_exec_sync
 host_columnar_reply
 host_crypto_aes_cbc_decrypt
@@ -80,6 +82,8 @@ host_http_listen
 host_http_reply
 host_http_request
 host_http_request_async
+host_http_request_v2
+host_input_format
 host_inspector_close
 host_inspector_open
 host_inspector_pause
