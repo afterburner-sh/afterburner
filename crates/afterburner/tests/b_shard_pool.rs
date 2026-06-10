@@ -246,6 +246,12 @@ fn shard_pool_sandbox_denies_on_every_shard() {
         .arg("--sandbox")
         .arg("--allow-net")
         .arg("*")
+        // The sandbox now also seals inbound listening (the listen
+        // capability axis): grant the test's bind port back explicitly,
+        // otherwise `.listen()` is denied and the daemon never readies.
+        // env stays sealed — that's what this test actually exercises.
+        .arg("--allow-listen")
+        .arg(port.to_string())
         .arg("-e")
         .arg(&src);
     let (_child, _watcher) = spawn_and_wait_listening(cmd, port, READY_TIMEOUT);
@@ -283,6 +289,11 @@ fn shard_pool_allow_env_visible_on_every_shard() {
         .arg("--sandbox")
         .arg("--allow-net")
         .arg("*")
+        // Sandbox seals inbound listening too (the listen capability
+        // axis); grant the bind port back so the daemon can ready. The
+        // env grant below is what this test really verifies.
+        .arg("--allow-listen")
+        .arg(port.to_string())
         .arg("--allow-env")
         .arg("SHARD_TEST_VAR")
         .arg("-e")

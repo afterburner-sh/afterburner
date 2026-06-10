@@ -130,9 +130,7 @@ pub fn extract_host_port(url: &str) -> Option<(String, u16)> {
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     // Drop userinfo if present (`user:pass@host:port`).
-    let authority = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, hp)| hp);
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
     if let Some(v6) = authority.strip_prefix('[') {
         let (host, after) = v6.split_once(']')?;
         let port = match after.strip_prefix(':') {
@@ -350,7 +348,10 @@ mod tests {
 
     #[test]
     fn split_host_port_pattern_shapes() {
-        assert_eq!(split_host_port_pattern("example.com"), ("example.com", None));
+        assert_eq!(
+            split_host_port_pattern("example.com"),
+            ("example.com", None)
+        );
         assert_eq!(
             split_host_port_pattern("example.com:8080"),
             ("example.com", Some(PortPattern::Port(8080)))

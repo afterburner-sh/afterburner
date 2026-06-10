@@ -60,8 +60,7 @@ fn rejected_exported_promise_exits_nonzero_with_message() {
 
 #[test]
 fn exported_async_throw_exits_nonzero_with_message() {
-    let out =
-        run_eval("module.exports = (async () => { throw new Error('boom-async'); })()");
+    let out = run_eval("module.exports = (async () => { throw new Error('boom-async'); })()");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
         out.status.code(),

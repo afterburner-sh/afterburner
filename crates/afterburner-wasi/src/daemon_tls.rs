@@ -565,8 +565,7 @@ fn host_allowed(host: &str, port: u16, allow: &[String]) -> bool {
     allow.iter().any(|pat| {
         // Shared `host[:port]` grammar — port-less entries match any
         // port, `host:port` entries pin the connect port.
-        let (pat_host, pat_port) =
-            afterburner_node_compat::http_host::split_host_port_pattern(pat);
+        let (pat_host, pat_port) = afterburner_node_compat::http_host::split_host_port_pattern(pat);
         if let Some(pp) = pat_port
             && !pp.matches(port)
         {

@@ -559,8 +559,7 @@ fn host_allowed(host: &str, port: u16, allow: &[String]) -> bool {
         // match any port. The split grammar is shared with the HTTP
         // gate so `--allow-net 127.0.0.1:9000` means the same thing
         // for fetch and net.connect.
-        let (pat_host, pat_port) =
-            afterburner_node_compat::http_host::split_host_port_pattern(pat);
+        let (pat_host, pat_port) = afterburner_node_compat::http_host::split_host_port_pattern(pat);
         if let Some(pp) = pat_port
             && !pp.matches(port)
         {

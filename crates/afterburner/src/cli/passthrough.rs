@@ -73,6 +73,36 @@ pub enum Detected {
     Unknown(String),
 }
 
+/// Reconstruct the pass-through argument vector straight from the raw
+/// process argv.
+///
+/// Why we can't just use `cli.rest_args`: when a pass-through target's
+/// own arguments happen to collide with one of burn's subcommand names
+/// (`burn npm install …`, `burn pnpm run …`, `burn yarn test`), clap
+/// binds the colliding token (`install` / `run` / `test`) as *burn's*
+/// subcommand and swallows the rest into that subcommand's fields, so
+/// they never reach `cli.rest_args`. The tokens belong to the target,
+/// not to burn — recover them from argv by slicing everything after the
+/// first standalone occurrence of `target`.
+///
+/// `target` is `cli.file` (the first positional clap bound), so the
+/// slice point is the first argv token equal to `target` that isn't the
+/// value of a preceding `--flag value` global. We approximate that with
+/// the first exact match in `argv[1..]`; global flags that take a value
+/// (`--mode`, `--fuel`, …) never legitimately carry one of the
+/// ecosystem target names as their value, so a plain first-match is
+/// safe in practice and degrades to "no trailing args" otherwise.
+pub fn args_after_target(target: &str) -> Vec<String> {
+    let argv: Vec<String> = std::env::args().collect();
+    if let Some(pos) = argv.iter().skip(1).position(|a| a == target) {
+        // `position` is relative to the `skip(1)` view; +1 maps back to
+        // the full argv index, then +1 again to start *after* the target.
+        argv[pos + 2..].to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Classify `argv[1]` per the Q5-A precedence above.
 pub fn detect(file: &Path) -> Detected {
     // Path-qualified forms (`./node`, `/usr/bin/node`, `subdir/node`)
@@ -134,8 +164,22 @@ fn dispatch_via_shim(cli: &mut Cli, target: &str) -> Result<()> {
     let shim_dir = shim::ensure_shim_dir()?;
     let real = find_real_binary(target, &shim_dir)
         .ok_or_else(|| anyhow::anyhow!("burn: '{target}' not found on PATH"))?;
-    let args = std::mem::take(&mut cli.rest_args);
+    let args = passthrough_args(cli, target);
     exec_with_shim(&real, &args, &shim_dir)
+}
+
+/// The target's argument vector. Prefer `cli.rest_args` (the common
+/// case where clap left the trailing tokens alone); fall back to the
+/// raw-argv reconstruction when a subcommand-name collision (`npm
+/// install`, `pnpm run`, …) caused clap to swallow them into a burn
+/// subcommand. See [`args_after_target`].
+fn passthrough_args(cli: &mut Cli, target: &str) -> Vec<String> {
+    let rest = std::mem::take(&mut cli.rest_args);
+    if rest.is_empty() {
+        args_after_target(target)
+    } else {
+        rest
+    }
 }
 
 fn check_shim_depth() -> Result<()> {

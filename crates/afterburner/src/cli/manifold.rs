@@ -244,6 +244,27 @@ pub fn has_wildcard(list: &[String]) -> bool {
     list.iter().any(|s| s == "*")
 }
 
+/// True when the CLI is running under the implicit open-capabilities
+/// default — i.e. the user supplied neither `--sandbox` nor any
+/// `--allow-*` flag and didn't explicitly set `-A`. The banner shows
+/// only in this case, so callers who set `-A` don't get warned twice.
+pub fn is_implicit_open(cli: &Cli) -> bool {
+    if cli.allow_all {
+        return false;
+    }
+    let any_allow = cli.allow_net.is_some()
+        || cli.allow_listen.is_some()
+        || cli.allow_fs.is_some()
+        || cli.allow_env.is_some()
+        || cli.allow_fs_read.is_some()
+        || cli.allow_fs_write.is_some()
+        || cli.allow_child_process
+        || cli.allow_worker
+        || cli.allow_crypto
+        || cli.permission;
+    !(cli.sandbox || any_allow)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,25 +343,4 @@ mod tests {
             );
         }
     }
-}
-
-/// True when the CLI is running under the implicit open-capabilities
-/// default — i.e. the user supplied neither `--sandbox` nor any
-/// `--allow-*` flag and didn't explicitly set `-A`. The banner shows
-/// only in this case, so callers who set `-A` don't get warned twice.
-pub fn is_implicit_open(cli: &Cli) -> bool {
-    if cli.allow_all {
-        return false;
-    }
-    let any_allow = cli.allow_net.is_some()
-        || cli.allow_listen.is_some()
-        || cli.allow_fs.is_some()
-        || cli.allow_env.is_some()
-        || cli.allow_fs_read.is_some()
-        || cli.allow_fs_write.is_some()
-        || cli.allow_child_process
-        || cli.allow_worker
-        || cli.allow_crypto
-        || cli.permission;
-    !(cli.sandbox || any_allow)
 }

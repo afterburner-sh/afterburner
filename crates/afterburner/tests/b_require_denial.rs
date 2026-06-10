@@ -91,11 +91,7 @@ fn sealed_manifold_require_reports_permission_denied_not_missing() {
 #[test]
 fn missing_module_still_reports_cannot_find_with_resolution_base() {
     let dir = tmp_dir("missing");
-    fs::write(
-        dir.join("main.js"),
-        "require('./definitely-absent.js');\n",
-    )
-    .unwrap();
+    fs::write(dir.join("main.js"), "require('./definitely-absent.js');\n").unwrap();
 
     // Open manifold (no flags): fs reads are allowed, the file truly
     // does not exist — the Node-shaped error must survive, and the
