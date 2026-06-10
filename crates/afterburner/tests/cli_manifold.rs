@@ -15,7 +15,7 @@
 #![cfg(feature = "bin")]
 
 use afterburner::cli::{Cli, build_manifold, is_implicit_open, parse_allow_list};
-use afterburner::{EnvAccess, FsAccess, NetAccess};
+use afterburner::{EnvAccess, FsAccess, ListenAccess, NetAccess};
 use std::path::PathBuf;
 
 #[derive(Default)]
@@ -24,6 +24,7 @@ struct CliBuilder {
     sandbox: bool,
     quiet: bool,
     allow_net: Option<String>,
+    allow_listen: Option<String>,
     allow_fs: Option<String>,
     allow_env: Option<String>,
 }
@@ -39,6 +40,10 @@ impl CliBuilder {
     }
     fn net(mut self, s: &str) -> Self {
         self.allow_net = Some(s.into());
+        self
+    }
+    fn listen(mut self, s: &str) -> Self {
+        self.allow_listen = Some(s.into());
         self
     }
     fn fs(mut self, s: &str) -> Self {
@@ -59,6 +64,7 @@ impl CliBuilder {
             memory: None,
             timeout_ms: None,
             allow_net: self.allow_net,
+            allow_listen: self.allow_listen,
             allow_fs: self.allow_fs,
             allow_env: self.allow_env,
             allow_all: self.allow_all,
@@ -196,6 +202,49 @@ fn allow_env_without_wildcard_is_allow_list() {
 fn allow_env_wildcard_is_full() {
     let m = build_manifold(&CliBuilder::default().env("*").build());
     assert!(matches!(m.env, EnvAccess::Full));
+}
+
+#[test]
+fn sandbox_default_denies_listen() {
+    let m = build_manifold(&CliBuilder::default().sandbox().build());
+    assert!(matches!(m.listen, ListenAccess::None));
+}
+
+#[test]
+fn allow_listen_is_a_sandbox_trigger() {
+    // `--allow-listen` alone implies `--sandbox`: every other axis
+    // seals, only listening on the named ports is granted.
+    let cli = CliBuilder::default().listen("8080").build();
+    assert!(!is_implicit_open(&cli));
+    let m = build_manifold(&cli);
+    assert!(matches!(m.fs, FsAccess::None));
+    assert!(matches!(m.net, NetAccess::None));
+    assert!(matches!(m.env, EnvAccess::None));
+    assert_eq!(m.listen, ListenAccess::Ports(vec![8080]));
+}
+
+#[test]
+fn allow_listen_port_list_becomes_ports() {
+    let m = build_manifold(&CliBuilder::default().listen("8080, 9090").build());
+    assert_eq!(m.listen, ListenAccess::Ports(vec![8080, 9090]));
+}
+
+#[test]
+fn allow_listen_single_range_becomes_port_range() {
+    let m = build_manifold(&CliBuilder::default().listen("9000-9100").build());
+    assert_eq!(m.listen, ListenAccess::PortRange(9000, 9100));
+}
+
+#[test]
+fn allow_listen_wildcard_is_any() {
+    let m = build_manifold(&CliBuilder::default().listen("*").build());
+    assert_eq!(m.listen, ListenAccess::Any);
+}
+
+#[test]
+fn allow_all_grants_listen_any() {
+    let m = build_manifold(&CliBuilder::default().allow_all().build());
+    assert_eq!(m.listen, ListenAccess::Any);
 }
 
 #[test]

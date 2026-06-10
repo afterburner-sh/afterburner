@@ -13,7 +13,7 @@ const HELLO_SOURCE: &str = "module.exports = (d) => d.n + 1\n";
 
 /// SHA-256 of the canonical `hello.afb`. Reproducible build ⇒ this is stable
 /// across machines and Rust versions; the committed fixture must match it.
-const HELLO_DIGEST_HEX: &str = "5868d4ae7011433a933a709f8818fa1eaca88de1d5f0be99c74d930f9794a901";
+const HELLO_DIGEST_HEX: &str = "461344b6ddfd433eafd1ac27eb953eb6c2e2ad6b57b06ac23e38b14f646a88da";
 
 fn hello_manifest() -> Manifest {
     Manifest::parse(

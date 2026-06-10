@@ -70,8 +70,9 @@ pub mod ts;
 pub use afterburner_core::{
     AfterburnerError, BurnCache, BurnCacheBackend, Combustor, EngineMode, EnvAccess, FsAccess,
     FuelGauge, HostContext, HostFunction, HttpMethod, HttpResponse, InMemoryStateStore,
-    InProcessCacheBackend, LogLevel, Manifold, NetAccess, NullHost, OutputValue, RegistryStats,
-    Result, ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore, StateStore, sha256,
+    InProcessCacheBackend, ListenAccess, LogLevel, Manifold, NetAccess, NullHost, OutputValue,
+    RegistryStats, Result, ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore, StateStore,
+    sha256,
 };
 
 // ---- Full sibling-crate re-exports ---------------------------------

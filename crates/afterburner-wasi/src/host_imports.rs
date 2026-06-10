@@ -1278,10 +1278,22 @@ fn wrap_crypto(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         .func_wrap(
             NS,
             "host_http3_listen",
-            |caller: Caller<'_, HostState>, port: u32, server_id: i32| -> i32 {
+            |mut caller: Caller<'_, HostState>, port: u32, server_id: i32| -> i32 {
                 let Some(daemon) = caller.data().daemon_http.clone() else {
                     return crate::daemon_http::LISTEN_ERR_NO_DAEMON;
                 };
+                // Same `listen`-axis gate as `host_http_listen`: the QUIC/UDP
+                // bind is inbound listening and obeys the same port grant.
+                if u16::try_from(port)
+                    .map(|p| !caller.data().manifold.listen.allows(p))
+                    .unwrap_or(true)
+                {
+                    caller.data_mut().last_error = format!(
+                        "permission denied: listen on port {port} is not granted by the manifold \
+                         (grant it via the `listen` capability / --allow-listen)"
+                    );
+                    return crate::daemon_http::LISTEN_ERR_PERMISSION;
+                }
                 let Some((cert, key)) = crate::daemon_http3::take_pending_cert() else {
                     return crate::daemon_http::LISTEN_ERR_IO;
                 };
@@ -3328,6 +3340,17 @@ fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                 if !(1..=65535).contains(&port) {
                     caller.data_mut().last_error = format!("http.listen: invalid port {port}");
                     return E_OTHER;
+                }
+                // The manifold's `listen` axis gates every inbound bind,
+                // exactly like `net` gates outbound requests. Checked
+                // BEFORE the port-claim arbitration so a denied port
+                // never reserves a server_id or claims the port map.
+                if !caller.data().manifold.listen.allows(port as u16) {
+                    caller.data_mut().last_error = format!(
+                        "permission denied: listen on port {port} is not granted by the manifold \
+                         (grant it via the `listen` capability / --allow-listen)"
+                    );
+                    return crate::daemon_http::LISTEN_ERR_PERMISSION;
                 }
                 dh.bind_listener(port as u16)
             },

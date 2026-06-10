@@ -33,8 +33,8 @@ pub enum FsAccess {
     ReadWrite(Vec<PathBuf>),
 }
 
-/// Outbound networking capability. Inbound/listening is never supported —
-/// Afterburner has no event loop and scripts are request/response shaped.
+/// Outbound networking capability. Inbound listening is governed
+/// separately by [`ListenAccess`] — `net` models outbound only.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum NetAccess {
     /// No network access.
@@ -46,6 +46,38 @@ pub enum NetAccess {
     OutboundHttp(Option<Vec<String>>),
     /// Outbound TCP + HTTP. Same allow-list semantics.
     OutboundFull(Option<Vec<String>>),
+}
+
+/// Inbound listening capability — which ports daemon-mode servers
+/// (`http.createServer().listen(port)`, the HTTP/3 listener) may bind.
+/// Checked by the listen host-calls before any socket bind; a denied
+/// port surfaces as `PermissionDenied`, exactly like outbound `net`
+/// and `fs` denials.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ListenAccess {
+    /// No inbound listening. Any `.listen(port)` returns
+    /// `PermissionDenied`.
+    #[default]
+    None,
+    /// Only the listed ports may be bound.
+    Ports(Vec<u16>),
+    /// Any port in the inclusive range `[lo, hi]` may be bound.
+    PortRange(u16, u16),
+    /// Any port. Use only for trusted scripts ([`Manifold::open`]).
+    Any,
+}
+
+impl ListenAccess {
+    /// Whether binding `port` is permitted under this grant.
+    #[must_use]
+    pub fn allows(&self, port: u16) -> bool {
+        match self {
+            Self::None => false,
+            Self::Ports(ports) => ports.contains(&port),
+            Self::PortRange(lo, hi) => (*lo..=*hi).contains(&port),
+            Self::Any => true,
+        }
+    }
 }
 
 /// Process-environment access for `process.env` and `getenv`.
@@ -81,6 +113,12 @@ pub struct Manifold {
     /// callers tighten the budget for SLA-strict scripts or loosen
     /// it for batch jobs.
     pub http_timeout_ms: Option<u64>,
+    /// Inbound listening grant for daemon-mode servers. `#[serde(default)]`
+    /// so manifolds serialized before this axis existed deserialize
+    /// unchanged (absent field = `ListenAccess::None` — sealed stays
+    /// sealed, never widened).
+    #[serde(default)]
+    pub listen: ListenAccess,
 }
 
 impl Manifold {
@@ -96,6 +134,7 @@ impl Manifold {
             env: EnvAccess::None,
             allow_exit: false,
             http_timeout_ms: None,
+            listen: ListenAccess::None,
         }
     }
 
@@ -110,6 +149,7 @@ impl Manifold {
             env: EnvAccess::Full,
             allow_exit: true,
             http_timeout_ms: None,
+            listen: ListenAccess::Any,
         }
     }
 }
@@ -132,6 +172,7 @@ mod tests {
         assert!(!m.child_process);
         assert!(matches!(m.env, EnvAccess::None));
         assert!(!m.allow_exit);
+        assert!(matches!(m.listen, ListenAccess::None));
     }
 
     #[test]
@@ -143,5 +184,85 @@ mod tests {
         assert!(m.child_process);
         assert!(matches!(m.env, EnvAccess::Full));
         assert!(m.allow_exit);
+        assert!(matches!(m.listen, ListenAccess::Any));
+    }
+
+    #[test]
+    fn listen_allows_matches_grant_shapes() {
+        assert!(!ListenAccess::None.allows(80));
+        let ports = ListenAccess::Ports(vec![8080, 9090]);
+        assert!(ports.allows(8080));
+        assert!(ports.allows(9090));
+        assert!(!ports.allows(8081));
+        let range = ListenAccess::PortRange(9000, 9100);
+        assert!(range.allows(9000));
+        assert!(range.allows(9100));
+        assert!(!range.allows(8999));
+        assert!(!range.allows(9101));
+        assert!(ListenAccess::Any.allows(1));
+        assert!(ListenAccess::Any.allows(65535));
+    }
+
+    #[test]
+    fn listen_serde_roundtrips_every_variant() {
+        for v in [
+            ListenAccess::None,
+            ListenAccess::Ports(vec![9090]),
+            ListenAccess::Ports(vec![80, 443, 8080]),
+            ListenAccess::PortRange(9000, 9100),
+            ListenAccess::Any,
+        ] {
+            let json = serde_json::to_string(&v).expect("serialize");
+            let back: ListenAccess = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(v, back, "roundtrip drift for {json}");
+        }
+    }
+
+    #[test]
+    fn listen_serde_is_externally_tagged_like_the_other_axes() {
+        // The wire shapes are part of the `.afb` digest contract — pin them.
+        assert_eq!(
+            serde_json::to_string(&ListenAccess::None).expect("ser"),
+            r#""None""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ListenAccess::Ports(vec![9090])).expect("ser"),
+            r#"{"Ports":[9090]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ListenAccess::PortRange(9000, 9100)).expect("ser"),
+            r#"{"PortRange":[9000,9100]}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ListenAccess::Any).expect("ser"),
+            r#""Any""#
+        );
+    }
+
+    #[test]
+    fn manifold_without_listen_field_parses_as_none() {
+        // Manifolds serialized before the listen axis existed must
+        // deserialize unchanged: absent field = None (never widened).
+        let legacy = r#"{
+            "fs": "None",
+            "net": "None",
+            "crypto": false,
+            "child_process": false,
+            "env": "None",
+            "allow_exit": false,
+            "http_timeout_ms": null
+        }"#;
+        let m: Manifold = serde_json::from_str(legacy).expect("legacy manifold parses");
+        assert_eq!(m, Manifold::sealed());
+        assert!(matches!(m.listen, ListenAccess::None));
+    }
+
+    #[test]
+    fn manifold_listen_roundtrips_through_json() {
+        let mut m = Manifold::sealed();
+        m.listen = ListenAccess::PortRange(18200, 18210);
+        let json = serde_json::to_string(&m).expect("serialize");
+        let back: Manifold = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(m, back);
     }
 }

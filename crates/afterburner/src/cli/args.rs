@@ -79,6 +79,15 @@ pub struct Cli {
           value_parser = super::manifold::parse_allow_net_arg)]
     pub allow_net: Option<String>,
 
+    /// Grant inbound listening (daemon-mode `http.createServer().listen`,
+    /// HTTP/3). Values: `*` = any port; `8080,9090` = comma-separated
+    /// port allow-list; `9000-9100` = an inclusive port range. Without
+    /// this flag (inside a sandbox) all listening is denied
+    /// (`PermissionDenied`).
+    #[arg(long = "allow-listen", value_name = "PORTS", global = true,
+          value_parser = super::manifold::parse_allow_listen_arg)]
+    pub allow_listen: Option<String>,
+
     /// Grant read+write filesystem access. Values: `*` = entire FS;
     /// `/var/data,/tmp/workspace` = comma-separated root allow-list.
     #[arg(long = "allow-fs", value_name = "PATHS", global = true)]

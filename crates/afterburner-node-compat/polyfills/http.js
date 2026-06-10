@@ -367,11 +367,20 @@ function __plenum_install_http(moduleName) {
                 var id = globalThis.__host_http_listen(port);
                 if (id <= 0) {
                     // B2b: -1 = no daemon (EACCES), -2 = EADDRINUSE,
-                    // -3 = other IO. Node emits 'error' async — we
-                    // match so `server.on('error', …)` handlers run.
+                    // -3 = other IO, -4 = manifold listen denial
+                    // (EACCES with the host's permission-denied
+                    // detail). Node emits 'error' async — we match so
+                    // `server.on('error', …)` handlers run.
                     queueMicrotask(function() {
-                        var err = new Error('http.listen failed (code ' + id + ')');
-                        if (id === -1) err.code = 'EACCES';
+                        var msg = 'http.listen failed (code ' + id + ')';
+                        if (id === -4 && typeof globalThis.__host_last_error === 'function') {
+                            try {
+                                var detail = globalThis.__host_last_error();
+                                if (detail) msg = 'http.listen: ' + detail;
+                            } catch (_) {}
+                        }
+                        var err = new Error(msg);
+                        if (id === -1 || id === -4) err.code = 'EACCES';
                         else if (id === -2) err.code = 'EADDRINUSE';
                         else err.code = 'EIO';
                         err.port = port;

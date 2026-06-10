@@ -683,6 +683,7 @@ fn forwarded_flags(cli: &Cli) -> Vec<String> {
     }
     for (flag, val) in [
         ("--allow-net", &cli.allow_net),
+        ("--allow-listen", &cli.allow_listen),
         ("--allow-fs", &cli.allow_fs),
         ("--allow-env", &cli.allow_env),
         ("--allow-fs-read", &cli.allow_fs_read),

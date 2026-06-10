@@ -98,6 +98,7 @@ Deno-style capability grants (deny by default):
 
 ```bash
 burn --allow-net=api.example.com,*.trusted.io script.js
+burn --allow-listen=8080 server.js         # inbound: port list or a lo-hi range
 burn --allow-fs=/tmp,/var/data etl.js
 burn --allow-env=HOME,PATH launcher.js
 burn -A runall.js                          # grant everything

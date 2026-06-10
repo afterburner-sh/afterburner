@@ -28,7 +28,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use engine::Combustor;
 pub use error::{AfterburnerError, Result};
 pub use host::{HostContext, HostFunction, HttpMethod, HttpResponse, LogLevel, NullHost};
-pub use manifold::{EnvAccess, FsAccess, Manifold, NetAccess};
+pub use manifold::{EnvAccess, FsAccess, ListenAccess, Manifold, NetAccess};
 pub use registry::{BurnCache, BurnCacheBackend, InProcessCacheBackend, RegistryStats, hex32};
 pub use state_store::{InMemoryStateStore, SharedStateStore, StateStore};
 pub use types::{
