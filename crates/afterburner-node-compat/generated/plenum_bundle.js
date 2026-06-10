@@ -1552,7 +1552,36 @@ __register_module('buffer', function(module, exports, require) {
         return a;
     })();
 
+    // Host-native base64 bridges (raw-byte framing). Present whenever
+    // the runtime installs the codec globals; the interpreter-side
+    // implementations below stay as the fallback for other embeddings
+    // and for inputs the host's stricter decoder rejects.
+    var hostB64Encode = typeof __host_b64_encode === 'function' ? __host_b64_encode : null;
+    var hostB64Decode = typeof __host_b64_decode === 'function' ? __host_b64_decode : null;
+
     function b64Encode(bytes) {
+        if (hostB64Encode && bytes.length > 0) {
+            try { return hostB64Encode(bytes); } catch (_) { /* fall back */ }
+        }
+        return b64EncodeJs(bytes);
+    }
+
+    function b64Decode(str) {
+        str = String(str);
+        if (hostB64Decode) {
+            // First attempt: the raw input. Covers canonical payloads
+            // (padded or not) without an O(n) sanitize pass.
+            try { return hostB64Decode(str); } catch (_) { /* sanitize */ }
+            // Second attempt: strip characters outside the standard
+            // alphabet (whitespace, line breaks, data-URL noise) the
+            // same way the interpreter path does, then retry.
+            var clean = str.replace(/[^A-Za-z0-9+/=]/g, '');
+            try { return hostB64Decode(clean); } catch (_) { /* fall back */ }
+        }
+        return b64DecodeJs(str);
+    }
+
+    function b64EncodeJs(bytes) {
         // Bulk-encode by chunk into an array, join once at the end.
         // QuickJS's `+=` string concat creates a fresh string per
         // step which goes quadratic on multi-KB inputs (50 KB took
@@ -1591,7 +1620,7 @@ __register_module('buffer', function(module, exports, require) {
         return chunks.join('');
     }
 
-    function b64Decode(str) {
+    function b64DecodeJs(str) {
         str = String(str).replace(/[^A-Za-z0-9+/=]/g, '');
         var pad = 0;
         if (str.charAt(str.length - 1) === '=') pad++;

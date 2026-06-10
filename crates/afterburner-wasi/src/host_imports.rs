@@ -52,6 +52,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_http(linker)?;
     wrap_dns(linker)?;
     wrap_zlib(linker)?;
+    wrap_b64(linker)?;
     wrap_state(linker)?;
     wrap_host_context(linker)?;
     wrap_last_error(linker)?;
@@ -2900,6 +2901,88 @@ fn wrap_zlib(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
             )
             .map_err(link_err)?;
     }
+    Ok(())
+}
+
+// ---- base64 codec (no manifold gate) --------------------------------------
+//
+// Unlike the zlib bridges (whose JS-visible API is string-shaped, so they
+// frame bytes as base64 on the wire), these two imports *implement* the
+// guest's base64 fast path — double-encoding would defeat their purpose.
+// They therefore use raw framing: `encode` reads raw bytes from guest
+// memory and writes the ASCII encoding into the out region; `decode`
+// reads ASCII and writes raw bytes back. Output sizes are exactly
+// computable from input sizes, so the guest allocates exact-fit buffers
+// and no retry-doubling protocol is needed.
+
+/// Lenient decode engine: accepts both padded and unpadded input and
+/// tolerates non-canonical trailing bits, matching the forgiving decode
+/// semantics scripts expect from `Buffer.from(str, 'base64')`. Inputs
+/// containing characters outside the standard alphabet still fail; the
+/// guest falls back to its interpreter-side decoder for those.
+const B64_LENIENT: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    base64::engine::GeneralPurposeConfig::new()
+        .with_decode_allow_trailing_bits(true)
+        .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+);
+
+fn wrap_b64(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    linker
+        .func_wrap(
+            NS,
+            "host_b64_encode",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32,
+             len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                // Encode straight off the guest-memory slice — no input
+                // copy. The borrow ends before `write_out` needs `&mut`.
+                let encoded = {
+                    let Some(input) = guest_slice(&memory, &caller, ptr, len) else {
+                        return E_OTHER;
+                    };
+                    B64.encode(input)
+                };
+                write_out(&mut caller, &memory, out_ptr, out_cap, encoded.as_bytes())
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_b64_decode",
+            |mut caller: Caller<'_, HostState>,
+             ptr: i32,
+             len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let decoded = {
+                    let Some(input) = guest_slice(&memory, &caller, ptr, len) else {
+                        return E_OTHER;
+                    };
+                    B64_LENIENT.decode(input)
+                };
+                match decoded {
+                    Ok(bytes) => write_out(&mut caller, &memory, out_ptr, out_cap, &bytes),
+                    Err(e) => {
+                        record(&mut caller, &format!("base64 decode: {e}"));
+                        E_OTHER
+                    }
+                }
+            },
+        )
+        .map_err(link_err)?;
     Ok(())
 }
 
@@ -6194,6 +6277,21 @@ fn read_str(memory: &Memory, caller: &Caller<'_, HostState>, ptr: i32, len: i32)
     let data = memory.data(caller);
     let slice = data.get((ptr as usize)..((ptr + len) as usize))?;
     std::str::from_utf8(slice).ok().map(String::from)
+}
+
+/// Borrow a `(ptr, len)` region of guest memory without copying.
+/// Treats `ptr` / `len` as unsigned (wasm32 addresses) and bounds-checks
+/// with overflow-safe arithmetic — large payloads high in linear memory
+/// must not wrap the range computation.
+fn guest_slice<'a>(
+    memory: &Memory,
+    caller: &'a Caller<'_, HostState>,
+    ptr: i32,
+    len: i32,
+) -> Option<&'a [u8]> {
+    let start = ptr as u32 as usize;
+    let end = start.checked_add(len as u32 as usize)?;
+    memory.data(caller).get(start..end)
 }
 
 fn read_bytes(

@@ -362,6 +362,18 @@ unsafe extern "C" {
         out_cap: u32,
     ) -> i32;
 
+    // ---- base64 codec -------------------------------------------------
+    //
+    // Raw framing (NOT base64-of-base64): `encode` takes raw bytes and
+    // writes the ASCII encoding; `decode` takes ASCII and writes raw
+    // bytes. Output sizes are exactly computable from input sizes
+    // (encode: 4·⌈n/3⌉; decode: ≤ ⌊n/4⌋·3), so callers allocate
+    // exact-fit buffers — no `-4` retry loop on this pair.
+    pub fn host_b64_encode(in_ptr: *const u8, in_len: u32, out_ptr: *mut u8, out_cap: u32)
+    -> i32;
+    pub fn host_b64_decode(in_ptr: *const u8, in_len: u32, out_ptr: *mut u8, out_cap: u32)
+    -> i32;
+
     // ---- sign / verify (RSA + ECDSA) --------------------------------
     //
     // Key passed as PEM string; data + sig base64 over the wire to keep

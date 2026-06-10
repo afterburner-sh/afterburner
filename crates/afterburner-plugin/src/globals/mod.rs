@@ -19,6 +19,7 @@
 //!    which builds `require()` and the Node-stdlib modules on top of
 //!    the bridges — so the bridges MUST exist first.
 
+mod codec;
 mod columnar;
 mod crypto;
 mod fs;
@@ -94,6 +95,7 @@ pub fn install(ctx: Ctx<'_>) {
     fs::install(&globals);
     crypto::install(&globals);
     misc::install(&globals);
+    codec::install(&globals);
     columnar::install(&globals);
 
     // Eval the plenum bundle so Wizer preinit captures `require()` and
