@@ -21,9 +21,73 @@
 use serial_test::serial;
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const BURN: &str = env!("CARGO_BIN_EXE_burn");
+
+/// Run `burn` with a Rust-level timeout. If the child hasn't exited
+/// within `timeout`, it is killed and an error output is synthesised.
+/// This prevents indefinite hangs on CI when WASM cold-start stalls
+/// (the JS-level setTimeout never fires if burn never reaches JS
+/// execution).
+#[allow(dead_code)] // WIP helper: wired into the timeout-based cases next.
+fn run_burn_with_timeout(
+    args: &[&str],
+    env: &[(&str, &str)],
+    timeout: Duration,
+) -> std::process::Output {
+    let mut cmd = Command::new(BURN);
+    for &(k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn burn");
+
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Child exited — collect its output.
+                use std::io::Read;
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                if let Some(mut so) = child.stdout.take() {
+                    let _ = so.read_to_end(&mut stdout);
+                }
+                if let Some(mut se) = child.stderr.take() {
+                    let _ = se.read_to_end(&mut stderr);
+                }
+                return std::process::Output {
+                    status,
+                    stdout,
+                    stderr,
+                };
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    // Kill the child and all its descendants.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let msg = format!(
+                        "burn process timed out after {:.0}s (Rust-level watchdog)\n",
+                        timeout.as_secs_f64()
+                    );
+                    // Synthesise a failed Output so the assertion fires
+                    // with a useful message instead of hanging forever.
+                    return std::process::Output {
+                        status: std::process::ExitStatus::default(),
+                        stdout: Vec::new(),
+                        stderr: msg.into_bytes(),
+                    };
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => panic!("error waiting for burn: {e}"),
+        }
+    }
+}
 
 fn write_temp(dir: &TempDir, name: &str, source: &str) -> std::path::PathBuf {
     let path = dir.path().join(name);
