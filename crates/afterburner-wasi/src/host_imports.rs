@@ -1510,7 +1510,101 @@ fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 let m = caller.data().manifold.clone();
                 match http_host::request(&method, &url, &[], body.as_deref(), &m) {
                     Ok(resp) => {
-                        let body_text = String::from_utf8_lossy(&resp.body).into_owned();
+                        // Binary bodies must not be lossy-stringified into the envelope:
+                        // U+FFFD replacement trebles random bytes and double-encodes
+                        // alongside body_b64, blowing the guest read cap on large
+                        // responses. body_b64 is authoritative for non-UTF-8 bodies.
+                        let body_text = match std::str::from_utf8(&resp.body) {
+                            Ok(s) => s.to_owned(),
+                            Err(_) => String::new(),
+                        };
+                        let body_b64 = B64.encode(&resp.body);
+                        let json = format!(
+                            r#"{{"status":{},"body":{},"body_b64":{}}}"#,
+                            resp.status,
+                            js_string_literal(&body_text),
+                            js_string_literal(&body_b64),
+                        );
+                        write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
+                    }
+                    Err(e) => map_err(&mut caller, e),
+                }
+            },
+        )
+        .map_err(link_err)?;
+
+    // v2 request path: carries request HEADERS (the legacy import drops
+    // them) and frames the body as base64 — arbitrary bytes cannot cross
+    // the JS string boundary unmangled (lone surrogates / UTF-8 coercion),
+    // so the guest encodes and this import decodes immediately before the
+    // request. The wire body is the exact original bytes; headers arrive
+    // as a JSON object of name→value.
+    linker
+        .func_wrap(
+            NS,
+            "host_http_request_v2",
+            |mut caller: Caller<'_, HostState>,
+             method_ptr: i32,
+             method_len: i32,
+             url_ptr: i32,
+             url_len: i32,
+             headers_ptr: i32,
+             headers_len: i32,
+             body_b64_ptr: i32,
+             body_b64_len: i32,
+             out_ptr: i32,
+             out_cap: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return E_OTHER;
+                };
+                let method = match read_str(&memory, &caller, method_ptr, method_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let url = match read_str(&memory, &caller, url_ptr, url_len) {
+                    Some(s) => s,
+                    None => return E_OTHER,
+                };
+                let headers: Vec<(String, String)> = if headers_len > 0 {
+                    let raw = match read_str(&memory, &caller, headers_ptr, headers_len) {
+                        Some(s) => s,
+                        None => return E_OTHER,
+                    };
+                    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
+                    {
+                        Ok(map) => map
+                            .into_iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+                            .collect(),
+                        Err(_) => return E_OTHER,
+                    }
+                } else {
+                    Vec::new()
+                };
+                let body = if body_b64_len > 0 {
+                    let b64 = match read_bytes(&memory, &caller, body_b64_ptr, body_b64_len) {
+                        Some(b) => b,
+                        None => return E_OTHER,
+                    };
+                    match B64.decode(&b64) {
+                        Ok(decoded) => Some(decoded),
+                        Err(_) => return E_OTHER,
+                    }
+                } else {
+                    None
+                };
+                let m = caller.data().manifold.clone();
+                match http_host::request(&method, &url, &headers, body.as_deref(), &m) {
+                    Ok(resp) => {
+                        // Binary bodies must not be lossy-stringified into the envelope:
+                        // U+FFFD replacement trebles random bytes and double-encodes
+                        // alongside body_b64, blowing the guest read cap on large
+                        // responses. body_b64 is authoritative for non-UTF-8 bodies.
+                        let body_text = match std::str::from_utf8(&resp.body) {
+                            Ok(s) => s.to_owned(),
+                            Err(_) => String::new(),
+                        };
                         let body_b64 = B64.encode(&resp.body);
                         let json = format!(
                             r#"{{"status":{},"body":{},"body_b64":{}}}"#,

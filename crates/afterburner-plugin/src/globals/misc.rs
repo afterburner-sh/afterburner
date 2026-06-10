@@ -1409,6 +1409,38 @@ fn install_http_dns<'js>(globals: &Object<'js>) {
         ),
     );
 
+    // v2 request path: headers travel as a JSON object; the body is
+    // base64-framed (raw bytes cannot cross the JS string boundary
+    // unmangled) and the host sends the exact original bytes.
+    let _ = globals.set(
+        "__host_http_request_v2",
+        Func::from(
+            |method: String, url: String, headers_json: String, body_b64: String| -> String {
+                let mb = method.as_bytes();
+                let ub = url.as_bytes();
+                let hb = headers_json.as_bytes();
+                let bb = body_b64.as_bytes();
+                match call_read(|out, cap| unsafe {
+                    host_http_request_v2(
+                        mb.as_ptr(),
+                        mb.len() as u32,
+                        ub.as_ptr(),
+                        ub.len() as u32,
+                        hb.as_ptr(),
+                        hb.len() as u32,
+                        bb.as_ptr(),
+                        bb.len() as u32,
+                        out,
+                        cap,
+                    )
+                }) {
+                    Ok(s) => s,
+                    Err(e) => format!(r#"{{"status":0,"body":"__HOST_ERR__:{e}"}}"#),
+                }
+            },
+        ),
+    );
+
     // Async variant: returns req_id immediately as a number
     // (`-1` when no daemon is attached so the JS shim falls back
     // to the sync path). Response delivery is event-driven via
