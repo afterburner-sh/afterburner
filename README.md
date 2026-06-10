@@ -138,7 +138,7 @@ release** (its per-version Change Date). Versions released *before* the relicens
 
 The Apache-2.0 components shipped alongside the engine — everything under
 `examples/` (see [`examples/LICENSE`](examples/LICENSE)), plus the planned
-`afterburner-afb`, `pg_burn`, and `psila/*` packages — are Apache-2.0 via
+`afterburner-afb` and `psila/*` packages — are Apache-2.0 via
 their own `LICENSE` / `license` metadata and **not** subject to the BSL.
 
 **Free for non-commercial and non-production use.** Individuals on personal
