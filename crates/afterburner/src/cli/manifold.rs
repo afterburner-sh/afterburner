@@ -44,6 +44,7 @@ pub fn build_manifold(cli: &Cli) -> Manifold {
         || cli.allow_fs_write.is_some()
         || cli.allow_child_process
         || cli.allow_worker
+        || cli.allow_crypto
         || cli.permission;
     let explicit_sandbox = cli.sandbox || any_allow;
     if !explicit_sandbox {
@@ -108,6 +109,10 @@ pub fn build_manifold(cli: &Cli) -> Manifold {
         };
     }
 
+    if cli.allow_crypto {
+        m.crypto = true;
+    }
+
     m
 }
 
@@ -140,6 +145,7 @@ pub fn is_implicit_open(cli: &Cli) -> bool {
         || cli.allow_fs_write.is_some()
         || cli.allow_child_process
         || cli.allow_worker
+        || cli.allow_crypto
         || cli.permission;
     !(cli.sandbox || any_allow)
 }

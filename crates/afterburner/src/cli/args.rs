@@ -149,6 +149,13 @@ pub struct Cli {
     #[arg(long = "allow-worker", global = true)]
     pub allow_worker: bool,
 
+    /// Grant the crypto capability (`crypto.createHash`/`createHmac`/
+    /// ciphers/SubtleCrypto) inside an explicit sandbox. Without any
+    /// `--allow-*`/`--sandbox` flag the CLI is open and crypto already
+    /// works; once a sandbox is in effect it must be granted back.
+    #[arg(long = "allow-crypto", global = true)]
+    pub allow_crypto: bool,
+
     /// **Internal — set only by `worker_threads`.** Marks this `burn`
     /// invocation as a worker child: read the init frame off stdin,
     /// expose `parentPort`, and pump frames over stdin/stdout per the
