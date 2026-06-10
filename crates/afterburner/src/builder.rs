@@ -384,6 +384,7 @@ pub struct AfterburnerBuilder {
     host_context: Option<Arc<dyn HostContext>>,
     state_store: Option<SharedStateStore>,
     cache_backend: Option<Arc<dyn BurnCacheBackend>>,
+    compile_cache_dir: Option<PathBuf>,
     cwd: Option<PathBuf>,
     /// Optional shard count for daemon-mode (multi-shard pool).
     /// `None` → `available_parallelism()` at daemon spawn time.
@@ -429,6 +430,7 @@ impl fmt::Debug for AfterburnerBuilder {
             .field("host_context", &self.host_context.is_some())
             .field("state_store", &self.state_store.is_some())
             .field("cache_backend", &self.cache_backend.is_some())
+            .field("compile_cache_dir", &self.compile_cache_dir)
             .finish_non_exhaustive()
     }
 }
@@ -480,6 +482,24 @@ impl AfterburnerBuilder {
     /// Attach a shared (cluster-wide) bytecode/source cache backend.
     pub fn cache_backend(mut self, backend: Arc<dyn BurnCacheBackend>) -> Self {
         self.cache_backend = Some(backend);
+        self
+    }
+
+    /// Enable the on-disk compilation cache for the WASM backend,
+    /// rooted at `dir` (must be an absolute path).
+    ///
+    /// The sandbox's native-code compilation is persisted there and
+    /// reused by every later engine construction in any process —
+    /// removing the cold-start compile cost for short-lived or
+    /// freshly-forked embedders. Entries are keyed by module contents,
+    /// compiler configuration, and runtime version, so upgrades miss
+    /// cleanly; corrupt or stale files are ignored and recompiled.
+    /// If the cache cannot be initialised (e.g. unwritable directory)
+    /// the engine logs a warning and proceeds without it — this is an
+    /// optimisation only and never affects correctness or sandbox
+    /// behaviour. Ignored by the `native` mode (nothing to cache).
+    pub fn compile_cache_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.compile_cache_dir = Some(dir.into());
         self
     }
 
@@ -614,8 +634,12 @@ impl AfterburnerBuilder {
 
         // Build the concrete combustor for the chosen mode. `host_context`
         // and `state_store` thread through per-backend constructors.
-        let combustor: Box<dyn Combustor> =
-            build_combustor(mode, state_store.clone(), self.host_context.clone())?;
+        let combustor: Box<dyn Combustor> = build_combustor(
+            mode,
+            state_store.clone(),
+            self.host_context.clone(),
+            self.compile_cache_dir.clone(),
+        )?;
 
         let mut cache = BurnCache::new(combustor);
         if let Some(b) = self.cache_backend.clone() {
@@ -640,13 +664,14 @@ fn build_combustor(
     mode: Mode,
     state_store: SharedStateStore,
     host_context: Option<Arc<dyn HostContext>>,
+    compile_cache_dir: Option<PathBuf>,
 ) -> Result<Box<dyn Combustor>> {
     match mode {
         Mode::Native => build_native(state_store, host_context),
         #[cfg(feature = "wasm")]
-        Mode::Wasm => build_wasm(state_store, host_context),
+        Mode::Wasm => build_wasm(state_store, host_context, compile_cache_dir),
         #[cfg(feature = "adaptive")]
-        Mode::Adaptive => build_adaptive(state_store, host_context),
+        Mode::Adaptive => build_adaptive(state_store, host_context, compile_cache_dir),
     }
 }
 
@@ -676,11 +701,13 @@ fn build_native(
 fn build_wasm(
     state_store: SharedStateStore,
     host_context: Option<Arc<dyn HostContext>>,
+    compile_cache_dir: Option<PathBuf>,
 ) -> Result<Box<dyn Combustor>> {
     let cfg = afterburner_wasi::WasmConfig {
         state_store: Some(state_store),
         host_context,
         transpile_hook: None,
+        compile_cache_dir,
     };
     Ok(Box::new(afterburner_wasi::WasmCombustor::new(cfg)?))
 }
@@ -689,11 +716,13 @@ fn build_wasm(
 fn build_adaptive(
     state_store: SharedStateStore,
     host_context: Option<Arc<dyn HostContext>>,
+    compile_cache_dir: Option<PathBuf>,
 ) -> Result<Box<dyn Combustor>> {
     let cfg = afterburner_wasi::WasmConfig {
         state_store: Some(state_store),
         host_context,
         transpile_hook: None,
+        compile_cache_dir,
     };
     Ok(Box::new(
         afterburner_adaptive::AdaptiveCombustor::with_wasm_config(cfg)?,
@@ -787,6 +816,7 @@ impl ThreadedBuilder {
             state_store: Some(state_store.clone()),
             host_context: self.parent.host_context.clone(),
             transpile_hook: None,
+            compile_cache_dir: self.parent.compile_cache_dir.clone(),
         };
 
         let cfg = afterburner_thrust::ThrustEngineConfig {

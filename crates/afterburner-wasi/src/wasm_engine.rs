@@ -151,6 +151,21 @@ pub struct WasmConfig {
     /// parse failure). The CLI wires this to oxc-backed transpile
     /// when built with the `ts` feature.
     pub transpile_hook: Option<crate::host::TranspileFn>,
+    /// Optional directory (absolute path) for wasmtime's on-disk
+    /// compilation cache. When set, the plugin module's native-code
+    /// compilation is persisted there and reused by every subsequent
+    /// `WasmCombustor::new` in any process — removing the cold-start
+    /// compile cost for short-lived or freshly-forked embedders.
+    ///
+    /// Entries are keyed by module contents + compiler configuration +
+    /// wasmtime version, so engine upgrades and config changes miss
+    /// cleanly (old entries are evicted by wasmtime's size-bounded
+    /// cleanup worker). Corrupt or stale files are ignored and
+    /// recompiled, never fatal. If the cache cannot be initialised
+    /// (e.g. unwritable directory), the engine logs a warning and
+    /// proceeds without a cache — this knob is purely an optimisation
+    /// and never affects correctness.
+    pub compile_cache_dir: Option<std::path::PathBuf>,
 }
 
 /// Cached payload for a registered script. Built once in `ignite` so
@@ -221,7 +236,7 @@ pub struct WasmCombustor {
 
 impl WasmCombustor {
     pub fn new(config: WasmConfig) -> Result<Self> {
-        let engine = build_engine()?;
+        let engine = build_engine(config.compile_cache_dir.as_deref())?;
         let plugin_module = Module::new(&engine, PLUGIN_BYTES)
             .map_err(|e| AfterburnerError::Engine(format!("plugin module: {e}")))?;
 
@@ -658,6 +673,28 @@ impl Drop for WasmCombustor {
 ///
 /// * `consume_fuel(true)` and `epoch_interruption(true)` — required for
 ///   per-call fuel + wall-clock bounds. Available on every platform.
+///
+///   Fuel instrumentation is **unconditional by necessity**, and taxes
+///   even calls that run with an unlimited budget (`fuel: None` →
+///   `set_fuel(u64::MAX)`). `consume_fuel` is an engine-level codegen
+///   flag: the decrement-and-check sequence is baked into the compiled
+///   machine code, so there is no per-`Store` off switch — and this one
+///   `Engine` (plus its single compiled plugin `Module` / `InstancePre`)
+///   is shared by every execution path regardless of budget: bounded
+///   UDF calls, unlimited compile-mode stores, and long-lived daemon
+///   stores all instantiate from it. Measured overhead on guest-CPU-
+///   bound work (release CLI, 3e7-iteration interpreted JS loop):
+///   ~5.5 s with fuel vs ~4.5 s without — roughly a 19 % tax. Making it
+///   conditional would mean a second `Engine` with `consume_fuel(false)`
+///   plus a second module compile and `InstancePre`, routed per call on
+///   `limits.fuel.is_some()`: double the cold-start compile (and double
+///   the on-disk compile-cache footprint, since cache entries are keyed
+///   by compiler configuration), double the pooling allocator's virtual
+///   reservation, and a second epoch-ticker target. That trade is not
+///   worth ~19 % on the unmetered path today, especially now that the
+///   dominant guest-side O(n) hot paths (base64, zlib, crypto, hashing)
+///   are host-hoisted and burn no fuel at all. Revisit if profiling
+///   shows interpreter-bound unmetered workloads dominating again.
 /// * `memory_init_cow(true)` — re-initialize linear memory via copy-on-
 ///   write page mapping. Cross-platform; on Windows the implementation
 ///   uses file-backed sections and is functionally equivalent.
@@ -677,7 +714,12 @@ impl Drop for WasmCombustor {
 /// platform-specific would be runtime-probed here and silently fall
 /// back if unsupported. None are currently enabled — the defaults above
 /// already saturate commodity hardware throughput.
-fn build_engine() -> Result<Engine> {
+///
+/// `compile_cache_dir` (see [`WasmConfig::compile_cache_dir`]) enables
+/// wasmtime's on-disk compilation cache rooted at the given absolute
+/// path. Cache initialisation failure is downgraded to a warning — the
+/// cache is an optimisation, never a correctness dependency.
+fn build_engine(compile_cache_dir: Option<&std::path::Path>) -> Result<Engine> {
     let mut config = Config::new();
     config
         .consume_fuel(true)
@@ -685,6 +727,22 @@ fn build_engine() -> Result<Engine> {
         .memory_init_cow(true)
         .cranelift_opt_level(OptLevel::Speed)
         .parallel_compilation(true);
+
+    if let Some(dir) = compile_cache_dir {
+        let mut cache_config = wasmtime::CacheConfig::new();
+        cache_config.with_directory(dir);
+        match wasmtime::Cache::new(cache_config) {
+            Ok(cache) => {
+                config.cache(Some(cache));
+            }
+            Err(e) => ab_event!(
+                Level::Warn,
+                "wasm.engine.compile_cache_disabled",
+                "dir" => dir.display().to_string(),
+                "error" => e.to_string(),
+            ),
+        }
+    }
 
     let mut pool = PoolingAllocationConfig::default();
     pool.total_core_instances(POOL_TOTAL_MEMORIES);
