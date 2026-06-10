@@ -14,7 +14,7 @@ Versions released before the relicense (git tag `last-apache-2.0`) were never
 under the BSL and are licensed under the Apache License, Version 2.0.
 
 Apache-2.0 components shipped alongside the engine — everything under
-examples/ (see examples/LICENSE), and the afterburner-afb and psila/*
+examples/ (see examples/LICENSE), and the afterburner-afb and burn/*
 packages — are licensed under Apache-2.0 via their own LICENSE /
 `license` metadata and are not subject to the Business Source License.
 

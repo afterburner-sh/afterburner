@@ -117,15 +117,15 @@ mod tests {
     fn round_trips_through_toml() {
         let mut selected = BTreeMap::new();
         selected.insert(
-            "psila/a".to_string(),
+            "burn/a".to_string(),
             SelectedPkg {
                 version: Version::parse("1.2.0").unwrap(),
                 digest: "aa".to_string(),
-                deps: vec!["psila/b".to_string()],
+                deps: vec!["burn/b".to_string()],
             },
         );
         selected.insert(
-            "psila/b".to_string(),
+            "burn/b".to_string(),
             SelectedPkg {
                 version: Version::parse("0.3.1").unwrap(),
                 digest: "bb".to_string(),
@@ -133,7 +133,7 @@ mod tests {
             },
         );
         let res = Resolution {
-            order: vec!["psila/b".into(), "psila/a".into()],
+            order: vec!["burn/b".into(), "burn/a".into()],
             selected,
         };
 
@@ -145,12 +145,12 @@ mod tests {
         assert!(
             back.packages
                 .iter()
-                .any(|p| p.name == "psila/a" && p.digest == "sha256:aa")
+                .any(|p| p.name == "burn/a" && p.digest == "sha256:aa")
         );
         assert_eq!(
             back.fetch_set()
                 .iter()
-                .find(|(n, _)| n == "psila/a")
+                .find(|(n, _)| n == "burn/a")
                 .unwrap()
                 .1,
             "aa"

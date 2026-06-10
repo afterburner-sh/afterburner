@@ -212,7 +212,7 @@ version = "1.0"
 
 [package]
 name = "anthropic"
-namespace = "psila"
+namespace = "burn"
 version = "1.4.0"
 language = "js"
 entry = "source/main.js"
@@ -355,11 +355,11 @@ min = "0.1.0"
     #[test]
     fn dependencies_roundtrip() {
         let src = format!(
-            "{good}\n[dependencies]\n\"psila/http-helpers\" = \"sha256:aabb\"\n",
+            "{good}\n[dependencies]\n\"burn/http-helpers\" = \"sha256:aabb\"\n",
             good = good()
         );
         let m = Manifest::parse(&src).unwrap();
-        assert_eq!(m.dependencies["psila/http-helpers"], "sha256:aabb");
+        assert_eq!(m.dependencies["burn/http-helpers"], "sha256:aabb");
         assert_eq!(Manifest::parse(&m.to_toml_string().unwrap()).unwrap(), m);
     }
 }

@@ -19,7 +19,7 @@ const SRC: &str = "module.exports = (d) => d.n + 1\n";
 fn body(version: &str, fmt_extra: &str, pkg_extra: &str, sections: &str) -> String {
     format!(
         "[format]\nversion = \"{version}\"\n{fmt_extra}\n\
-         [package]\nname = \"hello\"\nnamespace = \"psila\"\nversion = \"0.1.0\"\n\
+         [package]\nname = \"hello\"\nnamespace = \"burn\"\nversion = \"0.1.0\"\n\
          language = \"js\"\nentry = \"source/main.js\"\n{pkg_extra}\n\
          [runtime]\nmin = \"0.1.0\"\n{sections}"
     )

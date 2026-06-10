@@ -81,16 +81,16 @@ mod tests {
 
     #[test]
     fn parses_full_coordinate() {
-        let c = Coord::parse("psila/anthropic@0.1.0").unwrap();
-        assert_eq!(c.namespace, "psila");
+        let c = Coord::parse("burn/anthropic@0.1.0").unwrap();
+        assert_eq!(c.namespace, "burn");
         assert_eq!(c.name, "anthropic");
         assert_eq!(c.version.as_deref(), Some("0.1.0"));
-        assert_eq!(c.qualified(), "psila/anthropic");
+        assert_eq!(c.qualified(), "burn/anthropic");
     }
 
     #[test]
     fn parses_without_version() {
-        let c = Coord::parse("psila/anthropic").unwrap();
+        let c = Coord::parse("burn/anthropic").unwrap();
         assert!(c.version.is_none());
     }
 
@@ -100,15 +100,15 @@ mod tests {
             Coord::parse("anthropic"),
             Err(CloudError::BadCoord(_))
         ));
-        let c = Coord::parse_or_default_ns("anthropic", Some("psila")).unwrap();
-        assert_eq!(c.namespace, "psila");
+        let c = Coord::parse_or_default_ns("anthropic", Some("burn")).unwrap();
+        assert_eq!(c.namespace, "burn");
         assert_eq!(c.name, "anthropic");
     }
 
     #[test]
     fn rejects_bad_identifiers_and_versions() {
-        assert!(Coord::parse("Psila/Anthropic").is_err());
-        assert!(Coord::parse("psila/anthropic@not-semver").is_err());
-        assert!(Coord::parse("psila/").is_err());
+        assert!(Coord::parse("Burn/Anthropic").is_err());
+        assert!(Coord::parse("burn/anthropic@not-semver").is_err());
+        assert!(Coord::parse("burn/").is_err());
     }
 }

@@ -19,7 +19,7 @@ fn search_parses_results() {
         then.status(200).json_body(json!({
             "count": 1,
             "packages": [{
-                "namespace": "psila", "name": "anthropic", "description": "Claude",
+                "namespace": "burn", "name": "anthropic", "description": "Claude",
                 "downloads": 12, "keywords": ["llm"], "latest": "0.1.0"
             }]
         }));
@@ -35,13 +35,13 @@ fn search_parses_results() {
 fn get_package_exposes_digest_for_version() {
     let server = MockServer::start();
     server.mock(|when, then| {
-        when.method(GET).path("/api/v1/packages/psila/anthropic");
+        when.method(GET).path("/api/v1/packages/burn/anthropic");
         then.status(200).json_body(json!({
-            "namespace": "psila", "name": "anthropic", "latest": "0.1.0",
+            "namespace": "burn", "name": "anthropic", "latest": "0.1.0",
             "versions": [{"version": "0.1.0", "digest": "abcd", "size_bytes": 10, "yanked": false}]
         }));
     });
-    let meta = anon(&server).get_package("psila", "anthropic").unwrap();
+    let meta = anon(&server).get_package("burn", "anthropic").unwrap();
     assert_eq!(meta.digest_for("0.1.0"), Some("abcd"));
     assert_eq!(meta.digest_for("9.9.9"), None);
 }
