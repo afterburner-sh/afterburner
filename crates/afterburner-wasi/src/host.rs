@@ -36,7 +36,7 @@ pub struct TimerSlot {
 
 /// Framing of `HostState::pending_input`, read by the guest through
 /// the `host_input_format` import (as the discriminant value). One
-/// compiled invoke wrapper serves both framings — the guest-side input
+/// compiled invoke wrapper serves both framings - the guest-side input
 /// getter branches on this flag per invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(i32)]
@@ -91,7 +91,7 @@ pub struct HostState {
     /// the `host_input_format` import. [`InputFormat::Json`] (the
     /// default) means JSON text the invoke wrapper `JSON.parse`s;
     /// [`InputFormat::Raw`] means opaque bytes the wrapper hands the
-    /// module as a `Uint8Array` — the large-payload fast path that
+    /// module as a `Uint8Array` - the large-payload fast path that
     /// skips guest-side string materialization and `JSON.parse`
     /// entirely (both are O(n) fuel-metered work).
     pub input_format: InputFormat,
@@ -108,19 +108,19 @@ pub struct HostState {
     /// [`crate::columnar::decode_batch`] in `thrust_columnar`. `None`
     /// means the call hasn't completed (or wasn't a columnar call).
     pub pending_columnar_reply: Option<Vec<u8>>,
-    /// Optional daemon HTTP coordinator. `Some` only in daemon mode —
+    /// Optional daemon HTTP coordinator. `Some` only in daemon mode -
     /// owns the axum listeners + per-req reply channels. `None` for
     /// all one-shot thrust paths so UDF/script callers don't pay the
     /// coordinator's startup cost.
     pub daemon_http: Option<Arc<crate::daemon_http::DaemonHttp>>,
     /// Optional `worker_threads` coordinator. `Some` in daemon mode
     /// (parent role) and inside `burn run --internal-worker` (child
-    /// role); `None` everywhere else — `new Worker(...)` then surfaces
+    /// role); `None` everywhere else - `new Worker(...)` then surfaces
     /// a clear "not in daemon mode" error rather than silently
     /// spawning a process from the library API.
     pub daemon_workers: Option<Arc<crate::daemon_workers::DaemonWorkers>>,
     /// Optional `net` (raw TCP) coordinator. `Some` in daemon mode;
-    /// `None` everywhere else — `net.connect` / `net.createServer`
+    /// `None` everywhere else - `net.connect` / `net.createServer`
     /// then surface a clear "requires daemon mode" error rather than
     /// silently spawning sockets from the library API. Gated behind
     /// the `daemon` feature because the coordinator is tokio-backed.
@@ -132,13 +132,13 @@ pub struct HostState {
     #[cfg(feature = "daemon")]
     pub daemon_tls: Option<Arc<crate::daemon_tls::DaemonTls>>,
     /// Optional `dgram` (UDP) coordinator. Same lifecycle as
-    /// `daemon_net` — installed only by the CLI's daemon path
+    /// `daemon_net` - installed only by the CLI's daemon path
     /// (`http.createServer().listen()` etc.); the library API never
     /// installs one so dgram polyfill calls cleanly error in non-daemon
     /// mode. Gated behind `daemon` because it's tokio-backed.
     #[cfg(feature = "daemon")]
     pub daemon_dgram: Option<Arc<crate::daemon_dgram::DaemonDgram>>,
-    /// Outbound HTTP coordinator — async per-shard. JS calls
+    /// Outbound HTTP coordinator - async per-shard. JS calls
     /// `http.request` end up here (via `__host_http_request_async`),
     /// the request runs on the daemon's Tokio runtime, and the
     /// response comes back through the shard's event loop. Library
@@ -162,12 +162,12 @@ pub struct HostState {
     /// `None` means the call produced a JSON result (or nothing).
     pub pending_raw_output: Option<Vec<u8>>,
     /// Set by `host_raw_output` when the posted reply exceeded
-    /// [`Self::output_ceiling`] — the raw-path twin of the stdout
+    /// [`Self::output_ceiling`] - the raw-path twin of the stdout
     /// pipe's overflow flag, consulted by
     /// [`Self::output_overflowed`].
     pub raw_output_overflow: bool,
     /// Cross-process `SharedArrayBuffer` + `Atomics.wait`/`notify`
-    /// coordinator. Always present (cheap to construct — no listener
+    /// coordinator. Always present (cheap to construct - no listener
     /// or socket) so the JS side's `new SharedArrayBuffer(...)` and
     /// `Atomics.{wait,notify}` work uniformly across UDF, script,
     /// and daemon modes.
@@ -182,7 +182,7 @@ pub struct HostState {
     #[cfg(feature = "shadow-sqlite3")]
     pub sqlite3_shadow: Arc<afterburner_node_compat::shadows::sqlite3::SqliteShadow>,
     /// Sub-runner for `WebAssembly.compile` / `instantiate`. Always
-    /// present — wasmtime is already a workspace-wide dep, so the
+    /// present - wasmtime is already a workspace-wide dep, so the
     /// loader is cheap to construct and the API is part of the
     /// Node 20.x LTS surface (`globalThis.WebAssembly`).
     pub wasm_loader: Arc<crate::wasm_loader::WasmLoader>,
@@ -198,7 +198,7 @@ pub struct HostState {
     /// when built with the `ts` feature so `require('./x.ts')` and
     /// `require('./x.mjs')` lower to runnable CJS before the require
     /// resolver wraps the source in `new Function(...)`. `None`
-    /// disables the hook — any non-`.js`/`.json` file loaded via
+    /// disables the hook - any non-`.js`/`.json` file loaded via
     /// `require` surfaces a "TS support requires `ts` feature"-style
     /// error downstream.
     pub transpile_hook: Option<TranspileFn>,
@@ -222,7 +222,7 @@ impl HostState {
     ) -> Self {
         let stdin = MemoryInputPipe::new(input.to_vec());
         let stdout = CapturePipe::new(output_ceiling);
-        // Stderr is bounded too — preserving it unbounded is a memory-
+        // Stderr is bounded too - preserving it unbounded is a memory-
         // exhaustion vector. Surfaced to the caller via WasmTrap on error.
         let stderr = MemoryOutputPipe::new(64 * 1024);
 
@@ -313,7 +313,7 @@ impl HostState {
     /// `true` when this call's output exceeded [`Self::output_ceiling`]
     /// on either delivery channel (stdout capture or raw-output
     /// reply). The chamber and the script-mode path map a set flag to
-    /// `AfterburnerError::OutputTooLarge` — a structured error in the
+    /// `AfterburnerError::OutputTooLarge` - a structured error in the
     /// existing taxonomy, never a bare trap.
     pub fn output_overflowed(&self) -> bool {
         self.raw_output_overflow || self.stdout.overflowed()

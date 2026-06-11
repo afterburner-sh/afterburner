@@ -10,7 +10,7 @@
 //! `__AB_GET_ENVELOPE__()`, parses it, looks up the JS-side handler
 //! registered by `daemon-init` code, and invokes it. The response
 //! (if any) travels back through host imports (`__host_http_reply`)
-//! — this function's own return value is discarded.
+//! - this function's own return value is discarded.
 //!
 //! Top-level `await` resolves through Javy's event loop drain so
 //! handlers can be `async` without special wrapping.
@@ -21,7 +21,7 @@
 //! tables, etc.) and exhausts WASM linear memory after a few tens
 //! of thousands of requests. We compile lazily on the first event,
 //! cache the bytecode in a `OnceCell`, and reuse it forever after.
-//! QuickJS bytecode is `Vec<u8>` — owning it across calls doesn't
+//! QuickJS bytecode is `Vec<u8>` - owning it across calls doesn't
 //! hold any Store references.
 
 use alloc::format;
@@ -40,7 +40,7 @@ static mut DISPATCH_BYTECODE: OnceCell<Vec<u8>> = OnceCell::new();
 
 #[allow(static_mut_refs)]
 fn dispatch_bytecode() -> Result<&'static [u8], &'static str> {
-    // Safety: see module comment — daemon-event invocations are
+    // Safety: see module comment - daemon-event invocations are
     // serialised by the host. We never read while another writer
     // could be running.
     let cell = unsafe { &*core::ptr::addr_of!(DISPATCH_BYTECODE) };
@@ -59,7 +59,7 @@ fn dispatch_bytecode() -> Result<&'static [u8], &'static str> {
     }
 }
 
-/// JS-side dispatch wrapper. Keeps the Rust dispatcher lean — the JS
+/// JS-side dispatch wrapper. Keeps the Rust dispatcher lean - the JS
 /// already has the handler table on globalThis; we just decode the
 /// envelope and delegate. The wrapper is compiled fresh on each
 /// daemon-event because it's trivial and cache-invalidation across
@@ -309,7 +309,7 @@ const DISPATCH_SOURCE: &str = r#"
             try { srv._dispatchServerError(ev.message || ''); } catch (_) {}
         }
     } else if (kind === 'dgram-listening') {
-        // No-op on the dispatcher side — the polyfill emits 'listening'
+        // No-op on the dispatcher side - the polyfill emits 'listening'
         // synchronously when bind succeeds. The host envelope is
         // informational; we keep it on the wire so future code that
         // needs to react to the event has a path.
@@ -354,13 +354,13 @@ const DISPATCH_SOURCE: &str = r#"
             }
             delete table[ev.req_id];
         }
-        // Unknown req_id (resolver missing) is silently dropped — the
+        // Unknown req_id (resolver missing) is silently dropped - the
         // Rust side may have hit a race between the response queue
         // and a JS-side abort that already cleared the slot.
     } else if (kind === 'lifecycle') {
         // Node process shutdown lifecycle, driven by the host when the
         // event loop drains (see daemon_shard_pool::emit_lifecycle).
-        // npm — and many CLIs — buffer ALL their output and flush it
+        // npm - and many CLIs - buffer ALL their output and flush it
         // from a `process.on('exit')` handler, so without this they
         // print nothing and never finalize. 'exit' fires exactly once
         // (guarded so an explicit `process.exit()` can't double-fire
@@ -380,14 +380,14 @@ const DISPATCH_SOURCE: &str = r#"
             }
         }
     } else {
-        // Unknown event kind — surface on stderr for diagnosis.
+        // Unknown event kind - surface on stderr for diagnosis.
         try { console.error('daemon-event: unknown kind=' + kind); } catch (_) {}
     }
 })();
 "#;
 
 pub fn run(_envelope: &serde_json::Value) {
-    // Note: we ignore the Rust-side envelope we already parsed —
+    // Note: we ignore the Rust-side envelope we already parsed -
     // the JS dispatcher re-parses the envelope via __AB_GET_ENVELOPE__()
     // which gives it the authoritative bytes. That keeps the host→JS
     // boundary on exactly one serialization path.

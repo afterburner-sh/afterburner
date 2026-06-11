@@ -6,16 +6,16 @@
 //! Round-3 Node-compat surface gaps surfaced while making `burn npm
 //! install` reach actual install logic. Each fix here was a hard
 //! prerequisite for the npm / pnpm / yarn dispatch chain to advance
-//! past module-init time, but they're useful far beyond that — most
+//! past module-init time, but they're useful far beyond that - most
 //! libraries that subclass `http.Agent`, call `crypto.getHashes()`,
 //! destructure `os.constants.errno.*`, or use dynamic `import()` to
 //! reach for an ESM-only sibling fail in exactly the same place.
 //!
 //! Coverage in this file:
 //!
-//! * `crypto.getHashes()` / `getCiphers()` / `getCurves()` — present
+//! * `crypto.getHashes()` / `getCiphers()` / `getCurves()` - present
 //!   and returns the expected algorithm names.
-//! * `os.constants.errno` / `signals` / `priority` — destructure
+//! * `os.constants.errno` / `signals` / `priority` - destructure
 //!   without throwing `Cannot convert undefined or null to object`.
 //! * `console.assert` / `warn` / `info` / `debug` exist even when
 //!   the runtime ships its own minimal `console` (Javy did).
@@ -159,7 +159,7 @@ fn console_assert_and_warn_exist() {
 #[test]
 fn http_agent_is_constructable_and_subclassable() {
     // npm's `@npmcli/agent` does `class CustomAgent extends http.Agent`
-    // — without a real constructor we get
+    // - without a real constructor we get
     // "parent class must be constructor" at module-init time.
     let dir = tmp_dir("http_agent");
     let out = run_script(
@@ -213,13 +213,13 @@ fn http_client_request_returns_event_emitter() {
 
 #[test]
 fn http_get_supports_url_options_callback_form() {
-    // `http.get(url, opts, cb)` — the 3-arg form. corepack passes
+    // `http.get(url, opts, cb)` - the 3-arg form. corepack passes
     // an options object as the second argument; without normalisation
     // we treated it as the callback and called it as a function. The
     // failure mode would surface as `TypeError: not a function` at
     // module-init time; here we simply assert that calling `get`
     // with the 3-arg shape no longer mis-treats the options object.
-    // We do that without making a real network request — checking the
+    // We do that without making a real network request - checking the
     // function arity / shape is enough to lock in the regression.
     let dir = tmp_dir("http_get_3arg");
     let out = run_script(
@@ -263,7 +263,7 @@ fn dynamic_import_resolves_through_require() {
     // redirects to `__ab_dyn_import(require, 'foo')` which routes
     // through the CJS resolver. Validate the basic shape: the
     // returned object exposes `default` (CJS interop) and named
-    // keys. `path` is a stdlib factory module — guaranteed available.
+    // keys. `path` is a stdlib factory module - guaranteed available.
     let dir = tmp_dir("dyn_import_basic");
     let out = run_script(
         &dir,
@@ -383,7 +383,7 @@ fn require_subpath_imports_throws_named_error_when_unknown() {
 
 #[test]
 fn http_incoming_message_emits_data_and_end() {
-    // `req.on('data', ...)` followed by `req.on('end', ...)` — the
+    // `req.on('data', ...)` followed by `req.on('end', ...)` - the
     // Node-canonical way to drain a response body. The body lives in
     // the synthetic IncomingMessage; flushing has to wait until the
     // user has had a chance to register listeners (microtask), and
@@ -409,7 +409,7 @@ fn http_incoming_message_emits_data_and_end() {
 #[test]
 fn http_incoming_message_resume_then_attach_end_listener() {
     // The exact pattern from real-world TLS code:
-    // `res.resume(); res.on('end', cb);` — resume marks flowing and a
+    // `res.resume(); res.on('end', cb);` - resume marks flowing and a
     // microtask flushes the body, which fires the end listener
     // attached on the next sync line.
     let dir = tmp_dir("incoming_resume");
@@ -430,7 +430,7 @@ fn http_incoming_message_resume_then_attach_end_listener() {
 
 #[test]
 fn http_incoming_message_async_iteration() {
-    // `for await (const chunk of res)` — the modern Node-fetch shape.
+    // `for await (const chunk of res)` - the modern Node-fetch shape.
     // Single-chunk: yields the body once, terminates.
     let dir = tmp_dir("incoming_aiter");
     let out = run_script(

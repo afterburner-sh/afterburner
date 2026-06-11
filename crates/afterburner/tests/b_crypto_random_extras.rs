@@ -106,7 +106,7 @@ fn crypto_random_fill_sync_fills_buffer() {
         const c = require('crypto');
         const b = Buffer.alloc(32);
         c.randomFillSync(b);
-        // Probability of all-zero is 2^-256 — negligible.
+        // Probability of all-zero is 2^-256 - negligible.
         if (b.some(x => x !== 0)) console.log('FILL-OK');
         else console.log('FAIL');
         "#,

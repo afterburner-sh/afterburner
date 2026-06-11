@@ -12,13 +12,13 @@
 //!
 //! API matches the npm package:
 //!
-//! * `hash(password, options?)` — returns the PHC-formatted hash.
+//! * `hash(password, options?)` - returns the PHC-formatted hash.
 //!   Options: `type` (0 = Argon2d, 1 = Argon2i, 2 = Argon2id;
 //!   default Argon2id), `timeCost`, `memoryCost`, `parallelism`,
 //!   `hashLength`, `raw` (return bytes instead of PHC string).
-//! * `verify(hash, password)` — returns `true` iff the password
+//! * `verify(hash, password)` - returns `true` iff the password
 //!   matches.
-//! * `needsRehash(hash, options?)` — returns `true` if the stored
+//! * `needsRehash(hash, options?)` - returns `true` if the stored
 //!   hash was produced with weaker parameters than the current
 //!   defaults.
 //!
@@ -40,7 +40,7 @@ fn algo_from_type(ty: u8) -> Algorithm {
     }
 }
 
-/// `argon2::hash(password, options)` — returns the PHC-formatted
+/// `argon2::hash(password, options)` - returns the PHC-formatted
 /// hash string. Matches the npm package's default output shape
 /// (`$argon2id$v=19$m=...,t=...,p=...$SALT$HASH`).
 pub fn hash(
@@ -62,7 +62,7 @@ pub fn hash(
     let params = Params::new(m, t, p, None).map_err(|e| format!("argon2 params: {e}"))?;
     let argon = Argon2::new(algo, Version::V0x13, params);
 
-    // `SaltString::generate` pulls from OsRng — matches the npm
+    // `SaltString::generate` pulls from OsRng - matches the npm
     // package's behavior of generating a fresh salt per hash.
     let salt = SaltString::generate(&mut rand_core_04());
     let hash = argon
@@ -71,7 +71,7 @@ pub fn hash(
     Ok(hash.to_string())
 }
 
-/// `argon2::verify(hash, password)` — parse the PHC hash and run
+/// `argon2::verify(hash, password)` - parse the PHC hash and run
 /// the verifier. Returns `Ok(true)` on match, `Ok(false)` on
 /// mismatch, `Err` if the hash string is malformed.
 pub fn verify(phc_hash: &str, password: &str) -> Result<bool, String> {
@@ -86,7 +86,7 @@ pub fn verify(phc_hash: &str, password: &str) -> Result<bool, String> {
     }
 }
 
-/// `argon2::needsRehash(hash, options)` — parses the PHC string,
+/// `argon2::needsRehash(hash, options)` - parses the PHC string,
 /// compares its parameters against the target, and returns `true`
 /// if any tightened defaults require re-hashing.
 pub fn needs_rehash(
@@ -97,7 +97,7 @@ pub fn needs_rehash(
     parallelism: u32,
 ) -> Result<bool, String> {
     let parsed = PasswordHash::new(phc_hash).map_err(|e| format!("argon2 parse hash: {e}"))?;
-    // Compare algorithm first — a type change always requires rehash.
+    // Compare algorithm first - a type change always requires rehash.
     let target_algo = algo_from_type(ty);
     let target_ident = target_algo.ident();
     if parsed.algorithm != target_ident {
@@ -105,7 +105,7 @@ pub fn needs_rehash(
     }
     // Compare each numeric parameter. Stored params appear inside
     // `parsed.params`. Missing parameter means "was at some default"
-    // — treat as needing rehash if caller explicitly requested one.
+    // - treat as needing rehash if caller explicitly requested one.
     let t = if time_cost == 0 { 3 } else { time_cost };
     let m = if memory_cost_kib == 0 {
         65_536

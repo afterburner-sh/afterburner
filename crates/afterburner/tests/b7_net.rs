@@ -4,7 +4,7 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 #![cfg(feature = "bin")]
-//! B7 — `net` raw TCP integration.
+//! B7 - `net` raw TCP integration.
 //!
 //! Each test spins up a fixture TCP server in a background thread,
 //! then runs `burn` with an inline parent script that connects via
@@ -72,7 +72,7 @@ fn spawn_drain_then_close(expected_bytes: usize) -> (u16, thread::JoinHandle<Vec
         }
         let _ = s.shutdown(Shutdown::Both);
         tx.send(got).ok();
-        // Block forever — the test side decides when to drop the
+        // Block forever - the test side decides when to drop the
         // listener via the JoinHandle.
         rx.recv().ok();
         Vec::new()
@@ -396,7 +396,7 @@ fn server_accepts_connection_and_echoes() {
             // pick it up.
             console.log('PORT=' + addr.port);
         });
-        // Stay alive — server keeps the daemon up via has_refs.
+        // Stay alive - server keeps the daemon up via has_refs.
     "#;
 
     let mut child = Command::new(BURN)
@@ -505,7 +505,7 @@ fn multiple_concurrent_connections() {
 
 #[test]
 fn ip_helpers() {
-    // Pure-JS isIP / isIPv4 / isIPv6 — no host needed. Run in-process
+    // Pure-JS isIP / isIPv4 / isIPv6 - no host needed. Run in-process
     // via `burn -e`.
     let parent = r#"
         const net = require('net');

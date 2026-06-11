@@ -11,14 +11,14 @@
 //! defense in `daemon_workers::spawn_worker` or its surrounding glue.
 //! If any of them turn red, the threat model has regressed:
 //!
-//! * **capability inheritance never widens** — a sandboxed parent
+//! * **capability inheritance never widens** - a sandboxed parent
 //!   spawns a sandboxed child; FS / net / env grants do not leak.
-//! * **`BURN_WORKER_DEPTH` cap** — fork-bomb defense.
-//! * **`{eval:true}` rejected at the JS layer** — explicit error
+//! * **`BURN_WORKER_DEPTH` cap** - fork-bomb defense.
+//! * **`{eval:true}` rejected at the JS layer** - explicit error
 //!   rather than silent code injection.
-//! * **path outside the FS allow-list rejected before spawn** — no
+//! * **path outside the FS allow-list rejected before spawn** - no
 //!   subprocess is created for a denied script.
-//! * **manifold codec round-trip** — a unit test on the
+//! * **manifold codec round-trip** - a unit test on the
 //!   `manifold_to_cli_args` ↔ `build_manifold` boundary, covering
 //!   the security-critical "narrows but never widens" invariant.
 
@@ -71,7 +71,7 @@ fn worker_inherits_sandbox_no_fs() {
 
     // Parent needs to *spawn* the worker, which means it needs to
     // know the child path. With pure `--sandbox` the parent itself
-    // can't read its own arg as a file — but `new Worker(absPath)`
+    // can't read its own arg as a file - but `new Worker(absPath)`
     // doesn't need to read it; only canonicalize. So sandboxed
     // parent + absolute child path is the right test shape.
     //
@@ -272,15 +272,15 @@ fn path_outside_fs_allowlist_rejected() {
     );
     assert!(
         !stdout.contains("SHOULD_NEVER_RUN"),
-        "child ran despite path rejection — SECURITY REGRESSION\nstdout:\n{stdout}"
+        "child ran despite path rejection - SECURITY REGRESSION\nstdout:\n{stdout}"
     );
 }
 
 // ---------------------------------------------------------------------
-// (5) manifold codec — narrowing-only round-trip
+// (5) manifold codec - narrowing-only round-trip
 // ---------------------------------------------------------------------
 
-/// Sealed manifold encodes as `--sandbox` (no grants) — narrowest.
+/// Sealed manifold encodes as `--sandbox` (no grants) - narrowest.
 #[test]
 fn codec_sealed_emits_only_sandbox() {
     let m = Manifold::sealed();
@@ -296,7 +296,7 @@ fn codec_open_emits_no_args() {
     assert!(args.is_empty(), "expected empty, got {args:?}");
 }
 
-/// Narrowed FS — only the named root appears in the encoded args.
+/// Narrowed FS - only the named root appears in the encoded args.
 #[test]
 fn codec_narrow_fs_root() {
     let mut m = Manifold::sealed();
@@ -316,7 +316,7 @@ fn codec_narrow_fs_root() {
     }
 }
 
-/// Narrowed net — wildcard-set encoded as `*` (matching the CLI's
+/// Narrowed net - wildcard-set encoded as `*` (matching the CLI's
 /// own grammar). Must NOT promote to `--allow-fs`.
 #[test]
 fn codec_narrow_net_wildcard() {
@@ -332,7 +332,7 @@ fn codec_narrow_net_wildcard() {
     }
 }
 
-/// Narrowed env — exactly the named keys.
+/// Narrowed env - exactly the named keys.
 #[test]
 fn codec_narrow_env_allowlist() {
     let mut m = Manifold::sealed();

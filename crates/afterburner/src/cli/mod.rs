@@ -68,7 +68,7 @@ fn dispatch(mut cli: Cli) -> Result<()> {
     // The first positional (`cli.file`) is the pass-through target. It
     // takes precedence even when clap also parsed a `cli.command`: that
     // happens whenever the target's own arguments collide with a burn
-    // subcommand name — `burn npm install express` makes clap bind
+    // subcommand name - `burn npm install express` makes clap bind
     // `install` as `Cmd::Install`, `burn pnpm run dev` as `Cmd::Run`,
     // etc. Those tokens belong to npm/pnpm, not to burn, so a detected
     // pass-through target wins and the trailing args are recovered from
@@ -157,7 +157,7 @@ fn dispatch(mut cli: Cli) -> Result<()> {
         None => {
             if let Some(file) = cli.file.clone() {
                 Cmd::Run {
-                    file,
+                    file: Some(file),
                     rest_args: std::mem::take(&mut cli.rest_args),
                 }
             } else {
@@ -178,7 +178,7 @@ fn dispatch(mut cli: Cli) -> Result<()> {
     }
 
     match cmd {
-        Cmd::Run { file, rest_args } => run::run_file(&cli, &file, &rest_args),
+        Cmd::Run { file, rest_args } => run::run_package_or_file(&cli, file.as_deref(), &rest_args),
         Cmd::Eval { code, rest_args } => run::run_source(&cli, &code, &rest_args),
         Cmd::Thrust { file } => thrust::thrust_from_stdin(&cli, &file),
         Cmd::Check { file } => check::check_file(&cli, &file),
@@ -198,6 +198,7 @@ fn dispatch(mut cli: Cli) -> Result<()> {
         Cmd::Init { path, opts } => registry::init_package(&cli, path.as_deref(), &opts),
         Cmd::Package { dir, out } => registry::package(dir.as_deref(), out.as_deref()),
         Cmd::Test { dir } => registry::test(&cli, dir.as_deref()),
+        Cmd::Clean { dir, cache } => registry::clean(dir.as_deref(), cache),
         Cmd::Publish {
             afb,
             dir,

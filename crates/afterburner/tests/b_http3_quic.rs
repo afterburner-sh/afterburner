@@ -6,12 +6,12 @@
 //! HTTP/3 server end-to-end via the `node:quic` polyfill + the
 //! `daemon_http3` (quinn + h3-quinn) coordinator.
 //!
-//! Real wire format — every test sets up a self-signed TLS-1.3 cert,
+//! Real wire format - every test sets up a self-signed TLS-1.3 cert,
 //! starts a `QuicEndpoint.listen({port, cert, key})` in a `burn`
 //! subprocess, and connects with a quinn-based client to confirm the
 //! H3 handshake completes and request/response shapes round-trip.
 //!
-//! Run with `--test-threads=1` — same daemon-startup pressure as
+//! Run with `--test-threads=1` - same daemon-startup pressure as
 //! `b_http2_server`.
 
 #![cfg(all(feature = "bin", feature = "http3", feature = "ts"))]
@@ -28,7 +28,7 @@ static NEXT: AtomicU16 = AtomicU16::new(20100);
 fn pick_port() -> u16 {
     loop {
         let p = NEXT.fetch_add(1, Ordering::Relaxed);
-        // QUIC is UDP — verify free via UDP bind.
+        // QUIC is UDP - verify free via UDP bind.
         if let Ok(s) = std::net::UdpSocket::bind(("127.0.0.1", p)) {
             drop(s);
             return p;
@@ -60,7 +60,7 @@ fn spawn_h3(source: &str) -> Child {
         .expect("spawn burn")
 }
 
-/// Trust-no-verify TLS config — tests never check the cert chain.
+/// Trust-no-verify TLS config - tests never check the cert chain.
 fn insecure_client_config() -> rustls::ClientConfig {
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -421,7 +421,7 @@ fn h3_endpoint_address_returns_bound_port() {
 fn h3_listen_on_busy_port_errors() {
     // Hold the UDP port from the test harness so the H3 listener's
     // QUIC bind hits EADDRINUSE. We pick a SEPARATE port for the
-    // TCP listener — the polyfill binds TCP first (HTTP listener for
+    // TCP listener - the polyfill binds TCP first (HTTP listener for
     // the JS handler chain), then UDP for QUIC. Only the UDP path
     // should fail. The polyfill emits the failure via the
     // `'error'` event because by the time UDP bind is attempted, the

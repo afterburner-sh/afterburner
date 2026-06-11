@@ -5,7 +5,7 @@
 
 #![cfg(feature = "bin")]
 #![allow(non_snake_case)]
-//! R10 — `cluster` real per-CPU multi-process integration.
+//! R10 - `cluster` real per-CPU multi-process integration.
 //!
 //! Validates that:
 //! 1. `cluster.fork()` spawns a real subprocess.
@@ -210,7 +210,7 @@ fn cluster_listening_event() {
     );
 }
 
-/// Two workers co-bind the same port via SO_REUSEPORT — the kernel
+/// Two workers co-bind the same port via SO_REUSEPORT - the kernel
 /// 4-tuple-balances accept(). On Linux/macOS we can confirm both
 /// workers report a successful listen on the same port. On Windows
 /// SO_REUSEADDR allows the bind even if balance is OS-version-gated.
@@ -242,7 +242,7 @@ fn cluster_two_workers_co_bind_same_port() {
                     exits++;
                     if (exits === 2) process.exit(0);
                 }});
-                // 60s safety — cold CI cold-spawn + 2-worker fork
+                // 60s safety - cold CI cold-spawn + 2-worker fork
                 // + dual listen can take 40s+ on a 4-vCPU GH runner.
                 setTimeout(() => process.exit(99), 60000);
             }} else {{

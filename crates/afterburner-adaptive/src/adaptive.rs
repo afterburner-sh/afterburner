@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `AdaptiveCombustor` — native-first, with a single background worker that
+//! `AdaptiveCombustor` - native-first, with a single background worker that
 //! compiles the same source through the WASM backend and switches future
 //! `thrust` calls onto it once ready.
 //!
@@ -89,7 +89,7 @@ impl AdaptiveCombustor {
         Self::with_wasm_config(WasmConfig::default())
     }
 
-    /// Build an adaptive combustor with a custom Wasm-backend config —
+    /// Build an adaptive combustor with a custom Wasm-backend config -
     /// useful for tests that want to point at a specific Javy CLI.
     pub fn with_wasm_config(cfg: WasmConfig) -> Result<Self> {
         let native = Arc::new(NativeCombustor::new()?);
@@ -156,14 +156,14 @@ impl AdaptiveCombustor {
                     CompileOutcome::Ready => {}
                     CompileOutcome::Pending => {
                         return Err(AfterburnerError::Engine(format!(
-                            "{what}: wasm compile still in flight after 5s — \
+                            "{what}: wasm compile still in flight after 5s - \
                              check that the plugin worker is healthy and that the \
                              script ignited cleanly"
                         )));
                     }
                     CompileOutcome::Failed => {
                         return Err(AfterburnerError::Engine(format!(
-                            "{what}: wasm compile failed for this script — \
+                            "{what}: wasm compile failed for this script - \
                              see prior `wasm.ignite.compile_failed` event for details"
                         )));
                     }
@@ -186,7 +186,7 @@ impl AdaptiveCombustor {
         })
     }
 
-    /// Test/diagnostic accessor — which tier would service the next thrust?
+    /// Test/diagnostic accessor - which tier would service the next thrust?
     #[cfg(test)]
     pub fn current_tier(&self, id: &ScriptId) -> &'static str {
         match self
@@ -227,7 +227,7 @@ impl AdaptiveCombustor {
             let s = existing.state.load(Ordering::Acquire);
             if s == CANCELLED {
                 // Replace cancelled slot. Concurrent re-ignites may both
-                // reach this branch — the worker tolerates duplicate
+                // reach this branch - the worker tolerates duplicate
                 // compile messages because each carries its own slot.
                 self.state.insert(hash, new_slot.clone());
                 self.tx.send(WorkerMsg::Compile {
@@ -354,7 +354,7 @@ impl Combustor for AdaptiveCombustor {
         // Cancel atomically. Any worker mid-compile observes the CANCELLED
         // state via its CAS and rolls back the WASM cache entry it built.
         // If the slot was already READY, the WASM cache definitely holds
-        // the module — we clean it here.
+        // the module - we clean it here.
         if let Some(slot) = self.state.get(&id.hash) {
             let prev = slot.state.swap(CANCELLED, Ordering::AcqRel);
             if prev == READY {
@@ -371,7 +371,7 @@ impl Combustor for AdaptiveCombustor {
         });
     }
 
-    /// Script mode runs exclusively through the WASM backend — the
+    /// Script mode runs exclusively through the WASM backend - the
     /// whole point of adaptive is to *cache* compiled scripts across
     /// many calls, but script mode is one-shot. Native would also work
     /// but the sandboxed path matches the Q1-D expectation that

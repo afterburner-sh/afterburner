@@ -5,7 +5,7 @@
 
 //! `EventSource` (Server-Sent Events client).
 //!
-//! Polyfill is built on `fetch` — buffered, no streaming. Works for
+//! Polyfill is built on `fetch` - buffered, no streaming. Works for
 //! finite SSE responses where the server emits N events then closes.
 //! Tests run an in-process SSE server (TcpListener thread) that
 //! sends a known event sequence and closes; burn connects, parses,

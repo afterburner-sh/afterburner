@@ -10,14 +10,14 @@
 //! child-process tree resolves to our shim and therefore runs inside
 //! the burn sandbox.
 //!
-//! * **Unix** — shell script `#!/usr/bin/env sh\nexec $BURN "$@"\n`
+//! * **Unix** - shell script `#!/usr/bin/env sh\nexec $BURN "$@"\n`
 //!   made executable (0755).
-//! * **Windows** — `.cmd` batch file `@"$BURN" %*` (`.cmd` is picked
+//! * **Windows** - `.cmd` batch file `@"$BURN" %*` (`.cmd` is picked
 //!   up by `PATHEXT` by default on both cmd.exe and PowerShell).
 //!
 //! One shim dir per burn process at `$TMP/burn-shim-$PID/`. The dir
 //! is created on demand, idempotent within a single invocation, and
-//! intentionally leaked — `exec(3)` replaces us before we could clean
+//! intentionally leaked - `exec(3)` replaces us before we could clean
 //! up, and the temp files are a few dozen bytes each. OS-level temp
 //! cleanup handles stale dirs across reboots.
 

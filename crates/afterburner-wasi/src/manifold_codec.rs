@@ -18,7 +18,7 @@
 //! round-trip test in `tests/b10_security.rs` is the guardrail.
 //!
 //! The codec doesn't encode `crypto`, `child_process`, `allow_exit`,
-//! or `http_timeout_ms` — those have no CLI surface today (the CLI
+//! or `http_timeout_ms` - those have no CLI surface today (the CLI
 //! always sets them via `Manifold::open()` / `sealed()`). When a
 //! child needs a manifold whose narrow caps aren't expressible in
 //! flags (e.g. `crypto: true` but `fs: None`), the codec returns the
@@ -28,7 +28,7 @@
 use afterburner_core::{EnvAccess, FsAccess, ListenAccess, Manifold, NetAccess};
 
 /// Render `m` as `burn` CLI flags. The argument order is stable across
-/// calls (handy for tests). An empty result means "fully open" — the
+/// calls (handy for tests). An empty result means "fully open" - the
 /// CLI's implicit-open default applies (matching `Manifold::open()`).
 ///
 /// * `Manifold::open()` → `[]` (CLI's default-open posture).
@@ -71,7 +71,7 @@ fn encode_fs(fs: &FsAccess) -> Option<String> {
         // noting for future flag expansion.
         FsAccess::ReadOnly(roots) | FsAccess::ReadWrite(roots) => {
             if roots.is_empty() {
-                // ReadWrite-everywhere — CLI grammar is `--allow-fs=*`.
+                // ReadWrite-everywhere - CLI grammar is `--allow-fs=*`.
                 Some("*".to_string())
             } else {
                 Some(join_paths(roots))
@@ -114,7 +114,7 @@ fn encode_listen(listen: &ListenAccess) -> Option<String> {
         ListenAccess::Any => Some("*".to_string()),
         ListenAccess::Ports(ports) => {
             if ports.is_empty() {
-                // An empty allow-list grants nothing — same as None.
+                // An empty allow-list grants nothing - same as None.
                 None
             } else {
                 Some(

@@ -13,9 +13,9 @@
 //!
 //! Algorithm coverage:
 //!
-//! * **HS256 / HS384 / HS512** — HMAC with a secret string.
-//! * **RS256 / RS384 / RS512** — RSA with PEM-formatted keys.
-//! * **ES256 / ES384** — ECDSA with PEM-formatted keys.
+//! * **HS256 / HS384 / HS512** - HMAC with a secret string.
+//! * **RS256 / RS384 / RS512** - RSA with PEM-formatted keys.
+//! * **ES256 / ES384** - ECDSA with PEM-formatted keys.
 //!
 //! The three public functions take an options JSON blob (instead of
 //! ten-plus positional parameters) so the host ABI stays narrow and
@@ -24,7 +24,7 @@
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde_json::Value;
 
-/// `sign(payload, secret, options)` — returns the JWT compact
+/// `sign(payload, secret, options)` - returns the JWT compact
 /// serialization. `options` is the JSON-encoded argument object
 /// that the npm API accepts (algorithm, expiresIn, issuer, audience,
 /// subject); we parse only the subset listed above.
@@ -79,7 +79,7 @@ pub fn sign(payload_json: &str, secret: &[u8], options_json: &str) -> Result<Str
     encode(&header, &payload, &key).map_err(|e| format!("sign: {e}"))
 }
 
-/// `verify(token, secret, options)` — validates the JWT and returns
+/// `verify(token, secret, options)` - validates the JWT and returns
 /// the decoded payload as JSON. Mismatched algorithm, expired token,
 /// or bad signature surface as `Err` with a descriptive message.
 pub fn verify(token: &str, secret: &[u8], options_json: &str) -> Result<String, String> {
@@ -90,7 +90,7 @@ pub fn verify(token: &str, secret: &[u8], options_json: &str) -> Result<String, 
     // by default. If exp IS present the jsonwebtoken crate still
     // validates it (unless `ignoreExpiration` is set); same for nbf.
     // jsonwebtoken v10 ships with `required_spec_claims = {"exp"}`
-    // which would reject any token that didn't opt into expiresIn —
+    // which would reject any token that didn't opt into expiresIn -
     // too strict for the npm package's surface.
     validation.required_spec_claims = std::collections::HashSet::new();
     // Default leeway is 60s in the jsonwebtoken crate; tests that
@@ -123,7 +123,7 @@ pub fn verify(token: &str, secret: &[u8], options_json: &str) -> Result<String, 
     serde_json::to_string(&data.claims).map_err(|e| format!("verify: serialize: {e}"))
 }
 
-/// `decode(token)` — parses the JWT without verifying the signature.
+/// `decode(token)` - parses the JWT without verifying the signature.
 /// Returns `{ header, payload }` as JSON. Matches the npm package's
 /// `jwt.decode(token, { complete: true })` output.
 pub fn decode_unverified(token: &str) -> Result<String, String> {

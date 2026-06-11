@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! B7 — `dgram` (UDP) socket integration tests.
+//! B7 - `dgram` (UDP) socket integration tests.
 //!
 //! Drives the host coordinator end-to-end through the burn CLI:
 //! burn binds + sends, the test thread does the inverse from outside.
@@ -11,14 +11,14 @@
 //! so cross-process pipe buffering is not an option).
 //!
 //! Coverage:
-//!  * `bind_and_address_round_trip` — bind to ephemeral port, address()
+//!  * `bind_and_address_round_trip` - bind to ephemeral port, address()
 //!    returns matching {address, port}.
-//!  * `send_to_external_listener` — burn's send arrives at a rust-side
+//!  * `send_to_external_listener` - burn's send arrives at a rust-side
 //!    `std::net::UdpSocket` receiver.
-//!  * `receive_from_external_sender` — rust-side sends a packet, burn
+//!  * `receive_from_external_sender` - rust-side sends a packet, burn
 //!    observes it via 'message' event with rinfo populated.
-//!  * `bind_with_explicit_address` — bind('127.0.0.1', 0) works.
-//!  * `close_releases_socket` — close() lets the daemon exit when
+//!  * `bind_with_explicit_address` - bind('127.0.0.1', 0) works.
+//!  * `close_releases_socket` - close() lets the daemon exit when
 //!    nothing else holds a ref.
 
 #![cfg(feature = "bin")]
@@ -72,7 +72,7 @@ fn bind_and_address_round_trip() {
         log = serde_json::to_string(log.to_str().unwrap()).unwrap()
     );
     let mut child = spawn_burn_silent(&dir, &src);
-    // Poll for the log file rather than sleep a fixed budget — under
+    // Poll for the log file rather than sleep a fixed budget - under
     // cross-binary CPU pressure burn cold-start can stretch past any
     // hard-coded duration.
     let mut contents = String::new();
@@ -98,7 +98,7 @@ fn bind_and_address_round_trip() {
 fn send_to_external_listener() {
     // External rust UDP listener; burn binds + sends a packet to it.
     let listener = UdpSocket::bind("127.0.0.1:0").expect("bind listener");
-    // 60s recv timeout — cold GH 4-vCPU cold-spawn of burn + plugin
+    // 60s recv timeout - cold GH 4-vCPU cold-spawn of burn + plugin
     // + dgram bind + send can take 30-45s.
     listener
         .set_read_timeout(Some(Duration::from_secs(60)))

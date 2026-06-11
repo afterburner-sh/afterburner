@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Subtle Crypto AES additions — AES-CTR and AES-KW (RFC 3394).
+//! Subtle Crypto AES additions - AES-CTR and AES-KW (RFC 3394).
 //!
 //! AES-GCM and AES-CBC live in `crypto_host.rs` (Node-API surface);
 //! this module ships the Web-Crypto-only modes.
@@ -17,7 +17,7 @@ type Aes256Ctr64 = ctr::Ctr64BE<aes::Aes256>;
 
 /// AES-CTR encrypt/decrypt (the same operation either direction).
 /// Counter must be 16 bytes. Per Web Crypto, `length` is the
-/// counter-block bit width — only 64 (Ctr64BE) and 128 are spec'd;
+/// counter-block bit width - only 64 (Ctr64BE) and 128 are spec'd;
 /// we ship 64 (matches Node's WebCrypto + browsers' default).
 pub fn aes_ctr_apply(key: &[u8], counter: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     if counter.len() != 16 {
@@ -50,7 +50,7 @@ pub fn aes_ctr_apply(key: &[u8], counter: &[u8], data: &[u8]) -> Result<Vec<u8>>
     Ok(buf)
 }
 
-/// AES-KW (RFC 3394) — wraps a target key with a key-encryption key.
+/// AES-KW (RFC 3394) - wraps a target key with a key-encryption key.
 /// Plaintext (target key) length must be a multiple of 8 bytes and at
 /// least 16 bytes per RFC. Output is plaintext_len + 8 bytes.
 pub fn aes_kw_wrap(kek: &[u8], target: &[u8]) -> Result<Vec<u8>> {

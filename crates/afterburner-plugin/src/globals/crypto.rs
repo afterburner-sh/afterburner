@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `__host_crypto_*` globals — hash, sign/verify, AES, KDFs.
+//! `__host_crypto_*` globals - hash, sign/verify, AES, KDFs.
 
 use alloc::format;
 use alloc::string::String;
@@ -132,7 +132,7 @@ fn install_oneshot<'js>(globals: &Object<'js>) {
     bind_cbc!("__host_crypto_aes_cbc_encrypt", host_crypto_aes_cbc_encrypt);
     bind_cbc!("__host_crypto_aes_cbc_decrypt", host_crypto_aes_cbc_decrypt);
 
-    // Subtle Crypto dispatcher — single host fn, JSON args.
+    // Subtle Crypto dispatcher - single host fn, JSON args.
     let _ = globals.set(
         "__host_crypto_subtle_op",
         Func::from(|op: String, args_json: String| -> String {
@@ -177,8 +177,8 @@ fn install_oneshot<'js>(globals: &Object<'js>) {
         }),
     );
 
-    // V8 serialize/deserialize — JSON tree → base64 wire bytes (and back).
-    // `node:quic` / `http3.createServer().listen()` — bind a QUIC
+    // V8 serialize/deserialize - JSON tree → base64 wire bytes (and back).
+    // `node:quic` / `http3.createServer().listen()` - bind a QUIC
     // endpoint with TLS-1.3 + ALPN "h3". Two-step: stash cert+key,
     // then call listen with the port. This keeps the wasm trampoline
     // argument count low (two i32 strings + one u32 was triggering a
@@ -377,7 +377,7 @@ fn install_streaming<'js>(globals: &Object<'js>) {
             let ab = algo.as_bytes();
             let h = unsafe { host_crypto_sign_open(ab.as_ptr(), ab.len() as u32) };
             // 0 = error (JS falsy); the polyfill throws on that.
-            // Negative is also "not supported" — surface as 0 too.
+            // Negative is also "not supported" - surface as 0 too.
             if h <= 0 { 0.0 } else { h as f64 }
         }),
     );

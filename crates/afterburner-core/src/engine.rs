@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! The `Combustor` trait — where fuel (JS) meets air (data).
+//! The `Combustor` trait - where fuel (JS) meets air (data).
 //!
 //! Two implementations live in sibling crates: `WasmCombustor`
 //! (`afterburner-wasi`) for untrusted code, `NativeCombustor`
@@ -18,7 +18,7 @@ use serde_json::Value;
 /// instance can back a shared `BurnCache` across threads.
 pub trait Combustor: Send + Sync {
     /// Ignition: compile JS source to an internal representation and return
-    /// an opaque handle for repeated invocation. Idempotent — identical
+    /// an opaque handle for repeated invocation. Idempotent - identical
     /// sources produce identical `ScriptId`s (content-addressed).
     fn ignite(&self, source: &str) -> Result<ScriptId>;
 
@@ -55,13 +55,13 @@ pub trait Combustor: Send + Sync {
     /// Raw-input fast path: execute a compiled script with `input`
     /// delivered to the module as a `Uint8Array` instead of a JSON
     /// value. For bulk binary payloads this skips the whole
-    /// input-framing tax of [`thrust`](Self::thrust) — host-side JSON
+    /// input-framing tax of [`thrust`](Self::thrust) - host-side JSON
     /// serialization, guest-side string materialization, and
     /// guest-side `JSON.parse` (all O(n) in the input size, and the
     /// guest-side parts are fuel-metered). The script's return value
     /// still comes back as JSON, same output contract as `thrust`.
     ///
-    /// Default impl errors — backends without a linear-memory bridge
+    /// Default impl errors - backends without a linear-memory bridge
     /// inherit it and surface a clean diagnostic, mirroring
     /// [`thrust_columnar_bytes`](Self::thrust_columnar_bytes).
     /// Currently only `WasmCombustor` overrides; `AdaptiveCombustor`
@@ -76,15 +76,15 @@ pub trait Combustor: Send + Sync {
     /// Output-framing-aware variant of [`thrust`](Self::thrust): the
     /// module's return value decides the result shape. A `Uint8Array`
     /// / `ArrayBuffer` return comes back as [`OutputValue::Bytes`]
-    /// (raw bytes through a host import — no `JSON.stringify`, no
+    /// (raw bytes through a host import - no `JSON.stringify`, no
     /// guest-side string materialization, both O(n) fuel-metered
     /// work); anything else comes back as [`OutputValue::Json`] via
     /// the unchanged stdout contract. One compiled bytecode serves
-    /// both shapes — the invoke wrapper branches on the return type,
+    /// both shapes - the invoke wrapper branches on the return type,
     /// exactly mirroring how the input side branches on framing.
     ///
     /// Default impl forwards to [`thrust`](Self::thrust) and wraps in
-    /// [`OutputValue::Json`] — correct for backends without a raw
+    /// [`OutputValue::Json`] - correct for backends without a raw
     /// output bridge, where a bytes-shaped return would already have
     /// surfaced as that backend's JSON encoding of it.
     fn thrust_out(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<OutputValue> {
@@ -99,7 +99,7 @@ pub trait Combustor: Send + Sync {
     /// bulk-payload path: "bytes in, bytes out" crosses the boundary
     /// with zero JSON / string / base64 work in either direction.
     ///
-    /// Default impl errors — backends without a linear-memory bridge
+    /// Default impl errors - backends without a linear-memory bridge
     /// inherit it, mirroring [`thrust_raw`](Self::thrust_raw).
     fn thrust_raw_out(
         &self,
@@ -124,12 +124,12 @@ pub trait Combustor: Send + Sync {
     /// trait stays vendor-neutral; the only thing crossing the trait
     /// boundary is opaque byte slices.
     ///
-    /// Default impl errors — backends that don't support the columnar
+    /// Default impl errors - backends that don't support the columnar
     /// path inherit it and surface a clean diagnostic. Currently only
     /// `WasmCombustor` overrides; `NativeCombustor` and
     /// `AdaptiveCombustor` route through the wasm path implicitly via
     /// their stored `WasmCombustor` reference (Adaptive) or simply
-    /// error (Native — script mode + columnar are wasm-only).
+    /// error (Native - script mode + columnar are wasm-only).
     fn thrust_columnar_bytes(
         &self,
         id: &ScriptId,
@@ -148,7 +148,7 @@ pub trait Combustor: Send + Sync {
     /// runs. Returns captured stdout / stderr plus a Node-style exit
     /// code.
     ///
-    /// Default impl returns an error — backends that do not support
+    /// Default impl returns an error - backends that do not support
     /// script mode (currently only the library-facing native path when
     /// script mode is disabled) simply inherit this. WASM and adaptive
     /// combustors override with the real implementation.

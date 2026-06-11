@@ -3,26 +3,26 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! L3 shadow for `sqlite3` — end-to-end integration coverage.
+//! L3 shadow for `sqlite3` - end-to-end integration coverage.
 //!
 //! Each test runs a small JS program through `burn` that exercises
 //! the polyfill's surface. The Rust SQLite (`rusqlite/bundled`) is
 //! linked statically into the burn binary at build time, so these
-//! tests are hermetic — no `libsqlite3.so` on the runner, no network.
+//! tests are hermetic - no `libsqlite3.so` on the runner, no network.
 //!
 //! Coverage groups:
 //!
-//! * **Happy path** — open / create / insert / select / close on an
+//! * **Happy path** - open / create / insert / select / close on an
 //!   in-memory database; `:memory:` and disk-backed paths.
-//! * **API shape** — callback-vs-no-callback, `this.lastID`/`changes`
+//! * **API shape** - callback-vs-no-callback, `this.lastID`/`changes`
 //!   on `db.run`, `db.each` row dispatch.
-//! * **Parameter types** — null, bool, int, float, unicode strings,
+//! * **Parameter types** - null, bool, int, float, unicode strings,
 //!   Buffer (BLOB), large i64 values, named-param (object) binding.
-//! * **Error paths** — bad SQL, missing table, unique-constraint
+//! * **Error paths** - bad SQL, missing table, unique-constraint
 //!   violations, post-close access, unsupported param types.
-//! * **Lifecycle** — close idempotency, multi-Database isolation,
+//! * **Lifecycle** - close idempotency, multi-Database isolation,
 //!   transactions (commit + rollback), file persistence.
-//! * **Sandbox boundary** — without `--allow-fs`, opening a disk path
+//! * **Sandbox boundary** - without `--allow-fs`, opening a disk path
 //!   outside the allow-list returns an error rather than silently
 //!   writing somewhere unexpected.
 
@@ -316,7 +316,7 @@ fn named_param_object_binding() {
 #[test]
 #[serial]
 fn varargs_param_form() {
-    // db.run('?', a, b, c, cb) — vararg form (no array wrapper).
+    // db.run('?', a, b, c, cb) - vararg form (no array wrapper).
     let out = run_inline(
         r#"
             const sqlite3 = require('sqlite3');
@@ -449,7 +449,7 @@ fn unsupported_param_type_throws() {
             const sqlite3 = require('sqlite3');
             const db = new sqlite3.Database(':memory:');
             db.exec('CREATE TABLE t (v ANY)', () => {
-                // Symbols can't be encoded — the polyfill rejects.
+                // Symbols can't be encoded - the polyfill rejects.
                 db.run('INSERT INTO t VALUES (?)', [Symbol('s')], (err) => {
                     if (!err) { console.error('expected err'); process.exit(2); }
                     console.log('BAD_TYPE_OK');

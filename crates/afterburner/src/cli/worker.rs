@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `burn run --internal-worker FOO.js` — worker-child bootstrap.
+//! `burn run --internal-worker FOO.js` - worker-child bootstrap.
 //!
 //! This codepath is the *only* place a `DaemonWorkers::new_child`
 //! coordinator is constructed. The CLI flag is hidden from `--help`
@@ -20,7 +20,7 @@
 //!    and install the child-role coordinator on its Store.
 //! 3. `run_init` evaluates the user's worker script. Because workers
 //!    are inherently long-lived (they wait for messages), the polyfill
-//!    schedules an `online` heartbeat as a microtask post-eval —
+//!    schedules an `online` heartbeat as a microtask post-eval -
 //!    the parent's `worker.on('online')` fires from that.
 //! 4. We drive the same event loop the parent uses, but drain
 //!    `WorkerEvent::ParentMessage` / `TerminateRequested` instead of
@@ -55,7 +55,7 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     let manifold = build_manifold(cli);
 
     // Bootstrap the child-role worker coordinator. This BLOCKS until
-    // the parent writes the init frame to our stdin — that's the
+    // the parent writes the init frame to our stdin - that's the
     // contract; the parent always writes the frame immediately after
     // spawn, so the wait is bounded.
     let workers = DaemonWorkers::new_child(
@@ -95,7 +95,7 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     daemon.install_workers(Arc::clone(&workers));
 
     // workers can use net too. Inherits the (already-narrowed)
-    // manifold from the parent's CLI flags — capability inheritance
+    // manifold from the parent's CLI flags - capability inheritance
     // is enforced one level up at spawn-time, not here.
     let net = DaemonNet::new(rt.handle().clone(), manifold.clone());
     daemon.install_net(Arc::clone(&net));
@@ -181,7 +181,7 @@ fn run_child_event_loop(
                     Some(serde_json::json!({"kind": "worker-terminate-requested"}))
                 }
                 // Child role doesn't see online/message/error/exit on
-                // its own channel — those flow only parent-side. Ignore
+                // its own channel - those flow only parent-side. Ignore
                 // defensively.
                 _ => None,
             };
@@ -277,7 +277,7 @@ fn run_child_event_loop(
         // Exit conditions: parent closed our stdin AND nothing else
         // is keeping us alive (no ref'd timer / listener). Workers
         // that registered a `parentPort.on('message')` only stay alive
-        // because the stdin pump is still reading — once parent drops
+        // because the stdin pump is still reading - once parent drops
         // its end, parent_closed flips and we can exit.
         if workers.parent_closed_signaled() && !daemon.has_refs() {
             break;
@@ -566,7 +566,7 @@ fn collect_env(cli: &Cli) -> std::collections::BTreeMap<String, String> {
 
 fn flush_streams(daemon: &mut DaemonRuntime) -> Result<()> {
     // Worker children must not write anything to stdout that isn't a
-    // framed IPC payload — that channel belongs to daemon_workers.
+    // framed IPC payload - that channel belongs to daemon_workers.
     // Forward captured stdout to **stderr** instead so user
     // `console.log` from inside a worker is still visible while the
     // IPC pipe stays clean.

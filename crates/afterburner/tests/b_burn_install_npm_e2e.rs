@@ -4,7 +4,7 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 //! Full end-to-end: the REAL `burn install` binary installs an npm
-//! dependency declared in `afb.toml [npm]`, from a MOCK npm registry —
+//! dependency declared in `afb.toml [npm]`, from a MOCK npm registry -
 //! NO `npm` toolchain, NO process spawn, NO real network.
 //!
 //! Proves the whole glue: `burn install` reads `[npm]`, the native client
@@ -30,7 +30,8 @@ fn make_tarball(files: &[(&str, &[u8])]) -> (Vec<u8>, String) {
             h.set_size(body.len() as u64);
             h.set_mode(0o644);
             h.set_cksum();
-            b.append_data(&mut h, format!("package/{rel}"), &body[..]).unwrap();
+            b.append_data(&mut h, format!("package/{rel}"), &body[..])
+                .unwrap();
         }
         b.finish().unwrap();
     }
@@ -38,7 +39,10 @@ fn make_tarball(files: &[(&str, &[u8])]) -> (Vec<u8>, String) {
     let mut e = GzEncoder::new(&mut gz, flate2::Compression::default());
     e.write_all(&tar_buf).unwrap();
     e.finish().unwrap();
-    let sha: String = Sha1::digest(&gz).iter().map(|x| format!("{x:02x}")).collect();
+    let sha: String = Sha1::digest(&gz)
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect();
     (gz, sha)
 }
 
@@ -47,8 +51,14 @@ fn burn_install_fetches_npm_dep_from_afb_toml() {
     let server = MockServer::start();
 
     let (tar, sha) = make_tarball(&[
-        ("package.json", br#"{"name":"leftpad","version":"1.3.0","main":"index.js"}"#),
-        ("index.js", b"module.exports = (s, n) => String(s).padStart(n, '0');"),
+        (
+            "package.json",
+            br#"{"name":"leftpad","version":"1.3.0","main":"index.js"}"#,
+        ),
+        (
+            "index.js",
+            b"module.exports = (s, n) => String(s).padStart(n, '0');",
+        ),
     ]);
     let tarball_url = server.url("/leftpad/-/leftpad-1.3.0.tgz");
     server.mock(|when, then| {
@@ -71,10 +81,21 @@ fn burn_install_fetches_npm_dep_from_afb_toml() {
     let dir = tmp.path().join("app");
     let init = Command::new(BURN)
         .env("BURN_QUIET", "1")
-        .args(["init", dir.to_str().unwrap(), "--name", "app", "--namespace", "acme"])
+        .args([
+            "init",
+            dir.to_str().unwrap(),
+            "--name",
+            "app",
+            "--namespace",
+            "nyquist",
+        ])
         .output()
         .unwrap();
-    assert!(init.status.success(), "init: {}", String::from_utf8_lossy(&init.stderr));
+    assert!(
+        init.status.success(),
+        "init: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
 
     let afb_toml = dir.join("afb.toml");
     let mut t = std::fs::read_to_string(&afb_toml).unwrap();
@@ -102,7 +123,10 @@ fn burn_install_fetches_npm_dep_from_afb_toml() {
     // The package landed in the npm cache, extracted (no `package/` prefix),
     // and is byte-correct.
     let pkg_dir = cache.join("burn/npm/leftpad@1.3.0");
-    assert!(pkg_dir.join(".burn-complete").exists(), "cache marker present");
+    assert!(
+        pkg_dir.join(".burn-complete").exists(),
+        "cache marker present"
+    );
     let idx = std::fs::read_to_string(pkg_dir.join("index.js")).unwrap();
     assert!(idx.contains("padStart"), "extracted index.js: {idx}");
     assert!(pkg_dir.join("package.json").exists());
@@ -132,13 +156,22 @@ fn burn_install_rejects_npm_native_addon() {
 
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("app");
-    assert!(Command::new(BURN)
-        .env("BURN_QUIET", "1")
-        .args(["init", dir.to_str().unwrap(), "--name", "app", "--namespace", "acme"])
-        .output()
-        .unwrap()
-        .status
-        .success());
+    assert!(
+        Command::new(BURN)
+            .env("BURN_QUIET", "1")
+            .args([
+                "init",
+                dir.to_str().unwrap(),
+                "--name",
+                "app",
+                "--namespace",
+                "nyquist"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
     let afb_toml = dir.join("afb.toml");
     let mut t = std::fs::read_to_string(&afb_toml).unwrap();
     t.push_str("\n[npm]\nbcrypt = \"^5.0.0\"\n");
@@ -153,7 +186,13 @@ fn burn_install_rejects_npm_native_addon() {
         .args(["install"])
         .output()
         .unwrap();
-    assert!(!out.status.success(), "install must fail on a native npm addon");
+    assert!(
+        !out.status.success(),
+        "install must fail on a native npm addon"
+    );
     let msg = String::from_utf8_lossy(&out.stderr);
-    assert!(msg.to_lowercase().contains("native"), "error must name native rejection: {msg}");
+    assert!(
+        msg.to_lowercase().contains("native"),
+        "error must name native rejection: {msg}"
+    );
 }

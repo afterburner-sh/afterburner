@@ -16,41 +16,34 @@
 
 ---
 
-Afterburner lets you load, execute, and unload JavaScript from Rust with hard resource limits and fine-grained permission controls. Node.js built-ins (`fs`, `crypto`, `http`, `zlib`, `child_process`, and more) are available but locked behind capability gates you configure per-script.
+Afterburner is a JavaScript runtime built in Rust, and the way you build on it is by writing **packages**: small, capability-sealed units of JavaScript or TypeScript that you scaffold, test, build into a single `.afb` file, and publish to a registry. It ships its own package format, registry, and Cargo-style package manager, so the whole workflow is one toolchain. (You can also embed the engine as a Rust library; see [Library usage](#library-usage-embedding-the-engine) below.)
 
-## Library usage
+## Quickstart: build a package
 
-```toml
-[dependencies]
-afterburner = "0.1"
+Install the toolchain, then scaffold, run, and publish a package:
+
+```sh
+curl -fsSL https://afterburner.sh | sh            # install the `burn` toolchain
+
+burn init ./greeter --namespace nyquist --name greeter   # scaffold (add --ts for TypeScript)
+cd greeter
+burn run                                          # run the package entry (like `cargo run`)
+burn test                                         # run tests/ in the sandbox
+burn package                                      # build ./nyquist-greeter-0.1.0.afb
+burn publish                                      # upload to the registry
+burn clean                                        # remove build artifacts
 ```
 
-```rust
-use afterburner::Afterburner;
-use serde_json::json;
+A package is a directory with three parts: a manifest (`afb.toml`), a capability grant (`manifold.json`), and your `source/`. The entry exports one function that takes a JSON input and returns a JSON result:
 
-let ab = Afterburner::new()?;
-let id = ab.register("module.exports = (d) => d.n + 1")?;
-let out = ab.run(&id, &json!({ "n": 41 }))?;
-assert_eq!(out, json!(42));
+```javascript
+// source/main.js
+module.exports = function (input) {
+  return { hello: (input && input.name) || "world" };
+};
 ```
 
-The default picks the best mode available (`adaptive` → native on the first call, WASM-sandboxed on the second). Use `Afterburner::builder()` for mode + limits + capabilities:
-
-```rust
-use afterburner::{Afterburner, Manifold, FsAccess};
-
-let ab = Afterburner::builder()
-    .fuel(1_000_000_000)
-    .memory_bytes(64 << 20)
-    .timeout_ms(30_000)
-    .manifold(Manifold {
-        fs: FsAccess::ReadWrite(vec!["/var/data".into()]),
-        ..Manifold::sealed()
-    })
-    .threaded(8)
-    .build()?;
-```
+It is **sealed by default**: the scaffolded `manifold.json` grants nothing, so the code cannot touch the network, filesystem, or environment until you open a door. See [Packages, registry & package manager](#packages-registry--package-manager) for the full authoring reference.
 
 ## `burn`: the command-line runtime
 
@@ -136,13 +129,12 @@ in as dependencies when you want them).
   kinds of dependency, both declared (never vendored into your artifact):
   `[dependencies]` for other registry packages and `[npm]` for npm
   packages, which a **native, pure-Rust** installer fetches and
-  integrity-checks (no `npm` toolchain, no install scripts, native/C-ABI
-  addons rejected).
+  integrity-checks (no install scripts, native/C-ABI addons rejected).
 
 ```sh
-burn init ./greeter --namespace acme --name greeter   # scaffold (add --ts for TypeScript)
+burn init ./greeter --namespace nyquist --name greeter   # scaffold (add --ts for TypeScript)
 burn test                                             # run tests in the sandbox
-burn add acme/json-tools                              # pin a registry dependency
+burn add nyquist/json-tools                              # pin a registry dependency
 burn install                                          # resolve + cache the graph → burn.lock
 burn package                                          # build the .afb (deterministic)
 burn publish                                          # upload to the registry
@@ -150,6 +142,48 @@ burn publish                                          # upload to the registry
 
 Full authoring guide and the dependency-security model are in the
 [documentation](https://afterburner.sh/docs#packages).
+
+---
+
+## Library usage (embedding the engine)
+
+Besides the package toolchain, you can embed the engine directly in a Rust
+program to run untrusted JavaScript inside your own application. Add the
+crate, register a script, hand it JSON, get JSON back:
+
+```toml
+[dependencies]
+afterburner = "0.1"
+```
+
+```rust
+use afterburner::Afterburner;
+use serde_json::json;
+
+let ab = Afterburner::new()?;
+let id = ab.register("module.exports = (d) => d.n + 1")?;
+let out = ab.run(&id, &json!({ "n": 41 }))?;
+assert_eq!(out, json!(42));
+```
+
+The default picks the best mode available (adaptive: native on the first
+call, WASM-sandboxed thereafter). Use `Afterburner::builder()` for mode,
+limits, and capabilities:
+
+```rust
+use afterburner::{Afterburner, Manifold, FsAccess};
+
+let ab = Afterburner::builder()
+    .fuel(1_000_000_000)
+    .memory_bytes(64 << 20)
+    .timeout_ms(30_000)
+    .manifold(Manifold {
+        fs: FsAccess::ReadWrite(vec!["/var/data".into()]),
+        ..Manifold::sealed()
+    })
+    .threaded(8)
+    .build()?;
+```
 
 ---
 

@@ -14,7 +14,7 @@
 //! from npm, runs `esbuild` on the tree) and writes the result to
 //! `generated/plenum_bundle.js`. The developer commits the file.
 //!
-//! The in-tree generator is intentionally minimal for Phase 1 — Phase 2
+//! The in-tree generator is intentionally minimal for Phase 1 - Phase 2
 //! swaps in a proper bundler once we import npm polyfills.
 
 use std::env;
@@ -37,7 +37,7 @@ fn main() {
     }
 
     let mut bundle = String::new();
-    bundle.push_str("// GENERATED — do not edit. Source: afterburner-node-compat/polyfills/\n");
+    bundle.push_str("// GENERATED - do not edit. Source: afterburner-node-compat/polyfills/\n");
     bundle.push_str(
         "// Rebuild with: AFTERBURNER_REBUILD_PLENUM=1 cargo build -p afterburner-node-compat\n\n",
     );

@@ -6,7 +6,7 @@
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/vertexclique/afterburner/master/art/svg/afterburner-square.svg"
 )]
-//! Afterburner flow engine — a Rust-native runner for user-authored JS
+//! Afterburner flow engine - a Rust-native runner for user-authored JS
 //! modules consumed in a flow/pipeline. Construct one [`FlowEngine`] up
 //! front, then `load` modules, `execute` them against a chain input, and
 //! `unload` when no longer needed.

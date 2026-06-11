@@ -4,7 +4,7 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 //! Throughput smoke test for the WASM path. Not a replacement for a
-//! criterion bench — just a regression tripwire that fails if thrust
+//! criterion bench - just a regression tripwire that fails if thrust
 //! drops below a conservative floor.
 
 use afterburner_core::{Combustor, FuelGauge};
@@ -38,7 +38,7 @@ fn wasm_thrust_rate_meets_floor() {
         elapsed.as_secs_f64() * 1000.0
     );
 
-    // 50/sec is extremely conservative — debug builds with the full
+    // 50/sec is extremely conservative - debug builds with the full
     // ~1.6 MB Wizer-preinit plugin instantiated per call still beat
     // this comfortably. Release-mode throughput is much higher.
     assert!(

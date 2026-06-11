@@ -3,19 +3,19 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! WebSocket client (RFC 6455) — JS-on-net implementation tests.
+//! WebSocket client (RFC 6455) - JS-on-net implementation tests.
 //!
 //! Two layers:
 //!
 //! 1. **Shape tests** (always run): constructor exists, exposes the
 //!    canonical readyState constants, accepts events, encodes /
-//!    decodes frames correctly. No network — pure JS exercise.
+//!    decodes frames correctly. No network - pure JS exercise.
 //!
 //! 2. **Round-trip tests**: a hand-rolled Rust WebSocket echo server
 //!    runs as a thread inside the Rust test process, bound to
 //!    `127.0.0.1:<dynamic>`. burn connects via the WebSocket polyfill,
 //!    sends frames, reads echo, closes. Uses workspace `sha1` +
-//!    `base64` deps for the handshake — no `tungstenite` / external
+//!    `base64` deps for the handshake - no `tungstenite` / external
 //!    WebSocket lib needed.
 
 #![cfg(feature = "bin")]

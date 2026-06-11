@@ -17,15 +17,15 @@ pub enum CloudError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Transport-level failure (DNS, connect, TLS, timeout) — no HTTP status.
+    /// Transport-level failure (DNS, connect, TLS, timeout) - no HTTP status.
     #[error("could not reach the registry: {0}")]
     Transport(String),
 
-    /// 401 — no/invalid token.
+    /// 401 - no/invalid token.
     #[error("authentication failed: run `burn login` (or pass --token / set BURN_REGISTRY_TOKEN)")]
     Unauthorized,
 
-    /// 403 — authenticated but not the owner/admin.
+    /// 403 - authenticated but not the owner/admin.
     #[error("you are not an owner of this package (or not an admin)")]
     Forbidden,
 
@@ -33,7 +33,7 @@ pub enum CloudError {
     #[error("not found on the registry")]
     NotFound,
 
-    /// 409 — immutable-version conflict on publish.
+    /// 409 - immutable-version conflict on publish.
     #[error("conflict: {0}")]
     Conflict(String),
 

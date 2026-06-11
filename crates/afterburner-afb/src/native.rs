@@ -3,21 +3,21 @@
 
 //! Native-addon rejection.
 //!
-//! Afterburner runs JavaScript in a Wasmtime sandbox — it can NEVER load a
+//! Afterburner runs JavaScript in a Wasmtime sandbox - it can NEVER load a
 //! native dynamic library, an N-API / C-ABI addon, or any other host-arch
 //! machine code. A package that vendors such a thing (directly or through an
 //! npm dependency) is not just unrunnable, it is a security red flag: native
 //! addons exist precisely to escape the JS sandbox into the host process.
 //!
 //! So the rule is fail-closed at the earliest gate (pack AND vendor): if any
-//! file in the archive's source tree looks like a native artifact, refuse —
-//! naming the file — rather than ship a package that will explode (or worse,
+//! file in the archive's source tree looks like a native artifact, refuse -
+//! naming the file - rather than ship a package that will explode (or worse,
 //! try to dlopen something) at runtime.
 //!
 //! What we reject (by path/extension, before any bytes are trusted):
-//! * `*.node` — N-API / nan native addons (the canonical case).
+//! * `*.node` - N-API / nan native addons (the canonical case).
 //! * platform dynamic libraries: `*.dll`, `*.dylib`, `*.so`, `*.so.N`.
-//! * native build descriptors: `binding.gyp`, `*.gyp`, `*.gypi` — their mere
+//! * native build descriptors: `binding.gyp`, `*.gyp`, `*.gypi` - their mere
 //!   presence means the package expects a C/C++ toolchain at install time.
 //! * static objects / archives that only matter to a native linker:
 //!   `*.o`, `*.a`, `*.lib`, `*.wasm` is ALLOWED (it's sandbox-native).
@@ -92,7 +92,10 @@ mod tests {
 
     #[test]
     fn flags_node_addon() {
-        assert!(native_artifact_reason("source/node_modules/bcrypt/lib/binding/bcrypt_lib.node").is_some());
+        assert!(
+            native_artifact_reason("source/node_modules/bcrypt/lib/binding/bcrypt_lib.node")
+                .is_some()
+        );
     }
 
     #[test]

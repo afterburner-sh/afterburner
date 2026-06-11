@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `WasmCombustor` — untrusted-code path. Instantiates a
+//! `WasmCombustor` - untrusted-code path. Instantiates a
 //! Wizer-preinitialized Afterburner Javy plugin into a fresh `Store`
 //! per thrust and feeds the user source + input as a JSON envelope on
 //! stdin. The plugin compiles the source in-process via
@@ -17,7 +17,7 @@
 //!
 //! * `WasmCombustor::new` pre-compiles the plugin module once and
 //!   starts the shared epoch ticker.
-//! * `ignite(source)` hashes the source and stashes it in-memory — no
+//! * `ignite(source)` hashes the source and stashes it in-memory - no
 //!   compilation. `ScriptId` is content-addressed so identical sources
 //!   hash identically across backends (`Adaptive` relies on that).
 //! * `thrust(id, input, limits)` looks up the cached source, serializes
@@ -53,7 +53,7 @@ use wasmtime_wasi::p1::add_to_linker_sync;
 const PLUGIN_BYTES: &[u8] = include_bytes!("../plugin/afterburner_plugin.wasm");
 
 // Result capture is ceiling-bounded per call via
-// `FuelGauge::output_ceiling()` (default 64 MiB) — there is no fixed
+// `FuelGauge::output_ceiling()` (default 64 MiB) - there is no fixed
 // stdout buffer anymore. The old 1 MiB `STDOUT_CAPACITY` gave results
 // a hard cliff: the over-budget `fd_write` failed with errno 29 inside
 // `__ab_write_stdout` and the call surfaced as an opaque trap.
@@ -61,7 +61,7 @@ const PLUGIN_BYTES: &[u8] = include_bytes!("../plugin/afterburner_plugin.wasm");
 // ---- pooling allocator defaults -----------------------------------------
 //
 // Cross-platform high-performance defaults. Wasmtime's `PoolingAllocator`
-// is supported on Linux, macOS, and Windows (x86_64 + aarch64) — the same
+// is supported on Linux, macOS, and Windows (x86_64 + aarch64) - the same
 // values work everywhere. Per-platform sub-features that can fail (e.g.
 // memory protection keys on Linux x86_64) are runtime-probed in
 // `build_engine` and silently fall back if unsupported.
@@ -75,7 +75,7 @@ const PLUGIN_BYTES: &[u8] = include_bytes!("../plugin/afterburner_plugin.wasm");
 /// `FuelGauge::memory_bytes` (via `ResourceLimiter`) is the per-call
 /// dynamic cap below this hard limit.
 ///
-/// 1 GiB by default — comfortably fits the Wizer image (~5 MiB), the
+/// 1 GiB by default - comfortably fits the Wizer image (~5 MiB), the
 /// plenum polyfill bundle, and a long-running daemon-mode QuickJS Store
 /// driving frameworks like Express that keep per-request state alive
 /// across the whole listener lifetime.
@@ -85,7 +85,7 @@ const PLUGIN_BYTES: &[u8] = include_bytes!("../plugin/afterburner_plugin.wasm");
 /// 4 GiB). Capped at 4 GiB because the wasm32 ABI has a hard 4 GiB
 /// linear-memory limit per Store; values above that are clamped.
 /// Override down (e.g. `=128M`) when running many concurrent
-/// instances on small hosts — the pool pre-reserves
+/// instances on small hosts - the pool pre-reserves
 /// `MAX_LINEAR_MEMORY_BYTES * POOL_TOTAL_MEMORIES` of virtual address
 /// space (4 GiB × 128 = 512 GiB virtual at the defaults; resident only
 /// on first touch).
@@ -119,7 +119,7 @@ fn max_linear_memory_bytes() -> usize {
 /// is a generous default for commodity hardware.
 const POOL_TOTAL_MEMORIES: u32 = 128;
 
-/// Resident bytes kept warm per freed pool slot — CoW reset back to this
+/// Resident bytes kept warm per freed pool slot - CoW reset back to this
 /// after a Store drops, so re-instantiation skips the page-zeroing cost
 /// for the first 1 MiB. Plan §9.
 const LINEAR_MEMORY_KEEP_RESIDENT: usize = 1024 * 1024;
@@ -127,7 +127,7 @@ const LINEAR_MEMORY_KEEP_RESIDENT: usize = 1024 * 1024;
 /// Resident bytes kept warm per freed table slot.
 const TABLE_KEEP_RESIDENT: usize = 1024 * 1024;
 
-/// Table element ceiling — the Javy plugin uses a single funcref table.
+/// Table element ceiling - the Javy plugin uses a single funcref table.
 /// 65 536 is the Wasm spec maximum and matches what the plugin requests.
 const POOL_TABLE_ELEMENTS: usize = 65_536;
 
@@ -151,7 +151,7 @@ pub struct WasmConfig {
     /// Optional directory (absolute path) for wasmtime's on-disk
     /// compilation cache. When set, the plugin module's native-code
     /// compilation is persisted there and reused by every subsequent
-    /// `WasmCombustor::new` in any process — removing the cold-start
+    /// `WasmCombustor::new` in any process - removing the cold-start
     /// compile cost for short-lived or freshly-forked embedders.
     ///
     /// Entries are keyed by module contents + compiler configuration +
@@ -160,7 +160,7 @@ pub struct WasmConfig {
     /// cleanup worker). Corrupt or stale files are ignored and
     /// recompiled, never fatal. If the cache cannot be initialised
     /// (e.g. unwritable directory), the engine logs a warning and
-    /// proceeds without a cache — this knob is purely an optimisation
+    /// proceeds without a cache - this knob is purely an optimisation
     /// and never affects correctness.
     pub compile_cache_dir: Option<std::path::PathBuf>,
 }
@@ -173,9 +173,9 @@ pub struct WasmConfig {
 /// (compiled by the plugin's `compile` mode); `columnar_raw` is the
 /// bytecode for the columnar wrapper (compiled by the plugin's
 /// `compile-columnar` mode). Both are kept for diagnostics + future
-/// non-invoke consumers. The pre-serialised invoke envelopes —
+/// non-invoke consumers. The pre-serialised invoke envelopes -
 /// `invoke_envelope_bytes` (regular) and `columnar_invoke_envelope_bytes`
-/// (columnar) — are the hot-path payload that
+/// (columnar) - are the hot-path payload that
 /// `Combustor::thrust` / `WasmCombustor::thrust_columnar` borrow
 /// directly, so per-call work is just a slice borrow. Building all
 /// four eagerly at register time costs one extra plugin compile
@@ -206,7 +206,7 @@ pub struct WasmCombustor {
     /// unlocks the plan's 100 K/sec target on commodity 8-core
     /// hardware. The cached payload also pre-bakes the base64-encoded
     /// bytecode + the entire `{"mode":"invoke",...}` JSON envelope, so
-    /// per-thrust work is just a slice borrow — no encode, no serde.
+    /// per-thrust work is just a slice borrow - no encode, no serde.
     bytecode_cache: HopscotchMap<[u8; 32], Arc<CompiledScript>>,
     /// Counter incremented every time `compile_to_bytecode` actually
     /// invokes the plugin's compile mode. Used by tests to assert the
@@ -221,7 +221,7 @@ pub struct WasmCombustor {
     instance_pre: Arc<InstancePre<HostState>>,
     /// Cross-invocation state store passed to every thrust.
     state_store: SharedStateStore,
-    /// Optional host context — embedder-facing read_column/emit_row hooks.
+    /// Optional host context - embedder-facing read_column/emit_row hooks.
     host_context: Option<Arc<dyn afterburner_core::HostContext>>,
     /// Transpile hook threaded into every Store's HostState so the JS
     /// require resolver can call `__host_ts_transpile` for TS / ESM.
@@ -314,7 +314,7 @@ impl WasmCombustor {
         let envelope_bytes = serde_json::to_vec(&envelope)?;
 
         // Compile mode runs the plugin with a sealed manifold and no
-        // host context — the only thing it does is invoke
+        // host context - the only thing it does is invoke
         // `javy_plugin_api::compile_src` and write base64 to stdout.
         let limits = FuelGauge::unlimited();
         let state = HostState::new(
@@ -360,7 +360,7 @@ impl WasmCombustor {
     ///
     /// Returns `Err(AfterburnerError::CompileFailed)` on syntax
     /// errors or transpile failures, with the plugin's stderr
-    /// captured in the message — same surface as
+    /// captured in the message - same surface as
     /// [`Self::compile_to_bytecode`] for the UDF path.
     pub fn compile_daemon_init_bytecode(
         &self,
@@ -402,19 +402,19 @@ impl WasmCombustor {
         })
     }
 
-    /// Shared engine — DaemonRuntime::instantiate uses this when the
+    /// Shared engine - DaemonRuntime::instantiate uses this when the
     /// CLI constructs the daemon from combustor internals.
     pub fn engine(&self) -> &Engine {
         &self.engine
     }
 
-    /// Pre-resolved plugin instance — shared between thrust + daemon.
+    /// Pre-resolved plugin instance - shared between thrust + daemon.
     pub fn instance_pre(&self) -> &Arc<InstancePre<HostState>> {
         &self.instance_pre
     }
 
     /// Spawn a long-lived daemon runtime with a stub `DaemonHttp`
-    /// coordinator — no real TCP binding, just accounting. Used by
+    /// coordinator - no real TCP binding, just accounting. Used by
     /// tests that exercise the plugin ABI without needing a tokio
     /// runtime or real sockets.
     pub fn spawn_daemon(
@@ -476,7 +476,7 @@ impl WasmCombustor {
     /// (one `memcpy` per input column), the plugin's columnar-invoke
     /// mode reads the blob through the existing `host_get_input`
     /// channel, and the JS-side polyfill exposes each column as a
-    /// TypedArray *view* into wasm linear memory — zero copy on the
+    /// TypedArray *view* into wasm linear memory - zero copy on the
     /// guest side. After the user UDF returns, the polyfill writes
     /// the result blob via `host_columnar_reply` and the host decodes
     /// it (one `memcpy` per output column) into [`ColumnarOutput`].
@@ -486,7 +486,7 @@ impl WasmCombustor {
     /// JSON, no base64, no varint, no Arrow framing. The unavoidable
     /// boundary copies are the only ones; everything else is in-place.
     ///
-    /// **Sandbox model:** identical to [`Combustor::thrust`] — fresh
+    /// **Sandbox model:** identical to [`Combustor::thrust`] - fresh
     /// Store from the pool, fresh linmem, fuel + epoch + memory cap
     /// enforced exactly as today. The columnar path adds *no* new
     /// capability gates; the user UDF executes under the same
@@ -509,7 +509,7 @@ impl WasmCombustor {
     }
 
     /// Byte-level columnar UDF entry point. Takes the pre-encoded
-    /// host blob, returns the guest's reply blob — neither side does
+    /// host blob, returns the guest's reply blob - neither side does
     /// `encode_batch` / `decode_batch`. Used by the `Combustor` trait
     /// override (so the type-erased `Box<dyn Combustor>` shape works)
     /// and as the inner implementation of [`Self::thrust_columnar`].
@@ -533,7 +533,7 @@ impl WasmCombustor {
         let mut state = HostState::new_with_input(
             envelope_bytes,
             encoded_input,
-            // The columnar blob is opaque bytes, not JSON text — the
+            // The columnar blob is opaque bytes, not JSON text - the
             // dispatcher reads it through `__AB_GET_COLUMNAR_INPUT__`
             // (which ignores the framing flag), but keep the flag
             // truthful for anything else that consults it.
@@ -558,7 +558,7 @@ impl WasmCombustor {
 
         // Drain the reply set by the `host_columnar_reply` import.
         // Missing reply means the plugin's `_start` returned cleanly
-        // without writing back — most commonly because the plugin
+        // without writing back - most commonly because the plugin
         // .wasm doesn't ship a `columnar-invoke` mode handler.
         // Surface as a clean diagnostic instead of an empty Vec, since
         // the caller can't distinguish "0 rows out" from "guest never
@@ -570,7 +570,7 @@ impl WasmCombustor {
             .ok_or_else(|| {
                 AfterburnerError::Engine(
                     "columnar-invoke: guest returned without calling host_columnar_reply \
-                     (the plugin .wasm probably doesn't ship a columnar-invoke handler — \
+                     (the plugin .wasm probably doesn't ship a columnar-invoke handler - \
                      rebuild via crates/afterburner-plugin/build.sh)"
                         .to_string(),
                 )
@@ -579,13 +579,13 @@ impl WasmCombustor {
     }
 
     /// Raw-input fast path: execute a compiled script with `input`
-    /// delivered to the module as a `Uint8Array` — no JSON
+    /// delivered to the module as a `Uint8Array` - no JSON
     /// serialization host-side, no guest-side string materialization
     /// or `JSON.parse`. The O(n) byte movement happens in host code
     /// (outside fuel metering); the only guest-side per-byte work is
     /// one copy into a QuickJS-heap `ArrayBuffer`. Same sandbox
     /// properties, bytecode, and output contract as
-    /// [`Combustor::thrust`] — the script's return value comes back
+    /// [`Combustor::thrust`] - the script's return value comes back
     /// as JSON (a bytes-shaped return is the typed
     /// [`AfterburnerError::UnexpectedRawOutput`]; use
     /// [`Self::thrust_raw_out`] to receive it). See `docs/principles`
@@ -599,11 +599,11 @@ impl WasmCombustor {
     /// Output-framing-aware JSON-input invoke: the module's return
     /// type picks the result shape. A `Uint8Array` / `ArrayBuffer`
     /// return crosses the boundary as raw bytes through the
-    /// `host_raw_output` import ([`OutputValue::Bytes`]) — no
+    /// `host_raw_output` import ([`OutputValue::Bytes`]) - no
     /// `JSON.stringify`, no stdout framing, no base64; everything
     /// else takes the unchanged JSON-over-stdout contract
     /// ([`OutputValue::Json`]). One compiled bytecode serves both
-    /// shapes — the invoke wrapper branches on the return type, the
+    /// shapes - the invoke wrapper branches on the return type, the
     /// exact output-side mirror of the input framings.
     #[fastrace::trace(name = "WasmCombustor::thrust_out")]
     pub fn thrust_out(
@@ -616,7 +616,7 @@ impl WasmCombustor {
         self.invoke_with_input(id, input_bytes, InputFormat::Json, limits)
     }
 
-    /// Raw input **and** output-framing-aware result — the full-duplex
+    /// Raw input **and** output-framing-aware result - the full-duplex
     /// bulk-payload path ("bytes in, bytes out" with zero JSON /
     /// string / base64 work in either direction). Composition of
     /// [`Self::thrust_raw`]'s input framing and
@@ -636,8 +636,8 @@ impl WasmCombustor {
     /// [`Self::thrust_raw_out`]): per-call `Store` setup, plugin
     /// instantiation, `_start` dispatch, trap mapping, result
     /// extraction. The invoke envelope (mode + base64 bytecode) was
-    /// built once at `ignite` time and lives in `Arc<CompiledScript>`
-    /// — every call for the same script borrows the cached bytes
+    /// built once at `ignite` time and lives in `Arc<CompiledScript>`,
+    /// so every call for the same script borrows the cached bytes
     /// directly, saving ~40 µs/call (base64 encode of ~30 KB bytecode)
     /// plus the per-call `serde_json::to_vec` on the envelope. One
     /// bytecode serves both input framings (`format` rides in
@@ -703,20 +703,20 @@ impl Drop for WasmCombustor {
 ///
 /// Cross-platform invariants:
 ///
-/// * `consume_fuel(true)` and `epoch_interruption(true)` — required for
+/// * `consume_fuel(true)` and `epoch_interruption(true)` - required for
 ///   per-call fuel + wall-clock bounds. Available on every platform.
 ///
 ///   Fuel instrumentation is **unconditional by necessity**, and taxes
 ///   even calls that run with an unlimited budget (`fuel: None` →
 ///   `set_fuel(u64::MAX)`). `consume_fuel` is an engine-level codegen
 ///   flag: the decrement-and-check sequence is baked into the compiled
-///   machine code, so there is no per-`Store` off switch — and this one
+///   machine code, so there is no per-`Store` off switch - and this one
 ///   `Engine` (plus its single compiled plugin `Module` / `InstancePre`)
 ///   is shared by every execution path regardless of budget: bounded
 ///   UDF calls, unlimited compile-mode stores, and long-lived daemon
 ///   stores all instantiate from it. Measured overhead on guest-CPU-
 ///   bound work (release CLI, 3e7-iteration interpreted JS loop):
-///   ~5.5 s with fuel vs ~4.5 s without — roughly a 19 % tax. Making it
+///   ~5.5 s with fuel vs ~4.5 s without - roughly a 19 % tax. Making it
 ///   conditional would mean a second `Engine` with `consume_fuel(false)`
 ///   plus a second module compile and `InstancePre`, routed per call on
 ///   `limits.fuel.is_some()`: double the cold-start compile (and double
@@ -727,29 +727,29 @@ impl Drop for WasmCombustor {
 ///   dominant guest-side O(n) hot paths (base64, zlib, crypto, hashing)
 ///   are host-hoisted and burn no fuel at all. Revisit if profiling
 ///   shows interpreter-bound unmetered workloads dominating again.
-/// * `memory_init_cow(true)` — re-initialize linear memory via copy-on-
+/// * `memory_init_cow(true)` - re-initialize linear memory via copy-on-
 ///   write page mapping. Cross-platform; on Windows the implementation
 ///   uses file-backed sections and is functionally equivalent.
-/// * `cranelift_opt_level(Speed)` — emit optimized code; safepoint
+/// * `cranelift_opt_level(Speed)` - emit optimized code; safepoint
 ///   density is high enough that epoch interruption fires inside guest
 ///   loops including the Javy microtask pump (verified by the
 ///   `wasm_infinite_microtask_chain_is_bounded` regression test).
-/// * `parallel_compilation(true)` — Cranelift uses rayon to compile
+/// * `parallel_compilation(true)` - Cranelift uses rayon to compile
 ///   functions in parallel; cuts cold-start when the plugin module
 ///   first instantiates. Available on every platform.
-/// * `allocation_strategy(Pooling)` — pre-reserved per-instance
+/// * `allocation_strategy(Pooling)` - pre-reserved per-instance
 ///   linear-memory + table slots. Slot-affine reuse means
 ///   re-instantiation skips page zeroing for the first
 ///   `LINEAR_MEMORY_KEEP_RESIDENT` bytes. Cross-platform.
 ///
 /// Optional sub-features (memory protection keys, etc.) that are
 /// platform-specific would be runtime-probed here and silently fall
-/// back if unsupported. None are currently enabled — the defaults above
+/// back if unsupported. None are currently enabled - the defaults above
 /// already saturate commodity hardware throughput.
 ///
 /// `compile_cache_dir` (see [`WasmConfig::compile_cache_dir`]) enables
 /// wasmtime's on-disk compilation cache rooted at the given absolute
-/// path. Cache initialisation failure is downgraded to a warning — the
+/// path. Cache initialisation failure is downgraded to a warning - the
 /// cache is an optimisation, never a correctness dependency.
 fn build_engine(compile_cache_dir: Option<&std::path::Path>) -> Result<Engine> {
     let mut config = Config::new();
@@ -805,7 +805,7 @@ impl Combustor for WasmCombustor {
         // source (for diagnostics + future retry) and the bytecode
         // alongside a pre-built `invoke` envelope. Pre-building here
         // hoists the per-thrust base64 encode and per-thrust envelope
-        // serde out of the hot path — every subsequent `thrust` for
+        // serde out of the hot path - every subsequent `thrust` for
         // this script borrows the cached bytes directly.
         let bytecode = self.compile_to_bytecode(source)?;
         let bytecode_b64 = B64.encode(&bytecode);
@@ -815,7 +815,7 @@ impl Combustor for WasmCombustor {
         });
         let invoke_envelope_bytes = serde_json::to_vec(&invoke_envelope)?;
 
-        // Columnar wrapper compile — produces a separate bytecode
+        // Columnar wrapper compile - produces a separate bytecode
         // that wires `module.exports` to `__ab_columnar_dispatch`.
         // Same source, different wrapper, different bytecode hash.
         // Eager build because the per-call path needs both envelopes
@@ -856,14 +856,14 @@ impl Combustor for WasmCombustor {
     fn thrust(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value> {
         // Input serializes per-call because it changes per-call; it
         // goes via `HostState::pending_input` (read by the
-        // `host_get_input` linker import) — not via the envelope.
+        // `host_get_input` linker import) - not via the envelope.
         let input_bytes = serde_json::to_vec(input)?;
         self.invoke_with_input(id, input_bytes, InputFormat::Json, limits)?
             .into_json()
     }
 
     /// Combustor-trait override that delegates to the inherent
-    /// [`Self::thrust_raw`] — same delegation shape as
+    /// [`Self::thrust_raw`] - same delegation shape as
     /// `thrust_columnar_bytes` below.
     fn thrust_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
         WasmCombustor::thrust_raw(self, id, input, limits)
@@ -894,7 +894,7 @@ impl Combustor for WasmCombustor {
 
     /// Combustor-trait override that delegates to the inherent
     /// byte-level path. The `BurnCache` (and therefore the public
-    /// `Afterburner` facade) calls this via `Box<dyn Combustor>` —
+    /// `Afterburner` facade) calls this via `Box<dyn Combustor>` -
     /// the typed
     /// [`Self::thrust_columnar`] convenience is for direct callers.
     fn thrust_columnar_bytes(
@@ -1159,7 +1159,7 @@ mod tests {
             .thrust(&id, &json!(null), &FuelGauge::unlimited())
             .unwrap();
         // The message may carry a "(resolved against '<dir>')" suffix
-        // naming the node_modules base the walk started from — assert
+        // naming the node_modules base the walk started from - assert
         // on the Node-shaped prefix.
         let msg = out.as_str().expect("error message string");
         assert!(
@@ -1223,7 +1223,7 @@ mod tests {
         );
 
         // Re-igniting the same source must also hit the cache (no
-        // recompile) — content-addressed by hash.
+        // recompile) - content-addressed by hash.
         let id2 = c
             .ignite("module.exports = (d) => ({ doubled: d.n * 2 })")
             .unwrap();
@@ -1256,7 +1256,7 @@ mod tests {
             !compiled.columnar_raw.is_empty(),
             "columnar bytecode must be cached",
         );
-        // The two bytecodes are different — different wrappers around
+        // The two bytecodes are different - different wrappers around
         // the same user source produce different compiled bodies.
         assert_ne!(
             compiled.raw, compiled.columnar_raw,

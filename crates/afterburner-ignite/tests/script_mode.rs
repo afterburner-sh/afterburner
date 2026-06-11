@@ -60,7 +60,7 @@ fn console_error_routed_to_stderr() {
 
 #[test]
 fn async_iife_resolves_native() {
-    // Native script mode does NOT support top-level `await` — see the
+    // Native script mode does NOT support top-level `await` - see the
     // rationale in native_engine.rs::build_script_stage. The
     // idiomatic Node-compatible pattern for native is the
     // self-invoking async IIFE, which returns a Promise the pumping
@@ -147,7 +147,7 @@ fn argv_and_env_threaded_through_invocation() {
 
 #[test]
 fn udf_path_still_logs_to_workspace_after_script_capture() {
-    // Regression guard — after a script-mode call completes on this
+    // Regression guard - after a script-mode call completes on this
     // thread, the capture slot must be cleared so a subsequent UDF
     // call's console output flows through the workspace logger again
     // (not leak into a stale buffer).

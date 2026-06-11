@@ -21,7 +21,7 @@ use super::manifold::build_manifold;
 
 /// Compose a [`ScriptInvocation`] matching the Node convention
 /// `["program", "<script>", ...user_args]`. `script_label` is the
-/// string to put at `argv[1]` — the absolute file path for `run`, or
+/// string to put at `argv[1]` - the absolute file path for `run`, or
 /// `"[eval]"` for `-e`.
 pub fn build_invocation(cli: &Cli, script_label: &str, user_args: &[String]) -> ScriptInvocation {
     let mut argv = Vec::with_capacity(2 + user_args.len());
@@ -40,7 +40,7 @@ pub fn build_invocation(cli: &Cli, script_label: &str, user_args: &[String]) -> 
 /// `process.cwd()` and B6's `require()` path resolver have a sensible
 /// baseline when the entry script is `-e` eval mode (no `__dirname`
 /// of its own). Falls back to `"/"` if the host refuses to report a
-/// directory — the script still runs, just with a degraded baseline.
+/// directory - the script still runs, just with a degraded baseline.
 pub fn cli_cwd() -> String {
     std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
@@ -98,7 +98,7 @@ fn collect_env(cli: &Cli) -> BTreeMap<String, String> {
 
 /// Run `source` in script mode and forward the captured stdout,
 /// stderr, and exit code to the real host process streams. On
-/// `exit_code != 0` this calls [`std::process::exit`] — same
+/// `exit_code != 0` this calls [`std::process::exit`] - same
 /// semantics as Node.
 pub fn execute(
     ab: &Afterburner,
@@ -121,7 +121,7 @@ pub fn execute(
 
     if outcome.exit_code != 0 {
         // Preserve the script's exit code via `process::exit`. Node
-        // does the same — and there is no sensible "anyhow::Result"
+        // does the same - and there is no sensible "anyhow::Result"
         // mapping for "script exited cleanly with code 2."
         std::process::exit(outcome.exit_code);
     }

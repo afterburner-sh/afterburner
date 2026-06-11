@@ -4,7 +4,7 @@
 //! Native npm installer.
 //!
 //! `burn install` resolves and caches a package's `[npm]` dependencies
-//! WITHOUT a Node toolchain on the host — a self-contained registry client:
+//! WITHOUT a Node toolchain on the host - a self-contained registry client:
 //! fetch packument → pick the max version satisfying the range → download
 //! the tarball → verify integrity → extract into the content-addressed npm
 //! cache → recurse into that package's own `dependencies`. The runtime
@@ -18,7 +18,7 @@
 //!   native-artifact gate ([`afterburner_afb::native`]); a `.node`/`.so`/
 //!   `binding.gyp`/etc. aborts the install, naming the package + file.
 //! * **No install scripts.** Tarballs are extracted as data; npm lifecycle
-//!   scripts (`postinstall`, …) are never executed — the usual npm supply-
+//!   scripts (`postinstall`, …) are never executed - the usual npm supply-
 //!   chain RCE vector simply does not exist here.
 //! * **Bounded.** Per-tarball size cap; path-escape / symlink entries are
 //!   refused by the extractor.
@@ -49,7 +49,7 @@ pub struct NpmPackage {
 /// The full resolved npm closure for a package's `[npm]` section.
 #[derive(Debug, Clone, Default)]
 pub struct NpmResolution {
-    /// name → resolved package (deduplicated: one version per name — a flat
+    /// name → resolved package (deduplicated: one version per name - a flat
     /// install, like a deduped npm tree).
     pub packages: BTreeMap<String, NpmPackage>,
 }
@@ -127,7 +127,10 @@ impl NpmClient {
             .agent
             .get(&url)
             // the abbreviated packument is smaller + faster
-            .set("accept", "application/vnd.npm.install-v1+json, application/json")
+            .set(
+                "accept",
+                "application/vnd.npm.install-v1+json, application/json",
+            )
             .call()
             .map_err(|e| map_ureq(name, e))?;
         let mut body = String::new();
@@ -178,7 +181,7 @@ struct Dist {
 }
 
 /// Pick the highest version satisfying `range` (npm semantics: prerelease
-/// versions are excluded unless the range names one — we conservatively skip
+/// versions are excluded unless the range names one - we conservatively skip
 /// prereleases entirely, which is correct for the overwhelming common case).
 fn pick_version(
     name: &str,
@@ -189,7 +192,9 @@ fn pick_version(
         .ok_or_else(|| CloudError::Resolve(format!("npm {name}: bad range {range:?}")))?;
     let mut best: Option<(Version, &VersionEntry, &String)> = None;
     for (vstr, entry) in &pack.versions {
-        let Ok(v) = Version::parse(vstr) else { continue };
+        let Ok(v) = Version::parse(vstr) else {
+            continue;
+        };
         if !v.pre.is_empty() {
             continue;
         }
@@ -197,9 +202,8 @@ fn pick_version(
             best = Some((v, entry, vstr));
         }
     }
-    let (_, entry, vstr) = best.ok_or_else(|| {
-        CloudError::Resolve(format!("npm {name}: no version satisfies {range}"))
-    })?;
+    let (_, entry, vstr) = best
+        .ok_or_else(|| CloudError::Resolve(format!("npm {name}: no version satisfies {range}")))?;
     Ok((vstr.clone(), entry.dist.clone(), entry.dependencies.clone()))
 }
 
@@ -231,7 +235,7 @@ fn encode_name(name: &str) -> String {
 
 fn verify_shasum(name: &str, version: &str, shasum: &str, bytes: &[u8]) -> Result<()> {
     if shasum.is_empty() {
-        // No shasum in the packument — refuse rather than trust blindly.
+        // No shasum in the packument - refuse rather than trust blindly.
         return Err(CloudError::Package(format!(
             "npm {name}@{version}: registry returned no integrity shasum"
         )));
@@ -255,7 +259,10 @@ fn extract_tarball(name: &str, gz: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut ar = tar::Archive::new(dec.take(MAX_TARBALL_UNCOMPRESSED));
     let mut out: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut total: u64 = 0;
-    for entry in ar.entries().map_err(|e| CloudError::Package(format!("npm {name}: {e}")))? {
+    for entry in ar
+        .entries()
+        .map_err(|e| CloudError::Package(format!("npm {name}: {e}")))?
+    {
         let mut entry = entry.map_err(|e| CloudError::Package(format!("npm {name}: {e}")))?;
         let etype = entry.header().entry_type();
         if etype.is_symlink() || etype.is_hard_link() {
@@ -416,7 +423,8 @@ mod tests {
             h.set_size(body.len() as u64);
             h.set_mode(0o644);
             h.set_cksum();
-            b.append_data(&mut h, "package/index.js", &body[..]).unwrap();
+            b.append_data(&mut h, "package/index.js", &body[..])
+                .unwrap();
             b.finish().unwrap();
         }
         let mut gz = Vec::new();
@@ -428,7 +436,10 @@ mod tests {
             e.finish().unwrap();
         }
         let files = extract_tarball("x", &gz).unwrap();
-        assert_eq!(files.get("index.js").map(|v| v.as_slice()), Some(&b"module.exports = 1;"[..]));
+        assert_eq!(
+            files.get("index.js").map(|v| v.as_slice()),
+            Some(&b"module.exports = 1;"[..])
+        );
         assert!(!files.keys().any(|k| k.starts_with("package/")));
     }
 

@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Node 26 surface coverage — the project's stated runtime target.
+//! Node 26 surface coverage - the project's stated runtime target.
 //! Each missing module or global produces a hard regression in real
 //! Node code (libraries probe `typeof` at module-init and crash with
 //! ReferenceError, or destructure properties off `require('node:X')`
@@ -13,13 +13,13 @@
 //!
 //! The matrix is split into:
 //!
-//! * **stdlib modules** — every `require('node:X')` Node 26 ships.
+//! * **stdlib modules** - every `require('node:X')` Node 26 ships.
 //!   We assert each module loads and exposes at least one keyed
 //!   property (catch full-blackhole regressions).
-//! * **globals** — every Web/Node-shaped object Node 26 puts on
+//! * **globals** - every Web/Node-shaped object Node 26 puts on
 //!   `globalThis` at startup. Some are constructors (Event, Blob),
 //!   some functions (fetch, atob), some objects (process, navigator).
-//! * **module-shape sanity** — the most-probed members on the few
+//! * **module-shape sanity** - the most-probed members on the few
 //!   modules that actually matter day-to-day (fs.constants,
 //!   os.constants.errno, path.win32, util.types.isUint8Array, etc).
 
@@ -135,7 +135,7 @@ fn every_node26_stdlib_module_loads() {
                     // empty namespace (e.g. `wasi` only exposes a class
                     // via `module.exports`); we just want SOMETHING.
                     if (typeof x === 'object' && x !== null && Object.getOwnPropertyNames(x).length === 0) {{
-                        // Allowed — module loaded, just no enumerables.
+                        // Allowed - module loaded, just no enumerables.
                     }}
                 }}
             }} catch (e) {{
@@ -239,7 +239,7 @@ fn every_node26_global_is_defined() {
 
 #[test]
 fn fs_constants_carry_posix_open_flags() {
-    // `fs.constants.{F,R,W,X}_OK` plus `O_RDONLY` etc. — used by
+    // `fs.constants.{F,R,W,X}_OK` plus `O_RDONLY` etc. - used by
     // accessSync callers and almost every fs-aware lib.
     let src = r#"
         const fs = require('fs');
@@ -465,7 +465,7 @@ fn sea_reports_not_running_as_sea() {
 
 #[test]
 fn process_version_advertises_node_26() {
-    // npm and pacote gate on >=20.5.0 / >=22.0.0 — we have to claim a
+    // npm and pacote gate on >=20.5.0 / >=22.0.0 - we have to claim a
     // major that satisfies both. Pin to v26 (the project's target).
     let src = r#"
         if (!/^v(2[6-9]|[3-9]\d)\./.test(process.version)) {
@@ -496,7 +496,7 @@ fn fs_writev_serializes_buffers() {
     let src = r#"
         const fs = require('fs');
         const path = '/tmp/burn-writev-test-' + Date.now() + '.txt';
-        const fd = path; // Pass the path string directly — our writev
+        const fd = path; // Pass the path string directly - our writev
                          // accepts both numeric fds and path-string fds.
         const buffers = [Buffer.from('hello, '), Buffer.from('world')];
         const n = fs.writevSync(fd, buffers);
@@ -526,7 +526,7 @@ fn fs_promises_lstat_falls_back_to_stat() {
     let src = r#"
         const fsp = require('fs/promises');
         async function main() {
-            // Use /tmp itself — guaranteed directory.
+            // Use /tmp itself - guaranteed directory.
             const s = await fsp.lstat('/tmp');
             if (typeof s.isDirectory !== 'function') throw new Error('Stats.isDirectory missing');
             if (!s.isDirectory()) throw new Error('lstat /tmp not directory');
@@ -539,7 +539,7 @@ fn fs_promises_lstat_falls_back_to_stat() {
 
 #[test]
 fn require_resolves_node_prefix_uniformly() {
-    // `require('node:fs')` MUST be identical to `require('fs')` —
+    // `require('node:fs')` MUST be identical to `require('fs')` -
     // some libraries gate strict-resolve on this since Node 16+.
     let src = r#"
         const a = require('fs');

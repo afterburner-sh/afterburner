@@ -3,16 +3,16 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Token-bucket admission control — plan §8, T4.
+//! Token-bucket admission control - plan §8, T4.
 //!
-//! Per-tenant GCRA (Generic Cell Rate Algorithm — semantically a leaky
+//! Per-tenant GCRA (Generic Cell Rate Algorithm - semantically a leaky
 //! bucket) implemented lock-free over a single `AtomicU64` per tenant.
 //! Nothing here uses `std::sync::Mutex` or `parking_lot`; tenant state
 //! lives in a `kovan_map::HopscotchMap` keyed by `TenantId`.
 //!
 //! ### Capabilities note
 //!
-//! No POSIX real-time scheduling, no signals, no `timerfd` — just
+//! No POSIX real-time scheduling, no signals, no `timerfd` - just
 //! `Instant::now()`. Safe under default Docker capability set. See
 //! project memory `project_docker_cap_constraint`.
 //!
@@ -21,7 +21,7 @@
 //! A dedicated background thread (`afterburner-admission-sweep`)
 //! periodically walks the bucket map and evicts tenants that haven't
 //! advanced their TAT in `IDLE_THRESHOLD` (default 5 minutes). Bounds
-//! map growth under multi-tenant churn — without it, a workload that
+//! map growth under multi-tenant churn - without it, a workload that
 //! cycles through millions of distinct tenants would leak indefinitely.
 //!
 //! Sweep cadence is 30 s; shutdown is interruptible (100 ms-granular
@@ -132,7 +132,7 @@ impl TokenBucketAdmission {
         self.epoch.elapsed().as_nanos() as u64
     }
 
-    /// Lookup-or-initialize a tenant's TAT slot. Safe against races —
+    /// Lookup-or-initialize a tenant's TAT slot. Safe against races -
     /// two concurrent first-touches coalesce onto whichever
     /// `insert_if_absent` won the insert.
     fn bucket(&self, tenant: TenantId) -> Arc<AtomicU64> {
@@ -201,7 +201,7 @@ impl Drop for TokenBucketAdmission {
 /// Walks the bucket map at [`SWEEP_INTERVAL`] and evicts entries whose
 /// TAT lies more than `idle_threshold_ns` behind `now`. Re-checks the
 /// TAT just before removal so a bucket that became active in the
-/// interval isn't dropped — small races may still flap a freshly
+/// interval isn't dropped - small races may still flap a freshly
 /// rebuilt bucket, with the only effect being one full burst budget
 /// for that tenant. Acceptable for a 5-minute idle window.
 fn sweep_loop(
@@ -234,7 +234,7 @@ fn sweep_loop(
             .collect();
 
         for t in stale {
-            // Re-check before remove — bucket may have woken up.
+            // Re-check before remove - bucket may have woken up.
             if let Some(tat) = buckets.get(&t)
                 && tat.load(Ordering::Relaxed) < cutoff
             {
@@ -273,7 +273,7 @@ mod tests {
     fn allows_up_to_burst_then_rejects() {
         // 100 tokens/sec, burst 5 → period 10 ms, burst window 50 ms.
         // Five tight-loop acquires complete in <1 ms even on a loaded
-        // box, well inside the 50 ms window — so the 6th deterministically
+        // box, well inside the 50 ms window - so the 6th deterministically
         // rejects. Earlier the test used 1 000 tokens/sec (1 ms period,
         // 5 ms window), which raced with debug-mode HopscotchMap
         // lookups under CI load and occasionally allowed the 6th call.
@@ -295,7 +295,7 @@ mod tests {
         let b = tid(2);
         adm.try_acquire(a).unwrap();
         assert!(adm.try_acquire(a).is_err());
-        // b is untouched — must still have one token.
+        // b is untouched - must still have one token.
         adm.try_acquire(b).unwrap();
         assert!(adm.try_acquire(b).is_err());
     }
@@ -344,7 +344,7 @@ mod tests {
             Duration::from_millis(100),
             Duration::from_millis(50),
         );
-        // Touch three tenants — each gets a bucket entry.
+        // Touch three tenants - each gets a bucket entry.
         adm.try_acquire(tid(101)).unwrap();
         adm.try_acquire(tid(102)).unwrap();
         adm.try_acquire(tid(103)).unwrap();
@@ -395,7 +395,7 @@ mod tests {
             10,
             1,
             Duration::from_secs(60),
-            // Long sweep — Drop must interrupt the sleep, not wait it out.
+            // Long sweep - Drop must interrupt the sleep, not wait it out.
             Duration::from_secs(60),
         );
         adm.try_acquire(tid(301)).unwrap();

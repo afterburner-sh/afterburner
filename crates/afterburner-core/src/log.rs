@@ -10,7 +10,7 @@
 //! defaulting to `warn`. Output format is `AFTERBURNER_LOG_FORMAT`
 //! (`text` default, or `json`).
 //!
-//! Library users do not need to call anything — events are emitted via
+//! Library users do not need to call anything - events are emitted via
 //! the [`crate::ab_event!`] macro and `#[fastrace::trace]` spans.
 //! Applications that want output should call [`init`] once during
 //! startup; it installs a fastrace reporter idempotently.
@@ -104,7 +104,7 @@ macro_rules! ab_event {
     }};
 }
 
-/// String label for a level — used by the `ab_event!` macro and exposed
+/// String label for a level - used by the `ab_event!` macro and exposed
 /// for downstream reporters that want to filter by level.
 pub fn level_str(level: Level) -> &'static str {
     match level {
@@ -147,7 +147,7 @@ impl Format {
 static INIT_GUARD: OnceLock<()> = OnceLock::new();
 
 /// Initialize the global fastrace reporter. Reads `AFTERBURNER_LOG` (level)
-/// and `AFTERBURNER_LOG_FORMAT` (`text` or `json`). Idempotent — second and
+/// and `AFTERBURNER_LOG_FORMAT` (`text` or `json`). Idempotent - second and
 /// later calls are no-ops, so it's safe to call from `main` even when the
 /// process embeds Afterburner more than once.
 ///

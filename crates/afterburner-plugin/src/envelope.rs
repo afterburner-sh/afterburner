@@ -120,7 +120,7 @@ pub fn wrap_user_source(user: &str, input_json: &str) -> String {
 }
 
 /// Bytecode-cache variant of [`wrap_user_source`]. The compiled
-/// bytecode is *input-agnostic* — it pulls the per-call input directly
+/// bytecode is *input-agnostic* - it pulls the per-call input directly
 /// from the host via the `__AB_GET_INPUT_VALUE__` global installed in
 /// `globals::install`. Identical Promise / await semantics to the
 /// inlined-input version above; the only difference is the input
@@ -130,7 +130,7 @@ pub fn wrap_user_source(user: &str, input_json: &str) -> String {
 /// One bytecode serves both input framings: the getter returns a JS
 /// string under JSON framing (parsed here with QuickJS's native
 /// `JSON.parse`) and a `Uint8Array` under raw framing (handed to the
-/// module as-is — no string materialization, no parse). The branch is
+/// module as-is - no string materialization, no parse). The branch is
 /// a single `typeof` per invocation; raw framing can never produce a
 /// string, so the dispatch is unambiguous.
 ///
@@ -142,7 +142,7 @@ pub fn wrap_user_source(user: &str, input_json: &str) -> String {
 /// string materialization, and no stdout framing; every other value
 /// keeps the JSON-over-stdout contract. The two `instanceof` checks
 /// are O(1) per invocation. (The legacy [`wrap_user_source`] envelope
-/// keeps JSON-only output: its host path predates — and never reads —
+/// keeps JSON-only output: its host path predates - and never reads -
 /// the raw-output slot.)
 pub fn wrap_user_source_with_input_global(user: &str) -> String {
     let user = normalize_leading_hashbang(user);
@@ -174,7 +174,7 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
     )
 }
 
-/// Columnar-invoke wrapper. Phase 1 of the UDF-perf push — identical
+/// Columnar-invoke wrapper. Phase 1 of the UDF-perf push - identical
 /// shape to [`wrap_user_source_with_input_global`] except the result
 /// dispatch goes through the JS-side `__ab_columnar_dispatch` helper
 /// (installed at modify_runtime time by
@@ -182,7 +182,7 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
 /// `__AB_GET_INPUT_VALUE__` + `JSON.parse` / `JSON.stringify` to
 /// stdout.
 ///
-/// Synchronous in Phase 1 — the dispatcher throws a clean error if
+/// Synchronous in Phase 1 - the dispatcher throws a clean error if
 /// the user UDF returns a Promise. Async columnar UDFs land in
 /// Phase 1.5+. The vast majority of analytical columnar UDFs are
 /// pure compute and sync, so this is the right default.
@@ -202,13 +202,13 @@ pub fn wrap_user_source_columnar(user: &str) -> String {
 /// Envelope for script mode. The user source runs as top-level code
 /// inside a Node-style CommonJS wrapper (`module` / `exports` /
 /// `require` bound as parameters). Unlike the UDF wrappers above, we
-/// do **not** call `module.exports(input)` afterward — script mode
+/// do **not** call `module.exports(input)` afterward - script mode
 /// runs whatever the user wrote top-level and exits when that
 /// finishes. Stdout comes from `console.log` (plenum's console
 /// polyfill), not from `JSON.stringify(result)`.
 ///
 /// `argv_json` / `env_json` must be valid JSON literals (array and
-/// object respectively) — they are inlined into the JS text verbatim
+/// object respectively) - they are inlined into the JS text verbatim
 /// and become `process.argv` / `process.env`. The process polyfill
 /// was bootstrapped at Wizer-preinit time with empty argv/env, so we
 /// also mutate the live `globalThis.process` here to refresh those
@@ -222,16 +222,16 @@ pub fn wrap_user_source_columnar(user: &str) -> String {
 /// Top-level `await` inside user source resolves through Javy's
 /// event-loop drain: the outer wrapper itself is compiled as an ES
 /// module, so a rejecting Promise surfaces as a module-evaluation
-/// error that `invoke` returns as `Err` — exactly how we want script
+/// error that `invoke` returns as `Err` - exactly how we want script
 /// errors to flow back to the host as a WASM trap.
 ///
 /// **Exported promises are awaited.** A script whose final
 /// `module.exports` is a thenable (`module.exports =
 /// someAsyncMain()`) gets that value awaited after the top-level code
-/// finishes: a rejection surfaces exactly like a top-level `throw` —
+/// finishes: a rejection surfaces exactly like a top-level `throw` -
 /// the error message + stack reach stderr and the process exits
 /// nonzero (exit code 1, Node's convention for an unhandled
-/// error/rejection). A resolved exported promise changes nothing —
+/// error/rejection). A resolved exported promise changes nothing -
 /// the value is discarded and the script exits 0. Without this await,
 /// a rejected exported promise would vanish: the assignment itself is
 /// synchronous, nothing ever observed the rejection, and the run
@@ -292,7 +292,7 @@ pub fn wrap_script_source(user: &str, argv_json: &str, env_json: &str, cwd_json:
         // Await an exported thenable so its rejection cannot vanish:
         // `module.exports = Promise.reject(e)` must fail the run the
         // same way a top-level `throw e` does (message + stack on
-        // stderr, exit code 1). A resolved value is discarded —
+        // stderr, exit code 1). A resolved value is discarded -
         // script-mode output stays console-only.
         const __ab_exported = __ab_module.exports;
         if (__ab_exported !== null

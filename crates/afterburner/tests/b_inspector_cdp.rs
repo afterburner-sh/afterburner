@@ -5,7 +5,7 @@
 
 #![cfg(feature = "bin")]
 #![allow(non_snake_case)]
-//! R11 — `inspector` Chrome DevTools Protocol bridge.
+//! R11 - `inspector` Chrome DevTools Protocol bridge.
 //!
 //! Validates:
 //! 1. In-process `Session.post('Runtime.evaluate', ...)` returns the

@@ -6,8 +6,8 @@
 //! T3 gate: imbalanced load (every job hashes to one worker) still
 //! drains across N workers via steal-when-idle.
 //!
-//! We pin every thrust to the *same* `ScriptId` — so hash routing
-//! deterministically targets a single worker — then submit a CPU-bound
+//! We pin every thrust to the *same* `ScriptId` - so hash routing
+//! deterministically targets a single worker - then submit a CPU-bound
 //! batch and assert the wall-clock falls well below "single-threaded
 //! sum of execution times." Since `worker_id` victim selection in
 //! `worker_loop` cycles through peers, all idle workers should pick up
@@ -61,7 +61,7 @@ fn imbalanced_workload_drains_via_stealing() {
     let t1_dur = t0.elapsed();
     drop(engine_1);
 
-    // 4 workers, but every job has the *same* ScriptId — so without
+    // 4 workers, but every job has the *same* ScriptId - so without
     // steal-when-idle, all jobs would land on a single worker and the
     // wall-clock would match the 1-worker baseline. With steal, idle
     // workers grab jobs from the saturated peer's queue.
@@ -84,7 +84,7 @@ fn imbalanced_workload_drains_via_stealing() {
 
     // 4-worker speedup should beat 1.5× even on a 2-CPU CI box (where
     // theoretical max is 2×). On 4+ CPUs we typically see >2.5×. The
-    // 1.5× floor is the regression boundary — anything below means
+    // 1.5× floor is the regression boundary - anything below means
     // steal stopped working.
     assert!(
         speedup >= 1.5,
@@ -98,7 +98,7 @@ fn idle_workers_park_and_dont_burn_cpu() {
     // Sanity: if no work arrives, workers shouldn't busy-loop. We can't
     // measure CPU directly without heavy machinery, but we can at least
     // verify the engine constructs, sits idle for 200ms, and then
-    // picks up a single thrust within 50ms — which would NOT happen if
+    // picks up a single thrust within 50ms - which would NOT happen if
     // workers were spinning at 100% with no backoff (they'd starve the
     // OS scheduler enough that the test runner skews).
     let engine = mk_engine(4);

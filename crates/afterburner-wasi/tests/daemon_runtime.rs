@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! B2.2 — `DaemonRuntime` scaffold tests. Exercises the long-lived
+//! B2.2 - `DaemonRuntime` scaffold tests. Exercises the long-lived
 //! Store path end-to-end against the plugin's daemon modes without
 //! the axum listener layer (that lands in B2.4).
 
@@ -97,7 +97,7 @@ fn daemon_dispatch_invokes_registered_handler() {
 
 #[test]
 fn daemon_persists_js_state_across_dispatches() {
-    // `__counter` lives on globalThis and the Store is long-lived —
+    // `__counter` lives on globalThis and the Store is long-lived -
     // counter MUST survive across dispatch_event calls.
     let c = fresh();
     let mut daemon = c
@@ -150,10 +150,10 @@ fn daemon_handles_missing_handler_without_crashing() {
     // registered (shouldn't happen in practice but defence in
     // depth), the JS dispatcher sends a 500 via __host_http_reply.
     // Without a real reply channel wired, __host_http_reply is a
-    // no-op — the important thing is the dispatch returns cleanly.
+    // no-op - the important thing is the dispatch returns cleanly.
     let c = fresh();
     let mut daemon = c
-        .spawn_daemon("/* empty init — no handlers */", Manifold::open())
+        .spawn_daemon("/* empty init - no handlers */", Manifold::open())
         .expect("spawn daemon");
     daemon
         .dispatch_event(json!({
@@ -168,7 +168,7 @@ fn daemon_handles_missing_handler_without_crashing() {
 #[test]
 fn daemon_has_listeners_reflects_host_http_listen() {
     // Without `http.createServer` polyfill, user code can still
-    // call `__host_http_listen` directly — that's what this test
+    // call `__host_http_listen` directly - that's what this test
     // does to verify the DaemonHttp coordinator accounting.
     let c = fresh();
     let daemon = c
@@ -201,7 +201,7 @@ fn http_createserver_polyfill_end_to_end() {
     // `http.createServer(cb).listen(port)`. The polyfill registers
     // the handler onto `globalThis.__ab_http_handlers` keyed by the
     // `server_id` that `__host_http_listen` returned. A dispatched
-    // event reaches the user's `cb(req, res)` — `res.end(body)`
+    // event reaches the user's `cb(req, res)` - `res.end(body)`
     // flows back through `__host_http_reply` (stubbed in B2.1,
     // real axum wiring lands in B2.4).
     let c = fresh();
@@ -284,7 +284,7 @@ fn http_req_text_resolves_body() {
 fn http_createserver_request_event_listener_also_fires() {
     // Node allows `server.on('request', cb)` as an alternative to
     // passing the listener to createServer. The polyfill emits
-    // 'request' on the Server EventEmitter — a cb attached this
+    // 'request' on the Server EventEmitter - a cb attached this
     // way should see the same event.
     let c = fresh();
     let mut daemon = c

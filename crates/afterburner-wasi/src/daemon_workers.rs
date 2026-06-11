@@ -5,7 +5,7 @@
 
 //! `worker_threads` host coordinator (B10).
 //!
-//! Workers are **process-isolated** — each `new Worker(path, opts)` in
+//! Workers are **process-isolated** - each `new Worker(path, opts)` in
 //! the parent JS spawns a child `burn run --internal-worker <path>`
 //! subprocess. IPC is length-prefixed JSON over the child's stdin /
 //! stdout pipes (4-byte big-endian length, max 16 MiB per frame).
@@ -19,16 +19,16 @@
 //!   `clap` parser builds an identical (or narrower) one. A bug in the
 //!   codec can only narrow capabilities, never widen them
 //!   ([`crate::manifold_codec`]).
-//! * No `SharedArrayBuffer` / `Atomics` surface — the WASM linear-
+//! * No `SharedArrayBuffer` / `Atomics` surface - the WASM linear-
 //!   memory model can't share, so we don't pretend to.
 //!
 //! ## Hardening
 //!
 //! * **Depth cap** via `BURN_WORKER_DEPTH` (mirrors `BURN_SHIM_DEPTH`).
-//!   Default ceiling 8 — fork-bomb defense.
+//!   Default ceiling 8 - fork-bomb defense.
 //! * **Concurrency cap** via [`WorkerConfig::max_concurrent`] (default
-//!   32) — bounded resource use per parent.
-//! * **Frame-size cap** at 16 MiB — DoS defense against a hostile child
+//!   32) - bounded resource use per parent.
+//! * **Frame-size cap** at 16 MiB - DoS defense against a hostile child
 //!   sending a huge `JSON.stringify(...)`.
 //! * **Linux**: child sets `PR_SET_PDEATHSIG = SIGKILL` so the kernel
 //!   reaps it if the parent crashes (defense against orphaned workers).
@@ -64,8 +64,8 @@ mod frame {
     pub const ERROR: &str = "error";
     pub const TERMINATE: &str = "terminate";
     pub const CLOSE_PORT: &str = "close-port";
-    // `exit` is a parent-side synthetic event — never appears on the
-    // wire — so it has no constant here. The reader pump emits
+    // `exit` is a parent-side synthetic event - never appears on the
+    // wire - so it has no constant here. The reader pump emits
     // `WorkerEvent::Exit` directly from the waiter thread.
 }
 
@@ -130,14 +130,14 @@ pub enum WorkerEvent {
 }
 
 /// Parent-side per-worker handle. Both fields are `Clone`, so this
-/// satisfies `HopscotchMap<WorkerId, WorkerHandle>`'s `V: Clone` bound
-/// — the lock-free map returns owned clones from `get`/`remove`,
+/// satisfies `HopscotchMap<WorkerId, WorkerHandle>`'s `V: Clone` bound:
+/// the lock-free map returns owned clones from `get`/`remove`,
 /// which is fine because both `kovan_channel::Sender` and `Arc` are
 /// cheap to clone (one atomic increment).
 ///
 /// The actual `Child` lives inside the waiter thread so it can call
 /// `wait()` without contending with the spawn path. Threads are
-/// detached — they exit naturally when their channels close (writer
+/// detached - they exit naturally when their channels close (writer
 /// when stdin_tx is dropped; reader when the child closes stdout;
 /// waiter after `Child::wait`). The OS reaps any survivors when the
 /// parent process exits.
@@ -179,7 +179,7 @@ impl KillHandle {
 
     #[cfg(not(unix))]
     fn force_kill(&self) {
-        // Windows fallback uses Child::kill via the waiter — no
+        // Windows fallback uses Child::kill via the waiter - no
         // standalone PID handle needed. The waiter sees stdin close
         // and gives up.
     }
@@ -188,7 +188,7 @@ impl KillHandle {
 struct ParentState {
     next_id: AtomicI32,
     /// Wait-free reads (`get`); lock-free writes (`insert`/`remove`)
-    /// per kovan_map's HopscotchMap design — no Mutex anywhere on the
+    /// per kovan_map's HopscotchMap design - no Mutex anywhere on the
     /// daemon hot path.
     active: HopscotchMap<WorkerId, WorkerHandle>,
     alive: AtomicUsize,
@@ -198,7 +198,7 @@ struct ChildState {
     thread_id: WorkerId,
     worker_data: String,
     /// Single-producer, single-consumer queue feeding a dedicated
-    /// stdout-writer thread. Avoids any user-level lock on stdout —
+    /// stdout-writer thread. Avoids any user-level lock on stdout -
     /// the writer thread is the only entity that touches the pipe.
     stdout_tx: UnboundedTx<Vec<u8>>,
     parent_closed: Arc<AtomicBool>,
@@ -262,7 +262,7 @@ impl DaemonWorkers {
         let init = read_init_frame_from_stdin(config.max_frame_bytes)?;
         let parent_closed = Arc::new(AtomicBool::new(false));
 
-        // Stdin pump (parent → child events). Detached — exits when
+        // Stdin pump (parent → child events). Detached - exits when
         // stdin closes.
         {
             let tx = events_tx.clone();
@@ -349,7 +349,7 @@ impl DaemonWorkers {
             && p.active.remove(&worker_id).is_some()
         {
             // Dropping the WorkerHandle drops the stdin sender clone
-            // — once all senders are gone, the writer thread exits.
+            // - once all senders are gone, the writer thread exits.
             // The waiter thread already exited (it's what posted the
             // Exit event we're processing now). The kill handle drops
             // last; harmless because the child is already gone.
@@ -369,7 +369,7 @@ impl DaemonWorkers {
     /// Same as [`Self::spawn_worker`] but additionally injects the
     /// JSON-encoded `{key:val,...}` env map into the spawned child's
     /// environment. Reserved env vars used by burn itself
-    /// (`BURN_WORKER_DEPTH`, `BURN_QUIET`) are filtered out — caller-
+    /// (`BURN_WORKER_DEPTH`, `BURN_QUIET`) are filtered out - caller-
     /// supplied values for those would break the depth-cap and
     /// quiet-mode guarantees. Used by the `cluster` polyfill to set
     /// `BURN_CLUSTER_REUSEPORT=1` on every forked worker so its
@@ -465,7 +465,7 @@ impl DaemonWorkers {
         // slow / hostile worker. Frame-size cap is the DoS guard.
         let (stdin_tx, stdin_rx) = unbounded_channel::<Vec<u8>>();
 
-        // Writer thread — drains the queue onto the child's stdin
+        // Writer thread - drains the queue onto the child's stdin
         // pipe. Detached (no JoinHandle stored): exits when stdin_tx
         // is dropped or the pipe closes. The OS reaps any survivors
         // when the parent process exits.
@@ -474,7 +474,7 @@ impl DaemonWorkers {
             .spawn(move || parent_writer_pump(stdin, stdin_rx))
             .expect("spawn writer thread");
 
-        // Reader thread — child→parent events. `events_tx.send` is
+        // Reader thread - child→parent events. `events_tx.send` is
         // bounded; backpressure is intentional so a chatty worker
         // doesn't outpace the daemon event loop.
         let evt_tx = self.events_tx.clone();
@@ -484,7 +484,7 @@ impl DaemonWorkers {
             .spawn(move || parent_reader_pump(id, stdout, evt_tx, max_frame))
             .expect("spawn reader thread");
 
-        // Waiter thread — owns the Child, observes its exit, posts
+        // Waiter thread - owns the Child, observes its exit, posts
         // an Exit event.
         let evt_tx2 = self.events_tx.clone();
         thread::Builder::new()
@@ -525,7 +525,7 @@ impl DaemonWorkers {
             );
             return errors::E_FRAME_TOO_LARGE;
         }
-        // HopscotchMap::get returns an owned clone — the lookup is
+        // HopscotchMap::get returns an owned clone - the lookup is
         // wait-free.
         let Some(handle) = parent.active.get(&worker_id) else {
             *last_error = format!("worker_threads: unknown worker id {worker_id}");
@@ -609,7 +609,7 @@ impl DaemonWorkers {
 
 impl Drop for DaemonWorkers {
     /// Best-effort cleanup. We don't join the worker threads (none of
-    /// them are stored as `JoinHandle`s — they're detached). Force-
+    /// them are stored as `JoinHandle`s - they're detached). Force-
     /// killing every still-alive child via the kill handle gives the
     /// OS something to reap; the writer / reader threads exit on
     /// their own when the pipes close.
@@ -735,7 +735,7 @@ fn read_frame<R: Read>(r: &mut R, max_bytes: usize) -> Result<Vec<u8>, FrameRead
 }
 
 /// Returns the number of bytes filled before EOF/error. 0 means "EOF
-/// before any byte was read" — distinct from a partial fill (which
+/// before any byte was read" - distinct from a partial fill (which
 /// represents truncation when it isn't 0 or buf.len()).
 fn read_some_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut filled = 0;
@@ -823,7 +823,7 @@ fn parent_reader_pump(
             }
             _ => continue,
         };
-        // bounded `send` blocks if the daemon event loop is slow —
+        // bounded `send` blocks if the daemon event loop is slow -
         // intentional backpressure so we don't drop messages.
         tx.send(evt);
     }
@@ -927,7 +927,7 @@ fn current_worker_depth() -> u32 {
 
 /// Merge the JSON env map into `cmd`. Reserved keys are skipped:
 /// `BURN_WORKER_DEPTH` (depth-cap defense) and `BURN_QUIET`
-/// (silent-mode contract) — letting JS override these would break
+/// (silent-mode contract) - letting JS override these would break
 /// the security envelope.
 fn apply_env_overrides(cmd: &mut Command, env_json: &str) {
     const RESERVED: &[&str] = &[WORKER_DEPTH_ENV, "BURN_QUIET"];

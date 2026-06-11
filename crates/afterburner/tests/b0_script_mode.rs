@@ -6,7 +6,7 @@
 //! B0 phase gate: top-level script mode via `burn` (CLI) + via
 //! `Afterburner::run_script` (library).
 //!
-//! §8 verification — this file covers:
+//! §8 verification - this file covers:
 //!
 //! * Top-level `console.log` → real stdout (not JSON-wrapped).
 //! * Top-level `await` works through Javy's event-loop drain.
@@ -95,7 +95,7 @@ fn uncaught_exception_yields_exit_1_with_partial_stdout() {
 
 #[test]
 fn library_run_script_with_sealed_default() {
-    // The library API's default manifold is `sealed()` — console.log
+    // The library API's default manifold is `sealed()` - console.log
     // still goes through plenum's polyfill (which uses the baked-in
     // Javy.IO path) regardless of capability gates, because
     // `console.*` is not a capability-gated resource.
@@ -115,12 +115,12 @@ fn library_run_script_with_sealed_default() {
 fn library_script_syntax_error_yields_exit_1() {
     // Syntax errors in user source surface as runtime exceptions
     // because the outer wrapper wraps user code into a JS Function
-    // body — the parser blows up at `Function` construction time, not
+    // body - the parser blows up at `Function` construction time, not
     // at our wrapper's `compile_src`. That's the same shape Node
     // gives back: exit code 1 with a SyntaxError-ish stderr.
     //
     // `Err(CompileFailed)` from script mode is reserved for our
-    // outer-wrapper text being malformed — i.e., a bug on our side.
+    // outer-wrapper text being malformed - i.e., a bug on our side.
     let ab = Afterburner::new().expect("build ab");
     let outcome = ab
         .run_script("this is not valid js (*^(")
@@ -132,7 +132,7 @@ fn library_script_syntax_error_yields_exit_1() {
         "expected SyntaxError-ish stderr, got {stderr:?}"
     );
     // We should *not* get a `CompileFailed`-shape error with this
-    // particular stderr — that path is for outer-wrapper bugs only.
+    // particular stderr - that path is for outer-wrapper bugs only.
     let _ = AfterburnerError::CompileFailed("unused; satisfies import lint".into());
 }
 
@@ -186,7 +186,7 @@ fn library_run_script_with_invocation_threads_argv_env() {
 
 #[test]
 fn cli_piped_stdin_not_expected_in_script_mode() {
-    // `burn run` / `burn -e` do NOT consume stdin — that's `burn thrust`.
+    // `burn run` / `burn -e` do NOT consume stdin - that's `burn thrust`.
     // If we pipe stdin here, it should be ignored cleanly.
     let mut child = Command::new(BURN)
         .env("BURN_QUIET", "1")

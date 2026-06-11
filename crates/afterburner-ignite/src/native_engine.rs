@@ -3,23 +3,23 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `NativeCombustor` — executes JS via `rquickjs` FFI directly (no WASM).
+//! `NativeCombustor` - executes JS via `rquickjs` FFI directly (no WASM).
 //!
 //! The trusted-code path. No sandbox beyond QuickJS's own fuel/memory
 //! knobs, but startup is <300 μs and throughput is higher than the WASM
 //! route for short-lived scripts.
 //!
-//! ### Concurrency model — thread-local runtimes
+//! ### Concurrency model - thread-local runtimes
 //!
 //! rquickjs's `Runtime`/`Context` are `!Send`/`!Sync` (without the
 //! `parallel` feature, which drags in tokio). Rather than serialize
 //! access with a Mutex, each client thread gets its own lazily-created
 //! `Runtime` via `thread_local!`. There is **no cross-thread
-//! synchronization** on the hot path — two client threads can call
+//! synchronization** on the hot path - two client threads can call
 //! `thrust` concurrently without ever talking to each other.
 //!
 //! Shared state:
-//! * `source_store` — lock-free `kovan_map::HopscotchMap` caching the
+//! * `source_store` - lock-free `kovan_map::HopscotchMap` caching the
 //!   JS source text, keyed by SHA-256 of the source. Any thread can
 //!   read a source another thread ignited.
 //!
@@ -37,7 +37,7 @@ use afterburner_core::{
 /// Normalise a leading hashbang/BOM and bare dynamic `import(...)`
 /// expressions so QuickJS will parse and run the source. Same
 /// rationale as the wasm-side wrappers in
-/// `afterburner-plugin/src/envelope.rs` — we mirror the fix-up here
+/// `afterburner-plugin/src/envelope.rs` - we mirror the fix-up here
 /// so script files / npm-installed CLI entry points / TS-stripped
 /// sources behave identically across the native and wasm engines.
 /// Hashbang replacement is length-preserving (`#!` → `//`) so error
@@ -57,7 +57,7 @@ fn normalize_user_source(source: &str) -> String {
     rewrite_dynamic_imports(&after)
 }
 
-/// Twin of the wasm-side rewriter — see envelope.rs for the rationale.
+/// Twin of the wasm-side rewriter - see envelope.rs for the rationale.
 /// QuickJS has no module loader registered so `import('foo')` throws
 /// at runtime; we redirect to `globalThis.__ab_dyn_import(foo)`,
 /// which the plenum bundle wires to the require resolver.
@@ -107,7 +107,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// QuickJS V8-CallSite proto patch — adds the seven Node-shaped
+/// QuickJS V8-CallSite proto patch - adds the seven Node-shaped
 /// methods (`isEval`, `getEvalOrigin`, `isToplevel`, `isConstructor`,
 /// `getThis`, `getTypeName`, `getMethodName`) that rquickjs / Javy
 /// don't expose. depd / morgan / finalhandler probe these at module-
@@ -164,7 +164,7 @@ struct ScriptCapture {
 
 /// RAII guard that activates script-mode capture for the current
 /// thread and takes ownership back on drop. Calling code uses
-/// [`ScriptCaptureGuard::take`] to retrieve the buffers — the `Drop`
+/// [`ScriptCaptureGuard::take`] to retrieve the buffers - the `Drop`
 /// impl is the safety net that fires if the caller panics.
 struct ScriptCaptureGuard;
 
@@ -187,7 +187,7 @@ impl ScriptCaptureGuard {
 
 impl Drop for ScriptCaptureGuard {
     fn drop(&mut self) {
-        // Caller panicked before `take()` — clear the slot so the
+        // Caller panicked before `take()` - clear the slot so the
         // next call doesn't observe stale captures.
         SCRIPT_CAPTURE.with(|c| {
             let _ = c.borrow_mut().take();
@@ -234,7 +234,7 @@ impl ThreadRuntime {
         // Eval the plenum bundle once per thread-local Runtime so every
         // thrust on this thread can `require('path')` etc. without
         // paying the ~45 KB parse cost again. Host-backed modules
-        // (`fs`, `crypto`, `os`, `http`) are wired here too — the
+        // (`fs`, `crypto`, `os`, `http`) are wired here too - the
         // per-thrust Manifold is read via a thread-local slot that
         // `do_thrust` populates for the duration of each call.
         context.with(|ctx| -> std::result::Result<(), AfterburnerError> {
@@ -242,7 +242,7 @@ impl ThreadRuntime {
             afterburner_node_compat::register_native_builtins(&ctx)?;
             ctx.eval::<(), _>(afterburner_node_compat::PLENUM_BUNDLE.as_bytes())
                 .map_err(|e| AfterburnerError::Engine(format!("plenum bundle eval: {e}")))?;
-            // Patch QuickJS's V8 CallSite prototype — same patch the
+            // Patch QuickJS's V8 CallSite prototype - same patch the
             // WASM plugin installs at Wizer pre-init. Real npm packages
             // (depd, morgan, finalhandler) call `callSite.isEval()` /
             // `getEvalOrigin()` / `isToplevel()` etc. at module-load
@@ -350,7 +350,7 @@ impl NativeCombustor {
 impl Combustor for NativeCombustor {
     #[fastrace::trace(name = "NativeCombustor::ignite")]
     fn ignite(&self, source: &str) -> Result<ScriptId> {
-        // Strip a leading hashbang/BOM before storing or probing —
+        // Strip a leading hashbang/BOM before storing or probing -
         // every downstream wrap (probe, thrust stage, script stage)
         // inlines the source either as raw code or as a string
         // literal handed to `new Function(...)`, and QuickJS rejects
@@ -360,7 +360,7 @@ impl Combustor for NativeCombustor {
         let normalized = normalize_user_source(source);
         let source = normalized.as_str();
         let hash = sha256(source.as_bytes());
-        // Fast-path: source already registered — skip the parse probe.
+        // Fast-path: source already registered - skip the parse probe.
         if self.source_store.get(&hash).is_some() {
             ab_event!(Level::Debug, "native.ignite.cache_hit");
             return Ok(ScriptId {
@@ -426,7 +426,7 @@ impl Combustor for NativeCombustor {
         invocation: &ScriptInvocation,
         limits: &FuelGauge,
     ) -> Result<ScriptOutcome> {
-        // Same shebang/BOM normalisation `ignite` performs — script
+        // Same shebang/BOM normalisation `ignite` performs - script
         // mode bypasses ignite, so without this pass a `#!/usr/bin/env
         // node` prologue would land verbatim inside the user-source
         // string literal handed to `new Function(...)` and trip the
@@ -475,7 +475,7 @@ impl Combustor for NativeCombustor {
 
             // Translate the JS-side outcome into a Node-style exit code.
             // Anything that's *not* a script-level exception bubbles up
-            // as Err — fuel exhaustion and memory limits stay typed.
+            // as Err - fuel exhaustion and memory limits stay typed.
             match res {
                 Ok(()) => Ok(0),
                 Err(e) => {
@@ -493,7 +493,7 @@ impl Combustor for NativeCombustor {
                         ab_event!(Level::Warn, "native.script.memory_limit");
                         return Err(e);
                     }
-                    // Treat as user-script exception — surface the
+                    // Treat as user-script exception - surface the
                     // message on captured stderr and return exit 1.
                     append_capture("error", &format!("{e}"));
                     Ok(1)
@@ -513,17 +513,17 @@ impl Combustor for NativeCombustor {
 /// does the global setup (`__ab_argv`, `__host_env`, refreshing the
 /// live `process` polyfill) and runs the user source inside a plain
 /// `new Function(...)` wrapper. The wrapper's return value is
-/// whatever the user source's last statement yields — typically
+/// whatever the user source's last statement yields - typically
 /// `undefined` (script mode doesn't JSON-stringify a result).
 ///
 /// **Top-level `await` is NOT supported on this path.** rquickjs's
 /// thread-local runtime surfaces a "line 3:1" parse-time exception
-/// when we attempt to construct an `AsyncFunction` from here —
+/// when we attempt to construct an `AsyncFunction` from here -
 /// reproduced against the real `NativeCombustor::run_script` but not
 /// against a fresh `Runtime` in isolation, pointing at a
 /// version-pinning quirk we'd rather not paper over with a
 /// half-working workaround. Scripts that need top-level `await`
-/// should run through the WASM / adaptive backends (the default) —
+/// should run through the WASM / adaptive backends (the default) -
 /// that path compiles via Javy's ES-module pipeline where it's
 /// first-class. On native, the idiomatic workaround is the
 /// self-invoking async IIFE pattern:
@@ -630,7 +630,7 @@ fn map_script_err(ctx: &Ctx<'_>, err: RquickjsError) -> AfterburnerError {
 
 /// Best-effort human-readable rendering of an rquickjs exception
 /// value. Prefers the shape `"Error: <message>\n<stack>"` that Node
-/// users recognize — QuickJS's `.stack` lacks the leading "Error:
+/// users recognize - QuickJS's `.stack` lacks the leading "Error:
 /// msg" line that V8 includes, so we reassemble it here.
 fn exception_detail(value: &rquickjs::Value<'_>) -> String {
     if let Some(obj) = value.as_object() {
@@ -660,7 +660,7 @@ fn exception_detail(value: &rquickjs::Value<'_>) -> String {
     format!("uncaught exception (type {})", value.type_of().as_str())
 }
 
-/// Actual script execution — runs on the caller's thread against the
+/// Actual script execution - runs on the caller's thread against the
 /// thread-local `ThreadRuntime`.
 fn do_thrust(
     rt: &ThreadRuntime,
@@ -710,7 +710,7 @@ fn do_thrust(
 /// `JSON.stringify(result)`.
 ///
 /// Fast path: the user function returns a non-Promise. We `eval` the
-/// envelope, get a `String` back, done — no pending-job pump, no extra
+/// envelope, get a `String` back, done - no pending-job pump, no extra
 /// allocation. This is the vast majority of scripts (UDFs,
 /// transforms, flow ops).
 ///
@@ -734,7 +734,7 @@ fn run_script(ctx: &Ctx<'_>, source: &str, input_json: &str) -> Result<String> {
             var __fn = module.exports;
             var __result = (typeof __fn === 'function') ? __fn(__input) : __fn;
             // If the user didn't return a thenable, hand back the
-            // stringified result directly — no Promise wrap, no pump.
+            // stringified result directly - no Promise wrap, no pump.
             if (__result === null || typeof __result !== 'object' || typeof __result.then !== 'function') {{
                 return JSON.stringify(__result === undefined ? null : __result);
             }}
@@ -752,7 +752,7 @@ fn run_script(ctx: &Ctx<'_>, source: &str, input_json: &str) -> Result<String> {
         .eval(stage.as_bytes())
         .map_err(|e| map_script_err(ctx, e))?;
 
-    // Fast path: plain string result — done.
+    // Fast path: plain string result - done.
     if let Some(s) = result_val.as_string() {
         return s
             .to_string()
@@ -767,7 +767,7 @@ fn run_script(ctx: &Ctx<'_>, source: &str, input_json: &str) -> Result<String> {
     // in theory bounds runaway microtask chains via fuel. In practice
     // we've observed `queueMicrotask(step)` recursion where the
     // per-job opcode count is so low that the interrupt handler
-    // rarely fires — scripts can run for minutes before the counter
+    // rarely fires - scripts can run for minutes before the counter
     // accumulates past the fuel budget. The MAX_PUMP_ITERATIONS cap
     // guarantees we can never spin forever even if the interrupt
     // path mis-fires.

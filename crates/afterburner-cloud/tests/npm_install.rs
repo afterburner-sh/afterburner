@@ -2,7 +2,7 @@
 // Copyright (c) 2026 vertexclique
 
 //! End-to-end coverage for the NATIVE npm installer against a mock npm
-//! registry (httpmock) — NO `npm` binary, NO process spawn, NO real
+//! registry (httpmock) - NO `npm` binary, NO process spawn, NO real
 //! network. Proves the real install path: packument → version pick →
 //! tarball download → integrity check → extract → transitive deps →
 //! native rejection.
@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 
 /// Build a gzipped npm-style tarball (`package/<rel>` entries) and return
-/// (bytes, sha1-hex) — the shasum the registry would advertise.
+/// (bytes, sha1-hex) - the shasum the registry would advertise.
 fn make_tarball(files: &[(&str, &[u8])]) -> (Vec<u8>, String) {
     let mut tar_buf = Vec::new();
     {
@@ -25,7 +25,8 @@ fn make_tarball(files: &[(&str, &[u8])]) -> (Vec<u8>, String) {
             h.set_size(body.len() as u64);
             h.set_mode(0o644);
             h.set_cksum();
-            b.append_data(&mut h, format!("package/{rel}"), &body[..]).unwrap();
+            b.append_data(&mut h, format!("package/{rel}"), &body[..])
+                .unwrap();
         }
         b.finish().unwrap();
     }
@@ -49,7 +50,10 @@ fn installs_a_package_with_transitive_dep_from_mock_registry() {
 
     // dependency `dep@1.2.0` (a leaf)
     let (dep_tar, dep_sha) = make_tarball(&[
-        ("package.json", br#"{"name":"dep","version":"1.2.0","main":"index.js"}"#),
+        (
+            "package.json",
+            br#"{"name":"dep","version":"1.2.0","main":"index.js"}"#,
+        ),
         ("index.js", b"module.exports = 7;"),
     ]);
     let dep_tarball_url = server.url("/dep/-/dep-1.2.0.tgz");
@@ -72,7 +76,10 @@ fn installs_a_package_with_transitive_dep_from_mock_registry() {
 
     // root `widget@2.0.1` depends on dep ^1.0.0
     let (w_tar, w_sha) = make_tarball(&[
-        ("package.json", br#"{"name":"widget","version":"2.0.1","main":"index.js"}"#),
+        (
+            "package.json",
+            br#"{"name":"widget","version":"2.0.1","main":"index.js"}"#,
+        ),
         ("index.js", b"module.exports = require('dep') + 1;"),
     ]);
     let w_tarball_url = server.url("/widget/-/widget-2.0.1.tgz");
@@ -113,7 +120,10 @@ fn installs_a_package_with_transitive_dep_from_mock_registry() {
     );
     let dep = res.packages.get("dep").expect("transitive dep resolved");
     assert_eq!(dep.version, "1.2.0");
-    assert_eq!(dep.files.get("index.js").map(|v| v.as_slice()), Some(&b"module.exports = 7;"[..]));
+    assert_eq!(
+        dep.files.get("index.js").map(|v| v.as_slice()),
+        Some(&b"module.exports = 7;"[..])
+    );
 }
 
 #[test]

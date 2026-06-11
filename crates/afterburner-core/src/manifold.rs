@@ -3,11 +3,11 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `Manifold` — capability gate controlling which Node.js-style built-in
+//! `Manifold` - capability gate controlling which Node.js-style built-in
 //! modules (and which parts of them) are available to a running script.
 //!
 //! The metaphor: the intake manifold decides what air can enter the
-//! combustion chamber. By default — [`Manifold::sealed`] — nothing enters.
+//! combustion chamber. By default - [`Manifold::sealed`] - nothing enters.
 //! Hosts that trust their scripts open specific flaps (FS roots, env
 //! allow-lists, outbound HTTP allow-lists) explicitly.
 //!
@@ -34,7 +34,7 @@ pub enum FsAccess {
 }
 
 /// Outbound networking capability. Inbound listening is governed
-/// separately by [`ListenAccess`] — `net` models outbound only.
+/// separately by [`ListenAccess`] - `net` models outbound only.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum NetAccess {
     /// No network access.
@@ -48,7 +48,7 @@ pub enum NetAccess {
     OutboundFull(Option<Vec<String>>),
 }
 
-/// Inbound listening capability — which ports daemon-mode servers
+/// Inbound listening capability - which ports daemon-mode servers
 /// (`http.createServer().listen(port)`, the HTTP/3 listener) may bind.
 /// Checked by the listen host-calls before any socket bind; a denied
 /// port surfaces as `PermissionDenied`, exactly like outbound `net`
@@ -115,14 +115,14 @@ pub struct Manifold {
     pub http_timeout_ms: Option<u64>,
     /// Inbound listening grant for daemon-mode servers. `#[serde(default)]`
     /// so manifolds serialized before this axis existed deserialize
-    /// unchanged (absent field = `ListenAccess::None` — sealed stays
+    /// unchanged (absent field = `ListenAccess::None` - sealed stays
     /// sealed, never widened).
     #[serde(default)]
     pub listen: ListenAccess,
 }
 
 impl Manifold {
-    /// Zero-capability manifold. Safe for untrusted code — pure-JS
+    /// Zero-capability manifold. Safe for untrusted code - pure-JS
     /// modules (`path`, `url`, `buffer`, …) still work; host-backed
     /// modules (`fs`, `crypto`, `http`, …) return `PermissionDenied`.
     pub const fn sealed() -> Self {
@@ -138,7 +138,7 @@ impl Manifold {
         }
     }
 
-    /// Full capabilities — every flap open. Only appropriate for
+    /// Full capabilities - every flap open. Only appropriate for
     /// admin/trusted contexts; never expose to untrusted user JS.
     pub fn open() -> Self {
         Self {
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn listen_serde_is_externally_tagged_like_the_other_axes() {
-        // The wire shapes are part of the `.afb` digest contract — pin them.
+        // The wire shapes are part of the `.afb` digest contract - pin them.
         assert_eq!(
             serde_json::to_string(&ListenAccess::None).expect("ser"),
             r#""None""#

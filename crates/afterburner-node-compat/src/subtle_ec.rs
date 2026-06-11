@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Subtle Crypto elliptic-curve algorithms — ECDSA / ECDH on
+//! Subtle Crypto elliptic-curve algorithms - ECDSA / ECDH on
 //! P-256 / P-384 / P-521, plus Ed25519 and X25519.
 
 use afterburner_core::{AfterburnerError, Result};
@@ -152,7 +152,7 @@ pub fn ecdsa_verify(
             use p521::pkcs8::DecodePublicKey;
             use rsa::signature::Verifier;
             // VerifyingKey lacks DecodePublicKey + From<PublicKey> at
-            // this rev. Round through SEC1 encoded point form — both
+            // this rev. Round through SEC1 encoded point form - both
             // sides accept it.
             let pk = p521::PublicKey::from_public_key_der(spki_der)
                 .map_err(|e| AfterburnerError::Host(format!("P-521 pub: {e}")))?;

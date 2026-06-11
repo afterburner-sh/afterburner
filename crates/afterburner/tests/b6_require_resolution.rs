@@ -7,29 +7,29 @@
 //!
 //! The plan's gate is `require('express')` loading from an installed
 //! `node_modules/express/`. These tests cover the resolver mechanics
-//! directly — without requiring real npm packages in CI — by
+//! directly - without requiring real npm packages in CI - by
 //! materializing `node_modules/<pkg>/…` trees in a scratch dir and
 //! driving `burn` against them:
 //!
 //! * **Relative / absolute paths.** `require('./x')`, `require('../y')`,
 //!   `require('/abs/path/z')`.
-//! * **`package.json "main"`** — the loader reads `main` when a
+//! * **`package.json "main"`** - the loader reads `main` when a
 //!   directory is targeted.
 //! * **`index.js` / `index.json` fallback** when `main` is absent.
-//! * **`node_modules` walk** — the loader walks up from the requiring
+//! * **`node_modules` walk** - the loader walks up from the requiring
 //!   module's dir until it finds `node_modules/<pkg>`.
-//! * **Per-module `require`** — `./sibling` inside a loaded module
+//! * **Per-module `require`** - `./sibling` inside a loaded module
 //!   resolves relative to that module's dir, not the entry script's.
-//! * **`.json` auto-parsing** — `require('./cfg.json')` returns an
+//! * **`.json` auto-parsing** - `require('./cfg.json')` returns an
 //!   object, no `JSON.parse` needed.
-//! * **Module caching** — two requires return the same object
+//! * **Module caching** - two requires return the same object
 //!   identity, and cyclic requires see a partial exports object
 //!   rather than infinite-looping.
 //! * **`require.resolve(name)`** returns the absolute path without
 //!   loading.
 //! * **`require.cache`** maps absolute paths to loaded exports.
 //! * **Missing module** → `MODULE_NOT_FOUND`.
-//! * **Stdlib precedence** — `require('path')` still returns the
+//! * **Stdlib precedence** - `require('path')` still returns the
 //!   plenum polyfill even when `node_modules/path/` exists; the
 //!   node_modules walk is a fallback, not an override.
 
@@ -177,7 +177,7 @@ fn require_directory_falls_back_to_index_js() {
     let dir = scratch("index_js");
     let pkg_dir = dir.join("pkg_noindex");
     fs::create_dir_all(&pkg_dir).unwrap();
-    // No package.json — directory must fall through to index.js.
+    // No package.json - directory must fall through to index.js.
     fs::write(pkg_dir.join("index.js"), "module.exports = 'idx';").unwrap();
     let out = run_burn_in(&dir, "console.log(require('./pkg_noindex'));");
     let _ = fs::remove_dir_all(&dir);
@@ -269,7 +269,7 @@ fn required_module_sees_its_own_dirname() {
     fs::create_dir_all(&sub).unwrap();
     // The caller is `entry.js` in <dir>; it requires `./sub/loader`.
     // Inside `loader.js`, the require is scoped to <dir>/sub, so
-    // `./sibling` must resolve to <dir>/sub/sibling.js — NOT
+    // `./sibling` must resolve to <dir>/sub/sibling.js - NOT
     // <dir>/sibling.js.
     fs::write(
         sub.join("loader.js"),
@@ -380,7 +380,7 @@ fn circular_require_yields_partial_exports() {
     assert_ok(&out, "circular require");
     let stdout = String::from_utf8_lossy(&out.stdout);
     // b sees a.start (set before the require('./b')) but not a.done
-    // (set after) — proving the partial-exports semantics.
+    // (set after) - proving the partial-exports semantics.
     assert!(
         stdout.contains("b-saw-a-start,done=no"),
         "circular semantics: {stdout}"
@@ -422,7 +422,7 @@ fn require_cache_is_keyed_by_absolute_path() {
 fn require_cache_eviction_forces_reload() {
     // Node's canonical pattern for hot-reloadable modules is
     // `delete require.cache[require.resolve(name)]`. Burn must
-    // honor that — re-requiring after eviction must execute the
+    // honor that - re-requiring after eviction must execute the
     // module body a second time, not return the stale cached value.
     let dir = scratch("cache_evict");
     // The module captures Math.random() at load time; if we
@@ -535,7 +535,7 @@ fn missing_bare_package_throws_module_not_found() {
 #[test]
 fn stdlib_wins_over_node_modules_shadow() {
     // If a user has `./node_modules/path/index.js`, `require('path')`
-    // must still return the plenum polyfill — stdlib names are not
+    // must still return the plenum polyfill - stdlib names are not
     // shadowable via node_modules, matching how Node treats built-ins
     // until ESM's import-maps land.
     let dir = scratch("stdlib_vs_nm");

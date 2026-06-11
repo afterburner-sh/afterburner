@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `__host_fs_*` globals — file-system bridges (sync + chunked).
+//! `__host_fs_*` globals - file-system bridges (sync + chunked).
 
 use alloc::format;
 use alloc::string::String;

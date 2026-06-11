@@ -3,24 +3,24 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Per-call execution chamber — the machinery every one-shot plugin
+//! Per-call execution chamber - the machinery every one-shot plugin
 //! invocation shares: `Store` setup (limiter, fuel, epoch deadline),
 //! instantiation through the pre-resolved [`InstancePre`], `_start`
 //! dispatch, and the UDF-path trap → typed-error mapping.
 //!
 //! Three entry shapes, by how much of the pipeline the caller wants:
 //!
-//! * [`fire`] — full pipeline for the UDF-shaped paths (`thrust`,
+//! * [`fire`] - full pipeline for the UDF-shaped paths (`thrust`,
 //!   `thrust_raw`, columnar): returns the post-run `Store` on success
 //!   so the caller extracts its result channel (stdout for the JSON
 //!   paths, `pending_columnar_reply` for columnar). Traps map to
 //!   typed errors uniformly; `scope` prefixes the diagnostic events
 //!   (`wasm.thrust`, `wasm.thrust_columnar`).
-//! * [`prepare_store`] + [`instantiate_and_start`] — the setup and
+//! * [`prepare_store`] + [`instantiate_and_start`] - the setup and
 //!   dispatch halves, for paths with their own trap contract
 //!   (script mode maps `proc_exit(N)` to an exit code instead of an
 //!   error; compile mode maps every trap to `CompileFailed`).
-//! * [`drain_stdout`] / [`format_trap_with_stderr`] — post-run
+//! * [`drain_stdout`] / [`format_trap_with_stderr`] - post-run
 //!   extraction + diagnosis helpers shared by all of the above.
 
 use afterburner_core::log::Level;
@@ -63,7 +63,7 @@ pub(crate) fn prepare_store(
 
 /// Instantiate the plugin from the pre-resolved imports and call
 /// `_start`. Pre-resolution makes this just a slot checkout from the
-/// pooling allocator + a memory-image clone via CoW — no linker
+/// pooling allocator + a memory-image clone via CoW - no linker
 /// re-walk, no import re-typecheck. The outer `Result` carries
 /// infrastructure failures (instantiation, export lookup); the inner
 /// one is `_start`'s own outcome, returned raw so each caller maps
@@ -98,7 +98,7 @@ pub(crate) fn fire(
     // Output-ceiling overflow wins over whatever the trap looks like:
     // the guest-visible failure is an opaque errno-29 write error (or
     // a clean exit if the script swallowed it), but the root cause is
-    // the result exceeding `FuelGauge::output_bytes` — surface the
+    // the result exceeding `FuelGauge::output_bytes` - surface the
     // structured error uniformly, never the bare trap.
     if store.data().output_overflowed() {
         let limit = store.data().output_ceiling;
@@ -108,7 +108,7 @@ pub(crate) fn fire(
     if let Err(trap) = call_result {
         if let Some(exit) = trap.downcast_ref::<I32Exit>() {
             if exit.0 == 0 {
-                // proc_exit(0): clean exit through WASI — fall through
+                // proc_exit(0): clean exit through WASI - fall through
                 // to result extraction.
                 return Ok(store);
             }

@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Clap-derived CLI schema — the structure that `clap::Parser::parse`
+//! Clap-derived CLI schema - the structure that `clap::Parser::parse`
 //! fills from `std::env::args`.
 
 use crate::Mode;
@@ -42,7 +42,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Cmd>,
 
-    /// Positional fallback — when no subcommand is given but a path is,
+    /// Positional fallback - when no subcommand is given but a path is,
     /// this is treated as `burn run <path>`. Matches the user expectation
     /// of `burn ./script.js` working with zero ceremony.
     #[arg(value_name = "FILE")]
@@ -102,7 +102,7 @@ pub struct Cli {
     #[arg(long = "allow-all", short = 'A', global = true)]
     pub allow_all: bool,
 
-    /// Seal the sandbox (empty capabilities) — flip the CLI's open-by-default.
+    /// Seal the sandbox (empty capabilities) - flip the CLI's open-by-default.
     /// Combine with `--allow-*` flags to hand-pick grants.
     #[arg(long = "sandbox", global = true)]
     pub sandbox: bool,
@@ -169,7 +169,7 @@ pub struct Cli {
     #[arg(long = "allow-crypto", global = true)]
     pub allow_crypto: bool,
 
-    /// **Internal — set only by `worker_threads`.** Marks this `burn`
+    /// **Internal - set only by `worker_threads`.** Marks this `burn`
     /// invocation as a worker child: read the init frame off stdin,
     /// expose `parentPort`, and pump frames over stdin/stdout per the
     /// daemon_workers protocol. Hidden from `--help` to discourage
@@ -178,7 +178,7 @@ pub struct Cli {
     #[arg(long = "internal-worker", hide = true, global = true)]
     pub internal_worker: bool,
 
-    /// **Internal — set only by `worker_threads`.** The monotonic
+    /// **Internal - set only by `worker_threads`.** The monotonic
     /// `threadId` the parent assigned to this worker. Defaults to 0
     /// (which only the parent process sees) outside worker mode.
     #[arg(
@@ -189,7 +189,7 @@ pub struct Cli {
     )]
     pub worker_thread_id: Option<i32>,
 
-    /// Positional arguments after the script path — passed through as
+    /// Positional arguments after the script path - passed through as
     /// `process.argv[2..]`. Only meaningful for the top-level
     /// `burn FILE arg1 arg2…` shape; each subcommand has its own
     /// `rest_args` when it accepts trailing args.
@@ -203,10 +203,11 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Cmd {
-    /// Execute a JavaScript file.
+    /// Execute a JavaScript file, or - with no FILE - the current
+    /// package's entry from `afb.toml` (cargo-style `burn run`).
     Run {
         #[arg(value_name = "FILE")]
-        file: PathBuf,
+        file: Option<PathBuf>,
         /// Arguments passed through as `process.argv[2..]`.
         #[arg(
             trailing_var_arg = true,
@@ -227,7 +228,7 @@ pub enum Cmd {
         )]
         rest_args: Vec<String>,
     },
-    /// UDF mode — reads JSON from stdin, feeds as `data` to the script,
+    /// UDF mode - reads JSON from stdin, feeds as `data` to the script,
     /// writes the script's return value as JSON to stdout.
     Thrust {
         #[arg(value_name = "FILE")]
@@ -256,7 +257,7 @@ pub enum Cmd {
         workers: usize,
     },
     /// Interactive REPL. Each line becomes a fresh script (no state
-    /// shared across lines — matches the fresh-per-call invariant).
+    /// shared across lines - matches the fresh-per-call invariant).
     Repl,
     /// Print the build version + enabled features.
     Version,
@@ -312,6 +313,18 @@ pub enum Cmd {
         /// Package directory (default: current).
         #[arg(value_name = "DIR")]
         dir: Option<PathBuf>,
+    },
+    /// Remove build artifacts (cargo-style). By default, deletes this
+    /// package's built `.afb` files and `burn.lock`. With `--cache`, also
+    /// clears the shared download caches (registry packages + npm).
+    Clean {
+        /// Package directory (default: current).
+        #[arg(value_name = "DIR")]
+        dir: Option<PathBuf>,
+        /// Also clear the shared content-addressed caches under
+        /// `~/.cache/burn` (downloaded registry packages and npm packages).
+        #[arg(long)]
+        cache: bool,
     },
     /// Build (or upload a prebuilt) `.afb` to the registry.
     Publish {
@@ -380,7 +393,7 @@ pub enum Cmd {
         #[arg(long, value_name = "NAME")]
         registry: Option<String>,
     },
-    /// Manage package owners (registry owners API — roadmap).
+    /// Manage package owners (registry owners API - roadmap).
     Owner {
         #[arg(value_name = "PKG")]
         pkg: Option<String>,
@@ -396,7 +409,7 @@ pub enum Cmd {
 /// Shared flags for `burn new` / `burn init`.
 ///
 /// Capability grants reuse the runtime's global flags (`--allow-net`,
-/// `--allow-fs`, `--allow-env`, `-A`/`--allow-all`, `--allow-child-process`) —
+/// `--allow-fs`, `--allow-env`, `-A`/`--allow-all`, `--allow-child-process`) -
 /// the registry docs' "same grant vocabulary as the runtime." Only the
 /// package-shaped knobs (and `--allow-crypto`/`--allow-run`, which have no
 /// runtime global) live here.

@@ -3,7 +3,7 @@
 //!
 //! A package declares the minimum engine it needs. The "running engine" is
 //! the `afterburner-core` this crate is compiled against
-//! ([`afterburner_core::VERSION`]) — reused directly so the gate can never
+//! ([`afterburner_core::VERSION`]) - reused directly so the gate can never
 //! drift from the real runtime.
 
 use crate::error::{AfbError, Result};

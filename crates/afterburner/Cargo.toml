@@ -33,6 +33,7 @@ afterburner-thrust = { workspace = true, optional = true }
 # pulled in only by the `bin` feature (the CLI), never by library consumers.
 afterburner-cloud = { workspace = true, optional = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 # bin-only — gated behind `bin` feature so library consumers don't pull them.
 clap = { workspace = true, optional = true }
 rustyline = { workspace = true, optional = true }

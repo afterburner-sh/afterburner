@@ -35,7 +35,7 @@ const BANNER: &str = "running with open capabilities. --sandbox to seal, BURN_QU
 
 /// Show the open-capabilities banner if the current invocation is
 /// running under the implicit-open default and we haven't shown it to
-/// this user before. Idempotent and best-effort — never returns an
+/// this user before. Idempotent and best-effort - never returns an
 /// error to the caller.
 pub fn maybe_show(cli: &Cli) {
     if cli.quiet {
@@ -50,7 +50,7 @@ pub fn maybe_show(cli: &Cli) {
     let marker = match ack_marker_path() {
         Some(p) => p,
         None => {
-            // No HOME / LOCALAPPDATA — print every time. Still
+            // No HOME / LOCALAPPDATA - print every time. Still
             // preferable to silently running open without a warning.
             eprintln!("{}", style::warn(BANNER));
             return;
@@ -61,7 +61,7 @@ pub fn maybe_show(cli: &Cli) {
     }
     eprintln!("{BANNER}");
     // Best-effort ack; errors are ignored. On failure the banner
-    // shows again next run — noisy but not dangerous.
+    // shows again next run - noisy but not dangerous.
     if let Some(parent) = marker.parent() {
         let _ = fs::create_dir_all(parent);
     }

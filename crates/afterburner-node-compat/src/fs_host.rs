@@ -140,12 +140,12 @@ pub fn realpath_sync(path: &str, m: &Manifold) -> Result<String> {
 }
 
 /// Read the target of a symbolic link. Returns the literal stored
-/// target (relative or absolute, as on disk) — does not canonicalise.
+/// target (relative or absolute, as on disk) - does not canonicalise.
 /// Backs `fs.readlinkSync` / `fs.readlink` / `fs.promises.readlink`.
 ///
 /// The default `validate_read` canonicalises through symlinks, which
 /// would resolve the link before we ever called `read_link` on it.
-/// For symlink ops we validate the *parent* directory instead — the
+/// For symlink ops we validate the *parent* directory instead - the
 /// symlink itself is allowed to point anywhere; the manifold only
 /// gates which directories the caller can list.
 pub fn readlink_sync(path: &str, m: &Manifold) -> Result<String> {
@@ -190,7 +190,7 @@ pub fn readlink_sync(path: &str, m: &Manifold) -> Result<String> {
 /// destination cause an error.
 ///
 /// Both `src` and `dst` go through `validate_write` so the active
-/// FS manifold has to admit *both* paths — copying *out of* a
+/// FS manifold has to admit *both* paths - copying *out of* a
 /// read-only root into a read-write one is allowed (read on src,
 /// write on dst), so we use validate_read for src.
 pub fn cp_recursive(src: &str, dst: &str, force: bool, m: &Manifold) -> Result<()> {
@@ -287,7 +287,7 @@ impl WatchKind {
 
 /// Single-shot poll for changes to `path`. Compares two stat snapshots
 /// taken `interval_ms` apart and returns any deltas observed. This is
-/// the polling-based fallback fs.watch — burn never installs an
+/// the polling-based fallback fs.watch - burn never installs an
 /// inotify/kqueue/FSEvents subscription because:
 ///
 /// 1. inotify file descriptors don't survive the Wasmtime instance

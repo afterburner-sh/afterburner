@@ -60,9 +60,9 @@ pub fn zstd_decompress_sync(data: &[u8]) -> Result<Vec<u8>> {
         .map_err(|e| AfterburnerError::Host(format!("zlib.zstdDecompressSync: {e}")))
 }
 
-/// `zlib.brotliCompressSync` — pure-Rust brotli encoder. Quality 4
+/// `zlib.brotliCompressSync` - pure-Rust brotli encoder. Quality 4
 /// matches Node's default (`BROTLI_PARAM_QUALITY = 11` is the libuv
-/// default but at the cost of ~10× CPU vs gzip — Node 22 ships with
+/// default but at the cost of ~10× CPU vs gzip - Node 22 ships with
 /// the same library and Node's docs note "quality < 5 is recommended
 /// for runtime compression"; 4 is a balanced default).
 pub fn brotli_compress_sync(data: &[u8]) -> Result<Vec<u8>> {

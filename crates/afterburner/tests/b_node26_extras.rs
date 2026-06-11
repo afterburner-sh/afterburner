@@ -5,7 +5,7 @@
 
 #![cfg(feature = "bin")]
 #![allow(non_snake_case)]
-//! Stub-closure audit — fills the last reachable Node-26-era gaps:
+//! Stub-closure audit - fills the last reachable Node-26-era gaps:
 //!
 //! * `Promise.try` (Stage 3 / Node 22+)
 //! * `net.Socket.setEncoding` / `tls.TLSSocket.setEncoding`

@@ -65,7 +65,7 @@ pub enum AfterburnerError {
     /// The script requested a capability the active `Manifold` does not
     /// grant (e.g. `fs.readFileSync` with `FsAccess::None`, or an FS
     /// path outside the allowed roots). The inner string names the
-    /// denied operation — useful for audit logs and error messages.
+    /// denied operation - useful for audit logs and error messages.
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
@@ -94,7 +94,7 @@ pub enum AfterburnerError {
     ProcessExit(i32),
 
     /// Generic engine-internal failure that doesn't fit a specific variant.
-    /// Use sparingly — prefer adding a typed variant.
+    /// Use sparingly - prefer adding a typed variant.
     #[error("engine error: {0}")]
     Engine(String),
 }

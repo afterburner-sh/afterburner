@@ -5,11 +5,11 @@
 
 //! `http2.createServer().listen()` end-to-end. The daemon's
 //! per-connection auto-builder serves H1 and H2 over the same TCP
-//! listener — H2 is detected by the connection preface
+//! listener - H2 is detected by the connection preface
 //! (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`) and routed to hyper's H2
 //! engine; H1 falls through to the existing pipeline.
 //!
-//! Run with `cargo test --test b_http2_server -- --test-threads=1` —
+//! Run with `cargo test --test b_http2_server -- --test-threads=1` -
 //! parallel runs spawn ten burn processes simultaneously, which
 //! saturates plugin instantiation and the 15s wait_for_listener
 //! window goes flaky under that load. Single-threaded the suite
@@ -71,7 +71,7 @@ fn spawn(source: &str) -> Child {
 }
 
 /// Send a raw HTTP/2 cleartext (h2c) prior-knowledge request and
-/// return the first response line. No external `curl` dependency —
+/// return the first response line. No external `curl` dependency -
 /// h2c is a 24-byte preface + a SETTINGS frame + HEADERS frame +
 /// (optional) DATA frame. We rely on hyper to parse this; `curl`
 /// is not always available in test environments.
@@ -141,7 +141,7 @@ fn http2_server_serves_h1_request_via_stream_event() {
 
 // ---- h2 prior-knowledge cleartext path -----------------------------
 
-/// Build the minimal h2c connection preface + SETTINGS ACK — we
+/// Build the minimal h2c connection preface + SETTINGS ACK - we
 /// don't need a full client. After sending the preface we read
 /// frames until we see a HEADERS frame for stream 1 (the response).
 /// The hex check confirms we got real H2 wire format back.
@@ -174,7 +174,7 @@ fn http2_server_responds_to_h2_connection_preface() {
     s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     s.write_all(&h2c_connection_preface()).unwrap();
 
-    // Read enough to confirm hyper sent us a SETTINGS frame back —
+    // Read enough to confirm hyper sent us a SETTINGS frame back -
     // first 9 bytes after preface ack are the H2 frame header for
     // SETTINGS. Frame header layout: 24-bit length, 8-bit type,
     // 8-bit flags, 31-bit stream id.

@@ -5,7 +5,7 @@
 
 #![cfg(feature = "bin")]
 #![allow(non_snake_case)]
-//! B7 — `dns` record-type-aware resolution.
+//! B7 - `dns` record-type-aware resolution.
 //!
 //! Hits real public resolvers via the system `/etc/resolv.conf`,
 //! falling back to Cloudflare. Tests pin queries against well-known
@@ -15,7 +15,7 @@
 //!
 //! When network DNS is unavailable (CI without egress, isolated
 //! containers), the affected tests are no-ops via an early skip
-//! check — `_can_resolve` runs a fast `dns.lookup` against
+//! check - `_can_resolve` runs a fast `dns.lookup` against
 //! `cloudflare.com` and short-circuits the whole file's DNS asserts
 //! when it fails.
 
@@ -125,7 +125,7 @@ fn resolve_txt_yields_array_of_arrays() {
                 const txt = dns.resolveTxt('cloudflare.com');
                 // Node's TXT shape: array of arrays. We don't assert
                 // a specific record content (Cloudflare rotates SPF
-                // entries) — we just want the *shape*.
+                // entries) - we just want the *shape*.
                 if (Array.isArray(txt) && txt.length > 0 && Array.isArray(txt[0])) {
                     console.log('TXT_OK records=' + txt.length);
                 }
@@ -221,7 +221,7 @@ fn callback_form_fires_with_result() {
                 });
                 if (!called) {
                     // Our resolver is sync; the callback fired before we got here.
-                    console.error('callback never invoked — sync expectation broken');
+                    console.error('callback never invoked - sync expectation broken');
                     process.exit(3);
                 }
             "#,

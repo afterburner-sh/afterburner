@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Outbound HTTP via `ureq`. Synchronous API — fits Afterburner's
+//! Outbound HTTP via `ureq`. Synchronous API - fits Afterburner's
 //! single-threaded, no-event-loop execution model.
 //!
 //! Gated behind `Manifold::net`. Hosts outside the policy allow-list
@@ -155,12 +155,12 @@ pub fn extract_host_port(url: &str) -> Option<(String, u16)> {
 /// Pattern grammar (shared by `--allow-net`, `Manifold::net`
 /// allow-lists, and the raw TCP/TLS gates in `afterburner-wasi`):
 ///
-/// * `host` — host match only; **any** port is allowed.
-/// * `host:port` — host match **and** exact port. For HTTP the
+/// * `host` - host match only; **any** port is allowed.
+/// * `host:port` - host match **and** exact port. For HTTP the
 ///   request port is the URL's explicit port or the scheme default
 ///   (80 for `http`/schemeless, 443 for `https`/`wss`); for raw
 ///   TCP/TLS it is the literal connect port.
-/// * `[v6]` / `[v6]:port` — IPv6 patterns use brackets; the host
+/// * `[v6]` / `[v6]:port` - IPv6 patterns use brackets; the host
 ///   part is compared without them. An *unbracketed* pattern
 ///   containing two or more colons is treated as a bare IPv6 host
 ///   (any port) since the port suffix would be ambiguous.
@@ -176,7 +176,7 @@ pub fn split_host_port_pattern(pattern: &str) -> (&str, Option<PortPattern>) {
                 None => (host, Some(PortPattern::Invalid)),
             };
         }
-        // Unterminated bracket — treat the raw text as a host so it
+        // Unterminated bracket - treat the raw text as a host so it
         // simply never matches a real (bracket-less) hostname.
         return (pattern, None);
     }
@@ -193,7 +193,7 @@ pub fn split_host_port_pattern(pattern: &str) -> (&str, Option<PortPattern>) {
 /// Parsed `:port` suffix of an allow-list pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortPattern {
-    /// A valid numeric port — matches exactly this port.
+    /// A valid numeric port - matches exactly this port.
     Port(u16),
     /// A `:suffix` that is not a valid `u16`. Matches no port; the
     /// CLI rejects such entries at parse time.
@@ -213,7 +213,7 @@ impl PortPattern {
 
 /// Case-insensitive host comparison with `*.suffix` wildcard support.
 /// `*.example.com` matches `api.example.com` (and deeper) **and** the
-/// apex `example.com` itself — the historical HTTP-gate semantics. `*`
+/// apex `example.com` itself - the historical HTTP-gate semantics. `*`
 /// matches every host.
 pub fn host_part_matches(host: &str, pattern: &str) -> bool {
     if pattern == "*" {
@@ -380,7 +380,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind localhost");
         let port = listener.local_addr().unwrap().port();
         // Background acceptor that holds the connection open.
-        // Detached: we don't join — the listener drops with the test.
+        // Detached: we don't join - the listener drops with the test.
         std::thread::spawn(move || {
             for stream in listener.incoming().take(1) {
                 let _ = stream; // hold open
@@ -402,7 +402,7 @@ mod tests {
         );
         assert!(
             elapsed < std::time::Duration::from_secs(2),
-            "timeout fired late ({elapsed:?}) — Manifold knob not respected"
+            "timeout fired late ({elapsed:?}) - Manifold knob not respected"
         );
     }
 }

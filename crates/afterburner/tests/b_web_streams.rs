@@ -4,7 +4,7 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 //! WHATWG Web Streams (`ReadableStream` / `WritableStream` /
-//! `TransformStream`) — pinned end-to-end, including pipeTo /
+//! `TransformStream`) - pinned end-to-end, including pipeTo /
 //! pipeThrough / async iteration / `ReadableStream.from` / cancel
 //! propagation / TransformStream-backed CompressionStream.
 

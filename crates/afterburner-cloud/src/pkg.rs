@@ -119,7 +119,7 @@ fn collect_sources(root: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<(
                 let data = std::fs::read(&path).map_err(CloudError::Io)?;
                 out.insert(format!("source/{rel}"), data);
             }
-            // Symlinks / other entry types are skipped — the `.afb` reader
+            // Symlinks / other entry types are skipped - the `.afb` reader
             // rejects them anyway, so they could never round-trip.
         }
         Ok(())
@@ -209,7 +209,10 @@ mod pack_tests {
             Ok(_) => panic!("expected rejection"),
             Err(e) => e,
         };
-        assert!(format!("{err}").contains("native"), "must reject .node under source/");
+        assert!(
+            format!("{err}").contains("native"),
+            "must reject .node under source/"
+        );
     }
 
     #[test]

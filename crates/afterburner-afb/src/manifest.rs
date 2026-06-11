@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `afb.toml` — the package manifest (§3.2) and its evolution policy.
+//! `afb.toml` - the package manifest (§3.2) and its evolution policy.
 //!
 //! Precedent: Python wheels (`Wheel-Version` major/minor: refuse greater
 //! major, accept greater minor), npm/Debian (unknown descriptive fields are
@@ -7,11 +7,11 @@
 //! newer package), Cargo (`[package.metadata]` reserved namespace).
 //!
 //! So this is **deliberately not** `deny_unknown_fields` on the descriptive
-//! structs — that would make every additive change a breaking change.
+//! structs - that would make every additive change a breaking change.
 //! `Signature` *stays* strict: an identity block with an unexpected field is
 //! suspicious and must not be silently tolerated. The capability set itself
 //! lives in `afterburner_core::Manifold` (parsed in `unpack`), whose
-//! strictness is that crate's responsibility — see `FORMAT.md`.
+//! strictness is that crate's responsibility - see `FORMAT.md`.
 
 use crate::error::{AfbError, Result};
 use crate::{FORMAT_MAJOR, FORMAT_MINOR};
@@ -34,7 +34,7 @@ pub struct Manifest {
     /// (cargo-style). `burn install` resolves + vendors them into
     /// `source/node_modules/**`; the sandbox `require()` then serves bare
     /// specifiers from there. Vendored code runs under THIS package's
-    /// manifold — it can reach nothing the package itself is not granted.
+    /// manifold - it can reach nothing the package itself is not granted.
     #[serde(default, rename = "npm", skip_serializing_if = "BTreeMap::is_empty")]
     pub npm: BTreeMap<String, String>,
     /// Phase-2 signature block. Parsed (strictly) if present so a signed
@@ -46,7 +46,7 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     pub metadata: toml::Table,
     /// Unknown top-level sections from a newer minor, preserved verbatim.
-    /// Not a wire field — captured/merged by [`Manifest::parse`] /
+    /// Not a wire field - captured/merged by [`Manifest::parse`] /
     /// [`Manifest::to_toml_string`].
     #[serde(skip)]
     pub extra: toml::Table,
@@ -84,7 +84,7 @@ pub struct Package {
     pub keywords: Vec<String>,
 }
 
-/// `[runtime]`. Tolerant of unknown keys — the actual gate is the semver
+/// `[runtime]`. Tolerant of unknown keys - the actual gate is the semver
 /// `min` check in [`crate::version`], not field presence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Runtime {
@@ -96,7 +96,7 @@ pub struct Runtime {
     pub target: Option<String>,
 }
 
-/// `[signature]` — **strict** (`deny_unknown_fields`). Identity/security
+/// `[signature]` - **strict** (`deny_unknown_fields`). Identity/security
 /// surface: an unexpected key here is rejected, not tolerated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -122,7 +122,7 @@ impl Manifest {
     /// Parse, apply the format-evolution gate, and structurally validate.
     ///
     /// Rejects: a `format.version` whose **major** differs from this reader's
-    /// ([`AfbError::FormatVersion`] — refuse, never misparse); a
+    /// ([`AfbError::FormatVersion`] - refuse, never misparse); a
     /// `[format] min_reader` newer than this reader
     /// ([`AfbError::ReaderTooOld`]); a non-semver `package.version`; an
     /// empty/escaping `package.entry`. A **greater minor is accepted** (the

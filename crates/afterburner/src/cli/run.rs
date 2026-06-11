@@ -3,12 +3,12 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `burn run FILE args…` and `burn -e CODE args…` — execute a
+//! `burn run FILE args…` and `burn -e CODE args…` - execute a
 //! top-level script.
 //!
 //! Routes through the plugin's **daemon mode** (Q2-A): user source
 //! runs via `daemon-init`; if it didn't install any HTTP listeners
-//! (or `setInterval` — B3) the script exits cleanly like a plain
+//! (or `setInterval` - B3) the script exits cleanly like a plain
 //! one-shot. When listeners are present the CLI transitions into
 //! the dispatcher event loop until SIGINT.
 //!
@@ -16,7 +16,7 @@
 //! via `burn thrust`.
 //!
 //! **Exit codes** follow Node's convention: clean completion → 0,
-//! `process.exit(n)` → n, and any uncaught error → 1 — including a
+//! `process.exit(n)` → n, and any uncaught error → 1 - including a
 //! top-level `throw`, a rejected promise assigned to
 //! `module.exports`, and an exported async function that throws (the
 //! script envelope awaits an exported thenable; see
@@ -87,6 +87,52 @@ pub fn eval_args_from_argv(code: &str) -> Vec<String> {
     Vec::new()
 }
 
+/// `burn run` dispatch: run an explicit FILE, or - when none is given -
+/// the current package's entry resolved from `afb.toml` (cargo-style).
+pub fn run_package_or_file(
+    cli: &Cli,
+    file: Option<&std::path::Path>,
+    user_args: &[String],
+) -> Result<()> {
+    match file {
+        Some(p) => run_file(cli, &p.to_path_buf(), user_args),
+        None => {
+            let entry = resolve_package_entry(std::path::Path::new("."))?;
+            run_file(cli, &entry, user_args)
+        }
+    }
+}
+
+/// Resolve the entry file of the package rooted at `dir` from its
+/// `afb.toml`. Errors clearly when there is no package here.
+fn resolve_package_entry(dir: &std::path::Path) -> Result<PathBuf> {
+    let manifest_path = dir.join("afb.toml");
+    if !manifest_path.exists() {
+        anyhow::bail!(
+            "no afb.toml in the current directory - `burn run` with no FILE \
+             runs the current package's entry. Pass a file (`burn run script.js`) \
+             or run inside a package (`burn init` to create one)."
+        );
+    }
+    let text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let manifest: toml::Value =
+        toml::from_str(&text).with_context(|| format!("parsing {}", manifest_path.display()))?;
+    let entry = manifest
+        .get("package")
+        .and_then(|p| p.get("entry"))
+        .and_then(|e| e.as_str())
+        .ok_or_else(|| anyhow::anyhow!("afb.toml has no [package].entry"))?;
+    let path = dir.join(entry);
+    if !path.exists() {
+        anyhow::bail!(
+            "package entry {entry:?} (from afb.toml) does not exist at {}",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
 pub fn run_file(cli: &Cli, path: &PathBuf, user_args: &[String]) -> Result<()> {
     if cli.watch {
         return watch::run_with_watch(cli, path, user_args);
@@ -113,7 +159,7 @@ pub fn run_source(cli: &Cli, source: &str, user_args: &[String]) -> Result<()> {
 
 /// Prepend `--require=mod` / `--import=mod` preload modules to the
 /// user source, plus the `--permission` grant map. Both flags collapse
-/// onto `require(spec)` here — burn has a single CJS-shaped resolver,
+/// onto `require(spec)` here - burn has a single CJS-shaped resolver,
 /// so the ESM `--import` form is a `require()` of a module that was
 /// lowered through TS-strip + ESM rewrite at load time. Order matches
 /// Node: `--require` first, then `--import`.
@@ -140,7 +186,7 @@ fn with_preload(cli: &Cli, source: &str) -> String {
 }
 
 /// Build the JS prelude that installs `globalThis.__ab_permission_grants`
-/// when `--permission` is set on the CLI. Empty when the flag is off —
+/// when `--permission` is set on the CLI. Empty when the flag is off -
 /// `process.permission.has` then defaults to allow-all (manifold is the
 /// real gate). Each `--allow-*` flag becomes one entry on the grants
 /// map; the JS-side `has()` implementation does the prefix / wildcard
@@ -209,7 +255,7 @@ mod watch {
     /// `--watch` loop: poll the entry script's mtime; when it changes,
     /// run a fresh execution. Polling at 250 ms feels close to inotify
     /// for an interactive workflow without taking a host-watcher
-    /// dependency. Running the script is synchronous here — daemon
+    /// dependency. Running the script is synchronous here - daemon
     /// mode exits naturally when listeners close, and we re-loop.
     /// We re-run on entry-script change only, matching Node's pre-22
     /// default; transitive `require()` tracking can land later.

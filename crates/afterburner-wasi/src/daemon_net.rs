@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `net` — raw TCP host coordinator (B7).
+//! `net` - raw TCP host coordinator (B7).
 //!
 //! Backs the `net.createConnection` / `net.createServer` polyfill in
 //! `polyfills/net.js`. The host owns every `tokio::net::TcpStream` and
@@ -24,7 +24,7 @@
 //! ```
 //!
 //! The wake `Notify` paired with `try_recv` gives us async semantics
-//! over a kovan channel — no polling, no Mutex, no `tokio::sync::mpsc`
+//! over a kovan channel - no polling, no Mutex, no `tokio::sync::mpsc`
 //! (workspace rule: kovan channels everywhere).
 //!
 //! ## Backpressure
@@ -67,12 +67,12 @@ use tokio::task::AbortHandle;
 pub type ConnId = i32;
 pub type ServerId = i32;
 
-/// 64 KiB write high-water mark — matches Node's default Socket
+/// 64 KiB write high-water mark - matches Node's default Socket
 /// `writableHighWaterMark`. Crossing it makes `write()` return false;
 /// dropping back below fires `'drain'`.
 pub const WRITE_HWM: usize = 64 * 1024;
 
-/// 64 KiB read chunk granularity — matches Node's default. Larger
+/// 64 KiB read chunk granularity - matches Node's default. Larger
 /// peer reads get split across multiple `'data'` events.
 pub const READ_CHUNK: usize = 64 * 1024;
 
@@ -164,7 +164,7 @@ struct ListenerHandle {
 enum WriteCmd {
     Bytes(Vec<u8>),
     End,
-    /// `socket.setNoDelay(enable)` — toggles `TCP_NODELAY`. We route
+    /// `socket.setNoDelay(enable)` - toggles `TCP_NODELAY`. We route
     /// it through the same queue as writes so the option flip can't
     /// race with bytes already in flight (the worker task is the
     /// single owner of the stream).
@@ -195,7 +195,7 @@ pub struct DaemonNet {
     /// `try_claim` becomes the kernel-level owner; subsequent
     /// shards become followers (allocate a local server_id, no
     /// real bind, no listener task). `None` means single-shard
-    /// mode — `listen(port)` always tries the real bind.
+    /// mode - `listen(port)` always tries the real bind.
     shared_claims: Option<Arc<crate::daemon_port_claims::SharedPortClaims>>,
     /// `server_id` → port for owners, so `close_server` can release
     /// the shared claim when the user calls `server.close()`.
@@ -245,7 +245,7 @@ impl DaemonNet {
             // both paths run concurrently we anchor server ids in a
             // disjoint range. Counter starts at 1; outbound connect
             // and accepted-connection allocation both go through
-            // `next_conn_id` — a single monotonic counter — so each
+            // `next_conn_id` - a single monotonic counter - so each
             // socket gets a unique handle.
             next_server_id: AtomicI32::new(1),
             conns: HopscotchMap::new(),
@@ -333,13 +333,13 @@ impl DaemonNet {
     }
 
     pub fn destroy(&self, conn_id: ConnId) -> i32 {
-        // Cloning the handle (cheap — Arcs + AbortHandle) keeps the
+        // Cloning the handle (cheap - Arcs + AbortHandle) keeps the
         // entry visible to `pending_bytes()` / `mark_closed` until the
         // synthetic Close event has been dispatched to JS. Aborting the
         // task here means the task can't itself emit Close, so we send
         // the terminal event from the destroyer's thread. `alive_conns`
         // stays positive so the daemon event loop doesn't bail before
-        // the close envelope reaches JS — `mark_closed` decrements when
+        // the close envelope reaches JS - `mark_closed` decrements when
         // the JS dispatch completes.
         if let Some(handle) = self.conns.get(&conn_id) {
             handle.abort.abort();
@@ -382,7 +382,7 @@ impl DaemonNet {
 
         // Multi-shard arbitration: when shared_claims is set, only
         // the shard that wins the lock-free CAS does the real bind.
-        // Followers register a no-op listener — JS sees the port
+        // Followers register a no-op listener - JS sees the port
         // as "bound", connection events flow only through the
         // owner shard. See `daemon_port_claims` for the rationale.
         if let Some(claims) = &self.shared_claims {
@@ -392,7 +392,7 @@ impl DaemonNet {
                 ClaimResult::Follower(_) => {
                     // Allocate a local server_id; user JS uses it
                     // for `server.close()` accounting. No bind, no
-                    // task spawn — the kernel's listener is owned
+                    // task spawn - the kernel's listener is owned
                     // by the winning shard.
                     let server_id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
                     self.alive_servers.fetch_add(1, Ordering::Release);
@@ -435,7 +435,7 @@ impl DaemonNet {
             return 0;
         }
         // Not in `servers`. Two cases:
-        //   * Single-shard mode: stale / unknown id — historical
+        //   * Single-shard mode: stale / unknown id - historical
         //     behavior is no-op return 0. Preserve that.
         //   * Multi-shard mode: a follower stub closing. The
         //     follower never inserted into `servers` in `listen`,
@@ -537,7 +537,7 @@ impl DaemonNet {
 
 /// Manifold gate. `OutboundHttp` is HTTP-only by design; raw TCP
 /// must use `OutboundFull` (with optional host allow-list).
-/// Allow-list entries are `host` or `host:port` patterns — see
+/// Allow-list entries are `host` or `host:port` patterns - see
 /// [`afterburner_node_compat::http_host::split_host_port_pattern`]
 /// for the shared grammar. `port` here is the literal connect port.
 fn net_outbound_allowed(m: &Manifold, host: &str, port: u16) -> bool {
@@ -674,7 +674,7 @@ async fn server_task(
 
 /// Drive both halves of an established TCP socket. Reader posts
 /// `Data`/`End`/`Error`; writer drains the queue and posts `Drain`.
-/// Single task with `tokio::select!` — no polling, no Mutex.
+/// Single task with `tokio::select!` - no polling, no Mutex.
 async fn drive_socket(
     conn_id: ConnId,
     stream: TcpStream,
@@ -690,7 +690,7 @@ async fn drive_socket(
     let mut was_over_hwm = false;
 
     'outer: loop {
-        // Drain the write queue first — gives writes a chance to flush
+        // Drain the write queue first - gives writes a chance to flush
         // before we block on the next select.
         while let Some(cmd) = write_rx.try_recv() {
             match cmd {
@@ -723,7 +723,7 @@ async fn drive_socket(
                     // back to the underlying stream via OwnedWriteHalf::as_ref.
                     if let Err(e) = write_half.as_ref().set_nodelay(enable) {
                         // Log via error event but don't tear the
-                        // connection down — `setNoDelay` is advisory
+                        // connection down - `setNoDelay` is advisory
                         // in Node and shouldn't kill the socket.
                         evt_tx.send(NetEvent::Error {
                             conn_id,
@@ -740,7 +740,7 @@ async fn drive_socket(
                         // Build a keepalive config with the requested
                         // initial idle. Node's `setKeepAlive(true, ms)`
                         // documents `ms` as the time before the first
-                        // probe — that maps to TCP_KEEPIDLE on Linux,
+                        // probe - that maps to TCP_KEEPIDLE on Linux,
                         // which is what `with_time` controls.
                         let mut ka = TcpKeepalive::new();
                         if delay_ms > 0 {
@@ -763,7 +763,7 @@ async fn drive_socket(
         }
 
         if !writer_open && pending.load(Ordering::Acquire) == 0 {
-            // Half-closed and queue drained — keep the reader half
+            // Half-closed and queue drained - keep the reader half
             // alive until the peer closes too. The select below
             // simply won't have a writer arm to wake.
         }

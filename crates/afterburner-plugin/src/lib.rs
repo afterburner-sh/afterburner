@@ -19,15 +19,15 @@
 //!
 //! ### Module layout
 //!
-//! - `host_api` — `afterburner:host` extern declarations.
-//! - `stdio` — WASI preview1 `fd_read` / `fd_write` helpers.
-//! - `envelope` — JS source wrappers (input-inlined + input-via-global).
-//! - `globals` — `modify_runtime`-time JS global installers.
-//! - `modes` — per-mode dispatchers (`compile`, `invoke`, `legacy`).
+//! - `host_api` - `afterburner:host` extern declarations.
+//! - `stdio` - WASI preview1 `fd_read` / `fd_write` helpers.
+//! - `envelope` - JS source wrappers (input-inlined + input-via-global).
+//! - `globals` - `modify_runtime`-time JS global installers.
+//! - `modes` - per-mode dispatchers (`compile`, `invoke`, `legacy`).
 //!
 //! ### Error reporting
 //!
-//! Variable-length host responses use a buffer protocol — the callee
+//! Variable-length host responses use a buffer protocol - the callee
 //! writes bytes into a caller-provided region and returns either the
 //! length or a negative error code. A detailed message is stashed in
 //! the host's `last_error` slot and readable via the `host_last_error`
@@ -60,7 +60,7 @@ fn modify_runtime(runtime: Runtime) -> Runtime {
 fn config() -> Config {
     let mut c = Config::default();
     // `event_loop(true)` makes Javy automatically drain pending microtasks
-    // after every `invoke` call — required for `fetch().then(...)`,
+    // after every `invoke` call - required for `fetch().then(...)`,
     // `await`, `setTimeout(fn, 0)`, and any Promise chain. Without it,
     // scheduling a microtask traps with "Pending jobs in the event
     // queue. Scheduling events is not supported when the event-loop
@@ -82,7 +82,7 @@ pub extern "C" fn initialize_runtime() {
     }
 }
 
-/// `_start` — one-shot path. Reads the JSON envelope from stdin and
+/// `_start` - one-shot path. Reads the JSON envelope from stdin and
 /// delegates to the mode dispatcher in [`modes`]. Used by every
 /// combustor that tears down the Store after a single call (UDF
 /// `invoke`, `script`, `compile`, `legacy`).
@@ -101,7 +101,7 @@ pub extern "C" fn start() {
     modes::dispatch(&parsed);
 }
 
-/// `daemon_step` — long-lived-Store path. Reads the envelope bytes
+/// `daemon_step` - long-lived-Store path. Reads the envelope bytes
 /// from `HostState::pending_envelope` via the `host_get_envelope`
 /// import, parses, and dispatches.
 ///
@@ -109,7 +109,7 @@ pub extern "C" fn start() {
 /// `daemon_step` invocations so JS-side state (plenum caches,
 /// handler tables from `http.createServer().listen(...)`) persists.
 /// That's what makes daemon mode different from every other
-/// combustor path in this plugin — nothing here reads stdin or
+/// combustor path in this plugin - nothing here reads stdin or
 /// tears down the runtime.
 #[unsafe(export_name = "daemon_step")]
 pub extern "C" fn daemon_step() {

@@ -4,7 +4,7 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 //! `fs.Stats` / `fs.StatFs` / `fs.ReadStream` / `fs.WriteStream`
-//! constructor surface — real apps probe these classes at module
+//! constructor surface - real apps probe these classes at module
 //! init for `instanceof` checks.
 
 #![cfg(feature = "bin")]

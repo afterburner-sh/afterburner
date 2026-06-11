@@ -6,7 +6,7 @@
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/vertexclique/afterburner/master/art/svg/afterburner-square.svg"
 )]
-//! `afterburner-thrust` — multi-threaded scheduler for afterburner.
+//! `afterburner-thrust` - multi-threaded scheduler for afterburner.
 //!
 //! Turns the single-threaded `WasmCombustor` into an N-worker pool with
 //! per-worker kovan-channel queues, hash-based script → worker affinity
@@ -55,7 +55,7 @@ const STATE_FORCE: u8 = 2;
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Opaque tenant identifier used by the admission layer (§5, T4). A small
-/// integer keyed into a lock-free map — callers pick the mapping.
+/// integer keyed into a lock-free map - callers pick the mapping.
 ///
 /// `None` at the `thrust` call site means the caller is *trusted*: the
 /// token bucket is skipped entirely and the thrust enters the queue at
@@ -96,7 +96,7 @@ impl fmt::Display for TenantId {
 /// stores a builder snapshot, then hands it to `ThrustEngine::new`, which
 /// itself clones a copy into each worker.
 ///
-/// `Debug` is implemented manually below — `WasmConfig` embeds an
+/// `Debug` is implemented manually below - `WasmConfig` embeds an
 /// `Option<Arc<dyn HostContext>>` which isn't `Debug`, so the derive
 /// doesn't carry over.
 #[derive(Clone)]
@@ -125,7 +125,7 @@ pub struct ThrustEngineConfig {
 
     /// Hard cap on the global injector before `thrust()` returns
     /// `AfterburnerError::Overloaded`. Sized at 16× the per-worker cap
-    /// by default — represents the system-wide in-flight ceiling that
+    /// by default - represents the system-wide in-flight ceiling that
     /// keeps the pooling-allocator + reply-channel memory growth
     /// bounded under burst.
     pub injector_capacity: usize,
@@ -184,7 +184,7 @@ impl fmt::Debug for ThrustEngineConfig {
 // reserves a slot via `fetch_add` and rolls back on overflow; workers
 // `fetch_sub` after dequeue. Concurrent enqueues against a near-full
 // queue can momentarily overshoot `cap` by the number of in-flight
-// enqueuers — bounded and acceptable.
+// enqueuers - bounded and acceptable.
 
 struct BoundedQueue<T: 'static> {
     sender: Sender<T>,
@@ -250,14 +250,14 @@ pub struct ThrustEngineStats {
     /// layer. `0` when admission is disabled. A useful pressure-watch
     /// signal; the sweep evicts buckets idle past 5 minutes (P3).
     pub tenant_buckets_tracked: usize,
-    /// NUMA nodes detected at engine-startup time (Linux only — all
+    /// NUMA nodes detected at engine-startup time (Linux only - all
     /// other platforms report `1`). Workers are round-robined across
     /// nodes and pinned to their node's CPU set via
     /// `sched_setaffinity`.
     pub numa_nodes: usize,
 }
 
-// Raw atomic counters kept on the engine — cloned into `ThrustEngineStats`
+// Raw atomic counters kept on the engine - cloned into `ThrustEngineStats`
 // by `stats()`. Shared with workers via `Arc`.
 #[derive(Debug, Default)]
 struct StatsCounters {
@@ -312,7 +312,7 @@ impl ThrustHandle {
             .unwrap_or_else(|| Err(AfterburnerError::Engine("thrust channel closed".into())))
     }
 
-    /// Non-blocking poll. `None` means "result not ready yet" — caller
+    /// Non-blocking poll. `None` means "result not ready yet" - caller
     /// may retry. `Some(Err(Engine("closed")))` means the engine will
     /// never send.
     pub fn try_recv(&self) -> Option<Result<Value>> {
@@ -384,11 +384,11 @@ fn hex8(hash: &[u8; 32]) -> String {
 // Worker routing
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Affinity routing — same `ScriptId` always lands on the same worker so
+/// Affinity routing - same `ScriptId` always lands on the same worker so
 /// its compiled state stays warm on that worker's caches (plan §5.1).
 ///
 /// Reads the first 8 bytes of the SHA-256 hash and reduces modulo worker
-/// count. This is a byte-level operation — no allocation, no hashing.
+/// count. This is a byte-level operation - no allocation, no hashing.
 #[inline]
 fn route_worker(hash: &[u8; 32], n_workers: usize) -> usize {
     debug_assert!(n_workers > 0, "route_worker called with zero workers");
@@ -403,7 +403,7 @@ fn resolve_worker_count(requested: usize) -> usize {
         return requested;
     }
     // Logical-CPU probe; SMT-inclusive. Plan §14 flags a preference for
-    // physical cores — a future knob can substitute `num_cpus::get_physical`
+    // physical cores - a future knob can substitute `num_cpus::get_physical`
     // without changing the public surface.
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -435,13 +435,13 @@ pub struct ThrustEngine {
     /// Global overflow queue. Filled when a worker's local queue is
     /// at cap; drained by workers as a between-pop poll target.
     injector: Option<Arc<BoundedQueue<Job>>>,
-    /// Cached worker count — avoids re-reading `worker_queues.len()`
+    /// Cached worker count - avoids re-reading `worker_queues.len()`
     /// on the hot path.
     n_workers: usize,
-    /// NUMA topology — cached so stats() can surface it and the steal
+    /// NUMA topology - cached so stats() can surface it and the steal
     /// sweep can order peer visits by locality.
     numa: Arc<NumaTopology>,
-    /// Token-bucket admission (T4). `None` disables the layer entirely —
+    /// Token-bucket admission (T4). `None` disables the layer entirely -
     /// `tenant`-bearing thrusts skip straight to the queue.
     admission: Option<TokenBucketAdmission>,
     shutdown: Arc<AtomicU8>,
@@ -513,7 +513,7 @@ impl ThrustEngine {
         }))
     }
 
-    /// Queue a thrust. Non-blocking — the caller gets a handle back
+    /// Queue a thrust. Non-blocking - the caller gets a handle back
     /// immediately and the work happens on the worker thread this
     /// script's hash routes to.
     ///
@@ -569,7 +569,7 @@ impl ThrustEngine {
         };
 
         // Try local first (affinity). On overflow, try the global
-        // injector. On both full, return Overloaded — production-grade
+        // injector. On both full, return Overloaded - production-grade
         // backpressure prevents memory/queue blow-up under burst.
         match queues[worker_idx].try_push(job) {
             Ok(()) => {
@@ -631,16 +631,16 @@ impl ThrustEngine {
     /// columnar path. This is the right shape because:
     ///
     /// 1. The wasmtime pooling allocator inside `WasmCombustor`
-    ///    is itself thread-safe — N concurrent submitters from N
+    ///    is itself thread-safe - N concurrent submitters from N
     ///    OS threads all check out a fresh slot per call without
     ///    contention.
     /// 2. The columnar payload is a `&[u8]` blob, not a JSON
-    ///    `Value` — it doesn't fit cleanly into the `Job` enum
+    ///    `Value` - it doesn't fit cleanly into the `Job` enum
     ///    that ThrustEngine's worker channels carry, and pretending
     ///    it does would force a copy through the job-encoding step
     ///    that the columnar path explicitly avoids.
     /// 3. The caller's submitter parallelism is what the bench
-    ///    measures anyway — adding a worker hop wouldn't increase
+    ///    measures anyway - adding a worker hop wouldn't increase
     ///    parallelism, just add latency.
     ///
     /// Subscribers that want the admission/tenant/NUMA machinery for
@@ -669,7 +669,7 @@ impl ThrustEngine {
     }
 
     /// Output-framing-aware invoke (JSON input): the module's return
-    /// type picks the result shape — `Uint8Array` / `ArrayBuffer`
+    /// type picks the result shape - `Uint8Array` / `ArrayBuffer`
     /// comes back as [`OutputValue::Bytes`], everything else as
     /// [`OutputValue::Json`]. Bypasses the per-job dispatch pipeline
     /// for the same reasons as [`thrust_raw`](Self::thrust_raw).
@@ -682,7 +682,7 @@ impl ThrustEngine {
         self.combustor.thrust_out(id, input, limits)
     }
 
-    /// Raw input + output-framing-aware result — the full-duplex bulk
+    /// Raw input + output-framing-aware result - the full-duplex bulk
     /// path ("bytes in, bytes out"). Bypasses the per-job dispatch
     /// pipeline for the same reasons as
     /// [`thrust_raw`](Self::thrust_raw).
@@ -710,7 +710,7 @@ impl ThrustEngine {
         self.numa.node_count
     }
 
-    /// Graceful shutdown — flip to drain mode, let workers finish
+    /// Graceful shutdown - flip to drain mode, let workers finish
     /// pending queued jobs (up to `config.shutdown_drain_deadline`),
     /// then join.
     ///
@@ -721,7 +721,7 @@ impl ThrustEngine {
         match Arc::try_unwrap(self) {
             Ok(engine) => drop(engine), // triggers full Drop drain+force+join
             Err(arc) => {
-                // Other holders still reference us — signal drain so
+                // Other holders still reference us - signal drain so
                 // workers begin draining; the last Drop will continue
                 // through to force + join.
                 arc.shutdown.store(STATE_DRAIN, Ordering::Release);
@@ -758,7 +758,7 @@ impl Drop for ThrustEngine {
         self.shutdown.store(STATE_FORCE, Ordering::Release);
 
         // Drop our queue Arcs so worker copies can also drop after the
-        // workers exit — keeps no hidden roots alive.
+        // workers exit - keeps no hidden roots alive.
         let _ = self.worker_queues.take();
         let _ = self.injector.take();
 
@@ -831,11 +831,11 @@ fn spawn_worker(
 /// 1. **Injector tick** (every 64th iter): `try_pop` the global
 ///    injector first. Keeps overflow-shed thrusts from starving when
 ///    locals are persistently busy.
-/// 2. **Owner pop** of this worker's local queue — fast path.
-/// 3. **Steal** half-search of peers' queues — drains imbalanced
+/// 2. **Owner pop** of this worker's local queue - fast path.
+/// 3. **Steal** half-search of peers' queues - drains imbalanced
 ///    routing.
 /// 4. **Park** with exponential backoff (50 µs → 2 ms) when all
-///    queues are empty. No signals, no futexes — capability-safe.
+///    queues are empty. No signals, no futexes - capability-safe.
 const INJECTOR_POLL_MASK: u64 = 63; // 64 = 1<<6
 
 fn worker_loop(
@@ -870,7 +870,7 @@ fn worker_loop(
             break;
         }
 
-        // Work-finding sequence is identical regardless of state — only
+        // Work-finding sequence is identical regardless of state - only
         // the empty-queue case differs (Drain → exit, Run → park).
 
         // 1. Injector tick.
@@ -954,7 +954,7 @@ fn execute(job: Job, combustor: &WasmCombustor, stats: &StatsCounters) {
     } = job;
     let result = combustor.thrust(&id, &input, &limits);
     stats.thrusts_completed.fetch_add(1, Ordering::Relaxed);
-    // If the caller dropped the handle, send is a no-op — fine.
+    // If the caller dropped the handle, send is a no-op - fine.
     reply.send(result);
 }
 
@@ -1048,7 +1048,7 @@ mod tests {
 
     #[test]
     fn handle_recv_timeout_returns_none_on_orphan() {
-        // Using a receiver that will NEVER get a send — not tied to the
+        // Using a receiver that will NEVER get a send - not tied to the
         // engine at all. We just want to verify the timeout code path
         // correctly reports `None` on timeout and then `Some` on
         // late-arrival.
@@ -1094,7 +1094,7 @@ mod tests {
     fn shutdown_with_outstanding_arc_is_soft_signal() {
         let engine = ThrustEngine::new(ThrustEngineConfig::default()).unwrap();
         let engine2 = engine.clone();
-        // shutdown with outstanding Arc — falls through the soft-signal
+        // shutdown with outstanding Arc - falls through the soft-signal
         // branch, drop of engine2 will trigger the real Drop later.
         engine.shutdown();
         drop(engine2);

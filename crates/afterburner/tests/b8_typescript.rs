@@ -152,7 +152,7 @@ fn ts_strips_generic_parameters() {
 //
 // Non-const enums emit runtime objects. oxc's strip-only mode preserves
 // that emission (the enum object exists at runtime). const enums are
-// not erased under isolatedModules semantics — matching what esbuild
+// not erased under isolatedModules semantics - matching what esbuild
 // / swc do.
 
 #[test]
@@ -202,7 +202,7 @@ fn ts_drops_import_type_specifier() {
     // Note: `import ... from './util'` is ESM syntax, which this
     // runtime doesn't fully support until B9. The test's actual
     // gate is that the `import type` line doesn't survive
-    // transpile — the runtime's handling of the remaining ESM is
+    // transpile - the runtime's handling of the remaining ESM is
     // B9's concern.
     //
     // We assert that stderr, if any, does NOT mention "type" or
@@ -306,7 +306,7 @@ fn syntax_error_reports_filename() {
 //
 // Mixed extension resolution: a `.ts` entry calling `require('./lib')`
 // where `./lib.ts` exists. This is what most TS projects do when
-// compiled via `tsc` / `esbuild` — relative imports don't carry the
+// compiled via `tsc` / `esbuild` - relative imports don't carry the
 // source extension. Our B6 require resolver walks the extension
 // ladder; adding `.ts` / `.mts` / `.cts` to it is future work. For
 // now this test documents the current behavior: the `.js` ladder

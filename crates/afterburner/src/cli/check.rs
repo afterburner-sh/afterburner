@@ -3,11 +3,11 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `burn check` — parse-only, no execution. Matches `node --check`.
+//! `burn check` - parse-only, no execution. Matches `node --check`.
 //!
 //! Calls `Afterburner::register`, which routes through the combustor's
 //! compile step. The wasm path runs the Javy plugin's `compile`
-//! envelope — Javy parses the user source's wrapper *as an ES
+//! envelope - Javy parses the user source's wrapper *as an ES
 //! module*, eagerly validating any `new Function(...)` constants
 //! inlined into the module body. That's what surfaces syntactic
 //! errors in the user's source text without executing the user code:

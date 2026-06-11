@@ -11,10 +11,10 @@
 //! on a round trip.
 
 pub mod digest;
-pub mod link;
-pub mod native;
 pub mod error;
+pub mod link;
 pub mod manifest;
+pub mod native;
 pub mod pack;
 pub mod unpack;
 pub mod version;
@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 /// `FORMAT.md`), modeled on Python wheels / npm / Cargo editions:
 ///
 /// - **MAJOR** is the compatibility gate. A reader accepts only its own
-///   major and **refuses any other major loudly** — never misparses a format
+///   major and **refuses any other major loudly** - never misparses a format
 ///   it does not understand. A breaking change (a field removed, repurposed,
 ///   or one that must not be ignored) bumps MAJOR.
 /// - **MINOR** is additive-only. A reader accepts a *greater* minor (it just
@@ -54,7 +54,7 @@ pub fn reader_format_version() -> String {
 /// limit (50 MiB). `from_bytes` rejects anything larger before touching zstd.
 pub const MAX_AFB_BYTES: usize = 50 * 1024 * 1024;
 
-/// Hard cap on total decompressed bytes — zip-bomb defense (§3.3: 256 MiB).
+/// Hard cap on total decompressed bytes - zip-bomb defense (§3.3: 256 MiB).
 pub const MAX_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Hard cap on a single tar entry. Smaller than the total so one entry can
@@ -123,7 +123,7 @@ impl Afb {
         self.source.get(path).map(Vec::as_slice)
     }
 
-    /// `namespace/name` — the registry-facing package identifier.
+    /// `namespace/name` - the registry-facing package identifier.
     pub fn qualified_name(&self) -> String {
         format!(
             "{}/{}",

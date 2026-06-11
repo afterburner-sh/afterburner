@@ -14,7 +14,7 @@
 //! same listener accounting.
 //!
 //! Why this matters: B1 multi-shard sharding relies on this
-//! equivalence — N independent Stores all running init from the
+//! equivalence - N independent Stores all running init from the
 //! same Vec<u8> must produce N independent but behaviourally
 //! identical daemon Stores. If the bytecode path drifts from the
 //! source path, every multi-shard claim breaks.
@@ -107,7 +107,7 @@ fn precompiled_daemon_preserves_argv_env() {
 
     let resp = http_get(port, "/");
     assert!(resp.starts_with("HTTP/1.1 200"), "resp:\n{resp}");
-    // `argv` set to ["burn", "[eval]"] (or similar) — at minimum non-empty.
+    // `argv` set to ["burn", "[eval]"] (or similar) - at minimum non-empty.
     assert!(
         resp.contains("\"argvLen\":") && !resp.contains("\"argvLen\":0"),
         "argv not propagated through precompile:\n{resp}"
@@ -217,7 +217,7 @@ fn precompiled_daemon_console_log_reaches_stdout() {
     // The script self-exits after the listener is up so the burn
     // subprocess gets to flush its block-buffered stdout to the pipe.
     // Earlier versions used `child.kill()` after `wait_for_listener`
-    // which SIGKILLed the process before the buffer was flushed —
+    // which SIGKILLed the process before the buffer was flushed -
     // race-prone (~80% miss rate) on hosts where the pipe path is
     // fully buffered.
     let port = pick_port();

@@ -41,7 +41,7 @@ pub fn pick_port() -> u16 {
     p
 }
 
-/// RAII wrapper for spawned `burn` children. Kills + reaps on Drop —
+/// RAII wrapper for spawned `burn` children. Kills + reaps on Drop -
 /// even when the surrounding test panics, the child won't outlive
 /// the test process.
 pub struct ChildGuard(Option<Child>);
@@ -228,7 +228,7 @@ pub fn http_post(port: u16, path: &str, body: &str, content_type: &str) -> Strin
     resp
 }
 
-/// TCP-only readiness poll — no stdout marker required. Returns true
+/// TCP-only readiness poll - no stdout marker required. Returns true
 /// if the kernel accepts a TCP connection on `port` before the
 /// deadline. Use this for tests that don't (or can't) inject a
 /// LISTENING marker into their JS source; for the marker-driven path

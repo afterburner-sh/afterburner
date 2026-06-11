@@ -147,7 +147,7 @@ fn wasm_host_context_round_trip() {
 
 #[test]
 fn wasm_without_host_context_defaults_are_harmless() {
-    // No context wired — readColumn returns [], emitRow is a no-op,
+    // No context wired - readColumn returns [], emitRow is a no-op,
     // getEnv returns undefined. Must not crash.
     let cfg = WasmConfig::default();
     let c = WasmCombustor::new(cfg).unwrap();

@@ -59,7 +59,7 @@ fn dns_resolve_any_returns_combined_records() {
         r#"
         const dns = require('dns');
         dns.resolveAny('localhost', (err, list) => {
-            // We don't insist on a specific number — just that the
+            // We don't insist on a specific number - just that the
             // dispatcher returned without crashing and gave us an array.
             if (Array.isArray(list)) console.log('ANY-OK');
             else console.log('FAIL', err && err.message);

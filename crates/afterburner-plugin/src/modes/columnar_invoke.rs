@@ -11,7 +11,7 @@
 //! and runs `__ab_columnar_dispatch(module.exports)` after evaluating
 //! the user source. The dispatcher reads the input blob via
 //! `__AB_GET_COLUMNAR_INPUT__`, builds typed views, dispatches the
-//! UDF, and ships the reply via `__AB_COLUMNAR_REPLY__` — so this
+//! UDF, and ships the reply via `__AB_COLUMNAR_REPLY__` - so this
 //! mode is just `javy_plugin_api::invoke(&bytecode, None)`, identical
 //! shape to [`super::invoke`] but with a different cached bytecode
 //! body.

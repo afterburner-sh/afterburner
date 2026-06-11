@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `dgram` — UDP socket host coordinator.
+//! `dgram` - UDP socket host coordinator.
 //!
 //! Backs the `dgram.createSocket` polyfill in `polyfills/dgram.js`. The
 //! host owns every `tokio::net::UdpSocket`; the JS-side `Socket` is a
@@ -22,7 +22,7 @@
 //! Send is synchronous from the JS perspective: `__host_dgram_send`
 //! schedules the `send_to` on the runtime, blocks the host import
 //! until completion, returns the byte count. UDP doesn't need a
-//! writer task or backpressure queue — the kernel either accepts the
+//! writer task or backpressure queue - the kernel either accepts the
 //! packet or drops it; either outcome is observable in microseconds.
 //!
 //! ## Lock-free
@@ -51,7 +51,7 @@ use tokio::task::AbortHandle;
 
 pub type SocketId = i32;
 
-/// 64 KiB max datagram payload — covers IPv4 / IPv6 datagrams (theoretical
+/// 64 KiB max datagram payload - covers IPv4 / IPv6 datagrams (theoretical
 /// max ~65507 bytes for IPv4 UDP, slightly less for v6). Larger reads truncate
 /// and surface as truncated `Message` events; matches Node's behavior on
 /// oversized packets.
@@ -74,7 +74,7 @@ pub mod errors {
 pub enum DgramEvent {
     /// Socket bound + recv loop running. Polyfill emits `'listening'`.
     Listening { socket_id: SocketId, port: u16 },
-    /// Inbound datagram. `payload_b64` is base64 — UDP is a binary
+    /// Inbound datagram. `payload_b64` is base64 - UDP is a binary
     /// pipeline so we never assume utf8.
     Message {
         socket_id: SocketId,
@@ -180,7 +180,7 @@ impl DaemonDgram {
         }
 
         // Multi-shard arbitration. Skip for `port == 0` (OS-picked)
-        // — each shard gets its own OS-assigned port; the user's
+        // - each shard gets its own OS-assigned port; the user's
         // intent is "any port", so racing shards each binding their
         // own is the correct semantics. For non-zero ports, the
         // first shard to claim wins; followers stub the bind.
@@ -210,7 +210,7 @@ impl DaemonDgram {
         // bound port to JS immediately. JS callers do
         //   sock.bind(0, () => { sock.address(); ... })
         // and expect the address to be populated on the listening
-        // callback — that requires a synchronous bind.
+        // callback - that requires a synchronous bind.
         let result = this
             .runtime
             .block_on(async move { UdpSocket::bind(addr.clone()).await });
@@ -267,7 +267,7 @@ impl DaemonDgram {
                             );
                             // kovan bounded `send` blocks if full. UDP
                             // is best-effort, so we accept that
-                            // backpressure here — the daemon event
+                            // backpressure here - the daemon event
                             // pump drains the channel each tick.
                             events_tx.send(DgramEvent::Message {
                                 socket_id,
@@ -281,7 +281,7 @@ impl DaemonDgram {
                                 message: format!("dgram.recv: {e}"),
                                 code: io_error_code(&e).into(),
                             });
-                            // Stop the loop on recv error — the JS side
+                            // Stop the loop on recv error - the JS side
                             // will close the socket.
                             break;
                         }
@@ -344,7 +344,7 @@ impl DaemonDgram {
         let Some(handle) = self.sockets.remove(&socket_id) else {
             // Possible follower stub (multi-shard only). In
             // single-shard mode, closing an unknown id is
-            // historically a no-op — preserve.
+            // historically a no-op - preserve.
             if self.shared_claims.is_some() && self.alive.load(Ordering::Acquire) > 0 {
                 self.alive.fetch_sub(1, Ordering::Release);
                 self.events_tx.send(DgramEvent::Close { socket_id });

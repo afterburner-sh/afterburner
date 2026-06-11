@@ -18,7 +18,7 @@ thread_local! {
 }
 
 /// Install `m` as the manifold for the current thread. Returns a guard
-/// that restores the previous value when dropped — allowing nested
+/// that restores the previous value when dropped - allowing nested
 /// activations (rarely useful, but safer than a bare setter).
 pub fn activate(m: Manifold) -> ActiveGuard {
     let prev = ACTIVE.with(|s| s.replace(Some(m)));
@@ -26,7 +26,7 @@ pub fn activate(m: Manifold) -> ActiveGuard {
 }
 
 /// Run `f` with a borrowed reference to the active manifold. Returns
-/// `PermissionDenied` when no manifold is active — callers should always
+/// `PermissionDenied` when no manifold is active - callers should always
 /// install one via `activate` before running user JS.
 pub fn with<R>(f: impl FnOnce(&Manifold) -> Result<R>) -> Result<R> {
     ACTIVE.with(|slot| {

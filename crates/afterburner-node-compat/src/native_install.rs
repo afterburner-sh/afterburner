@@ -6,7 +6,7 @@
 //! Install host-backed globals (`__host_fs_*`, `__host_crypto_*`,
 //! `__host_os_*`, `__host_http_request`) on an rquickjs `Context`.
 //!
-//! Called once per [`crate::active_manifold`]-enabled `Context` — i.e.,
+//! Called once per [`crate::active_manifold`]-enabled `Context` - i.e.,
 //! once per thread-local Runtime on the native path. Each global is a
 //! thin closure that reads the thread-local active manifold, delegates
 //! to the corresponding Rust `*_host` module, and translates errors
@@ -20,7 +20,7 @@ use crate::{
 };
 
 // Thread-local handle stores. Each thread-local `ThreadRuntime` owns
-// its own — handles never cross thread boundaries. `SIGN_HANDLES` is
+// its own - handles never cross thread boundaries. `SIGN_HANDLES` is
 // for streaming sign/verify; `HASH_HANDLES` is for streaming
 // createHash/createHmac.
 thread_local! {
@@ -121,7 +121,7 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     )
     .map_err(err_to_ab)?;
 
-    // Stat returns a JSON string so the JS glue can parse it once — avoids
+    // Stat returns a JSON string so the JS glue can parse it once - avoids
     // the rquickjs lifetime shuffle for returning `Object<'js>` from a
     // closure captured in a long-lived Context.
     g.set(
@@ -399,7 +399,7 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     )
     .map_err(err_to_ab)?;
 
-    // QUIC / HTTP/3 listener — native path stub. The native runtime
+    // QUIC / HTTP/3 listener - native path stub. The native runtime
     // doesn't run a daemon (no event loop), so the API path always
     // surfaces the no-daemon error and JS callers land in the
     // "use the daemon CLI" branch.
@@ -429,7 +429,7 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     .map_err(err_to_ab)?;
 
     // Native (rquickjs) path doesn't run a tokio runtime, so the
-    // outbound H3 client surfaces the no-daemon sentinel — JS callers
+    // outbound H3 client surfaces the no-daemon sentinel - JS callers
     // either fall back to fetch() (which is wired) or run via the
     // daemon CLI / library API where a tokio handle is attached.
     g.set(
@@ -1017,7 +1017,7 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     )
     .map_err(err_to_ab)?;
 
-    // ---- zlib (no Manifold gate — pure compute) --------------------------
+    // ---- zlib (no Manifold gate - pure compute) --------------------------
     for (name, kind) in [
         ("__host_zlib_deflate_sync", ZlibOp::Deflate),
         ("__host_zlib_inflate_sync", ZlibOp::Inflate),
@@ -1056,7 +1056,7 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     )
     .map_err(err_to_ab)?;
 
-    // Record-type-aware resolvers — same JSON-encoded result shape as
+    // Record-type-aware resolvers - same JSON-encoded result shape as
     // the WASM bridges. `servers_csv` is a comma-separated address
     // list; empty string means "use system /etc/resolv.conf with a
     // Cloudflare fallback." The split happens here so dns_host stays
@@ -1163,7 +1163,7 @@ pub fn register_native_builtins(ctx: &Ctx<'_>) -> Result<(), AfterburnerError> {
     .map_err(err_to_ab)?;
 
     // ---- host context (embedder-facing hooks) -------------------------
-    // Scripts call these via require('afterburner:host') — the host
+    // Scripts call these via require('afterburner:host') - the host
     // wires a HostContext implementation; default NullHost returns
     // empty column / ignores emitted rows.
     g.set(

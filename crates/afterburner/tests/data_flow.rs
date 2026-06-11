@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Phase I — `udf_batch` / `run_batch` array-of-objects flow tests.
+//! Phase I - `udf_batch` / `run_batch` array-of-objects flow tests.
 //!
 //! Verifies the per-row UDF execution contract embedders rely on for
 //! data-pipeline / per-row transformation use cases: input array →
@@ -11,7 +11,7 @@
 //! length, same order, per-element types preserved.
 //!
 //! These tests use the threaded engine because that's where the per-
-//! row dispatch lives — the cache path treats the script as a single
+//! row dispatch lives - the cache path treats the script as a single
 //! whole-array transform. Both paths are valid; this file pins the
 //! per-row contract.
 
@@ -104,7 +104,7 @@ fn single_row_batch() {
 
 #[test]
 fn one_row_throw_aborts_batch() {
-    // The per-row contract is "stop on first error" — a thrown
+    // The per-row contract is "stop on first error" - a thrown
     // exception in any row aborts the batch and surfaces the error.
     // Embedders rely on this for transactional semantics.
     let ab = ab();
@@ -131,7 +131,7 @@ fn one_row_throw_aborts_batch() {
 
 #[test]
 fn primitive_outputs_supported() {
-    // Rows return primitives, not objects — should still surface as a
+    // Rows return primitives, not objects - should still surface as a
     // JSON array of those primitives.
     let ab = ab();
     let id = ab
@@ -184,7 +184,7 @@ fn large_batch_round_trip_1000_rows() {
 
 #[test]
 fn run_then_run_batch_share_compiled_script() {
-    // The cache is keyed by source — registering once and dispatching
+    // The cache is keyed by source - registering once and dispatching
     // through both run and run_batch should hit the same compiled
     // artifact. This is the "compile-once-call-many" contract that
     // makes per-row UDFs cheap.
@@ -197,7 +197,7 @@ fn run_then_run_batch_share_compiled_script() {
     // Batched path against the same id
     let out = ab.run_batch(&id, &json!([{ "n": 2 }, { "n": 3 }])).unwrap();
     assert_eq!(out, json!([102, 103]));
-    // And once more in single-call mode — verifies the cache slot is
+    // And once more in single-call mode - verifies the cache slot is
     // still hot and didn't get invalidated by the batch path.
     assert_eq!(ab.run(&id, &json!({ "n": 4 })).unwrap(), json!(104));
 }

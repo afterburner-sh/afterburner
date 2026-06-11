@@ -30,14 +30,14 @@ fn main() {
 
     let bundle = match fs::read(&bundle_path) {
         Ok(b) => b,
-        Err(_) => return, // bundle not yet generated — fresh workspace checkout
+        Err(_) => return, // bundle not yet generated - fresh workspace checkout
     };
     let current_hash = sha256_hex(&bundle);
 
     let committed_hash = match fs::read_to_string(&sidecar_path) {
         Ok(s) => s.trim().to_string(),
         Err(_) => {
-            // No recorded hash yet — first-time plugin build; record it
+            // No recorded hash yet - first-time plugin build; record it
             // rather than fail. Normal CI/dev flow writes this via the
             // plugin's build.sh.
             let _ = fs::write(&sidecar_path, format!("{current_hash}\n"));

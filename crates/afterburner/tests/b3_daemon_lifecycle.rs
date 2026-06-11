@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! B3 phase gate: daemon mode lifecycle — `process.exit(n)` returns the
+//! B3 phase gate: daemon mode lifecycle - `process.exit(n)` returns the
 //! right code, `setInterval` keeps the daemon alive, `.unref()` lets it
 //! exit.
 //!
@@ -11,7 +11,7 @@
 //! codes, stdout, and timing behavior.
 //!
 //! Tests run sequentially (`serial_test`) because they spawn long-lived
-//! subprocesses that contend for CPU under parallel execution — debug
+//! subprocesses that contend for CPU under parallel execution - debug
 //! builds are slow to cold-instantiate the WASM engine, and a dozen
 //! parallel instantiations can oversubscribe CPU enough that the
 //! timing assertions below (exit-within-10s etc.) flake.
@@ -105,7 +105,7 @@ fn process_exit_without_arg_is_zero() {
 #[serial]
 fn setinterval_keeps_daemon_alive() {
     // Script uses setInterval to log periodically. We wait for a few
-    // ticks then kill the process — the key assertion is that it did
+    // ticks then kill the process - the key assertion is that it did
     // NOT exit immediately (which it would if setInterval didn't keep
     // the runtime alive).
     let mut child = Command::new(BURN)
@@ -127,7 +127,7 @@ fn setinterval_keeps_daemon_alive() {
         .spawn()
         .expect("spawn burn");
 
-    // Give it up to 30 seconds — debug-build WASM engine startup is
+    // Give it up to 30 seconds - debug-build WASM engine startup is
     // slow and multiple parallel subprocess tests contend for CPU.
     let out = wait_with_timeout(&mut child, Duration::from_secs(30));
     let stdout = String::from_utf8_lossy(&out.0);
@@ -183,7 +183,7 @@ fn settimeout_nonzero_delay_fires() {
     // It should have waited at least ~100ms (allow some slack for CI).
     assert!(
         elapsed >= Duration::from_millis(50),
-        "elapsed {elapsed:?} — timer should have waited"
+        "elapsed {elapsed:?} - timer should have waited"
     );
 }
 
@@ -231,7 +231,7 @@ fn unref_timer_lets_daemon_exit() {
     // runners this dominates real wall time.
     assert!(
         elapsed < Duration::from_secs(90),
-        "elapsed {elapsed:?} — should exit quickly"
+        "elapsed {elapsed:?} - should exit quickly"
     );
 }
 
@@ -273,7 +273,7 @@ fn clearinterval_lets_daemon_exit() {
     // WASM engine startup on cold CI runners.
     assert!(
         elapsed < Duration::from_secs(90),
-        "elapsed {elapsed:?} — should exit after clearing"
+        "elapsed {elapsed:?} - should exit after clearing"
     );
 }
 
@@ -413,7 +413,7 @@ fn cleartimeout_prevents_fire() {
 #[test]
 #[serial]
 fn settimeout_zero_delay_does_not_keep_daemon_alive() {
-    // setTimeout(fn, 0) fires via microtask — it should NOT register a
+    // setTimeout(fn, 0) fires via microtask - it should NOT register a
     // host timer or keep the daemon alive. The script should exit cleanly
     // without entering the event loop.
     let start = Instant::now();
@@ -440,7 +440,7 @@ fn settimeout_zero_delay_does_not_keep_daemon_alive() {
         stdout.contains("zero-delay"),
         "zero-delay timer should fire as microtask: {stdout}"
     );
-    // Should exit fast — no daemon event loop entered. Ceiling
+    // Should exit fast - no daemon event loop entered. Ceiling
     // absorbs debug-build WASM engine startup on cold CI runners.
     assert!(
         elapsed < Duration::from_secs(90),

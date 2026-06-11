@@ -4,7 +4,7 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 #![cfg(feature = "bin")]
-//! B7 — `tls` raw TLS integration.
+//! B7 - `tls` raw TLS integration.
 //!
 //! Each test generates a fresh self-signed cert with `rcgen`, starts
 //! a tokio-rustls echo server in a multi-thread runtime on a
@@ -16,7 +16,7 @@
 //! 'secureConnect' callback; same in reverse for the data direction.
 //!
 //! The burn-as-server test (`burn_serves_tls_and_host_client_echoes`)
-//! flips the topology — burn binds, host connects with rustls — to
+//! flips the topology - burn binds, host connects with rustls - to
 //! cover the `tls.createServer` path.
 
 use rcgen::generate_simple_self_signed;
@@ -58,7 +58,7 @@ fn make_test_certs() -> TestCerts {
 }
 
 /// Bind a tokio-rustls echo server. Returns the bound port. The
-/// server is single-threaded (one connection at a time) — fine for
+/// server is single-threaded (one connection at a time) - fine for
 /// the round-trip tests.
 fn spawn_tls_echo_server(certs: &TestCerts) -> u16 {
     // Bind synchronously so the test can return a port before the
@@ -194,7 +194,7 @@ fn handshake_failure_self_signed_with_strict_verification() {
                 port: {port},
                 host: '127.0.0.1',
                 servername: 'localhost',
-                // Default is strict — explicitly leave it on.
+                // Default is strict - explicitly leave it on.
             }});
             sock.on('error', (e) => {{
                 console.log('HANDSHAKE_FAIL code=' + (e.code || 'NONE'));
@@ -643,7 +643,7 @@ impl rustls::client::danger::ServerCertVerifier for CapturingNoVerify {
 
 /// Drive a rustls handshake to `port` over TCP and return the leaf
 /// certificate the server actually presented. Used to verify SNI
-/// routing — caller asserts on the cert bytes. Bypasses hostname
+/// routing - caller asserts on the cert bytes. Bypasses hostname
 /// verification so we can probe arbitrary SNIs (including ones the
 /// fallback default cert won't validate against).
 fn fetch_presented_cert(port: u16, server_name: &str) -> Vec<u8> {
@@ -816,7 +816,7 @@ fn sni_add_context_works_post_construction() {
 
 #[test]
 fn ip_helpers() {
-    // tls.isIP* re-exports net's helpers — quick smoke test.
+    // tls.isIP* re-exports net's helpers - quick smoke test.
     let parent = r#"
         const tls = require('tls');
         const out = [];

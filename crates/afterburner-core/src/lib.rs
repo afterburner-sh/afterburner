@@ -6,7 +6,7 @@
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/vertexclique/afterburner/master/art/svg/afterburner-square.svg"
 )]
-//! Afterburner core — engine trait, shared types, host-function API surface,
+//! Afterburner core - engine trait, shared types, host-function API surface,
 //! and the script registry shell.
 //!
 //! This crate deliberately has no runtime dependencies on Wasmtime or

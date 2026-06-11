@@ -10,7 +10,7 @@
 //! Sync round-trip via `zlib.brotliCompressSync` / `brotliDecompressSync`;
 //! async round-trip via `zlib.brotliCompress` / `brotliDecompress`;
 //! header sniff (brotli stream starts with a window-size + magic byte
-//! pattern — we just confirm the bytes aren't the input verbatim and
+//! pattern - we just confirm the bytes aren't the input verbatim and
 //! that decompress returns them).
 
 use serial_test::serial;

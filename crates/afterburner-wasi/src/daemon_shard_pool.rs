@@ -3,13 +3,13 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `DaemonShardPool` — N independent `DaemonRuntime` instances, each
+//! `DaemonShardPool` - N independent `DaemonRuntime` instances, each
 //! served from a dedicated OS thread. The shared `DaemonHttp`
 //! coordinator binds one TCP listener per port; the pool's
 //! dispatcher task drains the central event channel and round-robins
 //! each request to a shard's mailbox. Per-shard event sources
 //! (timers, worker_threads, net, tls, dgram) are polled by each
-//! shard's own loop on its own daemon — events can't smuggle across
+//! shard's own loop on its own daemon - events can't smuggle across
 //! shard boundaries.
 //!
 //! Sandbox boundary preserved per-shard: every shard owns its own
@@ -25,7 +25,7 @@
 //! linear-memory usage is `N × M`. Same multiplier applies to the
 //! `worker_threads` budget (`N × WorkerConfig::max_concurrent`).
 //! Operators size the container (CPU + memory) at the deployment
-//! layer — `available_parallelism()` honours cgroup CPU quotas, so
+//! layer - `available_parallelism()` honours cgroup CPU quotas, so
 //! `docker run --cpus=4` produces 4 shards automatically.
 //!
 //! Shard panic isolation: every dispatch call is wrapped in
@@ -71,7 +71,7 @@ use wasmtime::{Engine, InstancePre};
 pub const DEFAULT_SHARD_QUEUE_DEPTH: usize = 256;
 
 /// Hard ceiling on shard count. Pinned to match Wasmtime's
-/// `POOL_TOTAL_MEMORIES = 128` (set in `wasm_engine.rs`) — the
+/// `POOL_TOTAL_MEMORIES = 128` (set in `wasm_engine.rs`) - the
 /// pooling allocator pre-allocates that many instance slots, and
 /// each shard claims one. Exceeding the pool would fail
 /// `instance_pre.instantiate()` on shards 128+ with
@@ -97,7 +97,7 @@ pub struct ShardPoolConfig {
     /// `setInterval`, `fetch`, etc.) don't multiply by N.
     ///
     /// Set to `false` for the legacy "always multi-shard" behavior
-    /// — useful for benchmarks where init is intentionally trivial
+    /// - useful for benchmarks where init is intentionally trivial
     /// and the amplification doesn't matter.
     pub expand_only_for_http_listener: bool,
     pub engine: Engine,
@@ -131,7 +131,7 @@ pub struct DaemonShardPool {
     /// and routes each event to a shard. Lives for the pool's
     /// lifetime; abort on `Drop`.
     dispatcher_task: Option<tokio::task::JoinHandle<()>>,
-    /// Per-shard init outcomes — collected during spawn().
+    /// Per-shard init outcomes - collected during spawn().
     init_results: Vec<InitResult>,
 }
 
@@ -271,7 +271,7 @@ impl DaemonShardPool {
         // does `net.connect(api)` or `setInterval(refresh, 1000)`
         // at the top level, we don't want to multiply those side
         // effects N times. HTTP daemons are the multi-shard sweet
-        // spot — the bound listener is the dispatch boundary, and
+        // spot - the bound listener is the dispatch boundary, and
         // every shard needs its own JS state to handle requests in
         // parallel. Non-HTTP daemons stay single-shard.
         spawn_one(0, &mut shards)?;
@@ -345,10 +345,10 @@ impl DaemonShardPool {
             // with the user's intended code instead of collapsing
             // to 1.
             cfg.shutdown.store(true, Ordering::Release);
-            // Surface init's stdout/stderr to the user — useful for
+            // Surface init's stdout/stderr to the user - useful for
             // diagnosing init failures (TS compile errors, missing
             // modules, etc.). For ProcessExit suppress the stderr
-            // because there's nothing wrong — the user's script
+            // because there's nothing wrong - the user's script
             // intentionally exited.
             let _ = std::io::stdout().write_all(&stdout);
             if !matches!(error, AfterburnerError::ProcessExit(_)) {
@@ -439,7 +439,7 @@ impl DaemonShardPool {
 
     /// Block until all shards exit naturally. Used by the CLI's
     /// shutdown path to drain in-flight requests. Does NOT signal
-    /// shutdown — the caller must set the shutdown flag (or close
+    /// shutdown - the caller must set the shutdown flag (or close
     /// listeners and clear timers) separately.
     pub fn join_all(&mut self) {
         for shard in &mut self.shards {
@@ -577,7 +577,7 @@ fn shard_main_inner(args: ShardThreadArgs) {
     let dgram = DaemonDgram::new_with_claims(tokio_handle.clone(), manifold, shared_claims);
     daemon.install_dgram(Arc::clone(&dgram));
 
-    // Outbound HTTP coordinator — async per-shard. JS calls to
+    // Outbound HTTP coordinator - async per-shard. JS calls to
     // `http.request` / `https.request` / `fetch` go through this
     // coord, which spawns the actual round-trip on the same Tokio
     // runtime that drives axum / net / tls. Responses come back
@@ -659,11 +659,11 @@ fn shard_event_loop(
             break;
         }
         if !daemon.has_refs() {
-            // Event loop drained — emit Node's shutdown lifecycle
+            // Event loop drained - emit Node's shutdown lifecycle
             // before tearing the shard down so `process.on('beforeExit')`
             // / `process.on('exit')` handlers run. npm (and many CLIs)
             // buffer ALL their output and flush it from an 'exit'
-            // handler — without this the script that completed by
+            // handler - without this the script that completed by
             // draining the loop (rather than calling `process.exit()`)
             // prints nothing and never finalizes. A 'beforeExit' handler
             // may schedule new work (a timer / async I/O); if it does,
@@ -753,7 +753,7 @@ fn shard_event_loop(
         // ---- Outbound HTTP responses ----
         // Each shard owns its outbound coordinator; responses for
         // requests this shard issued land here. Drain a generous
-        // batch per tick — npm install fans out 50+ concurrent
+        // batch per tick - npm install fans out 50+ concurrent
         // requests during dependency resolution, and stalling on
         // queue drain stretches install wall time.
         for _ in 0..256 {
@@ -820,7 +820,7 @@ fn shard_event_loop(
         }
 
         if !did_work {
-            // No events processed this iteration — sleep briefly,
+            // No events processed this iteration - sleep briefly,
             // bounded by the next timer's fire-time. Same shape as
             // the legacy single-shard run loop.
             let max_sleep = Duration::from_millis(5);
@@ -839,13 +839,13 @@ fn shard_event_loop(
 /// the JS handler (or any host import called from it) doesn't
 /// propagate up the shard thread; we log + carry on with the next
 /// event. The HTTP reply (if any) was registered as a pending slot
-/// in `DaemonHttp.pending` — when the panicked dispatch fails to
+/// in `DaemonHttp.pending` - when the panicked dispatch fails to
 /// call `__host_http_reply`, axum's `recv_async` waits forever on
 /// that req_id. To prevent this, we cancel the pending slot on
 /// dispatch error.
 ///
 /// On `ProcessExit`, flushes the shard's stdout/stderr before
-/// calling `std::process::exit(code)` — otherwise the user's
+/// calling `std::process::exit(code)` - otherwise the user's
 /// `console.log` immediately preceding `process.exit()` gets lost
 /// in the shard's MemoryOutputPipe.
 fn dispatch_with_panic_isolation(
@@ -897,7 +897,7 @@ fn dispatch_with_panic_isolation(
 
 /// Synthesise a 500 response into a pending reply slot so the axum
 /// task isn't stuck forever waiting on `__host_http_reply`. Idempotent
-/// — `take_reply` returns `None` if the JS already replied.
+/// - `take_reply` returns `None` if the JS already replied.
 fn cancel_pending_reply(coord: &Arc<DaemonHttp>, req_id: i64) {
     if let Some(pending) = coord.take_reply(req_id) {
         // Best-effort send of an empty 500. The axum side just sees
@@ -1016,7 +1016,7 @@ async fn run_dispatcher(
                     }
                 }
                 if !sent {
-                    // All shards full or down — fall back to async
+                    // All shards full or down - fall back to async
                     // send on the originally-chosen shard so we
                     // backpressure rather than drop.
                     let idx = start;

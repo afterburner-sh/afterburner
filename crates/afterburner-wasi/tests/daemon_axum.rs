@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! B2.4 — real axum listener end-to-end. Spawns a `DaemonHttp`
+//! B2.4 - real axum listener end-to-end. Spawns a `DaemonHttp`
 //! with a live tokio runtime, a WasmCombustor, and a dispatcher
 //! thread; makes a real HTTP request against `127.0.0.1:PORT` and
 //! checks the response came through the full pipeline:
@@ -41,7 +41,7 @@ fn pick_port() -> u16 {
 
 /// Block until `127.0.0.1:port` accepts a TCP connection or the
 /// deadline elapses. Axum's bind + serve runs on the tokio runtime
-/// asynchronously — we need to wait for the listener to actually be
+/// asynchronously - we need to wait for the listener to actually be
 /// up before firing a request at it.
 fn wait_for_listener(port: u16, timeout: Duration) -> bool {
     let start = Instant::now();
@@ -272,7 +272,7 @@ fn sealed_manifold_denies_listen() {
 
 #[test]
 fn listen_granted_port_binds_and_other_port_is_denied() {
-    // A `Ports([p])` grant lets the daemon bind exactly p — and
+    // A `Ports([p])` grant lets the daemon bind exactly p - and
     // nothing else (checked here via a second server on p2).
     use afterburner_core::ListenAccess;
     let rt = tokio::runtime::Builder::new_multi_thread()

@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `burn check` surface — verifies syntax errors in user source are
+//! `burn check` surface - verifies syntax errors in user source are
 //! caught at `register`/compile time, while runtime-only errors
 //! (ReferenceError, TypeError) are NOT reported. Matches
 //! `node --check foo.js` semantics.
@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const BURN: &str = env!("CARGO_BIN_EXE_burn");
 
-/// Monotonic counter for unique filenames — tests run in parallel
+/// Monotonic counter for unique filenames - tests run in parallel
 /// threads within the same process, so a process-id-only suffix races
 /// between them.
 static CTR: AtomicU64 = AtomicU64::new(0);
@@ -79,7 +79,7 @@ fn check_fails_on_unclosed_brace() {
 
 #[test]
 fn check_passes_on_runtime_only_error() {
-    // `foo.bar()` is syntactically valid — ReferenceError only fires
+    // `foo.bar()` is syntactically valid - ReferenceError only fires
     // at runtime when `foo` is looked up. `burn check` should not
     // flag this, matching `node --check`.
     let out = check_file("foo.bar();");

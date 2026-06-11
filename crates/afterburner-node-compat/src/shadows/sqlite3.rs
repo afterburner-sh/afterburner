@@ -10,7 +10,7 @@
 //! [`rusqlite`](https://crates.io/crates/rusqlite) via host imports.
 //! `rusqlite/bundled` compiles the SQLite C amalgamation into the
 //! burn binary at build time, so a single static binary ships the
-//! real SQLite engine — no runtime dependency on `libsqlite3.so`.
+//! real SQLite engine - no runtime dependency on `libsqlite3.so`.
 //!
 //! ## Threading model
 //!
@@ -21,7 +21,7 @@
 //! `HopscotchMap`; commands cross via `kovan_channel::unbounded` and
 //! their replies via `kovan_channel::bounded(1)` (used as one-shot).
 //!
-//! Per-call cost is two channel hops (forward + reply) — negligible
+//! Per-call cost is two channel hops (forward + reply) - negligible
 //! next to the SQLite-side work, which dominates anything past
 //! pure-cache hits.
 //!
@@ -39,10 +39,10 @@
 //!
 //! ### Deferred (will throw a clear error if used)
 //!
-//! * `db.prepare(sql)` returning a `Statement` handle for re-binding —
+//! * `db.prepare(sql)` returning a `Statement` handle for re-binding -
 //!   most callers use the inline `db.run(sql, params)` form. Could
 //!   land later as a separate handle map; not in the minimum subset.
-//! * `db.each(sql, params, rowCb, doneCb)` — partial; we materialize
+//! * `db.each(sql, params, rowCb, doneCb)` - partial; we materialize
 //!   all rows and invoke `rowCb` synchronously per row, then `doneCb`.
 //!
 //! Parameters and result values cross the host boundary as JSON. NULL,
@@ -137,7 +137,7 @@ impl SqliteShadow {
         // surfaces an Err before the worker is spawned.
         let conn = open_connection(path)
             .map_err(|e| AfterburnerError::Host(format!("sqlite3.Database({path}): {e}")))?;
-        // Drop the probe connection — the worker will open its own.
+        // Drop the probe connection - the worker will open its own.
         // (Two opens of the same file are fine; SQLite's locking
         // handles concurrent process-level access.)
         drop(conn);
@@ -209,7 +209,7 @@ impl SqliteShadow {
         let (tx, rx) = bounded_channel::<()>(1);
         handle.cmd_tx.send(DbCommand::Close { reply: tx });
         // Best-effort wait for the worker to drop the conn before we
-        // return — avoids races where the user closes a file then
+        // return - avoids races where the user closes a file then
         // immediately re-opens the same path expecting fresh state.
         let _ = rx.recv();
         Ok(())
@@ -225,7 +225,7 @@ impl SqliteShadow {
 /// Open with the same flags `node-sqlite3` uses by default
 /// (READWRITE | CREATE | URI). The `bundled` build of rusqlite
 /// always serialises threads at the SQLite level, so concurrent
-/// access from outside the worker is safe — but we restrict access
+/// access from outside the worker is safe - but we restrict access
 /// to the worker thread anyway by construction.
 fn open_connection(path: &str) -> rusqlite::Result<Connection> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -404,7 +404,7 @@ fn row_to_json(row: &rusqlite::Row<'_>, column_names: &[String]) -> Result<JsonV
             SqlValue::Real(f) => json!(f),
             SqlValue::Text(s) => JsonValue::String(s),
             SqlValue::Blob(b) => {
-                // Mirror the parameter shape — Buffer round-trips
+                // Mirror the parameter shape - Buffer round-trips
                 // through `{"$blob_b64": "..."}`.
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&b);
                 json!({ "$blob_b64": b64 })
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn boolean_param_stored_as_integer() {
-        // SQLite has no native bool — we map to 0/1 INTEGER, matching
+        // SQLite has no native bool - we map to 0/1 INTEGER, matching
         // node-sqlite3 behavior. The retrieved value is the integer
         // form, not a JSON bool.
         let (s, id) = open_mem();
@@ -667,7 +667,7 @@ mod tests {
 
     #[test]
     fn large_integer_round_trip() {
-        // i64 max — biggest value SQLite supports.
+        // i64 max - biggest value SQLite supports.
         let (s, id) = open_mem();
         s.exec(id, "CREATE TABLE t (n INTEGER)").expect("create");
         let big = i64::MAX;
@@ -701,7 +701,7 @@ mod tests {
         let (s, id) = open_mem();
         let r = s.exec(id, "NOT VALID SQL");
         assert!(matches!(r, Err(AfterburnerError::Host(_))));
-        // Connection still alive after an error — verify by running
+        // Connection still alive after an error - verify by running
         // a subsequent command that should succeed.
         s.exec(id, "CREATE TABLE t (n INTEGER)").expect("recover");
         s.close(id).expect("close");
@@ -760,7 +760,7 @@ mod tests {
         let id = s.open(":memory:").expect("open");
         s.close(id).expect("first close");
         // Second close on the same id should be a no-op error rather
-        // than a panic — caller already invalidated the handle.
+        // than a panic - caller already invalidated the handle.
         let _ = s.close(id);
     }
 
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     fn concurrent_dbs_dont_block_each_other() {
-        // Each db has its own worker thread — a long-running op on
+        // Each db has its own worker thread - a long-running op on
         // one mustn't block another. We can prove the parallelism
         // with two SQLite "BEGIN IMMEDIATE" / busy-loop style tests,
         // but a simpler proof is that opening N dbs and running N

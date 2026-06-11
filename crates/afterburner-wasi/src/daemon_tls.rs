@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `tls` — raw TLS host coordinator (B7).
+//! `tls` - raw TLS host coordinator (B7).
 //!
 //! Backs the `tls.connect` / `tls.createServer` polyfill in
 //! `polyfills/tls.js`. Architecture is the per-connection-task model
@@ -23,7 +23,7 @@
 //! ```
 //!
 //! The wake `Notify` paired with `try_recv` gives us async semantics
-//! over a kovan channel — no polling, no Mutex, no `tokio::sync::mpsc`
+//! over a kovan channel - no polling, no Mutex, no `tokio::sync::mpsc`
 //! (workspace rule: kovan channels everywhere).
 //!
 //! ## Backpressure
@@ -43,17 +43,17 @@
 //! `tls.connect` requires `NetAccess::OutboundFull` (TLS over raw
 //! TCP escapes URL-shaped policy, so `OutboundHttp` is **rejected**).
 //! Hostname allow-lists support exact matches, `*`, and `*.suffix`
-//! wildcards — same shape as `daemon_net`. Inbound listening is
+//! wildcards - same shape as `daemon_net`. Inbound listening is
 //! daemon-mode-only; the library API never installs a `DaemonTls`
 //! so `tls.createServer().listen()` cleanly errors.
 //!
 //! ## Certificate handling
 //!
-//! * **Client** — defaults to the Mozilla root CA bundle bundled by
+//! * **Client** - defaults to the Mozilla root CA bundle bundled by
 //!   `webpki-roots`. Callers can pass `rejectUnauthorized: false` to
 //!   bypass verification (test/dev-only); the polyfill is responsible
 //!   for warning. Custom CA PEM bytes (`ca:`) are honored.
-//! * **Server** — the polyfill passes `cert` and `key` PEM strings;
+//! * **Server** - the polyfill passes `cert` and `key` PEM strings;
 //!   we parse them with `rustls-pemfile` and build a single-cert
 //!   `ServerConfig`. SNI / multi-cert routing isn't part of the
 //!   minimum viable subset.
@@ -82,7 +82,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 pub type TlsConnId = i32;
 pub type TlsServerId = i32;
 
-/// 64 KiB write high-water mark — matches `daemon_net`.
+/// 64 KiB write high-water mark - matches `daemon_net`.
 pub const WRITE_HWM: usize = 64 * 1024;
 
 /// 64 KiB read chunk granularity.
@@ -165,7 +165,7 @@ pub enum TlsEvent {
 /// to drive rustls.
 #[derive(Debug, Clone, Default)]
 pub struct ConnectOptions {
-    /// Disables certificate verification. Test/dev only — the
+    /// Disables certificate verification. Test/dev only - the
     /// polyfill emits a `console.warn` whenever this is set.
     pub reject_unauthorized: bool,
     /// SNI override (defaults to `host` if empty).
@@ -207,7 +207,7 @@ pub struct DaemonTls {
     alive_servers: AtomicUsize,
     events_tx: BoundedTx<TlsEvent>,
     events_rx: BoundedRx<TlsEvent>,
-    /// Multi-shard port arbiter — see `daemon_port_claims` for the
+    /// Multi-shard port arbiter - see `daemon_port_claims` for the
     /// owner / follower contract. `None` in single-shard mode.
     shared_claims: Option<Arc<crate::daemon_port_claims::SharedPortClaims>>,
     /// `server_id` → port for owners, so `close_server` releases
@@ -545,7 +545,7 @@ impl DaemonTls {
 
 /// Manifold gate. Same posture as `daemon_net`: TLS over raw TCP
 /// must use `OutboundFull`; `OutboundHttp` is HTTP-only by design.
-/// Allow-list entries are `host` or `host:port` patterns — see
+/// Allow-list entries are `host` or `host:port` patterns - see
 /// [`afterburner_node_compat::http_host::split_host_port_pattern`]
 /// for the shared grammar. `port` here is the literal connect port.
 fn net_outbound_allowed(m: &Manifold, host: &str, port: u16) -> bool {
@@ -563,7 +563,7 @@ fn host_allowed(host: &str, port: u16, allow: &[String]) -> bool {
     }
     let host_lc = host.to_ascii_lowercase();
     allow.iter().any(|pat| {
-        // Shared `host[:port]` grammar — port-less entries match any
+        // Shared `host[:port]` grammar - port-less entries match any
         // port, `host:port` entries pin the connect port.
         let (pat_host, pat_port) = afterburner_node_compat::http_host::split_host_port_pattern(pat);
         if let Some(pp) = pat_port
@@ -639,7 +639,7 @@ fn build_server_config(
     };
 
     // Parse the SNI map: a JSON object mapping `servername` →
-    // `{cert, key}`. Empty / missing means "no SNI routing — every
+    // `{cert, key}`. Empty / missing means "no SNI routing - every
     // ClientHello gets the default cert."
     let sni_map = if sni_map_json.is_empty() {
         Vec::new()
@@ -682,7 +682,7 @@ fn build_server_config(
     };
 
     if sni_map.is_empty() {
-        // Single-cert path — keep the simpler with_single_cert builder
+        // Single-cert path - keep the simpler with_single_cert builder
         // so error messages stay clean for the most common shape.
         return ServerConfig::builder()
             .with_no_client_auth()
@@ -697,7 +697,7 @@ fn build_server_config(
             .ok();
     }
 
-    // SNI path — install a `ResolvesServerCert` impl that maps the
+    // SNI path - install a `ResolvesServerCert` impl that maps the
     // ClientHello's `server_name` to the right certified key.
     let resolver = SniResolver {
         default: Arc::new(default_certified),
@@ -738,7 +738,7 @@ fn parse_certified_key(
     })
 }
 
-/// rustls `ResolvesServerCert` impl — the SNI router.
+/// rustls `ResolvesServerCert` impl - the SNI router.
 struct SniResolver {
     default: Arc<CertifiedPair>,
     by_name: std::collections::HashMap<String, Arc<CertifiedPair>>,
@@ -784,7 +784,7 @@ impl rustls::server::ResolvesServerCert for SniResolver {
 
 /// Match `requested` against keys with a leading `*.` wildcard.
 /// `*.example.com` matches `api.example.com` but not `example.com`
-/// itself or `nested.api.example.com` (single label only —
+/// itself or `nested.api.example.com` (single label only -
 /// `tls.createServer` callers wanting deep wildcards register them
 /// explicitly).
 fn wildcard_match(
@@ -906,7 +906,7 @@ async fn client_task(
     let local = tcp.local_addr().ok();
     let remote = tcp.peer_addr().ok();
 
-    // 2. TLS handshake — `servername` falls back to `host`.
+    // 2. TLS handshake - `servername` falls back to `host`.
     let sni_label = if opts.servername.is_empty() {
         host.as_str()
     } else {
@@ -1024,7 +1024,7 @@ async fn server_task(
         let evt_tx2 = evt_tx.clone();
         let coord2 = Arc::clone(&coord);
         tokio::spawn(async move {
-            // Per-connection handshake — running it inline with
+            // Per-connection handshake - running it inline with
             // `accept` would let one slow client stall the loop.
             let tls = match acceptor.accept(stream).await {
                 Ok(t) => t,
@@ -1135,7 +1135,7 @@ async fn drive_split<R, W>(
         }
 
         if !writer_open && pending.load(Ordering::Acquire) == 0 {
-            // Half-closed and queue drained — nothing the writer arm
+            // Half-closed and queue drained - nothing the writer arm
             // could do; reader keeps running until peer closes.
         }
 
@@ -1153,7 +1153,7 @@ async fn drive_split<R, W>(
                     Err(e) => {
                         // rustls flags peers that drop the TCP socket
                         // without `close_notify` as `UnexpectedEof`.
-                        // Node's tls treats that case as a clean end —
+                        // Node's tls treats that case as a clean end -
                         // mirror it: emit End, no `error`. Genuine I/O
                         // errors (resets, broken pipes) still surface
                         // through `Error`.
@@ -1340,7 +1340,7 @@ mod tests {
         assert!(wildcard_match(&map, "api.example.com").is_some());
         // No match for the bare apex (single-label rule).
         assert!(wildcard_match(&map, "example.com").is_none());
-        // Different domain — no match.
+        // Different domain - no match.
         assert!(wildcard_match(&map, "api.other.com").is_none());
     }
 }

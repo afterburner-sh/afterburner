@@ -55,7 +55,7 @@ fn overflow_to_injector_is_drained() {
 
 #[test]
 fn both_full_returns_overloaded() {
-    // local_cap=1 + injector_cap=1 + 1 worker + a slow script — burst
+    // local_cap=1 + injector_cap=1 + 1 worker + a slow script - burst
     // 16 thrusts. The first 1-3 land (one in worker, one in injector,
     // one being processed); the rest hit Overloaded.
     let engine = mk(1, 1, 1);

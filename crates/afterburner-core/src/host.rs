@@ -102,7 +102,7 @@ pub trait HostContext: Send + Sync {
     }
 }
 
-/// Zero-capability host context — useful as a default for tests and for the
+/// Zero-capability host context - useful as a default for tests and for the
 /// minimal flow-engine path that only uses `Log`.
 pub struct NullHost;
 

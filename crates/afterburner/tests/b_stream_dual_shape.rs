@@ -5,7 +5,7 @@
 
 //! Phase 0 / Gap A regression: `require('stream')` returns a callable
 //! `Stream` constructor with `Readable`/`Writable`/etc. attached as own
-//! properties — matching Node's dual-shape contract.
+//! properties - matching Node's dual-shape contract.
 //!
 //! Real npm packages depend on this. `send/index.js` (transitively
 //! required by `express` → `serve-static`) does
@@ -14,18 +14,18 @@
 //! so a plain-object `module.exports` would crash module init.
 //!
 //! Coverage:
-//!   * `typeof require('stream') === 'function'` — the callable contract.
+//!   * `typeof require('stream') === 'function'` - the callable contract.
 //!   * `Stream.Readable`, `Stream.Writable`, `Stream.Duplex`,
 //!     `Stream.Transform`, `Stream.PassThrough`, `Stream.pipeline`,
 //!     `Stream.finished`, `Stream.compose`, `Stream.addAbortSignal`,
 //!     `Stream.Stream` are all reachable as own properties.
 //!   * `util.inherits(Sub, require('stream'))` does not throw.
 //!   * Stream-derived instances mix in `EventEmitter` (`.on`, `.emit`).
-//!   * Existing consumers — `Readable.from([...])`, `pipeline(...)`,
-//!     `addAbortSignal(...)`, `stream/promises.pipeline` — keep working
+//!   * Existing consumers - `Readable.from([...])`, `pipeline(...)`,
+//!     `addAbortSignal(...)`, `stream/promises.pipeline` - keep working
 //!     (the `exports` namespace is still populated).
 //!   * `tty.ReadStream` (which calls `stream.Readable.call(this, ...)`)
-//!     still constructs cleanly — proves we didn't break the
+//!     still constructs cleanly - proves we didn't break the
 //!     `Readable.call(this)` callable-from-prototype pattern.
 
 #![cfg(feature = "bin")]
@@ -160,7 +160,7 @@ fn stream_emits_events_after_inherits() {
 #[test]
 fn readable_from_iterable_still_works() {
     // Regression: `Readable.from([...])` was the pre-change canonical
-    // entry point. Must keep working — the `exports.Readable` slot is
+    // entry point. Must keep working - the `exports.Readable` slot is
     // still populated and `Stream.Readable` aliases it.
     let out = run_burn(
         r#"
@@ -196,7 +196,7 @@ fn stream_promises_subpath_unaffected() {
 
 #[test]
 fn tty_readstream_construction_unaffected() {
-    // Regression — `polyfills/tty.js` does
+    // Regression - `polyfills/tty.js` does
     // `if (typeof stream.Readable === 'function') stream.Readable.call(this, options);`
     // followed by `Object.create(stream.Readable.prototype)`. The
     // dual-shape change leaves `stream.Readable` populated, so this

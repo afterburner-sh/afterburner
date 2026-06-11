@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Streaming zlib classes — `Gzip` / `Gunzip` / `Deflate` / `Inflate`.
+//! Streaming zlib classes - `Gzip` / `Gunzip` / `Deflate` / `Inflate`.
 //!
 //! Pacote / minizlib / tar all wrap one of these and call
 //! `.write(chunk)` + `.end()` then collect the `data` chunks. Without
@@ -103,7 +103,7 @@ fn gunzip_process_chunk_handles_empty_finalize() {
     // minizlib's flow calls _processChunk with the data chunk first
     // then with an empty buffer (Z_FINISH flush). Our zlib host
     // would synchronously throw "unexpected end of file" on the
-    // empty input — the polyfill short-circuits empty → empty.
+    // empty input - the polyfill short-circuits empty → empty.
     // Without this, every npm install tarball extraction crashed
     // immediately after the first chunk.
     let out = run_inline(
@@ -117,7 +117,7 @@ fn gunzip_process_chunk_handles_empty_finalize() {
             console.log('FAIL decoded:', decoded.toString('utf8'));
             process.exit(1);
         }
-        // Now the canary call — empty buffer must not throw.
+        // Now the canary call - empty buffer must not throw.
         const empty = inst._processChunk(Buffer.alloc(0), 4);
         if (empty.length !== 0) {
             console.log('FAIL empty len:', empty.length);
@@ -159,7 +159,7 @@ fn url_resolves_relative_against_base() {
 
 #[test]
 fn url_normalizes_dot_segments() {
-    // `..` and `.` segments must collapse — RFC 3986 §5.2.4. Without
+    // `..` and `.` segments must collapse - RFC 3986 §5.2.4. Without
     // it, redirect chains that include `..` (uncommon but valid)
     // produce paths the upstream rejects.
     let out = run_inline(

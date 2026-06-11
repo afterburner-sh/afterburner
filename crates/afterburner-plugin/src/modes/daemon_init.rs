@@ -7,11 +7,11 @@
 //!
 //! Two envelope shapes accepted:
 //!
-//! * `{mode: "daemon-init", source, argv?, env?, cwd?}` — wrap the
+//! * `{mode: "daemon-init", source, argv?, env?, cwd?}` - wrap the
 //!   user source in script-mode shape, compile to bytecode, invoke.
 //!   The original single-Store flow.
 //!
-//! * `{mode: "daemon-init", bytecode_b64}` — invoke pre-compiled
+//! * `{mode: "daemon-init", bytecode_b64}` - invoke pre-compiled
 //!   bytecode produced by the `compile-script` mode. The wrap +
 //!   compile already happened on the host side; we just decode the
 //!   bytes and invoke. This is the fast path for multi-Store
@@ -26,7 +26,7 @@
 //! map keyed by `server_id` returned from `__host_http_listen`;
 //! subsequent `daemon-event` envelopes dispatch against that map.
 //!
-//! Unlike script mode, we do NOT return the result here — the JS
+//! Unlike script mode, we do NOT return the result here - the JS
 //! state persists in the Store across calls so handlers stay live.
 
 use alloc::format;

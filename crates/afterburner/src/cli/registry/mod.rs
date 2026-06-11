@@ -222,7 +222,10 @@ fn transpile_ts_sources(local: &mut pkg::LocalPackage) -> Result<()> {
                     .with_context(|| format!("{path}: TypeScript source is not UTF-8"))?;
                 let js = crate::ts::transpile(src, std::path::Path::new(&path))
                     .map_err(|e| anyhow::anyhow!("transpiling {path}: {e}"))?;
-                let js_path = format!("{}.js", path.rsplit_once('.').map(|(s, _)| s).unwrap_or(&path));
+                let js_path = format!(
+                    "{}.js",
+                    path.rsplit_once('.').map(|(s, _)| s).unwrap_or(&path)
+                );
                 out.insert(js_path, js.into_bytes());
             } else {
                 out.insert(path, bytes);
@@ -308,7 +311,7 @@ pub fn yank(pkg: &str, undo: bool, registry: Option<&str>, token: Option<&str>) 
     Ok(())
 }
 
-/// `burn install [pkg]` — resolve the full dependency set (PubGrub) and fetch it
+/// `burn install [pkg]` - resolve the full dependency set (PubGrub) and fetch it
 /// concurrently into the content-addressed cache, with an animated progress bar.
 ///
 /// With `pkg`, installs that package plus its transitive dependencies. With no
@@ -356,7 +359,7 @@ pub fn install(
 
     report_install(&plan.lockfile, &summary);
 
-    // npm dependencies (the `[npm]` section) — resolved + extracted +
+    // npm dependencies (the `[npm]` section) - resolved + extracted +
     // cached by the NATIVE installer (no `npm` binary, no process spawn).
     install_npm_deps(&plan.npm)?;
     Ok(())
@@ -383,7 +386,7 @@ fn install_npm_deps(npm: &std::collections::BTreeMap<String, String>) -> Result<
             "installed {n} npm package{}",
             if n == 1 { "" } else { "s" }
         )),
-        style::muted("(native — no npm toolchain)"),
+        style::muted("(native)"),
     );
     for pkg in res.packages.values() {
         println!(
@@ -672,9 +675,109 @@ pub fn owner(
     )
 }
 
-/// `burn test` — run every test file under `<dir>/tests/` through the runtime.
+/// `burn test` - run every test file under `<dir>/tests/` through the runtime.
 /// Each file is executed as its own `burn run` (clean process per file so
 /// `node:test`'s exit-code semantics hold); output is shown only on failure.
+/// `burn clean` - remove build artifacts (cargo-style). Default: this
+/// package's built `.afb` files (matching `<ns>-<name>-*.afb`) and
+/// `burn.lock` in `dir`. `--cache` also clears the shared download caches.
+pub fn clean(dir: Option<&Path>, cache: bool) -> Result<()> {
+    let dir = dir.unwrap_or_else(|| Path::new("."));
+    let mut removed = 0u64;
+    let mut report = |label: &str, path: &Path| {
+        println!("  {} {}", style::muted("removed"), style::value(label));
+        let _ = path;
+        removed += 1;
+    };
+
+    // Local build artifacts: `<ns>-<name>-*.afb` produced by `burn package`.
+    if let Ok(local) = pkg::LocalPackage::load(dir) {
+        let prefix = format!(
+            "{}-{}-",
+            local.manifest.package.namespace, local.manifest.package.name
+        );
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with(&prefix) && name.ends_with(".afb") {
+                    std::fs::remove_file(e.path()).ok();
+                    report(&name, &e.path());
+                }
+            }
+        }
+    }
+    // Lockfile.
+    let lock = dir.join(LOCKFILE_NAME);
+    if lock.exists() {
+        std::fs::remove_file(&lock).ok();
+        report(LOCKFILE_NAME, &lock);
+    }
+
+    // Shared caches (opt-in). These are CONTENT-ADDRESSED, so clearing them
+    // can never break another project's dependency chain: a missing entry is
+    // simply re-downloaded (byte-identical) on that project's next
+    // `burn install` / run. We still remove SAFELY for terminals running
+    // concurrently:
+    //   * registry packages are single files named for their digest - an
+    //     atomic unlink; a concurrent reader either opened it already (full
+    //     bytes) or now misses and re-downloads. No torn reads.
+    //   * npm packages are directories guarded by a `.burn-complete` marker
+    //     that `load_npm` checks BEFORE reading. We delete that marker FIRST,
+    //     so any concurrent reader treats a half-removed package as absent
+    //     (re-download) rather than reading partial files.
+    if cache {
+        if let Ok(root) = afterburner_cloud::cache::cache_root() {
+            let mut n = 0u64;
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                for e in entries.flatten() {
+                    if e.path().extension().map(|x| x == "afb").unwrap_or(false) {
+                        std::fs::remove_file(e.path()).ok();
+                        n += 1;
+                    }
+                }
+            }
+            if n > 0 {
+                report(&format!("registry package cache ({n})"), &root);
+            }
+        }
+        if let Ok(root) = afterburner_cloud::npm::npm_cache_root() {
+            let mut n = 0u64;
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                for e in entries.flatten() {
+                    if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        // marker first → concurrent readers see "incomplete"
+                        std::fs::remove_file(e.path().join(".burn-complete")).ok();
+                        std::fs::remove_dir_all(e.path()).ok();
+                        n += 1;
+                    }
+                }
+            }
+            if n > 0 {
+                report(&format!("npm cache ({n})"), &root);
+            }
+        }
+    }
+
+    if removed == 0 {
+        println!("{}", style::muted("nothing to clean"));
+    } else {
+        println!(
+            "{}",
+            style::ok(&format!(
+                "cleaned {removed} item{}",
+                if removed == 1 { "" } else { "s" }
+            ))
+        );
+        if !cache {
+            println!(
+                "  {}",
+                style::muted("(shared caches kept; `burn clean --cache` to clear them too)")
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn test(cli: &Cli, dir: Option<&Path>) -> Result<()> {
     let dir = dir.unwrap_or_else(|| Path::new("."));
     let tests_dir = dir.join("tests");

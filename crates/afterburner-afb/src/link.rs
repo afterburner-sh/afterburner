@@ -8,8 +8,8 @@
 //!
 //! Dependencies are NOT packed in the `.afb` (cargo model): a package
 //! carries only its own `source/**`. At LOAD time the linker composes
-//! that source with its resolved dependencies — afb packages (digest-
-//! pinned, from the burn cache) and npm packages (from the npm cache) —
+//! that source with its resolved dependencies - afb packages (digest-
+//! pinned, from the burn cache) and npm packages (from the npm cache) -
 //! into one source carrying the whole virtual tree as *data*:
 //!
 //! ```text
@@ -21,8 +21,8 @@
 //! The plenum `require()` consults `__afb_files` before the host
 //! filesystem (a `/afb/…` path never reaches the fs bridge at all) and
 //! `__afb_links` for bare dependency coordinates, so the full Node
-//! resolution algorithm — package.json `exports`, the extension ladder,
-//! caching, circular-require semantics — runs unchanged over the virtual
+//! resolution algorithm - package.json `exports`, the extension ladder,
+//! caching, circular-require semantics - runs unchanged over the virtual
 //! tree.
 //!
 //! ## Security model
@@ -30,15 +30,15 @@
 //! * **The manifold is untouched.** Everything in the composed source is
 //!   inert data inside the sandbox; vendored npm code and dependency
 //!   packages run under the ROOT package's manifold only. Network and
-//!   real-filesystem access still go through the same host gates — a
+//!   real-filesystem access still go through the same host gates - a
 //!   dependency can never widen the grants it runs under.
 //! * **Digest pins are enforced here.** Every coordinate in
-//!   `manifest.dependencies` (root's, and each dependency's own —
+//!   `manifest.dependencies` (root's, and each dependency's own -
 //!   transitively) must be present in `deps` with a content digest equal
 //!   to its `sha256:…` pin, or composition fails. Substituting a
 //!   different build of a dependency is structurally impossible.
 
-use crate::{hex, Afb, AfbError, Result};
+use crate::{Afb, AfbError, Result, hex};
 use std::collections::BTreeMap;
 
 /// Virtual filesystem root the composed tree mounts under.
@@ -53,16 +53,16 @@ impl Afb {
     }
 
     /// Compose this package plus its resolved dependencies into one JS
-    /// source. Dependencies are NOT packed in the `.afb` (cargo model) —
+    /// source. Dependencies are NOT packed in the `.afb` (cargo model) -
     /// they are resolved + cached by `burn install` and passed here at
     /// load time:
     ///
-    /// * `deps` — afb dependency packages, keyed by `namespace/name`. Each
+    /// * `deps` - afb dependency packages, keyed by `namespace/name`. Each
     ///   must cover every coordinate in the manifest's `[dependencies]`
     ///   closure and is digest-checked against its pin. Mounted under
     ///   `/afb/burn_modules/<coord>/` and exposed by exact coordinate
     ///   through `__afb_links`.
-    /// * `npm` — resolved npm packages as `(name, files)` where `files`
+    /// * `npm` - resolved npm packages as `(name, files)` where `files`
     ///   keys are package-root-relative (`index.js`, `lib/x.js`). Mounted
     ///   under `/afb/source/node_modules/<name>/`, so the package's own
     ///   `require('name')` resolves by the normal node_modules walk.
@@ -145,17 +145,16 @@ fn add_tree(files: &mut BTreeMap<String, String>, base: &str, afb: &Afb) {
 }
 
 /// Every pinned coordinate must be present with the exact pinned digest.
-fn validate_pins(
-    pins: &BTreeMap<String, String>,
-    by_coord: &BTreeMap<&str, &Afb>,
-) -> Result<()> {
+fn validate_pins(pins: &BTreeMap<String, String>, by_coord: &BTreeMap<&str, &Afb>) -> Result<()> {
     for (coord, pin) in pins {
-        let dep = by_coord.get(coord.as_str()).ok_or_else(|| AfbError::Dependency {
-            coord: coord.clone(),
-            detail: "missing from the provided dependency set (the full \
+        let dep = by_coord
+            .get(coord.as_str())
+            .ok_or_else(|| AfbError::Dependency {
+                coord: coord.clone(),
+                detail: "missing from the provided dependency set (the full \
                      transitive closure must be supplied)"
-                .into(),
-        })?;
+                    .into(),
+            })?;
         let actual = format!("sha256:{}", hex(&dep.digest));
         if &actual != pin {
             return Err(AfbError::Dependency {
@@ -170,7 +169,7 @@ fn validate_pins(
 #[cfg(test)]
 mod tests {
     use crate::pack::Builder;
-    use crate::{hex, Afb, AfbError, Manifest};
+    use crate::{Afb, AfbError, Manifest, hex};
     use afterburner_core::Manifold;
 
     fn build(ns: &str, name: &str, files: &[(&str, &str)]) -> Afb {
@@ -265,7 +264,11 @@ min = "0.1.0"
 
     #[test]
     fn dependency_link_and_pin_enforced() {
-        let dep = build("t", "dep", &[("source/main.js", "module.exports = () => 7;")]);
+        let dep = build(
+            "t",
+            "dep",
+            &[("source/main.js", "module.exports = () => 7;")],
+        );
         let root = with_dep("t", "root", "t/dep", &dep);
         let s = root.linked_source(&[("t/dep", &dep)], &[]).unwrap();
         assert!(s.contains("\"t/dep\":\"/afb/burn_modules/t/dep/source/main.js\""));
@@ -275,8 +278,17 @@ min = "0.1.0"
         assert!(matches!(err, AfbError::Dependency { .. }));
 
         // wrong bytes under the same coordinate
-        let imposter = build("t", "dep", &[("source/main.js", "module.exports = () => 8;")]);
-        let err = root.linked_source(&[("t/dep", &imposter)], &[]).unwrap_err();
-        assert!(matches!(err, AfbError::Dependency { .. }), "pin must reject imposter");
+        let imposter = build(
+            "t",
+            "dep",
+            &[("source/main.js", "module.exports = () => 8;")],
+        );
+        let err = root
+            .linked_source(&[("t/dep", &imposter)], &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, AfbError::Dependency { .. }),
+            "pin must reject imposter"
+        );
     }
 }

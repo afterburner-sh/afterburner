@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! End-to-end `burn npm install` test — proves that the full
+//! End-to-end `burn npm install` test - proves that the full
 //! npm-style install pipeline (registry fetch, manifest resolve,
 //! tarball download, decompress, tar extract, write to
 //! `node_modules/`) works. This was the structural bar we'd been
@@ -12,23 +12,23 @@
 //! What had to land for this to succeed (each was a hard
 //! prerequisite, debugged in this order):
 //!
-//! 1. **Async outbound HTTP** (`b_async_outbound_http`) — pacote /
+//! 1. **Async outbound HTTP** (`b_async_outbound_http`) - pacote /
 //!    make-fetch-happen / minipass-fetch await on Promises that
 //!    only resolve when the host signals network completion. Sync
 //!    HTTP wouldn't ever drive the chain forward.
-//! 2. **RFC 3986 URL resolution** (`b_zlib_streaming::url_*`) — the
+//! 2. **RFC 3986 URL resolution** (`b_zlib_streaming::url_*`) - the
 //!    npm registry redirects tarball downloads to a CDN; the
 //!    Location-header redirect goes through `new URL(loc, base)`.
 //!    Without proper relative resolution every redirect ended with
 //!    an empty host and a malformed `https:///path` URL.
-//! 3. **zlib streaming classes** (`b_zlib_streaming::gunzip_*`) —
+//! 3. **zlib streaming classes** (`b_zlib_streaming::gunzip_*`) -
 //!    minizlib wraps `Gunzip` with `_processChunk`. Empty-finalize
 //!    short-circuit keeps the canonical `Z_FINISH` no-op call from
 //!    synchronously throwing.
-//! 4. **Buffer.toString('base64') de-quadratisation** — string
+//! 4. **Buffer.toString('base64') de-quadratisation** - string
 //!    concat in QuickJS goes quadratic. 50 KB took 800 ms, 315 KB
 //!    hung. Chunk-then-join collapsed it to ~30 ms / 200 ms.
-//! 5. **`fs.openSync` / `writeSync` / `closeSync` fd table** — tar's
+//! 5. **`fs.openSync` / `writeSync` / `closeSync` fd table** - tar's
 //!    Unpack writes file contents through the classic fd triple,
 //!    not through `createWriteStream`. The JS-side fd table maps a
 //!    small integer to `{ path, offset }` and routes writes through
@@ -107,7 +107,7 @@ fn npm_install_lodash_writes_node_modules() {
 fn npm_install_lodash_then_require_returns_real_lib() {
     // Install + invoke. The require chain has to walk through the
     // freshly-written `node_modules/lodash` and pick up the
-    // installed package — a real end-to-end verification that the
+    // installed package - a real end-to-end verification that the
     // install produced usable JS, not just a directory of files.
     let dir = fresh_project("lodash_use");
     let install = run_burn_in(&dir, &["npm", "install", "lodash"]);
@@ -180,8 +180,8 @@ fn npm_install_express_then_serve_works() {
     // slow on a cold CI runner (locally ~6s, several multiples of that
     // on CI), so the budget is deliberately generous; the loop returns
     // the instant a GET succeeds, so the ceiling only costs wall-clock
-    // on a real failure. Retrying real requests — rather than poking
-    // the single-shard server with throwaway readiness connects — keeps
+    // on a real failure. Retrying real requests - rather than poking
+    // the single-shard server with throwaway readiness connects - keeps
     // the probe from disturbing the very server under test. (cf.
     // b7_dgram's 60s cold-spawn budget, commit f690d57.)
     let body = curl_get_retry(
@@ -208,10 +208,10 @@ fn npm_install_express_then_serve_works() {
 }
 
 fn curl_get_once(url: &str) -> Option<String> {
-    // Cheap one-shot HTTP client — parse a `http://host:port/path`
+    // Cheap one-shot HTTP client - parse a `http://host:port/path`
     // URL by hand (the only shape our test issues), open a TCP
     // socket, write a `GET / HTTP/1.0` line, read until EOF. Keeps
-    // the test self-contained — no extra workspace deps just to
+    // the test self-contained - no extra workspace deps just to
     // make a single GET request to localhost. Returns `None` on a
     // connect/IO failure so the caller can retry through a readiness
     // race instead of panicking on the first refused connect.

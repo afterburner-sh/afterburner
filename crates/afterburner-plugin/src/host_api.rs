@@ -12,7 +12,7 @@
 //!
 //! ABI conventions:
 //!
-//! * Variable-length results use a buffer protocol — caller passes
+//! * Variable-length results use a buffer protocol - caller passes
 //!   `(out_ptr, out_cap)`; host writes bytes and returns either the
 //!   length (≥0) or a negative error code. `-4` means "buffer too
 //!   small"; caller should double and retry.
@@ -103,7 +103,7 @@ unsafe extern "C" {
     ) -> i32;
     pub fn host_crypto_random_bytes(len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
     /// V8 ValueSerializer encode. Input is a JSON tree describing the
-    /// JS value (typed shape — see `v8_host.rs`); output is base64-
+    /// JS value (typed shape - see `v8_host.rs`); output is base64-
     /// encoded V8 wire-format bytes.
     pub fn host_v8_serialize(
         json_ptr: *const u8,
@@ -125,7 +125,7 @@ unsafe extern "C" {
     /// error code matching `host_http_listen`'s contract.
     ///
     /// The PEM strings cross via the buffer-protocol (`out_ptr/out_cap`
-    /// shape — caller writes them into a host-allocated stash via
+    /// shape - caller writes them into a host-allocated stash via
     /// `host_http3_listen_set_cert` first). Two-step pattern keeps
     /// the wasm trampoline's argument count modest and matches the
     /// shape `host_crypto_subtle_op` uses for its JSON tree input.
@@ -138,7 +138,7 @@ unsafe extern "C" {
         key_ptr: *const u8,
         key_len: u32,
     ) -> i32;
-    /// Outbound HTTP/3 request — sync wrapper that runs a quinn
+    /// Outbound HTTP/3 request - sync wrapper that runs a quinn
     /// client connect + h3 request inside the daemon's tokio runtime
     /// via `block_on`. Output is JSON
     /// `{"status":N,"headers":{...},"body_b64":"..."}`.
@@ -153,7 +153,7 @@ unsafe extern "C" {
         out_cap: u32,
     ) -> i32;
     /// Subtle Crypto dispatcher. Single import covers the whole Web
-    /// Crypto algorithm set — `op` is `<algo>:<verb>[:<curve_or_hash>]`,
+    /// Crypto algorithm set - `op` is `<algo>:<verb>[:<curve_or_hash>]`,
     /// `args_json` is a JSON array of base64url-encoded byte buffers
     /// (scalars are base64url-encoded UTF-8). Output is base64url
     /// bytes, or `[<b64>,<b64>]` for ops returning a key pair.
@@ -196,7 +196,7 @@ unsafe extern "C" {
         out_cap: u32,
     ) -> i32;
     /// v2 of `host_http_request`: carries request headers (JSON object of
-    /// name→value — the legacy import drops them) and a base64-framed body
+    /// name→value - the legacy import drops them) and a base64-framed body
     /// (binary bytes cannot cross the JS string boundary unmangled); the
     /// host decodes and sends the exact original bytes.
     pub fn host_http_request_v2(
@@ -368,7 +368,7 @@ unsafe extern "C" {
     // writes the ASCII encoding; `decode` takes ASCII and writes raw
     // bytes. Output sizes are exactly computable from input sizes
     // (encode: 4·⌈n/3⌉; decode: ≤ ⌊n/4⌋·3), so callers allocate
-    // exact-fit buffers — no `-4` retry loop on this pair.
+    // exact-fit buffers - no `-4` retry loop on this pair.
     pub fn host_b64_encode(in_ptr: *const u8, in_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
     pub fn host_b64_decode(in_ptr: *const u8, in_len: u32, out_ptr: *mut u8, out_cap: u32) -> i32;
 
@@ -562,7 +562,7 @@ unsafe extern "C" {
 
     // ---- process lifecycle -------------------------------------------
     //
-    // `host_process_exit(code)` never returns — the host traps with
+    // `host_process_exit(code)` never returns - the host traps with
     // `I32Exit(code)` which propagates as `AfterburnerError::ProcessExit`.
     pub fn host_process_exit(code: i32);
 
@@ -588,7 +588,7 @@ unsafe extern "C" {
 
     // Framing of `pending_input` for this call: `0` = JSON text (the
     // wrapper must `JSON.parse` it), `1` = raw bytes (the wrapper hands
-    // the module a `Uint8Array` directly — no string materialization,
+    // the module a `Uint8Array` directly - no string materialization,
     // no parse). Set host-side by `thrust` vs `thrust_raw`; read once
     // per invocation by `__AB_GET_INPUT_VALUE__`.
     pub fn host_input_format() -> i32;
@@ -624,8 +624,8 @@ unsafe extern "C" {
     // ---- daemon envelope (long-lived Store re-entry) ----------------
     //
     // The daemon path reuses the same Wasmtime Store across many
-    // `daemon_step` invocations (so JS globals — including registered
-    // HTTP handlers — persist). Each step reads its envelope from
+    // `daemon_step` invocations (so JS globals - including registered
+    // HTTP handlers - persist). Each step reads its envelope from
     // `HostState::pending_envelope` via this import. We keep this
     // separate from `host_get_input` because the UDF invoke path
     // still uses the latter for per-call user-data input.
@@ -634,7 +634,7 @@ unsafe extern "C" {
     // ---- http server (daemon mode B2) -------------------------------
     //
     // `host_http_listen(port)` binds an axum listener on the host and
-    // returns a `server_id` (>0) — scripts that call
+    // returns a `server_id` (>0) - scripts that call
     // `http.createServer(cb).listen(port)` hand the port to this
     // import. Subsequent HTTP requests on that listener are dispatched
     // through `daemon_step` with `{kind: "http-request", ...}`.
@@ -649,7 +649,7 @@ unsafe extern "C" {
 
     // `host_http_close(server_id)` aborts the axum listener task
     // on the host side and releases the port. Returns 1 if the
-    // server_id was known, 0 otherwise (idempotent — safe to call
+    // server_id was known, 0 otherwise (idempotent - safe to call
     // twice). Backs `server.close()` in the http polyfill.
     pub fn host_http_close(server_id: i32) -> i32;
 
@@ -691,7 +691,7 @@ unsafe extern "C" {
     ) -> i32;
     pub fn host_shadow_bcrypt_gen_salt(rounds: i32, out_ptr: *mut u8, out_cap: u32) -> i32;
 
-    // argon2 shadow — Argon2d/i/id variants. `ty`: 0=Argon2d,
+    // argon2 shadow - Argon2d/i/id variants. `ty`: 0=Argon2d,
     // 1=Argon2i, 2=Argon2id (default). time/memory/parallelism at 0
     // → use the npm package defaults (3 / 65536 KiB / 4).
     pub fn host_shadow_argon2_hash(
@@ -860,7 +860,7 @@ unsafe extern "C" {
     // listeners, and writes. Inbound bytes / lifecycle events arrive
     // via the daemon-event dispatcher as `{kind: "net-..."}` envelopes.
     //
-    // Payloads cross the boundary as base64-encoded strings — keeps
+    // Payloads cross the boundary as base64-encoded strings - keeps
     // the i32 ABI uniform with the rest of the host_api surface and
     // avoids JSON / UTF-8 issues with arbitrary binary data.
     pub fn host_net_connect(host_ptr: *const u8, host_len: u32, port: i32) -> i32;

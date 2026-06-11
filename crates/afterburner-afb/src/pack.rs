@@ -5,7 +5,7 @@
 //! in sorted order, every header field that could carry host state
 //! (`mtime`, `uid`, `gid`, owner names) is pinned to 0/empty, and zstd runs
 //! single-threaded at a fixed level. The returned digest is the SHA-256 of
-//! the exact compressed bytes — the package's content address.
+//! the exact compressed bytes - the package's content address.
 
 use crate::Manifold;
 use crate::digest::digest;
@@ -14,7 +14,7 @@ use crate::manifest::Manifest;
 use std::collections::BTreeMap;
 
 /// zstd level. 19 is the §3.3 invariant: near-max ratio, and decode cost is
-/// level-independent so the smaller artifact is a pure runtime win. Not 22 —
+/// level-independent so the smaller artifact is a pure runtime win. Not 22 -
 /// `--ultra` can enlarge the decode window, raising unpack memory.
 pub const ZSTD_LEVEL: i32 = 19;
 
@@ -78,7 +78,7 @@ impl Builder {
             h.set_gid(0);
             h.set_entry_type(tar::EntryType::Regular);
             // append_data writes the path into the header and recomputes the
-            // checksum last — do not set_cksum manually.
+            // checksum last - do not set_cksum manually.
             ar.append_data(&mut h, path, data.as_slice())
                 .map_err(AfbError::Io)?;
         }

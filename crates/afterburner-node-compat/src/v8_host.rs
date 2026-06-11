@@ -6,8 +6,8 @@
 //! `v8.serialize` / `v8.deserialize` host bridge.
 //!
 //! The JS adapter walks the value tree and produces a typed JSON
-//! description (small enough to cross the host boundary as a string
-//! — binary chunks come through base64-encoded). This module parses
+//! description (small enough to cross the host boundary as a string,
+//! and binary chunks come through base64-encoded). This module parses
 //! the JSON, converts it to a `V8Value`, and calls into `v8_serde`
 //! for the actual wire-format encoding. The reverse path decodes the
 //! V8 wire format and returns a typed JSON description that the JS

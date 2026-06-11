@@ -6,7 +6,7 @@
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/vertexclique/afterburner/master/art/svg/afterburner-square.svg"
 )]
-//! Afterburner WASM engine — Wasmtime runtime hosting Javy-style
+//! Afterburner WASM engine - Wasmtime runtime hosting Javy-style
 //! QuickJS-in-WASM. Produces hard-sandboxed JS execution with fuel,
 //! memory, and wall-clock caps.
 

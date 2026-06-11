@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! L3 shadow tests — argon2.
+//! L3 shadow tests - argon2.
 //!
 //! Mirrors the bcrypt suite's structure: `require('argon2')` resolves
 //! to the pure-Rust shadow backed by the `argon2` crate. All three
@@ -64,7 +64,7 @@ fn require_argon2_returns_a_module() {
 #[test]
 fn hash_produces_phc_format_default_argon2id() {
     // Use light params so the test runs fast. Default memoryCost
-    // is 64 MiB, which is legit expensive for CI — override down.
+    // is 64 MiB, which is legit expensive for CI - override down.
     let out = run_burn_eval(
         "(async () => {\n\
              const argon2 = require('argon2');\n\
@@ -148,7 +148,7 @@ fn argon2d_variant_selected_via_type_option() {
 #[test]
 fn needs_rehash_detects_weaker_params() {
     // Hash with weak params, then ask needsRehash with stronger
-    // defaults — should say yes.
+    // defaults - should say yes.
     let out = run_burn_eval(
         "(async () => {\n\
              const argon2 = require('argon2');\n\

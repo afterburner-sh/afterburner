@@ -21,7 +21,7 @@
 //! loop alive (ref'd by default, `.unref()` supported).
 //!
 //! The library API (`Afterburner::run_script`) does **not** use this
-//! path — Q2-A locks that to strict one-shot semantics. Only the CLI
+//! path - Q2-A locks that to strict one-shot semantics. Only the CLI
 //! can auto-transition into daemon mode.
 
 use crate::AfterburnerError;
@@ -54,18 +54,18 @@ const MAX_SHARDS: usize = 128;
 /// 1. **`BURN_SHARDS` env var** if set and parseable as a positive
 ///    integer. Clamped to `[1, MAX_SHARDS]`. Garbage / `0` →
 ///    fall through with a stderr warning.
-/// 2. **`std::thread::available_parallelism()`** — container-aware
+/// 2. **`std::thread::available_parallelism()`** - container-aware
 ///    (cgroup CPU quotas honoured via `sched_getaffinity` on
 ///    Linux). This is the recommended path: `docker run --cpus=4`
 ///    produces 4 shards, k8s `cpu: "4"` produces 4 shards.
 /// 3. Falls back to `1` if `available_parallelism()` errors (rare).
 ///
-/// `BURN_SHARDS` is the testing / debugging escape hatch — useful
+/// `BURN_SHARDS` is the testing / debugging escape hatch - useful
 /// for forcing single-shard semantics when comparing against the
 /// pre-B1 baseline, A/B benchmarking shard counts without touching
 /// the container, or pinning to a specific count under a CI runner
 /// with variable core count. **Oversubscribing** (`BURN_SHARDS >
-/// available_parallelism()`) is allowed but warns at startup —
+/// available_parallelism()`) is allowed but warns at startup -
 /// dedicated-thread shards contend for fewer cores than they
 /// claim, incurring context-switch tax with zero throughput
 /// benefit.
@@ -113,13 +113,13 @@ fn daemon_shard_count() -> usize {
 
 /// Run `source` via daemon-init; enter the event loop if the script
 /// registered at least one ref (HTTP listener or ref'd timer).
-/// Matches script-mode semantics for plain scripts — captured
+/// Matches script-mode semantics for plain scripts - captured
 /// stdout/stderr flushed, exit code from `process.exit(N)` or `0`
 /// on clean completion.
 pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]) -> Result<()> {
     // `burn --mode native` can't host daemon mode (native combustor
     // has no axum hooks). Route such scripts through the library's
-    // script mode instead — keeps the `--mode native foo.js` path
+    // script mode instead - keeps the `--mode native foo.js` path
     // useful for trusted one-shot scripts.
     if let Some(mode) = cli.mode.as_deref()
         && mode.eq_ignore_ascii_case("native")
@@ -173,7 +173,7 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     let shard_count = daemon_shard_count();
     let shutdown = Arc::new(AtomicBool::new(false));
 
-    // Resource-budget banner moved to AFTER pool.spawn() — the
+    // Resource-budget banner moved to AFTER pool.spawn() - the
     // *actual* shard count depends on whether shard 0's init bound
     // an HTTP listener (non-HTTP daemons stay at 1 even when the
     // user requested more). Reporting before spawn would lie.
@@ -264,14 +264,14 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     }
 
     if !pool.any_has_refs() {
-        // Plain script — no listeners and no ref'd timers in any
+        // Plain script - no listeners and no ref'd timers in any
         // shard. Drop the pool (joins all shards), exit cleanly.
         drop(pool);
         rt.shutdown_timeout(Duration::from_secs(1));
         return Ok(());
     }
 
-    // Daemon mode — install SIGINT/SIGTERM handlers.
+    // Daemon mode - install SIGINT/SIGTERM handlers.
     {
         let shutdown = Arc::clone(&shutdown);
         rt.spawn(async move {
@@ -295,7 +295,7 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     // Main thread waits for shutdown signal OR all shards naturally
     // exit (no refs anywhere). Each shard runs its own per-shard
     // event loop (HTTP from mailbox, timers/workers/net/tls/dgram
-    // local), so the main thread does no event dispatch — it only
+    // local), so the main thread does no event dispatch - it only
     // observes pool state.
     while !shutdown.load(Ordering::Acquire) {
         if !pool.any_has_refs() {
@@ -366,7 +366,7 @@ fn collect_env(cli: &Cli) -> BTreeMap<String, String> {
 }
 
 /// Resolve a user-supplied script path to an absolute path suitable
-/// for `process.argv[1]`. Falls back to the raw string on failure —
+/// for `process.argv[1]`. Falls back to the raw string on failure -
 /// matches `super::script::script_label`.
 pub fn script_label(path: &Path) -> String {
     path.canonicalize()

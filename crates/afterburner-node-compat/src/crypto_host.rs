@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Crypto host functions — SHA-2 family hashes, MD5, HMAC, secure random.
+//! Crypto host functions - SHA-2 family hashes, MD5, HMAC, secure random.
 //!
 //! Gated behind `Manifold::crypto`; a disabled manifold returns
 //! `PermissionDenied` for every operation.
@@ -28,7 +28,7 @@ type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 /// Incremental digest state for streaming sign / verify and hash.
 /// `Clone` because the host exposes an `update` primitive that takes
 /// the current state, feeds the new chunk, and stores the new state
-/// back — cloning is how we avoid interior-mutability + sync primitives.
+/// back - cloning is how we avoid interior-mutability + sync primitives.
 #[derive(Clone)]
 pub enum DigestState {
     Sha1(Sha1),
@@ -37,7 +37,7 @@ pub enum DigestState {
     Sha384(Sha384),
     Sha512(Sha512),
     Md5(Md5),
-    /// SHAKE is a XOF — variable-length output. We accumulate input
+    /// SHAKE is a XOF - variable-length output. We accumulate input
     /// state here; finalization picks the byte length at digest time
     /// (defaults match Node: shake128→16 bytes, shake256→32 bytes).
     Shake128(Shake128),
@@ -50,7 +50,7 @@ impl DigestState {
     ///   `RS384` (sha-384), `RS512` (sha-512).
     /// - hash names (lowercase): `sha1`, `sha224`, `sha256`, `sha384`,
     ///   `sha512`, `md5`. SHA-1 is included for parity with Node's
-    ///   getHashes() — callers requesting cryptographic strength
+    ///   getHashes() - callers requesting cryptographic strength
     ///   should pick a SHA-2 variant.
     pub fn new(algorithm: &str) -> Result<Self> {
         match algorithm {
@@ -119,7 +119,7 @@ impl DigestState {
 
 /// Incremental HMAC state for streaming `createHmac`. Same
 /// `Clone`-on-update pattern as [`DigestState`]. The key is embedded
-/// at construction time — HMAC doesn't accept a key change mid-stream.
+/// at construction time - HMAC doesn't accept a key change mid-stream.
 #[derive(Clone)]
 pub enum HmacState {
     Sha1(Hmac<Sha1>),
@@ -295,7 +295,7 @@ pub fn verify_finalize(
     }
 }
 
-/// Hash `data` with the named algorithm. Supported: `md5`, `sha1` (no —
+/// Hash `data` with the named algorithm. Supported: `md5`, `sha1` (no -
 /// too weak, rejected), `sha256`, `sha384`, `sha512`.
 pub fn hash(algorithm: &str, data: &[u8], m: &Manifold) -> Result<Vec<u8>> {
     if !m.crypto {

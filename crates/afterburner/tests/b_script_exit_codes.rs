@@ -11,7 +11,7 @@
 //! kind of false-green. The contract, matching Node's convention:
 //!
 //! * top-level sync `throw` → exit 1, message + stack on stderr;
-//! * a rejected Promise assigned to `module.exports` → exit 1 — the
+//! * a rejected Promise assigned to `module.exports` → exit 1 - the
 //!   script-mode envelope awaits an exported thenable
 //!   (`envelope.rs::wrap_script_source`), so the rejection surfaces
 //!   as a module-evaluation error instead of being dropped on the

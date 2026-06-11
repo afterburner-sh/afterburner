@@ -4,7 +4,7 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 //! `module._resolveFilename` / `_nodeModulePaths` / `Module.prototype.load` /
-//! `Module.wrap` — the webpack/corepack-internal surface. Pinned so a
+//! `Module.wrap` - the webpack/corepack-internal surface. Pinned so a
 //! polyfill regression doesn't silently break corepack-managed pnpm/yarn
 //! flows that read these internals at module-init.
 

@@ -8,17 +8,17 @@
 //! Drives the public Afterburner facade in `wasm` mode (the default
 //! engine selects adaptive on the second call; pin `EngineMode::Wasm`
 //! up front to keep the test deterministic). The host fn is gated by
-//! `Manifold::child_process` — sealed-default scripts get EACCES; an
+//! `Manifold::child_process` - sealed-default scripts get EACCES; an
 //! enabled manifold lets the script reach `/usr/bin/env` and friends.
 //!
 //! Coverage:
-//!  * `wasm_exec_sync_runs_real_command` — `/bin/echo hi` round-trips.
-//!  * `wasm_exec_sync_captures_stderr` — stderr makes it back.
-//!  * `wasm_exec_sync_propagates_nonzero_status` — `false` returns 1.
-//!  * `wasm_exec_sync_blocked_when_manifold_seals` — sealed manifold
+//!  * `wasm_exec_sync_runs_real_command` - `/bin/echo hi` round-trips.
+//!  * `wasm_exec_sync_captures_stderr` - stderr makes it back.
+//!  * `wasm_exec_sync_propagates_nonzero_status` - `false` returns 1.
+//!  * `wasm_exec_sync_blocked_when_manifold_seals` - sealed manifold
 //!    surfaces a permission-denied error.
-//!  * `wasm_spawn_sync_round_trip` — args array threading.
-//!  * `wasm_spawn_sync_with_no_args` — empty argv works.
+//!  * `wasm_spawn_sync_round_trip` - args array threading.
+//!  * `wasm_spawn_sync_with_no_args` - empty argv works.
 
 use afterburner::{Afterburner, EngineMode, FsAccess, Manifold, Mode};
 use serde_json::json;
@@ -26,7 +26,7 @@ use serde_json::json;
 fn wasm_ab(child_process: bool) -> Afterburner {
     let mut m = Manifold::sealed();
     m.child_process = child_process;
-    // Some shells/binaries probe /tmp etc. — give them at least a
+    // Some shells/binaries probe /tmp etc. - give them at least a
     // permissive read for the duration of the test. The host fn
     // itself doesn't touch fs, but the spawned binary may.
     m.fs = FsAccess::ReadOnly(vec!["/".into()]);
@@ -97,7 +97,7 @@ fn wasm_exec_sync_propagates_nonzero_status() {
 #[test]
 fn wasm_exec_sync_blocked_when_manifold_seals() {
     // child_process disabled. The polyfill calls __host_child_process_exec_sync
-    // which goes through the manifold gate inside the host fn — the host
+    // which goes through the manifold gate inside the host fn - the host
     // returns a PermissionDenied error which becomes EACCES on the JS side.
     let ab = wasm_ab(false);
     let id = ab
@@ -138,7 +138,7 @@ fn wasm_spawn_sync_round_trip() {
 
 #[test]
 fn wasm_spawn_sync_with_no_args() {
-    // Empty argv array — should work fine.
+    // Empty argv array - should work fine.
     let ab = wasm_ab(true);
     let id = ab
         .register(

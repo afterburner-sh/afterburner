@@ -67,7 +67,7 @@ struct Region {
 impl Region {
     fn ptr(&self) -> *mut u8 {
         // `MmapMut` derefs to `&mut [u8]`. We hold an Arc so multiple
-        // threads can call `.ptr()` concurrently — the kernel page is
+        // threads can call `.ptr()` concurrently - the kernel page is
         // shared and atomic ops are valid through the raw pointer.
         self.map.as_ptr() as *mut u8
     }
@@ -242,7 +242,7 @@ impl DaemonSab {
     }
 
     /// Atomic compare-exchange. Returns the old value (or `ERR_*` as
-    /// i64 if the slot was out of bounds — JS callers should check
+    /// i64 if the slot was out of bounds - JS callers should check
     /// negative before treating as a value).
     pub fn atomic_cas(
         &self,
@@ -326,7 +326,7 @@ impl DaemonSab {
                     let now = std::time::Instant::now();
                     if now >= deadline {
                         // Re-check the slot one more time before
-                        // declaring timeout — a notify may have
+                        // declaring timeout - a notify may have
                         // landed in the gap.
                         let v = (*p).load(Ordering::SeqCst);
                         return if v != expected as u32 {
@@ -354,7 +354,7 @@ impl DaemonSab {
     }
 
     /// Wake up to `count` waiters parked on the 32-bit slot at
-    /// `byte_offset`. Returns the number of waiters woken (best-effort —
+    /// `byte_offset`. Returns the number of waiters woken (best-effort -
     /// the kernel doesn't tell us the exact count on every platform,
     /// so we wake all and report `count`).
     pub fn notify(&self, region_id: RegionId, byte_offset: usize, count: i64) -> i32 {
@@ -372,7 +372,7 @@ impl DaemonSab {
                 1
             } else {
                 atomic_wait::wake_all(&*p);
-                // Upper bound — the kernel returned successfully so
+                // Upper bound - the kernel returned successfully so
                 // at least the requested count may have woken. JS
                 // sees Infinity → wake_all → return Infinity in
                 // userland because we can't observe the exact count
@@ -399,7 +399,7 @@ fn build_region(byte_length: usize) -> Result<Region, std::io::Error> {
     use std::os::unix::fs::OpenOptionsExt;
     let path = unique_shm_path();
     // Open with O_CREAT | O_EXCL | O_RDWR so we own the file. Mode
-    // 0600 — only this user; nobody else can attach to a region we
+    // 0600 - only this user; nobody else can attach to a region we
     // didn't hand over the path for.
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -453,7 +453,7 @@ fn unique_shm_path() -> String {
     } else {
         // $TMPDIR fallback. macOS uses `/var/folders/.../T/` per
         // user; that's fine for SAB sharing as long as the parent
-        // and worker run as the same user (they do — workers
+        // and worker run as the same user (they do - workers
         // inherit the parent's uid).
         std::env::var("TMPDIR")
             .ok()
@@ -467,7 +467,7 @@ fn unique_shm_path() -> String {
 fn build_region(byte_length: usize) -> Result<Region, std::io::Error> {
     // Cross-platform fallback for Windows: anonymous map. Cross-
     // process sharing on Windows uses CreateFileMapping with a
-    // named object — that's the next iteration. Single-process
+    // named object - that's the next iteration. Single-process
     // SAB still works via the Arc-shared mmap.
     let map = MmapMut::map_anon(byte_length)?;
     Ok(Region {

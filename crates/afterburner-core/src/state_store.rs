@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Cross-invocation key/value persistence — the `StateStore` trait.
+//! Cross-invocation key/value persistence - the `StateStore` trait.
 //!
 //! Scripts running in Afterburner are otherwise stateless: every thrust
 //! gets a fresh JS context. `StateStore` plugs in a small KV the script
@@ -12,7 +12,7 @@
 //! lifetime of the engine; embedders can drop in a Redis/SQLite/etc.
 //! implementation by depending on the trait.
 //!
-//! Capability gating: `Manifold` does not gate `StateStore` — the store
+//! Capability gating: `Manifold` does not gate `StateStore` - the store
 //! is supplied by the host explicitly, so its presence and scope are
 //! deliberate. If you want to deny state access, install a no-op store.
 
@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 /// (`require('afterburner:state').get(key)`) is sync. Implementations
 /// must be `Send + Sync` to support concurrent thrusts.
 ///
-/// `increment_i64` is a required primitive, not a convenience helper —
+/// `increment_i64` is a required primitive, not a convenience helper -
 /// the JS-side `state.increment` counter would race without a single
 /// host call. Implementations MUST apply the delta atomically
 /// relative to other concurrent callers.
@@ -39,7 +39,7 @@ pub trait StateStore: Send + Sync {
     /// ensure no reader sees a partial update under concurrent access.
     fn increment_i64(&self, key: &str, delta: i64) -> i64;
     /// Best-effort prefix listing. The default in-memory backend
-    /// returns an empty vec — embedders that need iteration should
+    /// returns an empty vec - embedders that need iteration should
     /// plug in a backend whose storage supports it.
     fn list_keys(&self, _prefix: &str) -> Vec<String> {
         Vec::new()
@@ -57,7 +57,7 @@ pub type SharedStateStore = Arc<dyn StateStore>;
 /// Integer counters get their own `HopscotchMap<String, Arc<AtomicI64>>`
 /// so `increment_i64` can CAS atomically without RMW-racing through the
 /// byte-keyed bucket. Readers of the byte store see the counter value
-/// as decimal ASCII on `get(key)` after an increment — this mirrors the
+/// as decimal ASCII on `get(key)` after an increment - this mirrors the
 /// JS polyfill's `setJSON`/`getJSON` contract.
 #[derive(Default)]
 pub struct InMemoryStateStore {
@@ -99,7 +99,7 @@ impl StateStore for InMemoryStateStore {
         }
         // Slow path: seed from any existing bytes value (parsed as
         // decimal) then install the counter. Concurrent initializers
-        // race on `insert_if_absent` — the winner's counter survives.
+        // race on `insert_if_absent` - the winner's counter survives.
         let seed = self
             .bytes
             .get(key)

@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Raw result bridge for the invoke path — the output-side mirror of
+//! Raw result bridge for the invoke path - the output-side mirror of
 //! `globals::input`.
 //!
 //! `__AB_RAW_OUTPUT__(uint8arr)` reads the bytes from the module's
@@ -13,7 +13,7 @@
 //! module returned a `Uint8Array` / `ArrayBuffer`; every other return
 //! value keeps the JSON-over-stdout contract. The host stashes the
 //! bytes in `HostState::pending_raw_output` and surfaces
-//! `OutputValue::Bytes` after `_start` returns — no `JSON.stringify`,
+//! `OutputValue::Bytes` after `_start` returns - no `JSON.stringify`,
 //! no string materialization, no base64 anywhere on the path.
 
 use alloc::format;
@@ -23,7 +23,7 @@ use javy_plugin_api::javy::quickjs::{
 
 use crate::host_api::host_raw_output;
 
-/// Reply sink — same shape as the columnar `__AB_COLUMNAR_REPLY__`
+/// Reply sink - same shape as the columnar `__AB_COLUMNAR_REPLY__`
 /// bridge: read the TypedArray's backing bytes in linmem, hand
 /// `(ptr, len)` to the host import, throw a JS exception (which fails
 /// the invocation) on a negative return so errors never pass silently.

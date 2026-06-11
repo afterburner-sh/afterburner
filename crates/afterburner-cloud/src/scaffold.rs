@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `burn new` / `burn init` — scaffold a `.afb` package project, cargo-style.
+//! `burn new` / `burn init` - scaffold a `.afb` package project, cargo-style.
 //!
 //! Mirrors the registry's own scaffolder (`afterburner-registry new/init`) so
 //! the two tools emit identical projects. Capability flags pre-fill
@@ -162,15 +162,23 @@ fn main_js(template: &str, namespace: &str, name: &str) -> String {
 const TSCONFIG: &str = "{\n  \"compilerOptions\": {\n    \"target\": \"es2022\",\n    \"module\": \"commonjs\",\n    \"strict\": true,\n    \"esModuleInterop\": true,\n    \"skipLibCheck\": true,\n    \"types\": []\n  },\n  \"include\": [\"source/**/*.ts\", \"tests/**/*.ts\"]\n}\n";
 
 // TypeScript entry stubs. `burn package` transpiles these to JS at pack
-// time, so the published .afb is always plain JS — TS is purely a
+// time, so the published .afb is always plain JS - TS is purely a
 // developer convenience (types + editor support).
 fn main_ts(template: &str, namespace: &str, name: &str) -> String {
     let header = format!("// {namespace}/{name}: an Afterburner package (TypeScript).\n\n");
     let body = match template {
-        "udf" => "// A UDF: one record in, the transformed record out.\nmodule.exports = function (record: Record<string, unknown>): Record<string, unknown> {\n  return record;\n};\n",
-        "http" => "// Fetches a URL. Needs net access (see manifold.json).\nmodule.exports = async function (input: { url?: string }): Promise<{ status: number; body: string }> {\n  const res = await fetch(input?.url ?? \"https://example.com\");\n  return { status: res.status, body: await res.text() };\n};\n",
-        "llm" => "// Calls an LLM endpoint. Needs net + an API key (see manifold.json).\nmodule.exports = async function (input: { prompt?: string; apiKey?: string }): Promise<unknown> {\n  const key = (typeof process !== \"undefined\" && process.env && process.env.API_KEY) || input?.apiKey;\n  const res = await fetch(\"https://api.example.com/v1/chat\", {\n    method: \"POST\",\n    headers: { \"content-type\": \"application/json\", authorization: \"Bearer \" + key },\n    body: JSON.stringify({ prompt: input?.prompt }),\n  });\n  if (!res.ok) throw new Error(\"HTTP \" + res.status);\n  return await res.json();\n};\n",
-        _ => "// The default export is the entry point: input in, result out.\nmodule.exports = function (input: { name?: string }): { hello: string } {\n  return { hello: input?.name ?? \"world\" };\n};\n",
+        "udf" => {
+            "// A UDF: one record in, the transformed record out.\nmodule.exports = function (record: Record<string, unknown>): Record<string, unknown> {\n  return record;\n};\n"
+        }
+        "http" => {
+            "// Fetches a URL. Needs net access (see manifold.json).\nmodule.exports = async function (input: { url?: string }): Promise<{ status: number; body: string }> {\n  const res = await fetch(input?.url ?? \"https://example.com\");\n  return { status: res.status, body: await res.text() };\n};\n"
+        }
+        "llm" => {
+            "// Calls an LLM endpoint. Needs net + an API key (see manifold.json).\nmodule.exports = async function (input: { prompt?: string; apiKey?: string }): Promise<unknown> {\n  const key = (typeof process !== \"undefined\" && process.env && process.env.API_KEY) || input?.apiKey;\n  const res = await fetch(\"https://api.example.com/v1/chat\", {\n    method: \"POST\",\n    headers: { \"content-type\": \"application/json\", authorization: \"Bearer \" + key },\n    body: JSON.stringify({ prompt: input?.prompt }),\n  });\n  if (!res.ok) throw new Error(\"HTTP \" + res.status);\n  return await res.json();\n};\n"
+        }
+        _ => {
+            "// The default export is the entry point: input in, result out.\nmodule.exports = function (input: { name?: string }): { hello: string } {\n  return { hello: input?.name ?? \"world\" };\n};\n"
+        }
     };
     format!("{header}{body}")
 }
@@ -178,9 +186,15 @@ fn main_ts(template: &str, namespace: &str, name: &str) -> String {
 fn test_ts(template: &str, name: &str) -> String {
     let header = "const test = require('node:test');\nconst assert = require('node:assert');\nconst pkg = require('../source/main.ts');\n\n";
     let body = match template {
-        "udf" => format!("test('{name} passes a record through', () => {{\n  const record = {{ id: 1, value: 'x' }};\n  assert.deepStrictEqual(pkg(record), record);\n}});\n"),
-        "http" | "llm" => format!("test('{name} exports a function', () => {{\n  assert.strictEqual(typeof pkg, 'function');\n}});\n"),
-        _ => format!("test('{name} greets', () => {{\n  assert.strictEqual(pkg({{ name: 'world' }}).hello, 'world');\n}});\n"),
+        "udf" => format!(
+            "test('{name} passes a record through', () => {{\n  const record = {{ id: 1, value: 'x' }};\n  assert.deepStrictEqual(pkg(record), record);\n}});\n"
+        ),
+        "http" | "llm" => format!(
+            "test('{name} exports a function', () => {{\n  assert.strictEqual(typeof pkg, 'function');\n}});\n"
+        ),
+        _ => format!(
+            "test('{name} greets', () => {{\n  assert.strictEqual(pkg({{ name: 'world' }}).hello, 'world');\n}});\n"
+        ),
     };
     format!("{header}{body}")
 }
@@ -292,8 +306,16 @@ fn scaffold(
             name: name.to_string(),
             namespace: namespace.to_string(),
             version: o.version.clone().unwrap_or_else(|| "0.1.0".into()),
-            language: if o.ts { "typescript".into() } else { "js".into() },
-            entry: if o.ts { "source/main.ts".into() } else { "source/main.js".into() },
+            language: if o.ts {
+                "typescript".into()
+            } else {
+                "js".into()
+            },
+            entry: if o.ts {
+                "source/main.ts".into()
+            } else {
+                "source/main.js".into()
+            },
             description: o.description.clone(),
             homepage: None,
             license: Some(o.license.clone().unwrap_or_else(|| "Apache-2.0".into())),
@@ -372,7 +394,7 @@ fn scaffold(
     })
 }
 
-/// `burn new <name|ns/name>` — scaffold a fresh directory `./<name>`.
+/// `burn new <name|ns/name>` - scaffold a fresh directory `./<name>`.
 pub fn run_new(spec: &str, o: &ScaffoldOpts, default_ns: Option<&str>) -> Result<Scaffolded> {
     let (ns, name, placeholder) = resolve_coords(Some(spec), o, None, default_ns)?;
     let dir = PathBuf::from(&name);
@@ -390,7 +412,7 @@ pub fn run_new(spec: &str, o: &ScaffoldOpts, default_ns: Option<&str>) -> Result
     scaffold(&dir, &ns, &name, placeholder, o)
 }
 
-/// `burn init [path]` — scaffold into an existing directory.
+/// `burn init [path]` - scaffold into an existing directory.
 pub fn run_init(
     path: Option<&Path>,
     o: &ScaffoldOpts,
@@ -438,7 +460,7 @@ mod tests {
     }
 
     /// Every template scaffolds a package that round-trips through the real
-    /// `.afb` builder + reader — i.e. `burn new … && burn package` works.
+    /// `.afb` builder + reader - i.e. `burn new … && burn package` works.
     #[test]
     fn every_template_scaffolds_a_buildable_package() {
         for t in TEMPLATES {

@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `afterburner-cloud` — the registry client behind `burn`'s package-management
+//! `afterburner-cloud` - the registry client behind `burn`'s package-management
 //! subcommands (`login`, `publish`, `install`, `search`, `add`, `info`,
 //! `yank`, `whoami`, `new`/`init`).
 //!
@@ -13,14 +13,14 @@
 //! documented in the `afterburner-registry` repo (`/api/v1`).
 //!
 //! Layering:
-//! - [`client`] — a thin, synchronous HTTP client over `/api/v1` (one method
+//! - [`client`] - a thin, synchronous HTTP client over `/api/v1` (one method
 //!   per endpoint), returning typed [`types`] responses.
-//! - [`config`] — cargo-style credential storage (`~/.config/burn/credentials.toml`)
+//! - [`config`] - cargo-style credential storage (`~/.config/burn/credentials.toml`)
 //!   and the registry/token resolution order.
-//! - [`cache`] — the local content-addressed `.afb` store (`~/.cache/burn/packages`).
-//! - [`pkg`] — load a local package directory and build its `.afb` (publish/package/add).
-//! - [`scaffold`] — `new`/`init` project scaffolding with capability-aware templates.
-//! - [`coord`] — `namespace/name[@version]` coordinate parsing.
+//! - [`cache`] - the local content-addressed `.afb` store (`~/.cache/burn/packages`).
+//! - [`pkg`] - load a local package directory and build its `.afb` (publish/package/add).
+//! - [`scaffold`] - `new`/`init` project scaffolding with capability-aware templates.
+//! - [`coord`] - `namespace/name[@version]` coordinate parsing.
 
 pub mod cache;
 pub mod client;

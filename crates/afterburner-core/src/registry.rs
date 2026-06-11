@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `BurnCache` — content-addressed script cache sitting in front of any
+//! `BurnCache` - content-addressed script cache sitting in front of any
 //! `Combustor`. Compiles each unique source exactly once; `execute`
 //! delegates to the engine's `thrust` with per-call limits.
 
@@ -23,7 +23,7 @@ use std::thread;
 /// source. Enables distributed deployments where a single script is
 /// registered once on any node and replicated via an external
 /// coordinator (Redis, S3, NATS, etc.). Each node still compiles
-/// locally — the backend stores source text, not compiled modules,
+/// locally - the backend stores source text, not compiled modules,
 /// since the compiled form is engine-specific (wasmtime vs rquickjs)
 /// and not portably serializable today.
 ///
@@ -31,20 +31,20 @@ use std::thread;
 /// across threads.
 pub trait BurnCacheBackend: Send + Sync {
     /// Look up the source for `hash`. `Ok(None)` means "not in this
-    /// backend" — BurnCache then expects the caller to supply the
+    /// backend" - BurnCache then expects the caller to supply the
     /// source via `register(source)`. `Err(_)` is treated the same as
-    /// `Ok(None)` in the hot path — backend errors must never block
+    /// `Ok(None)` in the hot path - backend errors must never block
     /// registration of a locally-available source.
     fn fetch(&self, hash: &[u8; 32]) -> Result<Option<String>>;
 
     /// Store `source` under `hash`. Called after a successful local
     /// compile so peer nodes can look it up on their own registration.
-    /// Must be idempotent — a concurrent publisher racing this call
+    /// Must be idempotent - a concurrent publisher racing this call
     /// with the same hash is explicitly allowed.
     fn publish(&self, hash: &[u8; 32], source: &str) -> Result<()>;
 }
 
-/// In-process default backend — no network involvement, state lives in
+/// In-process default backend - no network involvement, state lives in
 /// a single lock-free map. Equivalent to the pre-Phase-G behavior.
 #[derive(Default)]
 pub struct InProcessCacheBackend {
@@ -146,7 +146,7 @@ impl BurnCache {
         self
     }
 
-    /// Register a script when only its hash is known — the source is
+    /// Register a script when only its hash is known - the source is
     /// fetched from the [`BurnCacheBackend`]. Returns
     /// [`AfterburnerError::ScriptNotFound`] if no backend is attached
     /// or the backend has no entry for `hash`.
@@ -196,8 +196,8 @@ impl BurnCache {
         // the same key all return `None` (each thinking it just
         // installed). The map then exposes the canonical (lowest-
         // offset) entry via `get`. We follow the same pattern its own
-        // `get_or_insert` uses — install, then re-get to find the
-        // canonical entry — and decide winner via Arc pointer
+        // `get_or_insert` uses - install, then re-get to find the
+        // canonical entry - and decide winner via Arc pointer
         // identity. Without this re-get, two threads could both run
         // `engine.ignite` for the same source under contention.
         let fresh = CompileCell::new();
@@ -216,7 +216,7 @@ impl BurnCache {
             self.source_store.insert(hash, source.to_string());
             // Publish to the distributed backend (if attached) so peer
             // nodes can fetch the source by hash. Publish failures are
-            // logged but don't abort registration — local compilation
+            // logged but don't abort registration - local compilation
             // succeeded and we want the caller to keep working.
             if let Some(b) = self.backend.as_ref()
                 && let Err(e) = b.publish(&hash, source)
@@ -230,7 +230,7 @@ impl BurnCache {
                     Err(e.to_string())
                 }
             };
-            // `set` can only fail if someone else already set — impossible
+            // `set` can only fail if someone else already set - impossible
             // because we're the sole writer via is_winner=true.
             let _ = cell.result.set(stored.clone());
             return match stored {
@@ -255,7 +255,7 @@ impl BurnCache {
     }
 
     /// Execute a compiled script. Creates an isolated invocation per
-    /// call — per-call `Store` in the WASM path, fresh interrupt handler
+    /// call - per-call `Store` in the WASM path, fresh interrupt handler
     /// in the native path.
     #[fastrace::trace(name = "BurnCache::execute")]
     pub fn execute(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value> {
@@ -266,7 +266,7 @@ impl BurnCache {
     /// `Uint8Array`; the JSON framing tax of [`execute`](Self::execute)
     /// (host-side serialize + guest-side string materialization +
     /// `JSON.parse`, all O(n) and fuel-metered on the guest side) is
-    /// skipped entirely. Output contract matches `execute` — the
+    /// skipped entirely. Output contract matches `execute` - the
     /// script's return value comes back as JSON.
     #[fastrace::trace(name = "BurnCache::execute_raw")]
     pub fn execute_raw(&self, id: &ScriptId, input: &[u8], limits: &FuelGauge) -> Result<Value> {
@@ -285,7 +285,7 @@ impl BurnCache {
         self.engine.thrust_out(id, input, limits)
     }
 
-    /// Raw input + output-framing-aware result — the full-duplex bulk
+    /// Raw input + output-framing-aware result - the full-duplex bulk
     /// path. See [`Combustor::thrust_raw_out`].
     #[fastrace::trace(name = "BurnCache::execute_raw_out")]
     pub fn execute_raw_out(
@@ -299,7 +299,7 @@ impl BurnCache {
 
     /// Run `source` as a top-level script (no UDF envelope). See
     /// [`Combustor::run_script`] for semantics. Script-mode calls are
-    /// **not** cached — every invocation is a fresh compile + run.
+    /// **not** cached - every invocation is a fresh compile + run.
     /// Caching a script-mode script is almost never what the user
     /// wants: Node-style scripts usually have side effects at top
     /// level, and the host has no way to know whether a particular
@@ -317,7 +317,7 @@ impl BurnCache {
     /// Array-in / array-out batch helper.
     ///
     /// Contract: `rows` must be a JSON array. The script receives the whole
-    /// array and must return an array — typically via
+    /// array and must return an array - typically via
     /// `module.exports = (rows) => rows.map(r => ({...}))`. The helper
     /// enforces the shape and returns a typed error if either side
     /// violates it.
@@ -341,7 +341,7 @@ impl BurnCache {
     /// Columnar UDF entry point. Forwards the pre-encoded blob to the
     /// underlying combustor via the trait method, which knows how to
     /// dispatch into the wasm path. Decoding the reply blob back into
-    /// host-side `ColumnarOutput` is the caller's responsibility — the
+    /// host-side `ColumnarOutput` is the caller's responsibility - the
     /// `Afterburner::run_columnar` facade wraps this with the
     /// `encode_batch` / `decode_batch` pair from `afterburner-wasi`.
     #[fastrace::trace(name = "BurnCache::execute_columnar_bytes")]
@@ -384,7 +384,7 @@ fn outcome_to_result(o: &std::result::Result<ScriptId, String>) -> Result<Script
     }
 }
 
-/// Render a 32-byte hash as a 16-char hex prefix — short enough for log
+/// Render a 32-byte hash as a 16-char hex prefix - short enough for log
 /// output, long enough to disambiguate scripts in practice.
 ///
 /// This is a *display* helper, not a content address: it encodes only the
@@ -420,7 +420,7 @@ mod tests {
     /// call so tests can assert idempotence / delegation.
     ///
     /// "Last thrust input" is stored in a lock-free `HopscotchMap`
-    /// keyed by a unit sentinel (u8=0) — no Mutex in test code either.
+    /// keyed by a unit sentinel (u8=0) - no Mutex in test code either.
     #[derive(Default)]
     struct MockCombustor {
         ignite_count: AtomicU64,
@@ -549,14 +549,14 @@ mod tests {
         // Node A registers a source. Node B knows only the hash and
         // asks BurnCache to materialize it. The shared backend
         // supplies the source; Node B still compiles locally (each
-        // engine keeps its own compile state — source distribution is
+        // engine keeps its own compile state - source distribution is
         // what the backend gives us, not compiled modules).
         let (cache_a, cache_b, _mock_a, mock_b, _backend) = shared_backend_pair();
         let id_a = cache_a.register("module.exports = (d) => d + 1").unwrap();
         // Node B: only knows the hash.
         let id_b = cache_b.register_by_hash(&id_a.hash).unwrap();
         assert_eq!(id_a.hash, id_b.hash);
-        // Node B compiled exactly once — its own mock shows one ignite.
+        // Node B compiled exactly once - its own mock shows one ignite.
         assert_eq!(mock_b.ignite_count.load(Ordering::Relaxed), 1);
     }
 
@@ -564,7 +564,7 @@ mod tests {
     fn register_by_hash_without_backend_is_not_found() {
         let (cache, _mock) = cache_with_mock();
         // No backend attached; hash is bogus, source isn't locally
-        // known — should surface ScriptNotFound, not a panic.
+        // known - should surface ScriptNotFound, not a panic.
         let err = cache.register_by_hash(&[0xab; 32]).unwrap_err();
         assert!(
             matches!(err, AfterburnerError::ScriptNotFound),
@@ -625,7 +625,7 @@ mod tests {
     #[test]
     fn execute_batch_rejects_non_array_output() {
         // MockCombustor echoes input inside an object. Feeding an
-        // array therefore yields {"echo": [...]} — not an array, so
+        // array therefore yields {"echo": [...]} - not an array, so
         // execute_batch must reject.
         let (cache, _) = cache_with_mock();
         let id = cache.register("module.exports = (r) => r").unwrap();
