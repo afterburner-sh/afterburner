@@ -2,7 +2,7 @@
 
 This Contributor License Agreement ("Agreement") is adapted from the Apache
 Software Foundation Individual Contributor License Agreement. References to the
-"Apache Software Foundation" are replaced by **Psila.AI** ("the Licensor").
+"Apache Software Foundation" are replaced by **vertexclique** ("the Licensor").
 
 By submitting a Contribution to this project, You accept and agree to the
 following terms for Your present and future Contributions. Except for the

@@ -19,7 +19,7 @@ to do so (see CLA.md §4).
 ## Licensing of contributions
 
 By contributing you agree your work is licensed under BSL 1.1 (converting to
-Apache-2.0 on the Change Date) and may also be offered by Psila.AI under
+Apache-2.0 on the Change Date) and may also be offered by vertexclique under
 commercial license terms, per the CLA. Do not add code under a license
 incompatible with this; disclose any third-party code and its license in the PR.
 

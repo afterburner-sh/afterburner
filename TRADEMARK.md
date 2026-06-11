@@ -1,7 +1,7 @@
 # Trademark Policy
 
 "Afterburner", "burn", the Afterburner logo, and the `.burn` / `.afb` file
-extensions are trademarks of **Psila.AI** (the "Marks").
+extensions are trademarks of **vertexclique** (the "Marks").
 
 EU trademark application: **EUIPO No. TBD** (word mark "Afterburner", Nice
 classes 9 and 42; application to be filed — this reference is updated with the
@@ -36,4 +36,4 @@ Email **info@afterburner.sh** describing the intended use.
 
 Trademark rights are independent of, and survive, the BSL Change Date: even
 after a version's code converts to Apache-2.0 (four years after that version's
-release), the Marks remain owned by Psila.AI and this policy continues to apply.
+release), the Marks remain owned by vertexclique and this policy continues to apply.
