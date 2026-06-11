@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>A sandboxed JavaScript VM for Rust. Execute untrusted scripts with memory limits, timeouts, capability-gated I/O, and threading — with its own package format, registry, and package manager.</strong>
+  <strong>A sandboxed JavaScript VM for Rust. Execute untrusted scripts with memory limits, timeouts, capability-gated I/O, and threading, with its own package format, registry, and package manager.</strong>
 </p>
 
 <p align="center">
@@ -116,28 +116,28 @@ app: `require('express')` resolves the actual npm package out of
 
 ## Packages, registry & package manager
 
-Afterburner ships its **own package ecosystem** — its own package format,
+Afterburner ships its **own package ecosystem**: its own package format,
 its own registry, and a built-in package manager. You don't need npm to
 publish or consume Afterburner code (and npm packages can still be pulled
 in as dependencies when you want them).
 
-- **`.afb` packages** — a package is a single, content-addressed,
+- **`.afb` packages**: a package is a single, content-addressed,
   compressed file: a manifest (`afb.toml`), a capability grant
   (`manifold.json`), and your `source/`. Sealed by default; what it may
   touch is declared and reviewable before anyone installs it. JavaScript
   or TypeScript (TS is transpiled to JS at pack time).
-- **Registry** — publish and install packages from the Afterburner
+- **Registry**: publish and install packages from the Afterburner
   registry (`afterburner-cloud` client + the `afterburner-registry`
   service). Coordinates are `namespace/name@version`; every release is
   pinned by SHA-256 digest.
-- **Cargo-style package manager** — `burn install` resolves the full
+- **Cargo-style package manager**: `burn install` resolves the full
   dependency graph with a conflict-driven version solver, writes a
   reproducible `burn.lock`, and caches packages content-addressed. Two
   kinds of dependency, both declared (never vendored into your artifact):
   `[dependencies]` for other registry packages and `[npm]` for npm
   packages, which a **native, pure-Rust** installer fetches and
-  integrity-checks — no `npm` toolchain, no install scripts, native/C-ABI
-  addons rejected.
+  integrity-checks (no `npm` toolchain, no install scripts, native/C-ABI
+  addons rejected).
 
 ```sh
 burn init ./greeter --namespace acme --name greeter   # scaffold (add --ts for TypeScript)
@@ -177,21 +177,21 @@ Afterburner is **source-available** under the [Business Source License 1.1](LICE
 release** (its per-version Change Date). Versions released *before* the relicense
 (git tag `last-apache-2.0`) were never under the BSL and remain Apache-2.0.
 
-The Apache-2.0 components shipped alongside the engine — everything under
+The Apache-2.0 components shipped alongside the engine (everything under
 `examples/` (see [`examples/LICENSE`](examples/LICENSE)), plus the planned
-`afterburner-afb` and `burn/*` packages — are Apache-2.0 via
+`afterburner-afb` and `burn/*` packages) are Apache-2.0 via
 their own `LICENSE` / `license` metadata and **not** subject to the BSL.
 
 **Free for non-commercial and non-production use.** Individuals on personal
 projects, students on coursework, and non-commercial open-source projects (no
 paid sponsorship, no monetised hosting, no enterprise SLA), plus any internal
-evaluation/development/testing, are explicitly welcome — no separate agreement
+evaluation/development/testing, are explicitly welcome, no separate agreement
 needed (see the Additional Use Grant in [LICENSE](LICENSE)).
 
 **Commercial license required to host, embed, or compete.** Offering
 Afterburner as a hosted/managed service, embedding it in a commercial product
 distributed to third parties (OEM), or using it to build a competing offering
-requires a commercial license — including via forks, rebrands, vendored, or
+requires a commercial license, including via forks, rebrands, vendored, or
 embedded copies. See **[LICENSING.md](LICENSING.md)**; contact
 `info@afterburner.sh`.
 
