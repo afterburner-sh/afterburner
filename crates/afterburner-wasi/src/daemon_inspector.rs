@@ -76,8 +76,8 @@ struct InspectorInner {
     /// matching Receiver. The WebSocket reader intercepts
     /// `Debugger.resume`/`stepOver`/`stepInto`/`stepOut` messages on
     /// the Rust side (not in JS) and signals the Sender, unblocking
-    /// the paused wasmtime instance. Going through JS would deadlock
-    /// - the wasmtime instance is what's blocked.
+    /// the paused wasmtime instance. Going through JS would deadlock,
+    /// since the wasmtime instance is what's blocked.
     pause_signals: HopscotchMap<i64, kovan_channel::flavors::bounded::Sender<i32>>,
     next_pause_id: AtomicI64,
 }

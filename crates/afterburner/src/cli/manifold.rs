@@ -192,8 +192,8 @@ pub fn parse_allow_listen_arg(s: &str) -> Result<String, String> {
 /// Clap value-parser for `--allow-net`: accept the comma-separated
 /// host list, rejecting entries whose `:port` suffix is not a valid
 /// port number. Without this gate a typo like `--allow-net
-/// host:90o0` would produce an allow-list entry that can never match
-/// - i.e. a silent deny-everything sandbox.
+/// host:90o0` would produce an allow-list entry that can never match,
+/// i.e. a silent deny-everything sandbox.
 ///
 /// Entry grammar (shared with the runtime matcher,
 /// `afterburner_node_compat::http_host::split_host_port_pattern`):

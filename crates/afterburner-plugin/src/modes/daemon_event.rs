@@ -10,7 +10,7 @@
 //! `__AB_GET_ENVELOPE__()`, parses it, looks up the JS-side handler
 //! registered by `daemon-init` code, and invokes it. The response
 //! (if any) travels back through host imports (`__host_http_reply`)
-//! - this function's own return value is discarded.
+//! and this function's own return value is discarded.
 //!
 //! Top-level `await` resolves through Javy's event loop drain so
 //! handlers can be `async` without special wrapping.

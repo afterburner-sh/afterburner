@@ -96,8 +96,8 @@ pub struct ShardPoolConfig {
     /// stay single-shard so init-time side effects (`net.connect`,
     /// `setInterval`, `fetch`, etc.) don't multiply by N.
     ///
-    /// Set to `false` for the legacy "always multi-shard" behavior
-    /// - useful for benchmarks where init is intentionally trivial
+    /// Set to `false` for the legacy "always multi-shard" behavior,
+    /// useful for benchmarks where init is intentionally trivial
     /// and the amplification doesn't matter.
     pub expand_only_for_http_listener: bool,
     pub engine: Engine,

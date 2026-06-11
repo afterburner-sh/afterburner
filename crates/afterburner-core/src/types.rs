@@ -69,8 +69,8 @@ pub struct FuelGauge {
     /// unlimited: the capture buffer is host RAM, so output stays a
     /// bounded resource even under [`Self::unlimited`]. Exceeding the
     /// ceiling surfaces as
-    /// [`AfterburnerError::OutputTooLarge`](crate::AfterburnerError::OutputTooLarge)
-    /// - a structured error, never a bare trap.
+    /// [`AfterburnerError::OutputTooLarge`](crate::AfterburnerError::OutputTooLarge):
+    /// a structured error, never a bare trap.
     pub output_bytes: Option<usize>,
     /// Capability gate for Node-style built-in modules. Defaults to
     /// [`Manifold::sealed`] - no host-backed modules accessible.
