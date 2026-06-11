@@ -1514,12 +1514,23 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><th>Subcommand</th><th>Purpose</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>run &lt;file&gt; [args]</code></td><td>Execute a script. Args after the file populate <code>process.argv[2..]</code>. Default when the first positional looks like a path.</td></tr>
+          <tr><td><code>run [file] [args]</code></td><td>Execute a script. With no <code>file</code>, runs the current package's entry from <code>afb.toml</code> (cargo-style <code>burn run</code>). Args after the file populate <code>process.argv[2..]</code>. Default when the first positional looks like a path.</td></tr>
           <tr><td><code>eval &lt;code&gt;</code> · <code>-e</code></td><td>Evaluate an inline JS snippet in script mode.</td></tr>
           <tr><td><code>thrust &lt;file&gt;</code></td><td>UDF mode. Stdin JSON envelope, script returns JSON, written to stdout. The script body is <code>module.exports = (data) =&gt; ...</code>.</td></tr>
           <tr><td><code>check &lt;file&gt;</code></td><td>Compile and parse without executing. Exits 0 on success, 1 on syntax error. Useful in CI.</td></tr>
           <tr><td><code>bench &lt;file&gt;</code></td><td>Throughput + p50 / p99 latency. Configurable iters and workers.</td></tr>
           <tr><td><code>repl</code></td><td>Interactive read-eval-print loop with line history.</td></tr>
+          <tr><td colspan="2" style="font-weight:600; background:var(--bg-section);">Package management (see <a href="#packages" style="color: var(--action);">Packages &amp; dependencies</a>)</td></tr>
+          <tr><td><code>init [dir]</code> · <code>new &lt;ns/name&gt;</code></td><td>Scaffold a package (<code>afb.toml</code>, <code>manifold.json</code>, <code>source/</code>, tests). <code>--ts</code> for TypeScript; <code>--template module|udf|http|llm</code>.</td></tr>
+          <tr><td><code>add &lt;ns/name&gt;</code></td><td>Add a registry package to <code>[dependencies]</code>, pinned by digest. (Edit <code>[npm]</code> directly for npm deps.)</td></tr>
+          <tr><td><code>install [pkg]</code></td><td>Resolve + cache the dependency graph and write <code>burn.lock</code>. With no <code>pkg</code>, installs the current package's <code>[dependencies]</code> + <code>[npm]</code>. <code>--locked</code> reuses the lockfile.</td></tr>
+          <tr><td><code>test [dir]</code></td><td>Run every file under <code>tests/</code> through the sandbox.</td></tr>
+          <tr><td><code>package [dir]</code> · <code>-o</code></td><td>Build a deterministic, content-addressed <code>.afb</code> (transpiles TS to JS).</td></tr>
+          <tr><td><code>publish [afb]</code></td><td>Build (or upload a prebuilt <code>.afb</code>) to the registry.</td></tr>
+          <tr><td><code>clean [dir]</code></td><td>Remove build artifacts (the package's <code>.afb</code> files and <code>burn.lock</code>). <code>--cache</code> also clears the shared registry + npm caches.</td></tr>
+          <tr><td><code>login</code> · <code>logout</code> · <code>whoami</code></td><td>Registry authentication.</td></tr>
+          <tr><td><code>search &lt;q&gt;</code> · <code>yank &lt;ver&gt;</code></td><td>Search the registry; hide/restore a published version.</td></tr>
+          <tr><td colspan="2" style="font-weight:600; background:var(--bg-section);">Runtime &amp; misc</td></tr>
           <tr><td><code>node | npm | pnpm | npx | yarn | bun</code></td><td>Pass-through shim. Forwards args to the ecosystem binary on <code>$PATH</code>; child <code>node</code> processes route back through <code>burn</code>.</td></tr>
           <tr><td><code>version</code></td><td>Print version and the cargo features built into the binary.</td></tr>
         </tbody>
