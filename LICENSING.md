@@ -46,7 +46,7 @@ source originates.
 
 ## How to obtain a commercial license
 
-Email **licensing@afterburner.sh** with:
+Email **info@afterburner.sh** with:
 
 - Your company / legal entity name.
 - Which of (1) host / (2) embed / (3) compete applies.

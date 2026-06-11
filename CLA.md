@@ -72,4 +72,4 @@ KIND, either express or implied.
 Agreement is recorded electronically via the CLA Assistant bot on the GitHub
 repository the first time You open a pull request. Signing once covers all
 future Contributions to Licensor projects unless revoked in writing to
-licensing@afterburner.sh.
+info@afterburner.sh.

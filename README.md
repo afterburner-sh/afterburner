@@ -154,7 +154,7 @@ Afterburner as a hosted/managed service, embedding it in a commercial product
 distributed to third parties (OEM), or using it to build a competing offering
 requires a commercial license — including via forks, rebrands, vendored, or
 embedded copies. See **[LICENSING.md](LICENSING.md)**; contact
-`licensing@afterburner.sh`.
+`info@afterburner.sh`.
 
 "Afterburner" and related marks are trademarks of Psila.AI; see
 [TRADEMARK.md](TRADEMARK.md). Contributions require a [CLA](CLA.md).
