@@ -43,4 +43,4 @@ New code goes in the appropriate crate's license tier:
 
 ## Reporting security issues
 
-Do not open public issues for vulnerabilities. Email **security@afterburner.sh**.
+Do not open public issues for vulnerabilities. Email **info@afterburner.sh**.

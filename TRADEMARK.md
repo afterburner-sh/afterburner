@@ -32,7 +32,7 @@ trademark grant are separate.
 
 ## How to request permission
 
-Email **trademark@afterburner.sh** describing the intended use.
+Email **info@afterburner.sh** describing the intended use.
 
 Trademark rights are independent of, and survive, the BSL Change Date: even
 after a version's code converts to Apache-2.0 (four years after that version's
