@@ -29,6 +29,7 @@ pub mod coord;
 pub mod error;
 pub mod install;
 pub mod lock;
+pub mod npm;
 pub mod pkg;
 pub mod resolve;
 pub mod scaffold;

@@ -42,6 +42,17 @@ impl LocalPackage {
         let source_root = dir.join("source");
         collect_sources(&source_root, &mut sources)?;
 
+        // We do NOT pack dependencies into the `.afb` (cargo model): a
+        // published package carries only its OWN `source/**`. Both afb
+        // dependencies (`[dependencies]`, digest-pinned) and npm
+        // dependencies (`[npm]`, semver) are declared in the manifest and
+        // resolved + cached separately by `burn install`, then composed
+        // at load time by the linker. A stray `source/node_modules/**`
+        // committed by hand is still defended: the native-artifact gate
+        // below runs over whatever IS in the archive.
+        afterburner_afb::native::reject_native(sources.keys().map(String::as_str))
+            .map_err(|e| CloudError::Package(e.to_string()))?;
+
         if !sources.contains_key(&manifest.package.entry) {
             return Err(CloudError::Package(format!(
                 "entry {:?} (from afb.toml) is not present under source/",
@@ -128,4 +139,89 @@ fn write_atomic_text(path: &Path, text: &str) -> Result<()> {
     std::fs::write(&tmp, text).map_err(CloudError::Io)?;
     std::fs::rename(&tmp, path).map_err(CloudError::Io)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+
+    fn write(dir: &Path, rel: &str, body: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    fn scaffold(dir: &Path) {
+        write(
+            dir,
+            "afb.toml",
+            "[format]\nversion = \"1.0\"\n[package]\nname = \"p\"\nnamespace = \"t\"\n\
+             version = \"0.1.0\"\nlanguage = \"javascript\"\nentry = \"source/main.js\"\n\
+             [runtime]\nmin = \"0.1.0\"\n",
+        );
+        let sealed = serde_json::to_string(&afterburner_afb::Manifold::sealed()).unwrap();
+        write(dir, "manifold.json", &sealed);
+        write(dir, "source/main.js", "module.exports = () => 1;");
+    }
+
+    fn load(dir: &Path) -> std::result::Result<LocalPackage, CloudError> {
+        LocalPackage::load(dir)
+    }
+
+    // Cargo model: a `node_modules/` next to afb.toml is NOT vendored
+    // into the package. The `.afb` carries only the package's own source;
+    // deps are resolved + cached separately by `burn install`.
+    #[test]
+    fn node_modules_is_not_packed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        scaffold(d);
+        write(d, "node_modules/lodash/index.js", "module.exports = 1;");
+        let pkg = load(d).expect("load");
+        assert!(
+            !pkg.sources.keys().any(|k| k.contains("node_modules")),
+            "node_modules must not be packed into the .afb"
+        );
+        assert!(pkg.sources.contains_key("source/main.js"));
+    }
+
+    // Own multi-file source is still packed and require()-able.
+    #[test]
+    fn own_source_tree_is_packed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        scaffold(d);
+        write(d, "source/lib/util.js", "module.exports = 2;");
+        let pkg = load(d).expect("load");
+        assert!(pkg.sources.contains_key("source/lib/util.js"));
+        assert!(pkg.build().is_ok());
+    }
+
+    // Defense-in-depth: a native artifact hand-committed under source/
+    // is rejected at pack (the WASM sandbox can never load it).
+    #[test]
+    fn rejects_native_under_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        scaffold(d);
+        write(d, "source/vendor/bcrypt.node", "\0\0fake native");
+        let err = match load(d) {
+            Ok(_) => panic!("expected rejection"),
+            Err(e) => e,
+        };
+        assert!(format!("{err}").contains("native"), "must reject .node under source/");
+    }
+
+    #[test]
+    fn rejects_binding_gyp_under_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        scaffold(d);
+        write(d, "source/native/binding.gyp", "{ 'targets': [] }");
+        let err = match load(d) {
+            Ok(_) => panic!("expected rejection"),
+            Err(e) => e,
+        };
+        assert!(format!("{err}").contains("native"));
+    }
 }

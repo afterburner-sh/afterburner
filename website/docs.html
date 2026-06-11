@@ -901,6 +901,13 @@
       <a class="sb-link" href="#extend-flow">FlowEngine</a>
     </div>
     <div class="sb-section">
+      <h4>Packages</h4>
+      <a class="sb-link" href="#packages">Packages &amp; deps</a>
+      <a class="sb-link" href="#packages-scaffold">Scaffold</a>
+      <a class="sb-link" href="#packages-deps">Declaring deps</a>
+      <a class="sb-link" href="#packages-security">Dependency security</a>
+    </div>
+    <div class="sb-section">
       <h4>Reference</h4>
       <a class="sb-link" href="#cli">burn CLI</a>
       <a class="sb-link" href="#node-compat">Node compat surface</a>
@@ -1275,6 +1282,63 @@ module.exports = () =&gt; ({ hits, seen });</pre>
         </div>
       </div>
 
+      <h2 id="packages"><span class="anchor">#</span>Packages &amp; dependencies</h2>
+      <p>A <code>.afb</code> is a single content-addressed, compressed package: a manifest (<code>afb.toml</code>), a capability grant (<code>manifold.json</code>), and your <code>source/</code>. Packages publish to a registry and resolve dependencies the way Cargo does — declared, version-resolved, digest-pinned, and cached — not vendored into your artifact.</p>
+
+      <h3 id="packages-scaffold">Scaffold a package</h3>
+      <p>Start a new package in JavaScript or TypeScript. TypeScript is a build-time convenience: <code>burn package</code> transpiles <code>.ts</code> to <code>.js</code> at pack time, so the published <code>.afb</code> is always plain JavaScript.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> init ./my-pkg --namespace acme --name widget        <span class="tok-com"># JavaScript</span>
+$ <span class="tok-mod">burn</span> init ./my-pkg --namespace acme --name widget --ts   <span class="tok-com"># TypeScript (+ tsconfig.json)</span>
+$ <span class="tok-mod">burn</span> new acme/widget                                   <span class="tok-com"># scaffold into ./widget</span></pre>
+      </div>
+      <p>The scaffold writes <code>afb.toml</code>, <code>manifold.json</code>, <code>source/main.{js,ts}</code>, a test, and a README. Templates: <code>--template module|udf|http|llm</code>.</p>
+
+      <h3 id="packages-deps">Declaring dependencies</h3>
+      <p>Two kinds of dependency, both declared in <code>afb.toml</code> and both resolved + cached by <code>burn install</code> — never copied into your package:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">toml</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-com"># afb.toml</span>
+[dependencies]              <span class="tok-com"># other registry packages, digest-pinned</span>
+<span class="tok-str">"acme/json-tools"</span> = <span class="tok-str">"sha256:9f86d0…"</span>
+
+[npm]                       <span class="tok-com"># npm packages, semver ranges</span>
+leftpad = <span class="tok-str">"^1.0.0"</span>
+date-fns = <span class="tok-str">"^3"</span></pre>
+      </div>
+      <p>Add them from the CLI instead of editing by hand:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> add acme/json-tools        <span class="tok-com"># pin a registry package</span>
+$ <span class="tok-mod">burn</span> install                     <span class="tok-com"># resolve the whole graph → burn.lock</span></pre>
+      </div>
+
+      <h3 id="packages-resolve">Resolution &amp; lockfile</h3>
+      <p><code>burn install</code> resolves the full transitive graph with a conflict-driven version solver (the same class of algorithm Cargo uses), topologically orders it, and writes a <code>burn.lock</code> pinning every package to an exact content digest. Re-running with <code>--locked</code> reuses the lockfile without re-resolving — reproducible, byte-for-byte. Resolved packages land in a shared content-addressed cache, so a dependency is downloaded once per machine and reused across every package that needs it.</p>
+      <ul>
+        <li><strong>Registry dependencies</strong> are pinned by SHA-256 digest — a coordinate can never silently resolve to different bytes.</li>
+        <li><strong>npm dependencies</strong> are resolved to an exact version + integrity hash and cached locally; you never run <code>npm install</code> yourself.</li>
+        <li><strong>Importing</strong> is just <code>require()</code> (or TypeScript <code>import</code>): a registry dependency by its <code>namespace/name</code>, an npm package by its bare name — from both JS and TS sources.</li>
+      </ul>
+
+      <h3 id="packages-security">Dependency security</h3>
+      <p>Dependencies are <em>data</em>, not new privilege. The guarantees:</p>
+      <ul>
+        <li><strong>One Manifold governs everything.</strong> A dependency — registry package or npm — runs under <em>your</em> package's Manifold. It can reach the network, filesystem, or environment only where you were granted access; a dependency can never widen its own permissions. A package with a sealed Manifold cannot make a single outbound request, no matter what it pulls in.</li>
+        <li><strong>No native code, ever.</strong> Packages run as sandboxed JavaScript. A dependency carrying a native/C-ABI/N-API addon (<code>.node</code>, <code>.so</code>, <code>.dylib</code>, <code>.dll</code>, <code>binding.gyp</code>) is <strong>rejected</strong> — at install and again at pack — with an error naming the offending file. Native addons are the usual sandbox-escape vector; they simply cannot enter.</li>
+        <li><strong>Pinned and reproducible.</strong> Every dependency is content-addressed; a lockfile fixes the exact closure. What you tested is what ships.</li>
+      </ul>
+
+      <h3 id="packages-perf">Why it's fast</h3>
+      <p>A <code>.afb</code> is one compressed file fetched in a single request — not npm's metadata-then-tarball waterfall across a deep tree. Resolution runs in parallel, the content-addressed cache means a dependency is fetched at most once per machine, and <code>--locked</code> installs skip resolution entirely. Packing is a single deterministic compression pass with no install scripts to execute.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> package                    <span class="tok-com"># build the .afb (TS → JS, deterministic)</span>
+$ <span class="tok-mod">burn</span> publish                    <span class="tok-com"># build + upload to the registry</span>
+$ <span class="tok-mod">burn</span> install --locked           <span class="tok-com"># reproducible, resolution skipped</span></pre>
+      </div>
+
       <h2 id="cli"><span class="anchor">#</span>The <code>burn</code> CLI</h2>
       <p>A Deno-style command-line runtime. CLI default is <code>Manifold::open()</code> so existing Node scripts drop in without flags. Pass <code>--sandbox</code> to flip back to deny-by-default and grant with <code>--allow-*</code>.</p>
 
@@ -1553,6 +1617,9 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
       <li class="toc-sub"><a href="#extend-cache">BurnCacheBackend</a></li>
       <li class="toc-sub"><a href="#extend-host">HostContext</a></li>
       <li class="toc-sub"><a href="#extend-flow">FlowEngine</a></li>
+      <li><a href="#packages">Packages &amp; deps</a></li>
+      <li class="toc-sub"><a href="#packages-deps">Declaring deps</a></li>
+      <li class="toc-sub"><a href="#packages-security">Dependency security</a></li>
       <li><a href="#cli">burn CLI</a></li>
       <li class="toc-sub"><a href="#cli-subcommands">Subcommands</a></li>
       <li class="toc-sub"><a href="#cli-flags">Flag reference</a></li>

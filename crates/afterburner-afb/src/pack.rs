@@ -52,6 +52,11 @@ impl Builder {
         let manifest_toml = self.manifest.to_toml_string()?;
         Manifest::parse(&manifest_toml)?;
 
+        // Fail-closed on native/C-ABI/N-API artifacts (e.g. a vendored
+        // npm dep carrying a `.node` addon): the WASM sandbox can never
+        // load them, and shipping one is a sandbox-escape red flag.
+        crate::native::reject_native(self.files.keys().map(String::as_str))?;
+
         let manifold_json = serde_json::to_vec(&self.manifold)
             .map_err(|e| AfbError::ManifoldParse(e.to_string()))?;
 

@@ -30,6 +30,13 @@ pub struct Manifest {
     /// Other `.afb` packages this one depends on, pinned by digest.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, String>,
+    /// npm packages this one depends on, declared `name = "semver-range"`
+    /// (cargo-style). `burn install` resolves + vendors them into
+    /// `source/node_modules/**`; the sandbox `require()` then serves bare
+    /// specifiers from there. Vendored code runs under THIS package's
+    /// manifold — it can reach nothing the package itself is not granted.
+    #[serde(default, rename = "npm", skip_serializing_if = "BTreeMap::is_empty")]
+    pub npm: BTreeMap<String, String>,
     /// Phase-2 signature block. Parsed (strictly) if present so a signed
     /// package round-trips; v0.1 does not verify it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,6 +141,7 @@ impl Manifest {
             "package",
             "runtime",
             "dependencies",
+            "npm",
             "signature",
             "metadata",
         ] {

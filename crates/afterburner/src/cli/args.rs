@@ -420,6 +420,10 @@ pub struct ScaffoldArgs {
     /// Entry-point template: `module` (default) | `udf` | `http` | `llm`.
     #[arg(long, value_name = "TEMPLATE")]
     pub template: Option<String>,
+    /// Scaffold a TypeScript package (`source/main.ts` + `tsconfig.json`).
+    /// `burn package` transpiles TS to JS at pack time.
+    #[arg(long)]
+    pub ts: bool,
     /// Grant the `crypto` capability in the scaffolded `manifold.json`.
     #[arg(long = "allow-crypto")]
     pub allow_crypto: bool,

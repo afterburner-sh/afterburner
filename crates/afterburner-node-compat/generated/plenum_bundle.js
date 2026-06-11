@@ -105,6 +105,10 @@
     }
 
     function fsExists(p) {
+        if (vfsMap()) {
+            if (vfsRead(String(p)) !== null || vfsIsDir(String(p))) return true;
+            if (vfsPath(String(p))) return false; // virtual root: miss = absent
+        }
         // NOTE: the boolean host probe cannot distinguish "absent"
         // from "denied" — denials are recovered on the resolution
         // failure path via `fsReadDenied` (see `moduleNotFound`).
@@ -114,6 +118,11 @@
     }
 
     function fsRead(p) {
+        if (vfsMap()) {
+            var vv = vfsRead(String(p));
+            if (vv !== null) return vv;
+            if (vfsPath(String(p))) return null; // never ask the host for /afb/…
+        }
         var fn = globalThis.__host_fs_read_file_sync;
         if (typeof fn !== 'function') return null;
         try {
@@ -146,6 +155,7 @@
     // failure is a manifold denial. Used only on the resolution
     // FAILURE path (zero extra host calls on successful requires).
     function fsReadDenied(p) {
+        if (vfsPath(String(p))) return false; // vfs misses are absent, not denied
         var fn = globalThis.__host_fs_read_file_sync;
         if (typeof fn !== 'function') return false;
         try {
@@ -238,6 +248,10 @@
     }
 
     function fsIsDir(p) {
+        if (vfsMap()) {
+            if (vfsIsDir(String(p))) return true;
+            if (vfsPath(String(p))) return false;
+        }
         var fn = globalThis.__host_fs_stat_sync;
         if (typeof fn !== 'function') return false;
         try {
@@ -247,6 +261,55 @@
         } catch (_) {
             return false;
         }
+    }
+
+    // ---- virtual package filesystem -----------------------------
+    //
+    // A composed .afb module (multi-file package, vendored
+    // node_modules, digest-pinned dependency packages) delivers its
+    // whole file tree as DATA inside the compiled source:
+    //   globalThis.__afb_files = { '/afb/source/main.js': '…', … }
+    //   globalThis.__afb_links = { 'ns/name': '/afb/deps/ns/name/source/main.js' }
+    // The probes below consult that map FIRST, so the entire Node
+    // resolution algorithm (exports maps, extension ladder, caching,
+    // circular semantics) runs unchanged over virtual paths — and a
+    // '/afb/…' path NEVER reaches the host fs bridge: a vfs miss is
+    // "absent", not a manifold question. Real-fs behavior (and its
+    // manifold gating) is byte-for-byte unchanged for every other
+    // path; network access from vendored code is not touched by any
+    // of this — it still goes through the host net gates.
+    var vfsDirCache = null;
+    function vfsMap() {
+        var m = globalThis.__afb_files;
+        return (m && typeof m === 'object') ? m : null;
+    }
+    function vfsPath(p) {
+        return typeof p === 'string' && p.indexOf('/afb/') === 0;
+    }
+    function vfsRead(p) {
+        var m = vfsMap();
+        if (!m) return null;
+        var v = m[p];
+        return typeof v === 'string' ? v : null;
+    }
+    function vfsIsDir(p) {
+        var m = vfsMap();
+        if (!m) return false;
+        if (vfsDirCache === null) {
+            // Built once per instance: every ancestor dir of every
+            // virtual file. Keeps the node_modules walk O(1) per
+            // probe even for thousand-file vendored packages.
+            vfsDirCache = {};
+            for (var k in m) {
+                var d = dirname(k);
+                while (d && d !== '/' && !vfsDirCache[d]) {
+                    vfsDirCache[d] = true;
+                    d = dirname(d);
+                }
+            }
+        }
+        var key = p.charAt(p.length - 1) === '/' ? p.slice(0, -1) : p;
+        return vfsDirCache[key] === true;
     }
 
     function dirname(p) {
@@ -747,6 +810,15 @@
                 var r = resolveCandidate(base);
                 if (!r) throw moduleNotFound(name, base);
                 return loadAbsoluteFile(r, makeRequire(dirname(r)));
+            }
+            // Linked dependency packages (__afb_links): a composed
+            // .afb maps each digest-pinned dependency coordinate to
+            // that dependency's entry inside the virtual tree. Exact
+            // names only — the dep's entry IS its API surface.
+            var links = globalThis.__afb_links;
+            if (links && typeof links === 'object' && typeof links[name] === 'string') {
+                var linked = links[name];
+                return loadAbsoluteFile(linked, makeRequire(dirname(linked)));
             }
             // Bare name — fall through to `node_modules` walk.
             var pkg = resolvePackage(name, fromDir);

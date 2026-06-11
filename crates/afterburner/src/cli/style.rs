@@ -118,17 +118,21 @@ pub fn gold(s: &str) -> String {
     paint(s, GOLD)
 }
 
-/// `✓ <msg>` in success green.
+/// `✓ <msg>` — glyph AND message in success green (cargo-style: the whole
+/// status line carries color, never a colored glyph next to default text).
+/// Pass a PLAIN `msg`: embedding a differently-colored span emits an inner
+/// reset that drops the green for the remainder — print such identifiers as
+/// separate styled args after the `ok(...)`.
 pub fn ok(msg: &str) -> String {
-    format!("{} {}", paint_bold("✓", SUCCESS), msg)
+    format!("{} {}", paint_bold("✓", SUCCESS), paint(msg, SUCCESS))
 }
-/// `✗ <msg>` in alert red.
+/// `✗ <msg>` — glyph and message in alert red.
 pub fn fail(msg: &str) -> String {
-    format!("{} {}", paint_bold("✗", FLAME_RED), msg)
+    format!("{} {}", paint_bold("✗", FLAME_RED), paint(msg, FLAME_RED))
 }
-/// `! <msg>` in gold.
+/// `! <msg>` — glyph and message in gold.
 pub fn warn(msg: &str) -> String {
-    format!("{} {}", paint_bold("!", GOLD), msg)
+    format!("{} {}", paint_bold("!", GOLD), paint(msg, GOLD))
 }
 /// A `→` step bullet in accent.
 pub fn bullet() -> String {

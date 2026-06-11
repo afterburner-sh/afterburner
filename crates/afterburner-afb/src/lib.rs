@@ -11,6 +11,8 @@
 //! on a round trip.
 
 pub mod digest;
+pub mod link;
+pub mod native;
 pub mod error;
 pub mod manifest;
 pub mod pack;
