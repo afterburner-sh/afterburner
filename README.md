@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>A sandboxed JavaScript VM for Rust. Execute untrusted scripts with memory limits, timeouts, capability-gated I/O, and threading.</strong>
+  <strong>A sandboxed JavaScript VM for Rust. Execute untrusted scripts with memory limits, timeouts, capability-gated I/O, and threading — with its own package format, registry, and package manager.</strong>
 </p>
 
 <p align="center">
@@ -111,6 +111,45 @@ UDF, batched UDF, multi-worker scheduling, streaming crypto,
 [`examples/express-app`](./examples/express-app) runs a real Express.js
 app: `require('express')` resolves the actual npm package out of
 `node_modules/` and serves HTTP end-to-end.
+
+---
+
+## Packages, registry & package manager
+
+Afterburner ships its **own package ecosystem** — its own package format,
+its own registry, and a built-in package manager. You don't need npm to
+publish or consume Afterburner code (and npm packages can still be pulled
+in as dependencies when you want them).
+
+- **`.afb` packages** — a package is a single, content-addressed,
+  compressed file: a manifest (`afb.toml`), a capability grant
+  (`manifold.json`), and your `source/`. Sealed by default; what it may
+  touch is declared and reviewable before anyone installs it. JavaScript
+  or TypeScript (TS is transpiled to JS at pack time).
+- **Registry** — publish and install packages from the Afterburner
+  registry (`afterburner-cloud` client + the `afterburner-registry`
+  service). Coordinates are `namespace/name@version`; every release is
+  pinned by SHA-256 digest.
+- **Cargo-style package manager** — `burn install` resolves the full
+  dependency graph with a conflict-driven version solver, writes a
+  reproducible `burn.lock`, and caches packages content-addressed. Two
+  kinds of dependency, both declared (never vendored into your artifact):
+  `[dependencies]` for other registry packages and `[npm]` for npm
+  packages, which a **native, pure-Rust** installer fetches and
+  integrity-checks — no `npm` toolchain, no install scripts, native/C-ABI
+  addons rejected.
+
+```sh
+burn init ./greeter --namespace acme --name greeter   # scaffold (add --ts for TypeScript)
+burn test                                             # run tests in the sandbox
+burn add acme/json-tools                              # pin a registry dependency
+burn install                                          # resolve + cache the graph → burn.lock
+burn package                                          # build the .afb (deterministic)
+burn publish                                          # upload to the registry
+```
+
+Full authoring guide and the dependency-security model are in the
+[documentation](https://afterburner.sh/docs#packages).
 
 ---
 
