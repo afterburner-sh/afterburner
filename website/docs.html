@@ -865,7 +865,7 @@
     <div class="nav__cta">
       <a href="index.html" class="btn btn--ghost btn--sm">Home</a>
       <a href="https://nodejs.org/docs/latest-v26.x/api/" class="btn btn--ghost btn--sm">Node.js Docs</a>
-      <a href="https://github.com/vertexclique/afterburner" class="btn btn--primary btn--sm btn--burn">
+      <a href="https://github.com/afterburner-sh/afterburner" class="btn btn--primary btn--sm btn--burn">
         <video class="burn-bg" src="art/burning.mp4" muted loop playsinline preload="metadata"></video>
         <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.94 0-1.11.39-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.64.71 1.03 1.6 1.03 2.71 0 3.84-2.34 4.69-4.57 4.94.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0 0 12 2z"/></svg>
         <span class="btn-label">Star</span>
@@ -1221,7 +1221,7 @@ module.exports = () =&gt; ({ hits, seen });</pre>
     .<span class="tok-fn">cache_backend</span>(Arc::<span class="tok-fn">new</span>(RedisBackend { client }))
     .<span class="tok-fn">build</span>()?;</pre>
       </div>
-      <p>See <a href="https://github.com/vertexclique/afterburner/tree/master/examples/cache-backend-sqlite" style="color: var(--action);"><code>examples/cache-backend-sqlite</code></a> for a working SQLite-WAL coordinator that two <code>Afterburner</code> instances share scripts through.</p>
+      <p>See <a href="https://github.com/afterburner-sh/afterburner/tree/master/examples/cache-backend-sqlite" style="color: var(--action);"><code>examples/cache-backend-sqlite</code></a> for a working SQLite-WAL coordinator that two <code>Afterburner</code> instances share scripts through.</p>
 
       <h3 id="extend-host">HostContext</h3>
       <p>Custom callbacks scripts can reach via <code>require('afterburner:host')</code>. Useful for streaming UDFs (<code>emit_row</code>), structured logging (<code>log</code>), and reading host-resolved configuration (<code>get_env</code>) without granting raw <code>process.env</code> access.</p>
@@ -1344,7 +1344,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
       </table></div>
 
       <h2 id="node-compat"><span class="anchor">#</span>Node compat surface</h2>
-      <p>Afterburner targets the <strong>Node.js 26</strong> surface. <code>burn npm install</code> and <code>require('express')</code> from a real <code>node_modules</code> tree both work end-to-end — see <a href="https://github.com/vertexclique/afterburner/tree/master/examples/express-app" style="color: var(--action);"><code>examples/express-app</code></a>. Pure-JS modules are always available; host-backed ones are gated by the <code>Manifold</code>; surface-only entries load and expose the right shapes.</p>
+      <p>Afterburner targets the <strong>Node.js 26</strong> surface. <code>burn npm install</code> and <code>require('express')</code> from a real <code>node_modules</code> tree both work end-to-end — see <a href="https://github.com/afterburner-sh/afterburner/tree/master/examples/express-app" style="color: var(--action);"><code>examples/express-app</code></a>. Pure-JS modules are always available; host-backed ones are gated by the <code>Manifold</code>; surface-only entries load and expose the right shapes.</p>
 
       <div class="callout callout--ok">
         <div class="callout__icon">✓</div>
@@ -1508,7 +1508,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <span class="lang">shell</span>
           <button class="copy-btn">Copy</button>
         </div>
-<pre>$ <span class="tok-mod">git</span> clone https://github.com/vertexclique/afterburner
+<pre>$ <span class="tok-mod">git</span> clone https://github.com/afterburner-sh/afterburner
 $ <span class="tok-fn">cd</span> afterburner
 $ <span class="tok-mod">cargo</span> build --release --features bin
 $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
@@ -1528,7 +1528,7 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
           <div class="l">← Previous</div>
           <div class="t">Landing</div>
         </a>
-        <a class="pagefoot__btn" href="https://github.com/vertexclique/afterburner" style="text-align: right;">
+        <a class="pagefoot__btn" href="https://github.com/afterburner-sh/afterburner" style="text-align: right;">
           <div class="l">Next →</div>
           <div class="t">Examples on GitHub</div>
         </a>

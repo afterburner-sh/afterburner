@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/vertexclique/afterburner/raw/master/art/svg/afterburner-bg-2000x500.svg" alt="Afterburner" width="100%"/>
+  <img src="https://github.com/afterburner-sh/afterburner/raw/master/art/svg/afterburner-bg-2000x500.svg" alt="Afterburner" width="100%"/>
 </p>
 
 <p align="center">
@@ -80,7 +80,7 @@ BURN_VERSION=v0.1.2 curl -fsSL https://afterburner.sh | sh
 $env:BURN_VERSION = 'v0.1.2'; iwr -useb https://afterburner.sh | iex
 ```
 
-Or grab a tarball directly from the [Releases page](https://github.com/vertexclique/afterburner/releases). Archives are named `burn-<version>-<target>.tar.gz` (or `.zip` for Windows) and ship with a `.sha256` next to them.
+Or grab a tarball directly from the [Releases page](https://github.com/afterburner-sh/afterburner/releases). Archives are named `burn-<version>-<target>.tar.gz` (or `.zip` for Windows) and ship with a `.sha256` next to them.
 
 Built with `--features release-cli` (every backend, every L3 shadow, TypeScript loader), so it's a single self-contained binary. No runtime libsqlite3, libssl, or libclang required. Plugin `.wasm` is `include_bytes!`-baked into the binary at build time.
 

@@ -11,7 +11,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$repo = 'vertexclique/afterburner'
+$repo = 'afterburner-sh/afterburner'
 $installDir = if ($env:BURN_INSTALL) { $env:BURN_INSTALL } else { Join-Path $env:USERPROFILE '.local\bin' }
 $version = if ($env:BURN_VERSION) { $env:BURN_VERSION } else { 'latest' }
 
