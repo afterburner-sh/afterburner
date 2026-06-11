@@ -10,6 +10,7 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+readme.workspace = true
 description = "Afterburner Node.js compat — polyfills + host shims"
 
 [dependencies]
@@ -49,7 +50,7 @@ flate2.workspace = true
 # zstd codec (Node 24+ stable). Statically linked C library plus a
 # safe-Rust wrapper. Used by `zlib.zstdCompress*` / `zstdDecompress*`
 # host fns and the `compression`-stream `'zstd'` format.
-zstd = { version = "0.13", default-features = false }
+zstd.workspace = true
 # Brotli codec — pure-Rust impl (no C dependency). Backs the
 # `zlib.brotliCompress*` / `brotliDecompress*` host fns.
 brotli.workspace = true
@@ -65,10 +66,10 @@ hickory-resolver = { workspace = true }
 # binary size scales with opt-in. `require('bcrypt')` etc. work
 # inside the WASM sandbox where loading a .node binary would be
 # impossible.
-bcrypt = { version = "0.17", optional = true }
-argon2 = { version = "0.5", optional = true, features = ["std"] }
-password-hash = { version = "0.5", optional = true, features = ["std"] }
-jsonwebtoken = { version = "10", optional = true, default-features = false, features = ["use_pem", "rust_crypto"] }
+bcrypt = { workspace = true, optional = true }
+argon2 = { workspace = true, optional = true }
+password-hash = { workspace = true, optional = true }
+jsonwebtoken = { workspace = true, optional = true }
 # L3 shadow: sqlite3. `bundled` compiles the SQLite C amalgamation
 # into the burn binary (no runtime dependency on libsqlite3.so).
 rusqlite = { workspace = true, optional = true }

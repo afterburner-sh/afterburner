@@ -10,6 +10,7 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+readme.workspace = true
 description = "Afterburner WASM engine — Wasmtime + QuickJS sandbox"
 
 [features]
@@ -112,10 +113,10 @@ libc.workspace = true
 afterburner-ignite.workspace = true
 rsa.workspace = true
 p256.workspace = true
-rand = "0.8"
+rand.workspace = true
 # Compile WAT (WebAssembly text format) to bytes inside tests so we
 # don't have to hand-encode binary fixtures.
-wat = "1"
+wat.workspace = true
 # B7 tls — generate self-signed certs in unit tests for the
 # server-config builder.
 rcgen = { workspace = true }

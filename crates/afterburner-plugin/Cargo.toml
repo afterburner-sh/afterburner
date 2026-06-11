@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
 description = "Afterburner Javy plugin — host imports + JS globals"
 # wasm32-wasip1-only build artifact. The compiled .wasm ships baked
 # into afterburner-wasi via include_bytes!; this crate is build-time
@@ -21,4 +24,4 @@ serde_json.workspace = true
 # user source via the plugin's `compile` mode and gets QuickJS bytecode
 # back as base64 on stdout; thrust() ships the cached bytecode back via
 # the `invoke` mode envelope. `default-features = false` keeps it no_std.
-base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+base64.workspace = true

@@ -14,7 +14,7 @@ license = "Apache-2.0"
 description = "Afterburner .afb package format — reproducible, content-addressed pack/unpack with sandboxed-manifest preservation"
 keywords = ["afterburner", "wasm", "package", "zstd", "sandbox"]
 categories = ["compression", "development-tools", "wasm"]
-readme = "README.md"
+readme.workspace = true
 include = ["src/**/*.rs", "Cargo.toml", "LICENSE", "README.md", "FORMAT.md"]
 
 [dependencies]

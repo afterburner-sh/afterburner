@@ -7,7 +7,7 @@
 # by user agent — curl/wget get this; PowerShell gets install.ps1.)
 #
 # Honors:
-#   BURN_VERSION   pinned tag (e.g. v0.1.1). Defaults to "latest".
+#   BURN_VERSION   pinned tag (e.g. v0.1.2). Defaults to "latest".
 #   BURN_INSTALL   install dir. Defaults to $HOME/.local/bin (no sudo).
 #
 # Tested under bash, zsh, dash, ash (Alpine BusyBox), ksh, mksh.

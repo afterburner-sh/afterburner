@@ -991,6 +991,7 @@
           <span class="copy">Copy</span>
         </div>
         <p class="installer__hint">Pin a version with <code>BURN_VERSION=vX.Y.Z</code> · custom install dir with <code>BURN_INSTALL=/usr/local/bin</code> · skip the <code>$PATH</code> update with <code>BURN_INSTALL_NO_PATH=1</code></p>
+        <p class="installer__hint">Uninstall — undoes exactly what the installer did (binary + the <code>$PATH</code> line), nothing else: <code>curl -fsSL https://afterburner.sh/uninstall | sh</code> &middot; PowerShell: <code>iwr -useb https://afterburner.sh/uninstall | iex</code> &middot; pass the same <code>BURN_INSTALL</code> if you customized the dir</p>
       </div>
 
       <p>Or pull the runtime as a Rust library:</p>
@@ -1013,7 +1014,7 @@
         </div>
 <pre>$ <span class="tok-mod">cargo install</span> afterburner --features bin
 $ <span class="tok-mod">burn</span> --version
-afterburner 0.1.1</pre>
+afterburner 0.1.2</pre>
       </div>
 
       <p>The prebuilt binary ships with <code>--features release-cli</code> (every backend, every L3 shadow, TypeScript loader). Nothing external is needed at runtime; SQLite, OpenSSL, libclang are all statically linked in. See <a href="#build" style="color: var(--action);">Building from source</a> if you want to compile the workspace yourself.</p>
@@ -1460,7 +1461,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><td><code>AFTERBURNER_LOG_FORMAT</code></td><td><code>text</code></td><td>Reporter format: <code>text</code> (stderr) or <code>json</code> (stdout NDJSON)</td></tr>
           <tr><td><code>AFTERBURNER_REBUILD_PLENUM</code></td><td>unset</td><td>Set to <code>1</code> to regenerate <code>generated/plenum_bundle.js</code>.</td></tr>
           <tr><td><code>BURN_MAX_LINEAR_MEMORY</code></td><td><code>1G</code> (1 GiB)</td><td>Per-instance WASM linear-memory ceiling enforced by Wasmtime's pooling allocator. Accepts plain bytes or a <code>K</code>/<code>M</code>/<code>G</code> suffix (e.g. <code>4G</code> = 4 GiB, <code>128M</code> = 128 MiB). Hard-clamped to 4 GiB (the wasm32 ABI limit). Bump it for long-running daemon-mode workloads (Express, Fastify, etc.) that accumulate per-request state across many calls; lower it when running many concurrent instances on small hosts. <code>--memory &lt;N&gt;</code> on the CLI sets a tighter per-call cap below this hard limit and is independent of <code>-A</code>.</td></tr>
-          <tr><td><code>BURN_VERSION</code></td><td><code>latest</code></td><td>Version pin used by the <code>install.sh</code> / <code>install.ps1</code> bootstrap (e.g. <code>v0.1.1</code>). Has no effect after the binary is installed.</td></tr>
+          <tr><td><code>BURN_VERSION</code></td><td><code>latest</code></td><td>Version pin used by the <code>install.sh</code> / <code>install.ps1</code> bootstrap (e.g. <code>v0.1.2</code>). Has no effect after the binary is installed.</td></tr>
           <tr><td><code>BURN_INSTALL</code></td><td><code>~/.local/bin</code></td><td>Install dir for the bootstrap installers. The runtime itself doesn't read this.</td></tr>
           <tr><td><code>BURN_INSTALL_NO_PATH</code></td><td>unset</td><td>Set to <code>1</code> to skip the bootstrap installer's automatic <code>$PATH</code> update (it normally appends an <code>export PATH=...</code> line to your shell rc — <code>~/.bashrc</code>, <code>~/.zshrc</code>, fish config, or <code>~/.profile</code> — or sets the User <code>Path</code> environment variable on Windows). Use this if you manage <code>$PATH</code> yourself via dotfiles, chezmoi, or a NixOS / nix-home / Guix configuration.</td></tr>
           <tr><td><code>BURN_QUIET</code></td><td>unset</td><td>Set to <code>1</code> to suppress the first-run capability banner and other non-essential stderr notices. Same as <code>--quiet</code> / <code>-q</code>.</td></tr>

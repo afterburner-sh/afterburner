@@ -12,6 +12,7 @@ homepage.workspace = true
 documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
+readme.workspace = true
 description = "Afterburner registry client — login/publish/install/search/scaffold for .afb packages (the engine behind burn's package-management subcommands)"
 
 [dependencies]

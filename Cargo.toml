@@ -47,6 +47,9 @@ license = "BUSL-1.1"
 repository = "https://github.com/vertexclique/afterburner"
 homepage = "https://github.com/vertexclique/afterburner"
 documentation = "https://docs.rs/afterburner"
+# Every crate publishes with the top-level README (workspace-inherited;
+# cargo resolves this relative to the workspace root and bundles it).
+readme = "README.md"
 keywords = ["javascript", "wasm", "sandbox", "runtime"]
 categories = ["wasm", "development-tools"]
 
@@ -66,13 +69,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 
-# `.afb` package format (afterburner-afb). zstd carries a `zstdmt`-free
-# default build (no compression threads) so packing stays single-core and
-# predictable; decode memory is bounded at runtime via window_log_max, not
+# `.afb` package format (afterburner-afb). zstd is built without default
+# features (no legacy-frame decode, no zdict builder, no compression
+# threads) — one trimmed build shared by afb packing and the node-compat
+# zlib shadow; decode memory is bounded at runtime via window_log_max, not
 # by the dependency. dirs/secrecy/zeroize/httpmock are reserved here for
 # the forthcoming afterburner-cloud client crate.
 tar = { version = "0.4", default-features = false }
-zstd = "0.13"
+zstd = { version = "0.13", default-features = false }
 toml = "0.8"
 semver = { version = "1", features = ["serde"] }
 pubgrub = "0.4"
@@ -199,6 +203,26 @@ rquickjs = { version = "0.11", features = ["bindgen"] }
 fastrace = { version = "0.7", features = ["enable"] }
 
 javy-plugin-api = "6.0"
+
+# `burn` CLI surface (the `bin`/`release-cli` features only).
+clap = { version = "4", features = ["derive"] }
+rustyline = "14"
+# Pinned exact: oxc's API churns between minors; bumps are deliberate.
+oxc = { version = "=0.127.0", default-features = false, features = [
+    "transformer", "codegen", "semantic", "ast_visit",
+] }
+
+# node-compat optional password-hashing / JWT shadows (feature-gated).
+bcrypt = "0.17"
+argon2 = { version = "0.5", features = ["std"] }
+password-hash = { version = "0.5", features = ["std"] }
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "rust_crypto"] }
+
+# dev-dependencies shared across crates — single source of truth too.
+rand = "0.8"
+wat = "1"
+http = "1"
+serial_test = "3"
 
 [profile.release]
 opt-level = 3

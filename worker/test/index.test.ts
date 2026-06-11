@@ -215,6 +215,54 @@ describe("planRoute — explicit overrides", () => {
   });
 });
 
+describe("planRoute — /uninstall UA dispatch (mirror of apex)", () => {
+  it("curl → /uninstall.sh with shellscript content-type", () => {
+    const plan = planRoute(r("/uninstall", { ua: UA_CURL }));
+    expect(plan).toEqual({
+      kind: "rewrite",
+      assetPath: "/uninstall.sh",
+      headers: expect.objectContaining({
+        "content-type": "text/x-shellscript; charset=utf-8",
+        "cache-control": CACHE.INSTALL,
+      }),
+    });
+  });
+
+  it("PowerShell → /uninstall.ps1", () => {
+    expect(planRoute(r("/uninstall", { ua: UA_PS_CORE }))).toMatchObject({
+      kind: "rewrite",
+      assetPath: "/uninstall.ps1",
+    });
+  });
+
+  it("trailing slash works", () => {
+    expect(planRoute(r("/uninstall/", { ua: UA_WGET }))).toMatchObject({
+      kind: "rewrite",
+      assetPath: "/uninstall.sh",
+    });
+  });
+
+  it("browser UA gets the docs page, not the marketing page", () => {
+    expect(planRoute(r("/uninstall", { ua: UA_BROWSER }))).toMatchObject({
+      kind: "rewrite",
+      assetPath: "/docs.html",
+    });
+  });
+
+  it("?install=ps1 override works on /uninstall too", () => {
+    expect(planRoute(r("/uninstall?install=ps1", { ua: UA_CURL }))).toMatchObject({
+      kind: "rewrite",
+      assetPath: "/uninstall.ps1",
+    });
+  });
+
+  it("POST /uninstall does not UA-dispatch; falls through to passthrough", () => {
+    expect(planRoute(r("/uninstall", { method: "POST", ua: UA_CURL }))).toMatchObject({
+      kind: "passthrough",
+    });
+  });
+});
+
 describe("planRoute — non-apex paths", () => {
   it("/docs maps to /docs.html via rewrite", () => {
     expect(planRoute(r("/docs"))).toMatchObject({
@@ -284,6 +332,18 @@ describe("passthroughHeaders — content-type + cache-control by extension", () 
 
   it("install.ps1 gets short cache + text/plain content-type", () => {
     const h = passthroughHeaders("/install.ps1");
+    expect(h["cache-control"]).toBe(CACHE.INSTALL);
+    expect(h["content-type"]).toBe("text/plain; charset=utf-8");
+  });
+
+  it("uninstall.sh gets short cache + shellscript content-type", () => {
+    const h = passthroughHeaders("/uninstall.sh");
+    expect(h["cache-control"]).toBe(CACHE.INSTALL);
+    expect(h["content-type"]).toBe("text/x-shellscript; charset=utf-8");
+  });
+
+  it("uninstall.ps1 gets short cache + text/plain content-type", () => {
+    const h = passthroughHeaders("/uninstall.ps1");
     expect(h["cache-control"]).toBe(CACHE.INSTALL);
     expect(h["content-type"]).toBe("text/plain; charset=utf-8");
   });
@@ -369,6 +429,23 @@ describe("e2e via SELF.fetch (assets-first mode in test pool)", () => {
     const body = await res.text();
     expect(body).toContain("$ErrorActionPreference");
     expect(body).toContain("BURN_VERSION");
+    expect(body).toContain("BURN_INSTALL");
+  });
+
+  it("/uninstall.sh returns the script body and references the rc marker", async () => {
+    const res = await SELF.fetch(APEX + "/uninstall.sh");
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("#!/bin/sh");
+    expect(body).toContain("# burn (https://afterburner.sh)");
+    expect(body).toContain("BURN_INSTALL");
+  });
+
+  it("/uninstall.ps1 returns the script body", async () => {
+    const res = await SELF.fetch(APEX + "/uninstall.ps1");
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("$ErrorActionPreference");
     expect(body).toContain("BURN_INSTALL");
   });
 

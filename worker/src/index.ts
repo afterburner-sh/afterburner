@@ -8,6 +8,8 @@
 //   GET / + curl/wget UA   -> install.sh   (text/x-shellscript)
 //   GET / + PowerShell UA  -> install.ps1  (text/plain)
 //   GET / + browser UA     -> index.html
+//   GET /uninstall[/]      -> uninstall.sh / uninstall.ps1 by the same
+//                             UA dispatch (browser UA -> docs.html)
 //   GET /docs[/]           -> docs.html
 //   everything else        -> ASSETS pass-through, with cache + security
 //                             headers stamped by content-type.
@@ -67,7 +69,16 @@ export function planRoute(req: Request): RoutePlan {
     url.pathname === "/" &&
     (method === "GET" || method === "HEAD")
   ) {
-    return planApex(req, url);
+    return planScripted(req, url, "/install.sh", "/install.ps1", "/index.html");
+  }
+
+  if (
+    (url.pathname === "/uninstall" || url.pathname === "/uninstall/") &&
+    (method === "GET" || method === "HEAD")
+  ) {
+    // Same UA dispatch as the apex; a browser landing here gets the
+    // docs (which document uninstall), not the marketing page.
+    return planScripted(req, url, "/uninstall.sh", "/uninstall.ps1", "/docs.html");
   }
 
   if (url.pathname === "/docs" || url.pathname === "/docs/") {
@@ -88,7 +99,13 @@ export function planRoute(req: Request): RoutePlan {
   };
 }
 
-function planApex(req: Request, url: URL): RoutePlan {
+function planScripted(
+  req: Request,
+  url: URL,
+  shAsset: string,
+  psAsset: string,
+  htmlAsset: string,
+): RoutePlan {
   const ua = req.headers.get("user-agent") ?? "";
   const accept = req.headers.get("accept") ?? "";
   const raw = url.searchParams.get("install");
@@ -101,7 +118,7 @@ function planApex(req: Request, url: URL): RoutePlan {
   if (force === "html" || (force === null && accept.includes("text/html"))) {
     return {
       kind: "rewrite",
-      assetPath: "/index.html",
+      assetPath: htmlAsset,
       headers: {
         "content-type": "text/html; charset=utf-8",
         "cache-control": CACHE.HTML,
@@ -113,7 +130,7 @@ function planApex(req: Request, url: URL): RoutePlan {
   if (force === "sh" || (force === null && SH_RE.test(ua))) {
     return {
       kind: "rewrite",
-      assetPath: "/install.sh",
+      assetPath: shAsset,
       headers: {
         "content-type": "text/x-shellscript; charset=utf-8",
         "cache-control": CACHE.INSTALL,
@@ -125,7 +142,7 @@ function planApex(req: Request, url: URL): RoutePlan {
   if (force === "ps1" || (force === null && PS_RE.test(ua))) {
     return {
       kind: "rewrite",
-      assetPath: "/install.ps1",
+      assetPath: psAsset,
       headers: {
         "content-type": "text/plain; charset=utf-8",
         "cache-control": CACHE.INSTALL,
@@ -136,7 +153,7 @@ function planApex(req: Request, url: URL): RoutePlan {
 
   return {
     kind: "rewrite",
-    assetPath: "/index.html",
+    assetPath: htmlAsset,
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": CACHE.HTML,
@@ -155,10 +172,10 @@ export function passthroughHeaders(path: string): Record<string, string> {
     out["cache-control"] = CACHE.IMMUTABLE;
   } else if (RE_CSS_JS.test(path)) {
     out["cache-control"] = CACHE.CSS_JS;
-  } else if (path === "/install.sh") {
+  } else if (path === "/install.sh" || path === "/uninstall.sh") {
     out["cache-control"] = CACHE.INSTALL;
     out["content-type"] = "text/x-shellscript; charset=utf-8";
-  } else if (path === "/install.ps1") {
+  } else if (path === "/install.ps1" || path === "/uninstall.ps1") {
     out["cache-control"] = CACHE.INSTALL;
     out["content-type"] = "text/plain; charset=utf-8";
   } else if (path.endsWith(".html")) {

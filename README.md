@@ -11,6 +11,7 @@
   <a href="https://docs.rs/afterburner"><img src="https://img.shields.io/docsrs/afterburner?style=flat-square&color=2a9d8f" alt="docs.rs"/></a>
   <img src="https://img.shields.io/badge/rust-1.90%2B_(2024_ed)-blue?style=flat-square&logo=rust&logoColor=white" alt="MSRV"/>
   <img src="https://img.shields.io/badge/license-BUSL--1.1-orange?style=flat-square" alt="License"/>
+  <a href="https://discord.gg/GfTJmZaNNn"><img src="https://img.shields.io/badge/discord-join%20chat-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"/></a>
 </p>
 
 ---
@@ -71,12 +72,12 @@ Pin a specific version with `BURN_VERSION`:
 
 ```sh
 # POSIX (put the latest version if you want, below command might be outdated)
-BURN_VERSION=v0.1.1 curl -fsSL https://afterburner.sh | sh
+BURN_VERSION=v0.1.2 curl -fsSL https://afterburner.sh | sh
 ```
 
 ```powershell
 # PowerShell (put the latest version if you want, below command might be outdated)
-$env:BURN_VERSION = 'v0.1.1'; iwr -useb https://afterburner.sh | iex
+$env:BURN_VERSION = 'v0.1.2'; iwr -useb https://afterburner.sh | iex
 ```
 
 Or grab a tarball directly from the [Releases page](https://github.com/vertexclique/afterburner/releases). Archives are named `burn-<version>-<target>.tar.gz` (or `.zip` for Windows) and ship with a `.sha256` next to them.
