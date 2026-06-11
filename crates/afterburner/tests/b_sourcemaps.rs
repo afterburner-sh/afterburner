@@ -78,7 +78,7 @@ fn ts_transpile_emits_source_mapping_url_in_output() {
     // back through our internal transpile path, prints the
     // transpiled output, and grep for the source-map header.
     //
-    // We expose this via an inline TS file that imports nothing —
+    // We expose this via an inline TS file that imports nothing -
     // the transpile output is what `require()` would have computed.
     let dir = fresh_dir("emit");
     let target = dir.join("hi.ts");

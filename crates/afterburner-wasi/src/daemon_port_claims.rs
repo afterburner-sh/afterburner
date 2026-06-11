@@ -8,7 +8,7 @@
 //! `DaemonNet` / `DaemonTls` / `DaemonDgram` each live per-shard in
 //! `HostState`. When a daemon-init source calls
 //! `net.createServer().listen(3000)`, every shard's coordinator
-//! tries to bind port 3000 — without arbitration, only one shard
+//! tries to bind port 3000 - without arbitration, only one shard
 //! wins and the others fail with EADDRINUSE, killing daemon-init.
 //!
 //! `SharedPortClaims` is a process-shared, lock-free port arbiter
@@ -17,7 +17,7 @@
 //!
 //! * The first shard to call `try_claim(port)` becomes the
 //!   **owner** and proceeds with the real `bind(2)` + listener task.
-//! * Subsequent shards become **followers** — they get the same
+//! * Subsequent shards become **followers** - they get the same
 //!   id back and treat their `listen()` as a no-op (no bind, no
 //!   listener task spawned). The user's JS sees a live listener,
 //!   the kernel sees only one bound socket.
@@ -37,8 +37,8 @@
 //! service with HTTP, or run with `BURN_SHARDS=1` for explicit
 //! single-shard semantics.
 //!
-//! This trade-off is acceptable because the alternative —
-//! cross-shard FD passing or SO_REUSEPORT — adds significant
+//! This trade-off is acceptable because the alternative -
+//! cross-shard FD passing or SO_REUSEPORT - adds significant
 //! complexity (the kernel hashes connections across listeners
 //! by 4-tuple, which doesn't load-balance evenly under bursty
 //! traffic; FD passing introduces ordering races between accept
@@ -60,7 +60,7 @@ pub enum ClaimResult {
     /// binding the real socket and spawning the listener task.
     Owner(ServerId),
     /// Another shard already claimed this port. The caller should
-    /// register a follower listener — allocate a local server_id
+    /// register a follower listener - allocate a local server_id
     /// for JS bookkeeping, but do not bind. Connection events
     /// flow only through the owner shard.
     Follower(ServerId),
@@ -74,7 +74,7 @@ pub struct SharedPortClaims {
     /// Monotonic id allocator. Each call to `try_claim` consumes
     /// one id regardless of outcome (the loser still emits an id
     /// to its caller; `get_or_insert` returns the winner's id but
-    /// the loser's id is just discarded — no leak, no reuse).
+    /// the loser's id is just discarded - no leak, no reuse).
     next_id: AtomicI32,
 }
 
@@ -87,7 +87,7 @@ impl SharedPortClaims {
     }
 
     /// Lock-free try-claim. The kovan map's `get_or_insert` is a
-    /// CAS — N shards racing on the same port converge atomically
+    /// CAS - N shards racing on the same port converge atomically
     /// to a single winner. No mutex, no syscall on the uncontended
     /// path (the contended path's only real cost is the kernel's
     /// own bind arbitration, which the owner handles).
@@ -102,7 +102,7 @@ impl SharedPortClaims {
     }
 
     /// Release a claim. The owner shard calls this when its
-    /// `server.close()` fires. Followers must NOT call this —
+    /// `server.close()` fires. Followers must NOT call this -
     /// they don't own the claim. Idempotent: removing a missing
     /// port is a no-op.
     ///

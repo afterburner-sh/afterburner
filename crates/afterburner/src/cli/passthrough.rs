@@ -4,12 +4,12 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 //! Pass-through dispatch: `burn node foo.js`, `burn npm install`,
-//! `burn pnpm run dev`, and the Q5-A general case — any first-arg
+//! `burn pnpm run dev`, and the Q5-A general case - any first-arg
 //! that isn't a subcommand and isn't a local file but *is* on `PATH`
 //! runs as a pass-through via the PATH shim in [`super::shim`].
 //!
 //! **Q5-A precedence** (locked):
-//! 1. Existing-file wins — if `argv[1]` resolves to a file in cwd,
+//! 1. Existing-file wins - if `argv[1]` resolves to a file in cwd,
 //!    we run it as a script regardless of whether the name also
 //!    exists on `PATH`.
 //! 2. Known targets (`node`, `npm`, `npx`, `pnpm`, `yarn`, `bun`)
@@ -56,19 +56,19 @@ const SHIM_DEPTH_ENV: &str = "BURN_SHIM_DEPTH";
 /// hard-coded names as "always pass through" makes that decision
 /// deterministic without magic.
 pub enum Detected {
-    /// Hard-coded Node-ecosystem entry point — dispatch as
+    /// Hard-coded Node-ecosystem entry point - dispatch as
     /// pass-through regardless of eval-mode context.
     KnownTarget(String),
-    /// Arbitrary PATH-resolved binary — Q5-A general case. The
+    /// Arbitrary PATH-resolved binary - Q5-A general case. The
     /// caller should only dispatch as pass-through when `-e CODE`
     /// is *not* in play.
     PathTarget(String),
-    /// Not a pass-through target — fall back to "run this as a file"
+    /// Not a pass-through target - fall back to "run this as a file"
     /// (the existing positional-file path).
     Runnable,
     /// `argv[1]` is neither a known subcommand, a file, nor on
     /// `PATH`. Surface a typed unknown-command error (Q5-2) before
-    /// any exec attempt — unless we're in eval mode, where the
+    /// any exec attempt - unless we're in eval mode, where the
     /// positional is a script arg and this verdict is ignored.
     Unknown(String),
 }
@@ -82,7 +82,7 @@ pub enum Detected {
 /// binds the colliding token (`install` / `run` / `test`) as *burn's*
 /// subcommand and swallows the rest into that subcommand's fields, so
 /// they never reach `cli.rest_args`. The tokens belong to the target,
-/// not to burn — recover them from argv by slicing everything after the
+/// not to burn - recover them from argv by slicing everything after the
 /// first standalone occurrence of `target`.
 ///
 /// `target` is `cli.file` (the first positional clap bound), so the
@@ -128,7 +128,7 @@ pub fn detect(file: &Path) -> Detected {
 pub fn dispatch(cli: &mut Cli, target: &str) -> Result<()> {
     banner::maybe_show(cli);
     match target {
-        // `node` stays a pure in-process dispatch — no subprocess, no
+        // `node` stays a pure in-process dispatch - no subprocess, no
         // PATH lookup. It's just "run this script under burn".
         "node" => dispatch_node(cli),
         _ => dispatch_via_shim(cli, target),
@@ -187,7 +187,7 @@ fn check_shim_depth() -> Result<()> {
     if depth >= SHIM_DEPTH_LIMIT {
         anyhow::bail!(
             "burn: shim recursion limit reached ({SHIM_DEPTH_ENV}={depth}, limit={SHIM_DEPTH_LIMIT}).\n\
-             a process in this tree kept spawning `burn` via the PATH shim — check for a fork loop."
+             a process in this tree kept spawning `burn` via the PATH shim - check for a fork loop."
         );
     }
     Ok(())
@@ -302,7 +302,7 @@ fn exec_with_shim(real: &Path, args: &[String], shim_dir: &Path) -> Result<()> {
         .status()
         .with_context(|| format!("spawning {real:?}"))?;
     // Propagate exit code verbatim so CI tooling (which cares) stays
-    // correct. `None` means the child died by signal — map to 1.
+    // correct. `None` means the child died by signal - map to 1.
     std::process::exit(status.code().unwrap_or(1));
 }
 

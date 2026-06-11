@@ -8,7 +8,7 @@
 //! `#[cfg(test)]` module in `src/bin/burn.rs` per §4.7 of
 //! `IMPL_PLAN_BURN_RUNTIME.md`.
 //!
-//! Semantics tested: Q1-D — the CLI defaults to `Manifold::open()`;
+//! Semantics tested: Q1-D - the CLI defaults to `Manifold::open()`;
 //! `--sandbox` or any `--allow-*` flag flips to sealed + explicit
 //! grants; `-A` is a shortcut for open.
 
@@ -149,7 +149,7 @@ fn allow_all_opens_every_flap() {
 #[test]
 fn allow_net_wildcard_is_unrestricted_under_implicit_sandbox() {
     // `--allow-net=*` without `--sandbox` still implicitly sandboxes
-    // other axes — net is the only thing granted.
+    // other axes - net is the only thing granted.
     let m = build_manifold(&CliBuilder::default().net("*").build());
     match m.net {
         NetAccess::OutboundFull(None) => {}

@@ -12,7 +12,7 @@
 //! * afterburner-ignite pumps `ctx.execute_pending_job()` after the
 //!   envelope eval when the user returned a thenable.
 //!
-//! The same JS script runs against both engines — behavior must match.
+//! The same JS script runs against both engines - behavior must match.
 
 use afterburner_core::{Combustor, FuelGauge, Manifold};
 use afterburner_ignite::NativeCombustor;
@@ -152,7 +152,7 @@ fn set_immediate_defers() {
 
 #[test]
 fn nested_microtasks_resolve() {
-    // Microtask that schedules another microtask — the pump must
+    // Microtask that schedules another microtask - the pump must
     // drain the queue until empty.
     let src = r#"
         module.exports = () => new Promise(resolve => {
@@ -250,14 +250,14 @@ fn native_infinite_microtask_chain_is_bounded() {
 fn wasm_infinite_microtask_chain_is_bounded() {
     // T5 gate (plan §6, REVIEW.md Pitfall 18): the WASM counterpart of
     // the native pump-cap test. A script that schedules itself forever
-    // as a microtask must not wedge the worker — we expect Timeout or
+    // as a microtask must not wedge the worker - we expect Timeout or
     // FuelExhausted, *never* a hang.
     //
     // The mechanism is wasmtime epoch interruption: the shared engine
     // ticker bumps the epoch every 10 ms; Cranelift-emitted safepoints
     // inside Javy's Promise::finish pump re-read the epoch on each
     // iteration and surface a Trap::Interrupt when the deadline elapses.
-    // Fuel is the secondary guard — if safepoints are sparse enough
+    // Fuel is the secondary guard - if safepoints are sparse enough
     // that epoch misses the pump, fuel still exhausts eventually.
     let src = r#"
         module.exports = () => new Promise(() => {
@@ -270,7 +270,7 @@ fn wasm_infinite_microtask_chain_is_bounded() {
         // liveness workaround.
         fuel: Some(5_000_000_000),
         // 3-second wall clock is comfortable above the 10 ms tick
-        // resolution — the pump must terminate well before we'd notice
+        // resolution - the pump must terminate well before we'd notice
         // in CI.
         timeout_ms: Some(3_000),
         manifold: Manifold::sealed(),
@@ -299,8 +299,8 @@ fn wasm_infinite_microtask_chain_is_bounded() {
 
 #[test]
 fn wasm_microtask_pump_bounded_by_fuel_alone() {
-    // P8 defense-in-depth: prove *fuel* — without any wall-clock
-    // timeout — also bounds the microtask pump. If the epoch mechanism
+    // P8 defense-in-depth: prove *fuel* - without any wall-clock
+    // timeout - also bounds the microtask pump. If the epoch mechanism
     // ever silently broke on a new wasmtime version, fuel is still a
     // hard cap.
     //
@@ -336,8 +336,8 @@ fn wasm_microtask_pump_bounded_by_fuel_alone() {
 
 #[test]
 fn wasm_microtask_pump_bounded_by_timeout_alone() {
-    // P8 defense-in-depth (the other belt): prove *timeout* — without
-    // any fuel cap — also bounds the pump. Pairs with
+    // P8 defense-in-depth (the other belt): prove *timeout* - without
+    // any fuel cap - also bounds the pump. Pairs with
     // `wasm_microtask_pump_bounded_by_fuel_alone` so we know each
     // mechanism stands on its own.
     let src = r#"

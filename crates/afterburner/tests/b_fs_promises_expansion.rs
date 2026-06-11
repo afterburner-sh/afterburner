@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! B7 — `fs/promises` expansion: realpath, cp, opendir + Dir/Dirent,
+//! B7 - `fs/promises` expansion: realpath, cp, opendir + Dir/Dirent,
 //! watch + FSWatcher (polling-based), and FileHandle (returned from
 //! `fs.promises.open`).
 //!
@@ -11,26 +11,26 @@
 //! (full grants) so capability gating doesn't shadow the surface
 //! we're verifying. Test inventory:
 //!
-//! * `realpath_resolves_symlink` — realpathSync follows a symlink.
-//! * `realpath_promise_form` — `fs.promises.realpath` round-trips.
-//! * `realpath_throws_for_missing` — clean ENOENT-class error.
-//! * `cp_copies_file` — file → file copy.
-//! * `cp_recursive_directory` — directory tree copy with nested entries.
-//! * `cp_force_overwrites` — `force: true` clobbers an existing file.
-//! * `cp_no_force_rejects_existing` — without `force`, existing dst errors.
-//! * `cp_promise_form` — `fs.promises.cp` resolves on success.
-//! * `opendir_returns_dirent_with_types` — `Dirent.isFile/isDirectory`.
-//! * `opendir_async_iterator_yields_all` — `for await` yields every entry.
-//! * `opendir_close_after_close_throws` — `ERR_DIR_CLOSED` after close.
-//! * `readdir_with_file_types_returns_dirents` — readdirSync({withFileTypes:true}).
-//! * `watch_emits_change_on_write` — FSWatcher fires 'change' when a file mutates.
-//! * `watch_emits_rename_on_create` — FSWatcher fires 'rename' on a new file.
-//! * `watch_close_stops_emissions` — `.close()` halts the watcher.
-//! * `watch_async_iterator` — `fs.promises.watch` is async-iterable.
-//! * `filehandle_read_writes_at_offsets` — read/write with positional offsets.
-//! * `filehandle_readFile_writeFile` — convenience methods round-trip.
-//! * `filehandle_close_then_use_throws` — `EBADF` after close.
-//! * `filehandle_truncate_shrinks` — truncate(N) trims the file.
+//! * `realpath_resolves_symlink` - realpathSync follows a symlink.
+//! * `realpath_promise_form` - `fs.promises.realpath` round-trips.
+//! * `realpath_throws_for_missing` - clean ENOENT-class error.
+//! * `cp_copies_file` - file → file copy.
+//! * `cp_recursive_directory` - directory tree copy with nested entries.
+//! * `cp_force_overwrites` - `force: true` clobbers an existing file.
+//! * `cp_no_force_rejects_existing` - without `force`, existing dst errors.
+//! * `cp_promise_form` - `fs.promises.cp` resolves on success.
+//! * `opendir_returns_dirent_with_types` - `Dirent.isFile/isDirectory`.
+//! * `opendir_async_iterator_yields_all` - `for await` yields every entry.
+//! * `opendir_close_after_close_throws` - `ERR_DIR_CLOSED` after close.
+//! * `readdir_with_file_types_returns_dirents` - readdirSync({withFileTypes:true}).
+//! * `watch_emits_change_on_write` - FSWatcher fires 'change' when a file mutates.
+//! * `watch_emits_rename_on_create` - FSWatcher fires 'rename' on a new file.
+//! * `watch_close_stops_emissions` - `.close()` halts the watcher.
+//! * `watch_async_iterator` - `fs.promises.watch` is async-iterable.
+//! * `filehandle_read_writes_at_offsets` - read/write with positional offsets.
+//! * `filehandle_readFile_writeFile` - convenience methods round-trip.
+//! * `filehandle_close_then_use_throws` - `EBADF` after close.
+//! * `filehandle_truncate_shrinks` - truncate(N) trims the file.
 
 #![cfg(feature = "bin")]
 
@@ -85,7 +85,7 @@ fn realpath_resolves_symlink() {
     std::os::unix::fs::symlink(&target, &link).unwrap();
     #[cfg(windows)]
     {
-        // Windows symlink may need elevated privileges — fall back to
+        // Windows symlink may need elevated privileges - fall back to
         // the same file path so the test still verifies realpath
         // collapses any "./" segments.
         std::fs::copy(&target, &link).unwrap();
@@ -369,13 +369,13 @@ fn readdir_with_file_types_returns_dirents() {
 //
 // host_fs_watch_poll BLOCKS the JS thread for `interval_ms`, so any
 // in-burn setTimeout that schedules a write happens AFTER the first
-// poll completes — too late to be observed. We instead coordinate via
+// poll completes - too late to be observed. We instead coordinate via
 // a shared event-log file: burn writes events into <dir>/events.log
 // using fs.writeFileSync({flag:'a'}); the rust test thread spawns
 // burn, sleeps long enough for the watcher to be running, mutates the
 // target file, sleeps again for the next poll cycle, then reads the
 // log and asserts. Avoids the cross-process pipe-buffering race
-// entirely — disk-backed messaging is the simpler protocol.
+// entirely - disk-backed messaging is the simpler protocol.
 //
 // burn debug-build cold-start is ~6 seconds; budgets reflect that.
 
@@ -488,7 +488,7 @@ fn watch_emits_rename_on_create() {
 fn watch_close_stops_emissions() {
     // Close-immediately path doesn't depend on external writes;
     // the watcher is closed before the file is mutated, so no events
-    // are expected. Run wholly inside burn — short setTimeout that
+    // are expected. Run wholly inside burn - short setTimeout that
     // fits in our cold-start window thanks to the in-burn loop pump.
     let dir = scratch("watch_close");
     fs::write(dir.join("x.txt"), b"v1").unwrap();
@@ -500,7 +500,7 @@ fn watch_close_stops_emissions() {
             let count = 0;
             w.on('change', () => {{ count += 1; }});
             w.close();
-            // Mutate after close — should NOT emit.
+            // Mutate after close - should NOT emit.
             fs.writeFileSync(path.join({d}, 'x.txt'), 'v2');
             // Give the closed watcher a generous window to mis-fire.
             setTimeout(() => {{ console.log('COUNT=' + count); process.exit(0); }}, 1000);

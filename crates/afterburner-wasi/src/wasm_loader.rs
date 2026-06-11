@@ -3,35 +3,35 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `WebAssembly.*` loader — host-side wasmtime sub-runner.
+//! `WebAssembly.*` loader - host-side wasmtime sub-runner.
 //!
 //! Burn already runs inside wasmtime (the QuickJS plugin); this
 //! module lets user JS load **additional** WebAssembly modules at
 //! runtime and call into them. With this in place every npm package
 //! that ships a pre-compiled `.wasm` file (sql.js, `@jsquash/*`,
 //! libheif-js, etc.) becomes loadable through standard
-//! `WebAssembly.compile` / `WebAssembly.instantiate` calls — no
+//! `WebAssembly.compile` / `WebAssembly.instantiate` calls - no
 //! per-package shadow code required.
 //!
 //! ## Scope (v1)
 //!
-//! * `WebAssembly.compile(bytes)` — returns an opaque `Module` id.
-//! * `WebAssembly.instantiate(module, importObject?)` — returns an
+//! * `WebAssembly.compile(bytes)` - returns an opaque `Module` id.
+//! * `WebAssembly.instantiate(module, importObject?)` - returns an
 //!   opaque `Instance` id.
-//! * `instance.exports.<name>(...)` — call any exported function with
+//! * `instance.exports.<name>(...)` - call any exported function with
 //!   primitive args (i32/i64/f32/f64).
-//! * `instance.exports.memory` — `WebAssembly.Memory` proxy whose
+//! * `instance.exports.memory` - `WebAssembly.Memory` proxy whose
 //!   `.buffer` is a `Uint8Array` snapshot of the linear memory (read +
 //!   write through dedicated host imports).
 //! * `wasi_snapshot_preview1` imports are auto-supplied when the
 //!   module asks for them, using `wasmtime-wasi`'s preview1 shim
-//!   (no host filesystem access — the WASI ctx is sealed).
+//!   (no host filesystem access - the WASI ctx is sealed).
 //!
 //! ## Not part of v1
 //!
 //! * **User-defined JS imports.** Modules that import functions
 //!   from arbitrary JS namespaces (e.g. emscripten's `env.*`) won't
-//!   instantiate — bridging JS callbacks back through wasmtime is
+//!   instantiate - bridging JS callbacks back through wasmtime is
 //!   non-trivial. v1 surfaces a clear `import not satisfied: <name>`
 //!   error so callers know which piece is missing.
 //! * **Tables / Globals.** Polyfill stubs them; not exposed yet.
@@ -68,7 +68,7 @@ struct CompiledModule {
     module: Module,
 }
 
-/// Per-instance state. Cloning is intentionally not `Clone`-derive —
+/// Per-instance state. Cloning is intentionally not `Clone`-derive -
 /// instances aren't meant to be duplicated; we wrap in `Arc<Mutex>`
 /// so multiple JS calls into the same instance serialize.
 struct LoadedInstance {
@@ -112,7 +112,7 @@ pub struct WasmLoader {
     next_instance_id: AtomicU64,
     modules: HopscotchMap<ModuleId, CompiledModule>,
     instances: HopscotchMap<InstanceId, Arc<LoadedInstance>>,
-    /// Standalone WebAssembly resources — `new WebAssembly.Memory(...)`,
+    /// Standalone WebAssembly resources - `new WebAssembly.Memory(...)`,
     /// `new WebAssembly.Table(...)`, `new WebAssembly.Global(...)`.
     /// Each one owns its own `Store<()>` because wasmtime resources
     /// can't be moved between stores. The JS-side wrapper holds the
@@ -156,7 +156,7 @@ impl std::fmt::Debug for WasmLoader {
 
 impl WasmLoader {
     pub fn new() -> Self {
-        // Default Engine config is fine — wasmtime defaults to
+        // Default Engine config is fine - wasmtime defaults to
         // sane resource caps. We don't enable async or epoch
         // interruption in v1 since calls cross the wasmtime↔QuickJS
         // boundary synchronously.
@@ -245,7 +245,7 @@ impl WasmLoader {
             .collect())
     }
 
-    /// Instantiate a module. v1 supplies no user imports — modules
+    /// Instantiate a module. v1 supplies no user imports - modules
     /// that need imports beyond what we satisfy automatically
     /// (currently nothing) will fail to instantiate with a clear
     /// "import not satisfied" message.
@@ -258,13 +258,13 @@ impl WasmLoader {
         // v1: no user imports, no auto-supplied imports. Modules
         // that import anything beyond `nothing` fail with a helpful
         // error. Adding WASI / user imports is straightforward
-        // future work — this is the seam.
+        // future work - this is the seam.
         let imports: Vec<wasmtime::Extern> = Vec::new();
         let instance = Instance::new(&mut store, &module_entry.module, &imports).map_err(|e| {
             AfterburnerError::Host(format!(
                 "WebAssembly.instantiate: {e}. \
                      Burn's WASM loader v1 doesn't supply user-defined imports yet \
-                     — modules with `(import \"x\" \"y\")` need to be re-built \
+                     - modules with `(import \"x\" \"y\")` need to be re-built \
                      without imports, or wait for the next loader release."
             ))
         })?;
@@ -283,7 +283,7 @@ impl WasmLoader {
     }
 
     /// Call an exported function on an instance. `args` and the
-    /// result use `Val` as a typed bridge — primitive types only in
+    /// result use `Val` as a typed bridge - primitive types only in
     /// v1 (i32/i64/f32/f64).
     pub fn call_export(
         &self,
@@ -492,7 +492,7 @@ impl WasmLoader {
 
     /// Get a table slot as a JSON-encoded reference descriptor
     /// (`{"kind":"funcref","null":true|false}` for funcref tables).
-    /// JS callers compare against the spec's `null` sentinel — we
+    /// JS callers compare against the spec's `null` sentinel - we
     /// don't yet expose the func itself.
     pub fn table_get(&self, instance_id: InstanceId, name: &str, index: u32) -> Result<String> {
         let inst = self.instances.get(&instance_id).ok_or_else(|| {
@@ -535,7 +535,7 @@ impl WasmLoader {
                     "WebAssembly: instance does not export table `{name}`"
                 ))
             })?;
-        // Use a null func ref as the fill value — matches the JS spec
+        // Use a null func ref as the fill value - matches the JS spec
         // default for `WebAssembly.Table.prototype.grow(delta)`.
         let init = wasmtime::Ref::Func(None);
         match t.grow(&mut state.store, delta as u64, init) {
@@ -548,7 +548,7 @@ impl WasmLoader {
     //
     // These back `new WebAssembly.Memory(descriptor)` /
     // `new WebAssembly.Table(descriptor)` /
-    // `new WebAssembly.Global(descriptor, value)` — resources the
+    // `new WebAssembly.Global(descriptor, value)` - resources the
     // user creates outside an Instance. Each owns a fresh `Store`
     // because wasmtime's Store-typed handles can't migrate between
     // stores; the JS wrapper holds the standalone id and routes
@@ -878,7 +878,7 @@ impl WasmLoader {
                         }
                     }
                 }
-                // Final fallback: scan the top-level Debug — wasmtime's
+                // Final fallback: scan the top-level Debug - wasmtime's
                 // error often inlines the cause text there.
                 let outer_dbg = format!("{e:?}");
                 if let Some(idx) = outer_dbg.find(marker) {
@@ -910,7 +910,7 @@ pub enum WasmValue {
 impl WasmValue {
     /// Convert into a [`wasmtime::Val`] matching the requested
     /// `ValType`. Allows JS to pass a plain number for any numeric
-    /// type — we coerce here so the polyfill doesn't need to know
+    /// type - we coerce here so the polyfill doesn't need to know
     /// the export's signature ahead of time.
     fn coerce(self, ty: &ValType) -> Result<Val> {
         match (self, ty) {
@@ -1006,7 +1006,7 @@ impl WasmValue {
 }
 
 // We intentionally don't use `std::sync::Mutex` (workspace rule). The
-// loader's per-instance state isn't a hot path — every JS call into
+// loader's per-instance state isn't a hot path - every JS call into
 // a WASM export already crosses the wasmtime↔QuickJS boundary, so
 // the Mutex overhead would be lost in the noise. Still, to honor the
 // rule we use a tiny lock based on `kovan_channel` (a 1-slot bounded

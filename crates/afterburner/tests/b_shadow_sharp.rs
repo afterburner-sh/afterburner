@@ -4,7 +4,7 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 #![allow(non_snake_case)]
-//! L3 shadow for `sharp` — end-to-end integration coverage.
+//! L3 shadow for `sharp` - end-to-end integration coverage.
 //!
 //! Each test runs a small JS program through `burn` that exercises
 //! the polyfill's surface against in-memory image fixtures generated
@@ -43,7 +43,7 @@ fn fixture_png_rgb() -> Vec<u8> {
     out
 }
 
-/// 16×16 RGBA fixture with checker alpha — for alpha-preservation tests.
+/// 16×16 RGBA fixture with checker alpha - for alpha-preservation tests.
 fn fixture_png_rgba() -> Vec<u8> {
     let buf: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_fn(16, 16, |x, y| {
         let a = if (x / 4 + y / 4) % 2 == 0 { 255 } else { 0 };
@@ -710,7 +710,7 @@ fn input_must_be_buffer_or_path() {
     let src = r#"
         const sharp = require('sharp');
         try {
-            sharp(12345); // numeric — invalid
+            sharp(12345); // numeric - invalid
             console.error('expected throw'); process.exit(3);
         } catch (e) {
             if (!/Buffer|Uint8Array|path/i.test(e.message)) {
@@ -728,7 +728,7 @@ fn input_must_be_buffer_or_path() {
 fn composite_queues_and_round_trips_through_pipeline() {
     // `composite(layers)` queues the op and is part of the
     // chainable surface; the rust shadow executes it on the
-    // pipeline run. Empty `layers` is a no-op overlay set —
+    // pipeline run. Empty `layers` is a no-op overlay set -
     // toBuffer() resolves with the unchanged base image.
     let src = r#"
         const sharp = require('sharp');

@@ -340,5 +340,5 @@ fn path_qualified_node_bypasses_passthrough() {
 }
 
 // Coverage for the non-`node` pass-through targets (npm/npx/pnpm/
-// yarn/bun) lives in `b5_shim.rs` — those paths now *work* via the
+// yarn/bun) lives in `b5_shim.rs` - those paths now *work* via the
 // PATH shim rather than erroring out as "not yet implemented".

@@ -29,7 +29,7 @@ fn sealed_json() -> Vec<u8> {
     serde_json::to_vec(&Manifold::sealed()).unwrap()
 }
 
-/// tar (reproducible-ish) + zstd, arbitrary members — used for cases the
+/// tar (reproducible-ish) + zstd, arbitrary members - used for cases the
 /// `Builder` would reject up front.
 fn pack_members(members: &[(&str, Vec<u8>)]) -> Vec<u8> {
     let mut ar = tar::Builder::new(Vec::new());
@@ -82,7 +82,7 @@ fn forward_greater_minor_is_accepted() {
 #[test]
 fn forward_unknown_descriptive_keys_are_tolerated() {
     // New optional keys a 1.0 reader has never heard of, in every tolerant
-    // table — must not break parsing.
+    // table - must not break parsing.
     let afb = Afb::from_bytes(&raw_pkg(&body(
         "1.3",
         "future_format_hint = \"x\"",

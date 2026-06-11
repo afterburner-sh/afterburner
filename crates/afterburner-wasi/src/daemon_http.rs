@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Daemon HTTP coordinator — host-side state that backs
+//! Daemon HTTP coordinator - host-side state that backs
 //! `__host_http_listen` / `__host_http_reply`.
 //!
 //! Owns the axum listeners spawned by user scripts' `.listen(port)`
@@ -72,7 +72,7 @@ pub struct DaemonEvent {
 }
 
 /// Negative return codes for `__host_http_listen`. Mirrored in
-/// `polyfills/http.js` — keep them in sync.
+/// `polyfills/http.js` - keep them in sync.
 pub const LISTEN_ERR_NO_DAEMON: i32 = -1;
 pub const LISTEN_ERR_ADDR_IN_USE: i32 = -2;
 pub const LISTEN_ERR_IO: i32 = -3;
@@ -104,7 +104,7 @@ pub struct DaemonHttp {
     /// OS bind, and keeps close() accounting honest.
     ports_in_use: HopscotchMap<u16, ServerId>,
     /// Parallel claim map for QUIC/UDP listeners. Same shape as
-    /// `ports_in_use` — a port can be simultaneously claimed by an
+    /// `ports_in_use` - a port can be simultaneously claimed by an
     /// HTTP TCP listener (this map's TCP sibling) and an H3 UDP
     /// listener (this map). The two are independent because TCP and
     /// UDP are distinct sockets at the kernel level; sharing the
@@ -115,7 +115,7 @@ pub struct DaemonHttp {
     /// the existing `server_id` instead of `LISTEN_ERR_ADDR_IN_USE`.
     /// This is the multi-shard contract: every shard's daemon-init
     /// runs the same source, so each shard calls `app.listen(port)`,
-    /// but only the first call binds a real socket — subsequent calls
+    /// but only the first call binds a real socket - subsequent calls
     /// register the handler under the same id and let the dispatcher
     /// route requests to whichever shard is least busy.
     ///
@@ -126,7 +126,7 @@ pub struct DaemonHttp {
     /// port. Losers see the winner's id without taking any lock.
     shared_listeners: AtomicBool,
 
-    /// Daemon-feature channel — axum handlers push `DaemonEvent`s
+    /// Daemon-feature channel - axum handlers push `DaemonEvent`s
     /// through here; the CLI's dispatcher thread pops them off and
     /// calls `DaemonRuntime::dispatch_event`. `None` in stub mode
     /// (no `with_runtime` call).
@@ -143,7 +143,7 @@ pub struct DaemonHttp {
     listener_tasks: HopscotchMap<ServerId, tokio::task::AbortHandle>,
 
     /// Tokio runtime handle used to spawn axum listener tasks. `None`
-    /// in stub mode — any call to `bind_listener` without a handle
+    /// in stub mode - any call to `bind_listener` without a handle
     /// logs and returns a negative error.
     #[cfg(feature = "daemon")]
     runtime: Option<tokio::runtime::Handle>,
@@ -168,7 +168,7 @@ impl Default for DaemonHttp {
 }
 
 impl DaemonHttp {
-    /// Stub-mode constructor — no runtime attached, so
+    /// Stub-mode constructor - no runtime attached, so
     /// `bind_listener` allocates a `server_id` without binding a
     /// real socket. Used by tests that exercise the plugin ↔ host
     /// ABI directly.
@@ -193,7 +193,7 @@ impl DaemonHttp {
     }
 
     /// Switch the coordinator into shared-listener mode. Must be
-    /// called BEFORE any `bind_listener` call — flipping this mid-
+    /// called BEFORE any `bind_listener` call - flipping this mid-
     /// flight would race with in-flight binds. Multi-shard pools
     /// flip this at construction.
     pub fn enable_shared_listeners(&self) {
@@ -209,7 +209,7 @@ impl DaemonHttp {
         Arc::new(Self::new())
     }
 
-    /// Real-mode constructor — `bind_listener` will actually bind a
+    /// Real-mode constructor - `bind_listener` will actually bind a
     /// TCP socket and spawn an axum service on the supplied
     /// runtime. `event_queue_cap` bounds the axum→dispatcher
     /// channel; overflow backpressures incoming requests.
@@ -242,13 +242,13 @@ impl DaemonHttp {
             .count()
     }
 
-    /// Stub-mode listener registration — reserves a `server_id`
+    /// Stub-mode listener registration - reserves a `server_id`
     /// without binding. Returned for tests / abstract drivers.
     /// Still honours within-process port collisions so stub-mode
     /// tests exercise the EADDRINUSE path.
     ///
     /// In shared-listener mode (multi-shard pool), an already-bound
-    /// port returns the existing id instead of erroring — first call
+    /// port returns the existing id instead of erroring - first call
     /// "binds" (registers), subsequent calls just rejoin.
     ///
     /// Lock-free port arbitration via `HopscotchMap::get_or_insert`
@@ -310,7 +310,7 @@ impl DaemonHttp {
     /// Signal the pending reply for `req_id` with the response
     /// payload the JS side handed to `__host_http_reply`. Returns
     /// `true` if a waiter was present. Missing slots are silently
-    /// dropped — the most likely cause is a stale reply after the
+    /// dropped - the most likely cause is a stale reply after the
     /// axum task already timed out or disconnected.
     pub fn deliver_reply(&self, req_id: ReqId, reply: ReplyEnvelope) -> bool {
         if let Some(PendingReply { sender }) = self.pending.remove(&req_id) {
@@ -324,7 +324,7 @@ impl DaemonHttp {
     /// Three-way claim outcome for sibling-protocol coordinators (H3,
     /// any future transport). [`PortClaim::Owner`] means this caller
     /// won the CAS and must perform the real bind; [`PortClaim::
-    /// Follower`] means another shard already bound the port — the
+    /// Follower`] means another shard already bound the port - the
     /// caller should *not* bind, just register its JS handler under
     /// the existing id (shared-listeners mode); [`PortClaim::Busy`]
     /// is the single-shard collision path.
@@ -341,7 +341,7 @@ impl DaemonHttp {
         PortClaim::Owner(new_id)
     }
 
-    /// Back-compat shim — the H3 path used to call this. Routes to
+    /// Back-compat shim - the H3 path used to call this. Routes to
     /// [`Self::try_claim_port_for`] and flattens to a positive id (
     /// owner or follower) or a negative LISTEN_ERR. Only the owner
     /// path should bind; callers that need the distinction should
@@ -356,7 +356,7 @@ impl DaemonHttp {
     /// Release a port claim AND its listener-slot accounting (used by
     /// sibling-protocol coordinators when their bind fails after
     /// [`Self::allocate_server_id_for`] already ran). Both removals
-    /// are required — leaving the listener slot in place keeps
+    /// are required - leaving the listener slot in place keeps
     /// `listener_count() > 0`, which triggers shard-pool expansion
     /// and re-evaluates the script across N shards (which in turn
     /// re-calls the failing listen, looping).
@@ -371,7 +371,7 @@ impl DaemonHttp {
     /// a TCP listener (HTTP/1+H2) and a UDP listener (H3) at the same
     /// time, exactly as the kernel allows.
     pub fn try_claim_h3_port(&self, port: u16) -> PortClaim {
-        // Negative sentinel pool — we don't need a real `server_id`
+        // Negative sentinel pool - we don't need a real `server_id`
         // here, just a "did I win the CAS" signal. UDP-side
         // `server_id` for event dispatch comes from the JS-side
         // HTTP listener.
@@ -405,7 +405,7 @@ impl DaemonHttp {
         self.runtime.clone()
     }
 
-    /// Sender side of the daemon event channel — sibling coordinators
+    /// Sender side of the daemon event channel - sibling coordinators
     /// (HTTP/3 etc.) push their incoming requests onto the same
     /// channel the H1/H2 axum loop uses, so JS sees one unified
     /// dispatch stream.
@@ -420,13 +420,13 @@ impl DaemonHttp {
     ///
     /// Returns:
     ///
-    /// * positive `server_id` — bound and serving.
-    /// * [`LISTEN_ERR_NO_DAEMON`] (-1) — coordinator constructed via
+    /// * positive `server_id` - bound and serving.
+    /// * [`LISTEN_ERR_NO_DAEMON`] (-1) - coordinator constructed via
     ///   [`Self::new`] / [`Self::shared`] (no runtime). Stub path:
     ///   allocate id without binding, preserving ABI-test symmetry.
-    /// * [`LISTEN_ERR_ADDR_IN_USE`] (-2) — port already bound, by us
+    /// * [`LISTEN_ERR_ADDR_IN_USE`] (-2) - port already bound, by us
     ///   or by the OS.
-    /// * [`LISTEN_ERR_IO`] (-3) — any other bind failure (permission
+    /// * [`LISTEN_ERR_IO`] (-3) - any other bind failure (permission
     ///   denied on a privileged port, interface vanished, etc.).
     ///
     /// The synchronous bind closes the race where a stale axum task
@@ -442,7 +442,7 @@ impl DaemonHttp {
         };
 
         // Lock-free port arbitration. `get_or_insert` is a CAS in
-        // kovan_map's HopscotchMap — N shards racing converge
+        // kovan_map's HopscotchMap - N shards racing converge
         // atomically: exactly one's `new_id` becomes the claim.
         let new_id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
         let claimed_id = self.ports_in_use.get_or_insert(port, new_id);
@@ -482,7 +482,7 @@ impl DaemonHttp {
             return LISTEN_ERR_IO;
         }
         // `TcpListener::from_std` registers the raw fd with the tokio
-        // reactor — it panics if called outside a runtime context.
+        // reactor - it panics if called outside a runtime context.
         // Enter the runtime synchronously for the duration of the
         // conversion + spawn so the host function can stay sync.
         let _enter = runtime.enter();
@@ -508,7 +508,7 @@ impl DaemonHttp {
         new_id
     }
 
-    /// Non-daemon-feature variant — allocates an id without binding
+    /// Non-daemon-feature variant - allocates an id without binding
     /// a real socket. Matches the stub behaviour pre-B2.4 so test
     /// harnesses exercising the plugin ABI still work without the
     /// `daemon` feature.
@@ -526,7 +526,7 @@ impl DaemonHttp {
         self.event_rx.as_ref().and_then(|rx| rx.recv())
     }
 
-    /// Non-daemon-feature recv — always returns None since no axum
+    /// Non-daemon-feature recv - always returns None since no axum
     /// task is pushing events.
     #[cfg(not(feature = "daemon"))]
     pub fn recv_event(&self) -> Option<DaemonEvent> {
@@ -606,7 +606,7 @@ mod axum_server {
         }
     }
 
-    /// hyper-native dispatcher — same flow as the axum `dispatch_request`
+    /// hyper-native dispatcher - same flow as the axum `dispatch_request`
     /// but operates on `hyper::Request<Incoming>` so the H1/H2 auto
     /// negotiation can hand us the request directly.
     async fn dispatch_hyper(

@@ -20,7 +20,7 @@
 //! * **Q5-A fall-through.** Any PATH binary (not just the hard-coded
 //!   known set) passes through.
 //! * **node shim payload.** Running the generated shim from within a
-//!   child process re-enters burn — proves the shim file is actually
+//!   child process re-enters burn - proves the shim file is actually
 //!   on PATH and is executable, which is what makes `burn npm
 //!   install` route npm's internal `node <script>` back through
 //!   burn.
@@ -76,7 +76,7 @@ fn missing_target_on_path_errors_typed() {
 
 #[test]
 fn missing_pnpm_yarn_bun_npx_also_typed() {
-    // Use an arg clap won't intercept — `--version` is a global flag
+    // Use an arg clap won't intercept - `--version` is a global flag
     // and `help` is the auto-generated help subcommand; either would
     // bypass passthrough dispatch entirely. A plain string like
     // `install` keeps clap in positional-fallback mode.
@@ -187,7 +187,7 @@ fn shim_depth_limit_ignores_garbage_values() {
         .output()
         .expect("spawn burn");
     // Should surface the "not found on PATH" error (depth treated as
-    // 0, proceeded to lookup, lookup failed) — NOT the recursion
+    // 0, proceeded to lookup, lookup failed) - NOT the recursion
     // limit.
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -289,7 +289,7 @@ fn existing_file_named_npm_wins_over_passthrough() {
 // This is the mechanism that makes `burn npm install` work at all:
 // npm internally spawns `node <script>`; our shim file, placed first
 // on PATH by the pass-through code, has to resolve to burn.
-// Directly invoking the shim is the tightest test — it doesn't need
+// Directly invoking the shim is the tightest test - it doesn't need
 // npm to be installed in CI to validate the core primitive.
 
 #[test]
@@ -308,7 +308,7 @@ fn shim_dir_node_shim_forwards_to_burn() {
     // the shim dir out of the first path entry, then drive it.
     let scratch = tmp_dir("shim_trampoline");
     // Stage `env` into the scratch dir so PATH lookup finds it there
-    // (doesn't matter where real `env` lives — we just need something
+    // (doesn't matter where real `env` lives - we just need something
     // executable to pass through to).
     let env_link = scratch.join("env");
     // `/usr/bin/env` is the most portable location for env on Unix.
@@ -333,7 +333,7 @@ fn shim_dir_node_shim_forwards_to_burn() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // env's output contains `PATH=<shim-dir>:<original-path>` — first
+    // env's output contains `PATH=<shim-dir>:<original-path>` - first
     // path entry is our shim dir.
     let path_line = stdout
         .lines()

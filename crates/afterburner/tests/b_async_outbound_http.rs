@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Async outbound HTTP — `__host_http_request_async` end-to-end.
+//! Async outbound HTTP - `__host_http_request_async` end-to-end.
 //!
 //! The wasm side dispatches the request through Tokio (no
 //! wasm-thread blocking), and the response comes back through the
@@ -54,7 +54,7 @@ fn assert_marker(out: &std::process::Output, marker: &str) {
 
 #[test]
 fn fetch_resolves_promise_after_script_body_returns() {
-    // The canonical "real async" check — the script body returns
+    // The canonical "real async" check - the script body returns
     // immediately; the fetch Promise's resolution has to come from
     // the daemon dispatching a host-side response event. If the
     // daemon exits the moment the user fn returns (the pre-async
@@ -93,7 +93,7 @@ fn http_request_event_response_callback_fires() {
 
 #[test]
 fn http_request_callback_form_fires() {
-    // `http.request(url, cb)` / `http.get(url, cb)` — the cb-style
+    // `http.request(url, cb)` / `http.get(url, cb)` - the cb-style
     // entry point. Cb fires with a synthetic IncomingMessage; we
     // assert the response object exposes the readable-stream
     // surface so downstream stream consumers (Minipass, native fs
@@ -120,7 +120,7 @@ fn http_request_callback_form_fires() {
 #[test]
 fn parallel_fetches_complete_concurrently() {
     // Three concurrent fetches should take roughly the time of one
-    // round-trip — proof the host side dispatches each on its own
+    // round-trip - proof the host side dispatches each on its own
     // Tokio task instead of serialising them on the wasm thread.
     // The JS side self-times the parallel-fetch window (excluding
     // burn cold-start) and prints the elapsed millis. Measuring
@@ -160,7 +160,7 @@ fn parallel_fetches_complete_concurrently() {
 #[test]
 fn fetch_response_text_returns_full_body() {
     // The Response.text() Promise has to settle with the full body
-    // — early bug rounds had it resolve with the bogus
+    // - early bug rounds had it resolve with the bogus
     // `__HOST_ERR__:` string when the body was empty, or with an
     // empty Buffer because the host's UTF-8 lossy decode dropped
     // the bytes. Pin the contract.

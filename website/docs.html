@@ -602,7 +602,7 @@
     color: var(--fg);
   }
 
-  /* table scroll wrapper — long tables (CLI flags, env vars, capabilities)
+  /* table scroll wrapper - long tables (CLI flags, env vars, capabilities)
      overflow viewport on phones; wrap them so they pan horizontally without
      breaking the article flow. */
   .table-scroll {
@@ -632,7 +632,7 @@
     .hero-card h2 { font-size: 24px; }
     .hero-card p { font-size: 14px; }
 
-    /* sidebar compresses into a horizontal scrollable strip — keeps nav useful
+    /* sidebar compresses into a horizontal scrollable strip - keeps nav useful
        without dominating the viewport before the article starts. */
     .sidebar {
       display: flex; flex-wrap: wrap; gap: 6px;
@@ -788,7 +788,7 @@
     .installer__cmd { font-size: 12px; padding: 12px 14px; gap: 12px; }
   }
 
-  /* burn button — video plays on hover (matches landing page treatment) */
+  /* burn button - video plays on hover (matches landing page treatment) */
   .btn--burn {
     position: relative;
     isolation: isolate;
@@ -883,7 +883,7 @@
       <h4>Get started</h4>
       <a class="sb-link active" href="#introduction">Introduction</a>
       <a class="sb-link" href="#installation">Installation</a>
-      <a class="sb-link" href="#first-burn">Your first burn <span class="tag">5m</span></a>
+      <a class="sb-link" href="#first-burn">Your first package <span class="tag">5m</span></a>
     </div>
     <div class="sb-section">
       <h4>Core concepts</h4>
@@ -894,11 +894,23 @@
       <a class="sb-link" href="#state">Cross-call state</a>
     </div>
     <div class="sb-section">
-      <h4>Embedder seams</h4>
+      <h4>Embed in Rust</h4>
+      <a class="sb-link" href="#programmatic">Programmatic API</a>
       <a class="sb-link" href="#extend">Extension points</a>
       <a class="sb-link" href="#extend-cache">BurnCacheBackend</a>
       <a class="sb-link" href="#extend-host">HostContext</a>
       <a class="sb-link" href="#extend-flow">FlowEngine</a>
+    </div>
+    <div class="sb-section">
+      <h4>Packages</h4>
+      <a class="sb-link" href="#packages">Packages &amp; deps</a>
+      <a class="sb-link" href="#packages-anatomy">Package anatomy</a>
+      <a class="sb-link" href="#packages-afbtoml">afb.toml manifest</a>
+      <a class="sb-link" href="#packages-manifold">manifold.json</a>
+      <a class="sb-link" href="#packages-entry">Entry function</a>
+      <a class="sb-link" href="#packages-scaffold">Scaffold</a>
+      <a class="sb-link" href="#packages-deps">Declaring deps</a>
+      <a class="sb-link" href="#packages-security">Dependency security</a>
     </div>
     <div class="sb-section">
       <h4>Reference</h4>
@@ -953,10 +965,13 @@
 
       <h2 id="introduction"><span class="anchor">#</span>Introduction</h2>
       <p>
-        Afterburner is a JavaScript runtime built in Rust. The <code>burn</code> binary runs your existing Node apps (<code>burn server.js</code>, <code>burn npm install</code>, <code>burn app.ts</code>), and the embeddable <code>afterburner</code> crate exposes the same engine to your Rust program. Every Node built-in (<code>fs</code>, <code>crypto</code>, <code>http</code>, <code>zlib</code>, <code>child_process</code>, …) is gated by a capability you configure per script.
+        Afterburner is a JavaScript runtime built in Rust, and the way you build on it is by writing <strong>packages</strong>: small, capability-sealed units of JavaScript or TypeScript that you scaffold, test, and publish to a registry, then install anywhere the runtime runs. Each package declares exactly what it may touch - network, filesystem, environment - so installing one is never a blank cheque. The <code>burn</code> toolchain takes you end to end: <code>burn init</code> to scaffold, <code>burn test</code> to run it in the sandbox, <code>burn package</code> to build a single content-addressed <code>.afb</code>, and <code>burn install</code> / <code>burn publish</code> to share it.
       </p>
       <p>
-        Memory caps, deterministic fuel metering, an N-worker scheduler, and a fully sandboxed execution mode are the production-grade machinery underneath. The surface you touch is one builder and three methods (<code>register</code>, <code>run</code>, <code>unregister</code>), or just type <code>burn</code> at the shell.
+        The same <code>burn</code> binary also runs your existing Node apps (<code>burn server.js</code>, <code>burn npm install</code>, <code>burn app.ts</code>), and the embeddable <code>afterburner</code> crate exposes the engine to your own Rust program (see the <a href="#programmatic" style="color: var(--action);">Programmatic API</a>). Memory caps, deterministic fuel metering, an N-worker scheduler, and a fully sandboxed execution mode are the production-grade machinery underneath - and every Node built-in (<code>fs</code>, <code>crypto</code>, <code>http</code>, <code>zlib</code>, <code>child_process</code>, …) is gated by a capability you grant explicitly.
+      </p>
+      <p>
+        New here? Start with <a href="#first-burn" style="color: var(--action);">Your first package</a>, then read <a href="#packages" style="color: var(--action);">Packages &amp; dependencies</a> for the full authoring reference.
       </p>
 
       <div class="callout callout--note">
@@ -991,7 +1006,7 @@
           <span class="copy">Copy</span>
         </div>
         <p class="installer__hint">Pin a version with <code>BURN_VERSION=vX.Y.Z</code> · custom install dir with <code>BURN_INSTALL=/usr/local/bin</code> · skip the <code>$PATH</code> update with <code>BURN_INSTALL_NO_PATH=1</code></p>
-        <p class="installer__hint">Uninstall — undoes exactly what the installer did (binary + the <code>$PATH</code> line), nothing else: <code>curl -fsSL https://afterburner.sh/uninstall | sh</code> &middot; PowerShell: <code>iwr -useb https://afterburner.sh/uninstall | iex</code> &middot; pass the same <code>BURN_INSTALL</code> if you customized the dir</p>
+        <p class="installer__hint">Uninstall - undoes exactly what the installer did (binary + the <code>$PATH</code> line), nothing else: <code>curl -fsSL https://afterburner.sh/uninstall | sh</code> &middot; PowerShell: <code>iwr -useb https://afterburner.sh/uninstall | iex</code> &middot; pass the same <code>BURN_INSTALL</code> if you customized the dir</p>
       </div>
 
       <p>Or pull the runtime as a Rust library:</p>
@@ -1019,27 +1034,42 @@ afterburner 0.1.2</pre>
 
       <p>The prebuilt binary ships with <code>--features release-cli</code> (every backend, every L3 shadow, TypeScript loader). Nothing external is needed at runtime; SQLite, OpenSSL, libclang are all statically linked in. See <a href="#build" style="color: var(--action);">Building from source</a> if you want to compile the workspace yourself.</p>
 
-      <h2 id="first-burn"><span class="anchor">#</span>Your first burn</h2>
-      <p>Five lines. Register a script, hand it some JSON, get JSON back:</p>
+      <h2 id="first-burn"><span class="anchor">#</span>Your first package</h2>
+      <p>The primary way to use Afterburner is to <strong>write a package</strong>: a small, capability-sealed unit of JavaScript (or TypeScript) that you test, build into a single <code>.afb</code> file, and publish to the registry. Scaffold one:</p>
 
       <div class="codeblock">
         <div class="codeblock__head">
-          <span class="lang">rust</span>
-          <button class="copy-btn">Copy</button>
+          <span class="lang">shell</span>
+          <button class="copy-btn" data-copy="burn init ./greeter --namespace nyquist --name greeter">Copy</button>
         </div>
-<pre><span class="tok-kw">use</span> afterburner::Afterburner;
-<span class="tok-kw">use</span> serde_json::json;
-
-<span class="tok-kw">fn</span> <span class="tok-fn">main</span>() -&gt; Result&lt;(), Box&lt;<span class="tok-kw">dyn</span> std::error::Error&gt;&gt; {
-    <span class="tok-kw">let</span> ab = Afterburner::<span class="tok-fn">new</span>()?;
-    <span class="tok-kw">let</span> id = ab.<span class="tok-fn">register</span>(<span class="tok-str">"module.exports = (d) =&gt; d.n + 1"</span>)?;
-    <span class="tok-kw">let</span> out = ab.<span class="tok-fn">run</span>(&amp;id, &amp;json!({ <span class="tok-str">"n"</span>: <span class="tok-num">41</span> }))?;
-    <span class="tok-fn">assert_eq!</span>(out, json!(<span class="tok-num">42</span>));
-    Ok(())
-}</pre>
+<pre>$ <span class="tok-mod">burn</span> init ./greeter --namespace nyquist --name greeter
+✓ created nyquist/greeter (module)
+  afb.toml  manifold.json  source/main.js  tests/  README.md</pre>
       </div>
 
-      <p><code>Afterburner::new()</code> uses the <strong>adaptive</strong> mode by default: a fast cold start on the first call, then a fully sandboxed execution path from the second call onward. You don't pick. It picks.</p>
+      <p>Open <code>source/main.js</code>. A package exports one function - input in, result out:</p>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">javascript</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre><span class="tok-com">// source/main.js</span>
+<span class="tok-kw">module</span>.exports = <span class="tok-kw">function</span> (input) {
+  <span class="tok-kw">return</span> { hello: (input &amp;&amp; input.name) || <span class="tok-str">"world"</span> };
+};</pre>
+      </div>
+
+      <p>It is <strong>sealed by default</strong> - that scaffolded <code>manifold.json</code> grants nothing, so this code cannot touch the network, filesystem, or environment until you open a door. Test it through the real runtime, then build the <code>.afb</code> and publish:</p>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">shell</span>
+          <button class="copy-btn" data-copy="burn test">Copy</button>
+        </div>
+<pre>$ <span class="tok-mod">burn</span> test          <span class="tok-com"># run tests/ in the sandbox</span>
+$ <span class="tok-mod">burn</span> package       <span class="tok-com"># → nyquist-greeter-0.1.0.afb (content-addressed)</span>
+$ <span class="tok-mod">burn</span> publish       <span class="tok-com"># upload to the registry</span></pre>
+      </div>
+      <p>That's the whole loop. The <a href="#packages" style="color: var(--action);">Packages &amp; dependencies</a> section is the full authoring reference - manifest fields, the capability Manifold, declaring dependencies, and how anyone installs your package with <code>burn install</code>. If instead you want to embed Afterburner as a Rust library, see the <a href="#programmatic" style="color: var(--action);">Programmatic API</a>.</p>
 
       <h2 id="manifold"><span class="anchor">#</span>The Manifold</h2>
       <p>
@@ -1122,7 +1152,7 @@ afterburner 0.1.2</pre>
         <div class="callout__icon">i</div>
         <div>
           <strong>Long-running daemons: the pool ceiling.</strong>
-          <p>The WASM-mode pooling allocator pre-reserves a per-instance virtual address range — <code>1 GiB</code> by default. Daemon-mode workloads (Express, Fastify, etc. that share a single runtime store across many requests) can accumulate state across the whole listener lifetime and eventually touch this ceiling, even though the host has plenty of free RAM. Override with <code>BURN_MAX_LINEAR_MEMORY</code> at startup: <code>BURN_MAX_LINEAR_MEMORY=4G ./burn server.js</code> bumps the per-slot ceiling to 4 GiB (the wasm32 ABI maximum); <code>=128M</code> tightens it. <code>--memory &lt;N&gt;</code> sets a tighter per-call cap below this hard limit and is independent of <code>-A</code> (which only flips capability gates, not resource caps).</p>
+          <p>The WASM-mode pooling allocator pre-reserves a per-instance virtual address range - <code>1 GiB</code> by default. Daemon-mode workloads (Express, Fastify, etc. that share a single runtime store across many requests) can accumulate state across the whole listener lifetime and eventually touch this ceiling, even though the host has plenty of free RAM. Override with <code>BURN_MAX_LINEAR_MEMORY</code> at startup: <code>BURN_MAX_LINEAR_MEMORY=4G ./burn server.js</code> bumps the per-slot ceiling to 4 GiB (the wasm32 ABI maximum); <code>=128M</code> tightens it. <code>--memory &lt;N&gt;</code> sets a tighter per-call cap below this hard limit and is independent of <code>-A</code> (which only flips capability gates, not resource caps).</p>
         </div>
       </div>
 
@@ -1131,9 +1161,9 @@ afterburner 0.1.2</pre>
         <div>
           <strong>HTTP servers run across all your CPUs.</strong>
           <p>When your script binds an HTTP listener (<code>http.createServer().listen(...)</code>), <code>burn</code> serves requests from every CPU the OS gives the process, in parallel. Container CPU limits flow through automatically: <code>docker run --cpus=4</code> gives you 4-way parallelism, k8s <code>cpu: "4"</code> the same. No knob to set.</p>
-          <p>This expansion only kicks in when init binds an HTTP listener. Other daemon shapes — timer-only scripts, raw <code>net</code> / <code>tls</code> / <code>dgram</code> servers, scripts that open outbound clients — stay single-shard so init-time side effects don't multiply across workers. <code>BURN_SHARDS=N</code> overrides this for benchmarks or workloads where init is intentionally idempotent.</p>
-          <p><strong>Per-request state in JavaScript is local to each parallel worker, not global.</strong> If a handler increments a counter declared outside the route, you'll get N independent counter streams instead of a single monotonic one — the same model Node's <code>cluster</code> module uses. For state shared across requests, use <code>require('afterburner:state')</code>.</p>
-          <p>Sandboxing is preserved end-to-end: capability gates (<code>--allow-fs</code> / <code>--allow-net</code> / <code>--allow-env</code> / <code>--sandbox</code>) apply identically to every parallel worker. A crash in one request can't take down the others — failed requests return HTTP 500 and the daemon keeps serving. Resource limits stack: <code>BURN_MAX_LINEAR_MEMORY=1G</code> with 16-way parallelism means up to 16 GiB peak memory; size your container accordingly.</p>
+          <p>This expansion only kicks in when init binds an HTTP listener. Other daemon shapes - timer-only scripts, raw <code>net</code> / <code>tls</code> / <code>dgram</code> servers, scripts that open outbound clients - stay single-shard so init-time side effects don't multiply across workers. <code>BURN_SHARDS=N</code> overrides this for benchmarks or workloads where init is intentionally idempotent.</p>
+          <p><strong>Per-request state in JavaScript is local to each parallel worker, not global.</strong> If a handler increments a counter declared outside the route, you'll get N independent counter streams instead of a single monotonic one - the same model Node's <code>cluster</code> module uses. For state shared across requests, use <code>require('afterburner:state')</code>.</p>
+          <p>Sandboxing is preserved end-to-end: capability gates (<code>--allow-fs</code> / <code>--allow-net</code> / <code>--allow-env</code> / <code>--sandbox</code>) apply identically to every parallel worker. A crash in one request can't take down the others - failed requests return HTTP 500 and the daemon keeps serving. Resource limits stack: <code>BURN_MAX_LINEAR_MEMORY=1G</code> with 16-way parallelism means up to 16 GiB peak memory; size your container accordingly.</p>
         </div>
       </div>
 
@@ -1197,6 +1227,35 @@ state.<span class="tok-fn">setJSON</span>(<span class="tok-str">'lastSeen'</span
 
 module.exports = () =&gt; ({ hits, seen });</pre>
       </div>
+
+      <h2 id="programmatic"><span class="anchor">#</span>Programmatic API</h2>
+      <p>Beyond packages, Afterburner is a Rust library - embed the engine directly to run untrusted JavaScript inside your own application. Add the crate and you have a sandboxed runtime in a handful of lines: register a script, hand it JSON, get JSON back.</p>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">toml</span>
+          <button class="copy-btn" data-copy="afterburner = &quot;0.1&quot;">Copy</button>
+        </div>
+<pre><span class="tok-com"># Cargo.toml</span>
+[dependencies]
+afterburner = <span class="tok-str">"0.1"</span></pre>
+      </div>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">rust</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre><span class="tok-kw">use</span> afterburner::Afterburner;
+<span class="tok-kw">use</span> serde_json::json;
+
+<span class="tok-kw">fn</span> <span class="tok-fn">main</span>() -&gt; Result&lt;(), Box&lt;<span class="tok-kw">dyn</span> std::error::Error&gt;&gt; {
+    <span class="tok-kw">let</span> ab = Afterburner::<span class="tok-fn">new</span>()?;
+    <span class="tok-kw">let</span> id = ab.<span class="tok-fn">register</span>(<span class="tok-str">"module.exports = (d) =&gt; d.n + 1"</span>)?;
+    <span class="tok-kw">let</span> out = ab.<span class="tok-fn">run</span>(&amp;id, &amp;json!({ <span class="tok-str">"n"</span>: <span class="tok-num">41</span> }))?;
+    <span class="tok-fn">assert_eq!</span>(out, json!(<span class="tok-num">42</span>));
+    Ok(())
+}</pre>
+      </div>
+      <p><code>Afterburner::new()</code> uses the <strong>adaptive</strong> mode by default: a fast cold start on the first call, then a fully sandboxed execution path from the second call onward. You don't pick. It picks. Everything from <a href="#manifold" style="color: var(--action);">The Manifold</a> onward - capability grants, fuel and timeouts, cross-call state - is configured on the builder; the extension points below let you swap the engine's seams.</p>
 
       <h2 id="extend"><span class="anchor">#</span>Embedder extension points</h2>
       <p>Three pluggable seams on the Rust side, each with a sensible default. Swap your own when the default is too tight.</p>
@@ -1275,6 +1334,149 @@ module.exports = () =&gt; ({ hits, seen });</pre>
         </div>
       </div>
 
+      <h2 id="packages"><span class="anchor">#</span>Packages &amp; dependencies</h2>
+      <p>A <code>.afb</code> is a single content-addressed, compressed package: a manifest (<code>afb.toml</code>), a capability grant (<code>manifold.json</code>), and your <code>source/</code>. Packages publish to a registry and resolve dependencies the way Cargo does - declared, version-resolved, digest-pinned, and cached - not vendored into your artifact.</p>
+
+      <h3 id="packages-anatomy">Package anatomy</h3>
+      <p>Every package is a directory with three required parts. <code>burn package</code> compresses them deterministically into a single <code>.afb</code> file named for its SHA-256 content digest.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">text</span><button class="copy-btn">Copy</button></div>
+<pre>my-pkg/
+├─ <span class="tok-fn">afb.toml</span>          <span class="tok-com"># manifest: identity, entry, dependencies</span>
+├─ <span class="tok-fn">manifold.json</span>     <span class="tok-com"># capability grant: what this code may touch</span>
+├─ <span class="tok-fn">source/</span>
+│  ├─ main.js        <span class="tok-com"># the entry point (or main.ts)</span>
+│  └─ lib/util.js    <span class="tok-com"># any number of sibling modules</span>
+├─ <span class="tok-fn">tests/</span>
+│  └─ my-pkg.test.js <span class="tok-com"># run by `burn test`</span>
+└─ README.md</pre>
+      </div>
+      <p>Only <code>source/</code>, <code>afb.toml</code>, and <code>manifold.json</code> are packed. Everything in <code>source/</code> is carried verbatim and is resolvable with <code>require()</code>; nothing outside it is. Dependencies are <em>not</em> packed - they are declared (below) and resolved at install time.</p>
+
+      <h3 id="packages-afbtoml">afb.toml - the manifest</h3>
+      <p>The complete manifest. <code>[format]</code>, <code>[package]</code>, and <code>[runtime]</code> are required; <code>[dependencies]</code> and <code>[npm]</code> are optional.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">toml</span><button class="copy-btn">Copy</button></div>
+<pre>[format]
+version = <span class="tok-str">"1.0"</span>              <span class="tok-com"># .afb format version (current: 1.0)</span>
+
+[package]
+namespace = <span class="tok-str">"nyquist"</span>          <span class="tok-com"># your registry namespace (lowercase a-z0-9-_)</span>
+name      = <span class="tok-str">"widget"</span>        <span class="tok-com"># package name; published as nyquist/widget</span>
+version   = <span class="tok-str">"0.1.0"</span>         <span class="tok-com"># semver - bump on every publish</span>
+entry     = <span class="tok-str">"source/main.js"</span> <span class="tok-com"># the module that exports the entry function</span>
+language  = <span class="tok-str">"js"</span>            <span class="tok-com"># "js" or "typescript"</span>
+license   = <span class="tok-str">"Apache-2.0"</span>    <span class="tok-com"># SPDX id (optional)</span>
+description = <span class="tok-str">"One-line summary."</span>   <span class="tok-com"># optional, indexed by search</span>
+homepage   = <span class="tok-str">"https://example.com"</span> <span class="tok-com"># optional</span>
+keywords   = [<span class="tok-str">"text"</span>, <span class="tok-str">"util"</span>]      <span class="tok-com"># optional, indexed by search</span>
+
+[runtime]
+min = <span class="tok-str">"0.1.0"</span>                <span class="tok-com"># minimum engine version this package needs</span>
+
+[dependencies]               <span class="tok-com"># other registry packages - pinned by digest</span>
+<span class="tok-str">"nyquist/json-tools"</span> = <span class="tok-str">"sha256:9f86d0…"</span>
+
+[npm]                        <span class="tok-com"># npm packages - semver ranges</span>
+date-fns = <span class="tok-str">"^3"</span></pre>
+      </div>
+      <p>Use <code>burn add nyquist/json-tools</code> to pin a registry dependency (it resolves the digest for you) and edit <code>[npm]</code> directly for npm packages - both install with <code>burn install</code>.</p>
+
+      <h3 id="packages-manifold">manifold.json - the capability grant</h3>
+      <p>The Manifold is the package's entire permission surface. It is <strong>sealed by default</strong>: a fresh package can touch nothing - no network, no filesystem, no environment, no subprocess. You open exactly the doors your code needs, and the registry shows reviewers those grants before anyone installs. Every field is deny-by-default.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">json</span><button class="copy-btn">Copy</button></div>
+<pre>{
+  <span class="tok-str">"fs"</span>: <span class="tok-str">"None"</span>,                         <span class="tok-com">// or {"ReadOnly":["/data"]} / {"ReadWrite":["/tmp"]}</span>
+  <span class="tok-str">"net"</span>: { <span class="tok-str">"OutboundHttp"</span>: [<span class="tok-str">"api.example.com"</span>] }, <span class="tok-com">// "None" | {"OutboundHttp":[hosts]} | "Any"</span>
+  <span class="tok-str">"env"</span>: <span class="tok-str">"None"</span>,                        <span class="tok-com">// "None" | {"Allow":["API_KEY"]} | "All"</span>
+  <span class="tok-str">"crypto"</span>: <span class="tok-num">false</span>,                     <span class="tok-com">// allow require('crypto')</span>
+  <span class="tok-str">"child_process"</span>: <span class="tok-num">false</span>,             <span class="tok-com">// allow spawning subprocesses</span>
+  <span class="tok-str">"allow_exit"</span>: <span class="tok-num">false</span>,                <span class="tok-com">// process.exit() ends the call vs throwing</span>
+  <span class="tok-str">"http_timeout_ms"</span>: <span class="tok-num">30000</span>,          <span class="tok-com">// per-request wall-clock cap</span>
+  <span class="tok-str">"listen"</span>: <span class="tok-str">"None"</span>                      <span class="tok-com">// inbound server ports: "None" | {"Ports":[8080]}</span>
+}</pre>
+      </div>
+      <p>A few rules worth internalizing: <code>net</code> host-allow-lists match exact hostnames (a port may be appended, e.g. <code>"api.example.com:443"</code>); <code>fs</code> grants are rooted at the listed paths and reads/writes outside them are denied; an absent field stays at its sealed default, so a manifold can never be accidentally widened by omission. The <code>burn init --allow-net host --allow-fs-read /data</code> flags write these grants for you.</p>
+
+      <h3 id="packages-entry">The entry function</h3>
+      <p>A package's entry module assigns its export with <code>module.exports</code>. The export is normally a function - sync or async - that takes one JSON-serializable input and returns a JSON-serializable result. That is the whole contract; the host passes input in and reads the return (or the resolved promise) out.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">javascript</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-com">// source/main.js</span>
+<span class="tok-kw">const</span> util = <span class="tok-fn">require</span>(<span class="tok-str">'./lib/util'</span>);   <span class="tok-com">// sibling modules: relative require</span>
+<span class="tok-kw">const</span> dates = <span class="tok-fn">require</span>(<span class="tok-str">'date-fns'</span>);   <span class="tok-com">// npm dep: bare specifier (from [npm])</span>
+
+<span class="tok-kw">module</span>.exports = <span class="tok-kw">async function</span> (input) {
+  <span class="tok-kw">const</span> res = <span class="tok-kw">await</span> <span class="tok-fn">fetch</span>(<span class="tok-str">'https://api.example.com/v1/x'</span>); <span class="tok-com">// needs net grant</span>
+  <span class="tok-kw">return</span> { ok: res.ok, value: util.transform(<span class="tok-kw">await</span> res.json()) };
+};</pre>
+      </div>
+      <p>Inside the sandbox you have a Node-compatible surface (<code>fetch</code>, <code>crypto</code>, <code>fs</code>, <code>path</code>, streams, and more) - but every capability-backed call is gated by the Manifold above. A package authored in TypeScript exports the same way; the type annotations are stripped to JavaScript when you <code>burn package</code>.</p>
+
+      <h3 id="packages-test">Test &amp; pack</h3>
+      <p>Tests live in <code>tests/*.test.js</code> and run through the real runtime with <code>burn test</code> (Node's built-in <code>node:test</code> + <code>node:assert</code>). When it's green, build and publish:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> test          <span class="tok-com"># run tests/ through the sandbox</span>
+$ <span class="tok-mod">burn</span> package       <span class="tok-com"># build the .afb (deterministic, content-addressed)</span>
+$ <span class="tok-mod">burn</span> publish       <span class="tok-com"># build + upload to the registry</span></pre>
+      </div>
+
+      <h3 id="packages-scaffold">Scaffold a package</h3>
+      <p>Start a new package in JavaScript or TypeScript. TypeScript is a build-time convenience: <code>burn package</code> transpiles <code>.ts</code> to <code>.js</code> at pack time, so the published <code>.afb</code> is always plain JavaScript.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> init ./my-pkg --namespace nyquist --name widget        <span class="tok-com"># JavaScript</span>
+$ <span class="tok-mod">burn</span> init ./my-pkg --namespace nyquist --name widget --ts   <span class="tok-com"># TypeScript (+ tsconfig.json)</span>
+$ <span class="tok-mod">burn</span> new nyquist/widget                                   <span class="tok-com"># scaffold into ./widget</span></pre>
+      </div>
+      <p>The scaffold writes <code>afb.toml</code>, <code>manifold.json</code>, <code>source/main.{js,ts}</code>, a test, and a README. Templates: <code>--template module|udf|http|llm</code>.</p>
+
+      <h3 id="packages-deps">Declaring dependencies</h3>
+      <p>Two kinds of dependency, both declared in <code>afb.toml</code> and both resolved + cached by <code>burn install</code> - never copied into your package:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">toml</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-com"># afb.toml</span>
+[dependencies]              <span class="tok-com"># other registry packages, digest-pinned</span>
+<span class="tok-str">"nyquist/json-tools"</span> = <span class="tok-str">"sha256:9f86d0…"</span>
+
+[npm]                       <span class="tok-com"># npm packages, semver ranges</span>
+leftpad = <span class="tok-str">"^1.0.0"</span>
+date-fns = <span class="tok-str">"^3"</span></pre>
+      </div>
+      <p>Add them from the CLI instead of editing by hand:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> add nyquist/json-tools        <span class="tok-com"># pin a registry package</span>
+$ <span class="tok-mod">burn</span> install                     <span class="tok-com"># resolve the whole graph → burn.lock</span></pre>
+      </div>
+
+      <h3 id="packages-resolve">Resolution &amp; lockfile</h3>
+      <p><code>burn install</code> resolves the full transitive graph with a conflict-driven version solver (the same class of algorithm Cargo uses), topologically orders it, and writes a <code>burn.lock</code> pinning every package to an exact content digest. Re-running with <code>--locked</code> reuses the lockfile without re-resolving - reproducible, byte-for-byte. Resolved packages land in a shared content-addressed cache, so a dependency is downloaded once per machine and reused across every package that needs it.</p>
+      <ul>
+        <li><strong>Registry dependencies</strong> are pinned by SHA-256 digest - a coordinate can never silently resolve to different bytes.</li>
+        <li><strong>npm dependencies</strong> are resolved to an exact version + integrity hash and cached locally; you never run <code>npm install</code> yourself.</li>
+        <li><strong>Importing</strong> is just <code>require()</code> (or TypeScript <code>import</code>): a registry dependency by its <code>namespace/name</code>, an npm package by its bare name - from both JS and TS sources.</li>
+      </ul>
+
+      <h3 id="packages-security">Dependency security</h3>
+      <p>Dependencies are <em>data</em>, not new privilege. The guarantees:</p>
+      <ul>
+        <li><strong>One Manifold governs everything.</strong> A dependency - registry package or npm - runs under <em>your</em> package's Manifold. It can reach the network, filesystem, or environment only where you were granted access; a dependency can never widen its own permissions. A package with a sealed Manifold cannot make a single outbound request, no matter what it pulls in.</li>
+        <li><strong>No native code, ever.</strong> Packages run as sandboxed JavaScript. A dependency carrying a native/C-ABI/N-API addon (<code>.node</code>, <code>.so</code>, <code>.dylib</code>, <code>.dll</code>, <code>binding.gyp</code>) is <strong>rejected</strong> - at install and again at pack - with an error naming the offending file. Native addons are the usual sandbox-escape vector; they simply cannot enter.</li>
+        <li><strong>Pinned and reproducible.</strong> Every dependency is content-addressed; a lockfile fixes the exact closure. What you tested is what ships.</li>
+      </ul>
+
+      <h3 id="packages-perf">Why it's fast</h3>
+      <p>A <code>.afb</code> is one compressed file fetched in a single request - not npm's metadata-then-tarball waterfall across a deep tree. Resolution runs in parallel, the content-addressed cache means a dependency is fetched at most once per machine, and <code>--locked</code> installs skip resolution entirely. Packing is a single deterministic compression pass with no install scripts to execute.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> package                    <span class="tok-com"># build the .afb (TS → JS, deterministic)</span>
+$ <span class="tok-mod">burn</span> publish                    <span class="tok-com"># build + upload to the registry</span>
+$ <span class="tok-mod">burn</span> install --locked           <span class="tok-com"># reproducible, resolution skipped</span></pre>
+      </div>
+
       <h2 id="cli"><span class="anchor">#</span>The <code>burn</code> CLI</h2>
       <p>A Deno-style command-line runtime. CLI default is <code>Manifold::open()</code> so existing Node scripts drop in without flags. Pass <code>--sandbox</code> to flip back to deny-by-default and grant with <code>--allow-*</code>.</p>
 
@@ -1312,12 +1514,23 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><th>Subcommand</th><th>Purpose</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>run &lt;file&gt; [args]</code></td><td>Execute a script. Args after the file populate <code>process.argv[2..]</code>. Default when the first positional looks like a path.</td></tr>
+          <tr><td><code>run [file] [args]</code></td><td>Execute a script. With no <code>file</code>, runs the current package's entry from <code>afb.toml</code> (cargo-style <code>burn run</code>). Args after the file populate <code>process.argv[2..]</code>. Default when the first positional looks like a path.</td></tr>
           <tr><td><code>eval &lt;code&gt;</code> · <code>-e</code></td><td>Evaluate an inline JS snippet in script mode.</td></tr>
           <tr><td><code>thrust &lt;file&gt;</code></td><td>UDF mode. Stdin JSON envelope, script returns JSON, written to stdout. The script body is <code>module.exports = (data) =&gt; ...</code>.</td></tr>
           <tr><td><code>check &lt;file&gt;</code></td><td>Compile and parse without executing. Exits 0 on success, 1 on syntax error. Useful in CI.</td></tr>
           <tr><td><code>bench &lt;file&gt;</code></td><td>Throughput + p50 / p99 latency. Configurable iters and workers.</td></tr>
           <tr><td><code>repl</code></td><td>Interactive read-eval-print loop with line history.</td></tr>
+          <tr><td colspan="2" style="font-weight:600; background:var(--bg-section);">Package management (see <a href="#packages" style="color: var(--action);">Packages &amp; dependencies</a>)</td></tr>
+          <tr><td><code>init [dir]</code> · <code>new &lt;ns/name&gt;</code></td><td>Scaffold a package (<code>afb.toml</code>, <code>manifold.json</code>, <code>source/</code>, tests). <code>--ts</code> for TypeScript; <code>--template module|udf|http|llm</code>.</td></tr>
+          <tr><td><code>add &lt;ns/name&gt;</code></td><td>Add a registry package to <code>[dependencies]</code>, pinned by digest. (Edit <code>[npm]</code> directly for npm deps.)</td></tr>
+          <tr><td><code>install [pkg]</code></td><td>Resolve + cache the dependency graph and write <code>burn.lock</code>. With no <code>pkg</code>, installs the current package's <code>[dependencies]</code> + <code>[npm]</code>. <code>--locked</code> reuses the lockfile.</td></tr>
+          <tr><td><code>test [dir]</code></td><td>Run every file under <code>tests/</code> through the sandbox.</td></tr>
+          <tr><td><code>package [dir]</code> · <code>-o</code></td><td>Build a deterministic, content-addressed <code>.afb</code> (transpiles TS to JS).</td></tr>
+          <tr><td><code>publish [afb]</code></td><td>Build (or upload a prebuilt <code>.afb</code>) to the registry.</td></tr>
+          <tr><td><code>clean [dir]</code></td><td>Remove build artifacts (the package's <code>.afb</code> files and <code>burn.lock</code>). <code>--cache</code> also clears the shared registry + npm caches.</td></tr>
+          <tr><td><code>login</code> · <code>logout</code> · <code>whoami</code></td><td>Registry authentication.</td></tr>
+          <tr><td><code>search &lt;q&gt;</code> · <code>yank &lt;ver&gt;</code></td><td>Search the registry; hide/restore a published version.</td></tr>
+          <tr><td colspan="2" style="font-weight:600; background:var(--bg-section);">Runtime &amp; misc</td></tr>
           <tr><td><code>node | npm | pnpm | npx | yarn | bun</code></td><td>Pass-through shim. Forwards args to the ecosystem binary on <code>$PATH</code>; child <code>node</code> processes route back through <code>burn</code>.</td></tr>
           <tr><td><code>version</code></td><td>Print version and the cargo features built into the binary.</td></tr>
         </tbody>
@@ -1344,7 +1557,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
       </table></div>
 
       <h2 id="node-compat"><span class="anchor">#</span>Node compat surface</h2>
-      <p>Afterburner targets the <strong>Node.js 26</strong> surface. <code>burn npm install</code> and <code>require('express')</code> from a real <code>node_modules</code> tree both work end-to-end — see <a href="https://github.com/afterburner-sh/afterburner/tree/master/examples/express-app" style="color: var(--action);"><code>examples/express-app</code></a>. Pure-JS modules are always available; host-backed ones are gated by the <code>Manifold</code>; surface-only entries load and expose the right shapes.</p>
+      <p>Afterburner targets the <strong>Node.js 26</strong> surface. <code>burn npm install</code> and <code>require('express')</code> from a real <code>node_modules</code> tree both work end-to-end - see <a href="https://github.com/afterburner-sh/afterburner/tree/master/examples/express-app" style="color: var(--action);"><code>examples/express-app</code></a>. Pure-JS modules are always available; host-backed ones are gated by the <code>Manifold</code>; surface-only entries load and expose the right shapes.</p>
 
       <div class="callout callout--ok">
         <div class="callout__icon">✓</div>
@@ -1463,10 +1676,10 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><td><code>BURN_MAX_LINEAR_MEMORY</code></td><td><code>1G</code> (1 GiB)</td><td>Per-instance WASM linear-memory ceiling enforced by Wasmtime's pooling allocator. Accepts plain bytes or a <code>K</code>/<code>M</code>/<code>G</code> suffix (e.g. <code>4G</code> = 4 GiB, <code>128M</code> = 128 MiB). Hard-clamped to 4 GiB (the wasm32 ABI limit). Bump it for long-running daemon-mode workloads (Express, Fastify, etc.) that accumulate per-request state across many calls; lower it when running many concurrent instances on small hosts. <code>--memory &lt;N&gt;</code> on the CLI sets a tighter per-call cap below this hard limit and is independent of <code>-A</code>.</td></tr>
           <tr><td><code>BURN_VERSION</code></td><td><code>latest</code></td><td>Version pin used by the <code>install.sh</code> / <code>install.ps1</code> bootstrap (e.g. <code>v0.1.2</code>). Has no effect after the binary is installed.</td></tr>
           <tr><td><code>BURN_INSTALL</code></td><td><code>~/.local/bin</code></td><td>Install dir for the bootstrap installers. The runtime itself doesn't read this.</td></tr>
-          <tr><td><code>BURN_INSTALL_NO_PATH</code></td><td>unset</td><td>Set to <code>1</code> to skip the bootstrap installer's automatic <code>$PATH</code> update (it normally appends an <code>export PATH=...</code> line to your shell rc — <code>~/.bashrc</code>, <code>~/.zshrc</code>, fish config, or <code>~/.profile</code> — or sets the User <code>Path</code> environment variable on Windows). Use this if you manage <code>$PATH</code> yourself via dotfiles, chezmoi, or a NixOS / nix-home / Guix configuration.</td></tr>
+          <tr><td><code>BURN_INSTALL_NO_PATH</code></td><td>unset</td><td>Set to <code>1</code> to skip the bootstrap installer's automatic <code>$PATH</code> update (it normally appends an <code>export PATH=...</code> line to your shell rc - <code>~/.bashrc</code>, <code>~/.zshrc</code>, fish config, or <code>~/.profile</code> - or sets the User <code>Path</code> environment variable on Windows). Use this if you manage <code>$PATH</code> yourself via dotfiles, chezmoi, or a NixOS / nix-home / Guix configuration.</td></tr>
           <tr><td><code>BURN_QUIET</code></td><td>unset</td><td>Set to <code>1</code> to suppress the first-run capability banner and other non-essential stderr notices. Same as <code>--quiet</code> / <code>-q</code>.</td></tr>
-          <tr><td><code>BURN_SHARDS</code></td><td>auto (matches available CPUs)</td><td>Number of parallel workers the daemon uses to serve HTTP. Defaults to the number of CPUs your container or host gives the process, which is usually what you want — set this only for testing (<code>BURN_SHARDS=1</code> reverts to single-worker behavior), benchmarking different parallelism levels without changing the container, or pinning a specific count on a CI runner. Accepted range <code>1</code>–<code>128</code>; values outside that range or non-numeric input fall back to auto with a warning. Setting it higher than the number of available CPUs is allowed but discouraged — workers compete for cores they don't have, which slows you down rather than speeds you up.</td></tr>
-          <tr><td><code>BURN_SHIM_DEPTH</code></td><td><code>0</code> (incremented per shim hop, capped at 8)</td><td>Pass-through recursion guard. When <code>burn</code> is invoked on a non-burn binary (<code>burn node script.js</code>, <code>burn npm test</code>, etc.) it forwards to the underlying tool and increments this counter — hitting <code>8</code> aborts with a typed error instead of fork-bombing. Operators rarely set this manually; it exists so the shim layer can refuse cycles introduced by a misconfigured PATH or a wrapper script that re-invokes <code>burn</code>.</td></tr>
+          <tr><td><code>BURN_SHARDS</code></td><td>auto (matches available CPUs)</td><td>Number of parallel workers the daemon uses to serve HTTP. Defaults to the number of CPUs your container or host gives the process, which is usually what you want - set this only for testing (<code>BURN_SHARDS=1</code> reverts to single-worker behavior), benchmarking different parallelism levels without changing the container, or pinning a specific count on a CI runner. Accepted range <code>1</code>–<code>128</code>; values outside that range or non-numeric input fall back to auto with a warning. Setting it higher than the number of available CPUs is allowed but discouraged - workers compete for cores they don't have, which slows you down rather than speeds you up.</td></tr>
+          <tr><td><code>BURN_SHIM_DEPTH</code></td><td><code>0</code> (incremented per shim hop, capped at 8)</td><td>Pass-through recursion guard. When <code>burn</code> is invoked on a non-burn binary (<code>burn node script.js</code>, <code>burn npm test</code>, etc.) it forwards to the underlying tool and increments this counter - hitting <code>8</code> aborts with a typed error instead of fork-bombing. Operators rarely set this manually; it exists so the shim layer can refuse cycles introduced by a misconfigured PATH or a wrapper script that re-invokes <code>burn</code>.</td></tr>
           <tr><td><code>BURN_WORKER_DEPTH</code></td><td><code>0</code> (incremented per spawned worker, capped at 8)</td><td><code>worker_threads</code> recursion guard (mirrors <code>BURN_SHIM_DEPTH</code> for the worker model). Each spawned <code>new Worker(...)</code> child inherits the parent's depth + 1; hitting the ceiling refuses spawn with <code>E_DEPTH</code> instead of letting a runaway script exhaust system resources. Together with <code>WorkerConfig::max_concurrent</code> (default <code>32</code>) and the 16 MiB per-frame cap, this bounds the worst case a hostile or buggy script can do.</td></tr>
         </tbody>
       </table></div>
@@ -1543,16 +1756,20 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
     <ul>
       <li><a href="#introduction">Introduction</a></li>
       <li><a href="#installation">Installation</a></li>
-      <li><a href="#first-burn">Your first burn</a></li>
+      <li><a href="#first-burn">Your first package</a></li>
       <li><a href="#manifold">Manifold</a></li>
       <li><a href="#fuel">Fuel &amp; limits</a></li>
       <li><a href="#tiers">Adaptive tiers</a></li>
       <li><a href="#scheduler">Scheduler</a></li>
       <li><a href="#state">Cross-call state</a></li>
+      <li><a href="#programmatic">Programmatic API</a></li>
       <li><a href="#extend">Extension points</a></li>
       <li class="toc-sub"><a href="#extend-cache">BurnCacheBackend</a></li>
       <li class="toc-sub"><a href="#extend-host">HostContext</a></li>
       <li class="toc-sub"><a href="#extend-flow">FlowEngine</a></li>
+      <li><a href="#packages">Packages &amp; deps</a></li>
+      <li class="toc-sub"><a href="#packages-deps">Declaring deps</a></li>
+      <li class="toc-sub"><a href="#packages-security">Dependency security</a></li>
       <li><a href="#cli">burn CLI</a></li>
       <li class="toc-sub"><a href="#cli-subcommands">Subcommands</a></li>
       <li class="toc-sub"><a href="#cli-flags">Flag reference</a></li>
@@ -1584,7 +1801,7 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
   document.addEventListener('scroll', highlight, { passive: true });
   highlight();
 
-  /* burn buttons — play video on hover */
+  /* burn buttons - play video on hover */
   document.querySelectorAll('.btn--burn').forEach(btn => {
     const vid = btn.querySelector('.burn-bg');
     if (!vid) return;
@@ -1618,7 +1835,7 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
     setTimeout(() => b.textContent = 'Click to copy', 1400);
   });
 
-  /* doc search — single-page client index over h2 + h3 sections.
+  /* doc search - single-page client index over h2 + h3 sections.
      Indexes title + body text per section, ranks by simple weighted
      substring match, renders a results dropdown under the input. */
   (function search() {

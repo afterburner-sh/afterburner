@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! L3 shadow tests — bcrypt.
+//! L3 shadow tests - bcrypt.
 //!
 //! `require('bcrypt')` should work inside the WASM sandbox even
 //! though upstream's native addon can't load. The shadow is backed
@@ -61,7 +61,7 @@ fn require_bcrypt_returns_a_module() {
 fn hashsync_produces_bcrypt_shaped_hash() {
     let out = run_burn_eval(
         "const bcrypt = require('bcrypt');\n\
-         // Cost 4 is the minimum bcrypt accepts — keeps the test fast.\n\
+         // Cost 4 is the minimum bcrypt accepts - keeps the test fast.\n\
          const h = bcrypt.hashSync('hunter2', 4);\n\
          // bcrypt hashes start with $2 variants and carry the cost.\n\
          console.log(h.slice(0, 7));\n\
@@ -170,7 +170,7 @@ fn truncates_detects_long_passwords() {
 
 #[test]
 fn unknown_hash_raises_error() {
-    // Passing a malformed hash should raise a typed bcrypt error —
+    // Passing a malformed hash should raise a typed bcrypt error -
     // not return false, because that would mask bad inputs.
     let out = run_burn_eval(
         "const bcrypt = require('bcrypt');\n\
@@ -192,7 +192,7 @@ fn unknown_hash_raises_error() {
 #[test]
 fn shadow_wins_over_node_modules_bcrypt() {
     // If a user's node_modules carries a real bcrypt package, the
-    // shadow must still win — the real one has a .node addon that
+    // shadow must still win - the real one has a .node addon that
     // can't load in the WASM sandbox. Simulate by materializing a
     // fake node_modules/bcrypt/ tree and confirming require returns
     // the shadow, not the fake.

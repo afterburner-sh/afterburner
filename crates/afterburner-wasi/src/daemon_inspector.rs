@@ -76,8 +76,8 @@ struct InspectorInner {
     /// matching Receiver. The WebSocket reader intercepts
     /// `Debugger.resume`/`stepOver`/`stepInto`/`stepOut` messages on
     /// the Rust side (not in JS) and signals the Sender, unblocking
-    /// the paused wasmtime instance. Going through JS would deadlock
-    /// — the wasmtime instance is what's blocked.
+    /// the paused wasmtime instance. Going through JS would deadlock,
+    /// since the wasmtime instance is what's blocked.
     pause_signals: HopscotchMap<i64, kovan_channel::flavors::bounded::Sender<i32>>,
     next_pause_id: AtomicI64,
 }
@@ -153,7 +153,7 @@ impl DaemonInspector {
     /// Block the calling thread until any WS client sends a
     /// `Debugger.resume`-class command. Used by `__host_inspector_pause`
     /// when a breakpoint fires. Returns 0 for resume, 1 for stepOver,
-    /// 2 for stepInto, 3 for stepOut — so the JS side can react
+    /// 2 for stepInto, 3 for stepOut - so the JS side can react
     /// differently to stepping commands. If no inspector listener
     /// is open or no client is connected, returns -1 immediately so
     /// the JS side doesn't deadlock forever waiting for nothing.
@@ -173,7 +173,7 @@ impl DaemonInspector {
         code
     }
 
-    /// Drain any pending pause signals — used on listener teardown so
+    /// Drain any pending pause signals - used on listener teardown so
     /// the JS side doesn't stay blocked when the inspector closes.
     fn release_all_pauses(&self) {
         let ids: Vec<i64> = self.inner.pause_signals.iter().map(|(id, _)| id).collect();
@@ -336,7 +336,7 @@ async fn handle_ws(socket: WebSocket, inner: Arc<InspectorInner>) {
 
     let (mut sink, mut stream) = socket.split();
 
-    // Writer task — drains the per-session out channel into the WS.
+    // Writer task - drains the per-session out channel into the WS.
     let writer = tokio::spawn(async move {
         while let Some(payload) = out_rx.recv().await {
             if sink.send(Message::Text(payload.into())).await.is_err() {
@@ -346,13 +346,13 @@ async fn handle_ws(socket: WebSocket, inner: Arc<InspectorInner>) {
         let _ = sink.close().await;
     });
 
-    // Reader loop — runs in this task. When the socket closes,
+    // Reader loop - runs in this task. When the socket closes,
     // we abort the writer and notify JS so any per-session state
     // can be cleaned up.
     while let Some(msg) = stream.next().await {
         let bytes = match msg {
             // axum 0.8 / tungstenite ship Text as Utf8Bytes and Binary
-            // as Bytes — convert both to owned String for downstream
+            // as Bytes - convert both to owned String for downstream
             // serde_json parsing.
             Ok(Message::Text(t)) => t.to_string(),
             Ok(Message::Binary(b)) => match String::from_utf8(b.to_vec()) {

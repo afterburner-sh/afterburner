@@ -5,7 +5,7 @@
 
 #![cfg(feature = "bin")]
 #![allow(non_snake_case)]
-//! C1 — `Atomics.waitAsync` real semantics.
+//! C1 - `Atomics.waitAsync` real semantics.
 //!
 //! Validates:
 //! 1. `waitAsync` returns `{async:false, value:'not-equal'}` when the
@@ -224,7 +224,7 @@ fn views_over_same_buffer_share_waiters() {
                 }
             });
             setTimeout(() => {
-                // Notify on the OTHER view — should still wake.
+                // Notify on the OTHER view - should still wake.
                 const woken = Atomics.notify(b, 0, 1);
                 if (woken !== 1) {
                     console.error('cross-view notify did not wake: ' + woken);

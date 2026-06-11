@@ -7,7 +7,7 @@
 //! thrusts/sec on a single core for a trivial transform. We run 10 K
 //! iterations (to keep CI time reasonable) and assert the rate stays
 //! well above a conservative floor. Tightened floors are welcome but
-//! not enforced — CI machines vary.
+//! not enforced - CI machines vary.
 
 use afterburner_core::log::Level;
 use afterburner_core::{Combustor, FuelGauge, ab_event};

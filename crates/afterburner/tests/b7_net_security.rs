@@ -10,17 +10,17 @@
 //! or the library/daemon partition. If any go red, the threat model has
 //! regressed:
 //!
-//! * **`NetAccess::None`** — `--sandbox` without `--allow-net` must
+//! * **`NetAccess::None`** - `--sandbox` without `--allow-net` must
 //!   reject `net.connect` with `EACCES`.
-//! * **Allow-list narrowing** — `--allow-net 127.0.0.1` lets that host
+//! * **Allow-list narrowing** - `--allow-net 127.0.0.1` lets that host
 //!   through but blocks unlisted hosts. The bind-then-drop helper gives
 //!   us a guaranteed-free port without needing a real server.
-//! * **`OutboundHttp` blocks raw TCP** — covered by a unit test in
+//! * **`OutboundHttp` blocks raw TCP** - covered by a unit test in
 //!   `daemon_net.rs`; we don't re-verify here because the CLI cannot
 //!   construct an HTTP-only manifold (only `OutboundFull`).
-//! * **Library mode rejects `net.createServer().listen()`** — the
+//! * **Library mode rejects `net.createServer().listen()`** - the
 //!   library API never installs `DaemonNet`, so inbound listening must
-//!   surface `ENO_DAEMON`. (Outbound `net.connect` is covered too — it
+//!   surface `ENO_DAEMON`. (Outbound `net.connect` is covered too - it
 //!   reaches the no-daemon stub and gets `ENO_DAEMON`.)
 
 use afterburner::Afterburner;
@@ -82,7 +82,7 @@ fn sandbox_without_allow_net_blocks_connect() {
 }
 
 // ---------------------------------------------------------------------
-// (2) Allow-list narrowing — listed host permitted, unlisted blocked
+// (2) Allow-list narrowing - listed host permitted, unlisted blocked
 // ---------------------------------------------------------------------
 
 #[test]
@@ -90,7 +90,7 @@ fn sandbox_without_allow_net_blocks_connect() {
 fn allow_list_blocks_unlisted_host() {
     let port = free_port();
     // Allow only 127.0.0.2 (a loopback alias that's never the target).
-    // The script targets 127.0.0.1 — must be denied with EACCES.
+    // The script targets 127.0.0.1 - must be denied with EACCES.
     let parent = format!(
         r#"
             const net = require('net');
@@ -133,7 +133,7 @@ fn allow_list_permits_listed_host() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("local_addr").port();
     let _t = std::thread::spawn(move || {
-        // Accept once; immediately close — we only need the connect to
+        // Accept once; immediately close - we only need the connect to
         // succeed against the listening socket.
         if let Ok((_s, _)) = listener.accept() {}
     });
@@ -170,13 +170,13 @@ fn allow_list_permits_listed_host() {
 }
 
 // ---------------------------------------------------------------------
-// (3) Library mode never installs DaemonNet — listen + connect deny
+// (3) Library mode never installs DaemonNet - listen + connect deny
 // ---------------------------------------------------------------------
 
 /// `Afterburner::run_script` is the library entry point. It does not
 /// install `DaemonNet`, so every `__host_net_*` import returns
 /// `E_NO_DAEMON` and the polyfill surfaces `ENO_DAEMON`. The point of
-/// the test is to lock that contract — library callers don't acquire
+/// the test is to lock that contract - library callers don't acquire
 /// inbound or outbound TCP just because the polyfill is present.
 #[test]
 fn library_mode_rejects_net_listen() {

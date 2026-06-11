@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! L3 shadow modules — pure-Rust substitutes for popular npm
+//! L3 shadow modules - pure-Rust substitutes for popular npm
 //! packages whose upstream ships a `.node` native addon.
 //!
 //! Scripts running under `burn` cannot dynamically load a `.node`
@@ -15,7 +15,7 @@
 //! Each shadow lives behind its own cargo feature so binary size
 //! scales with opt-in:
 //!
-//! * `bcrypt` — behind `shadow-bcrypt` (via the Rust `bcrypt`
+//! * `bcrypt` - behind `shadow-bcrypt` (via the Rust `bcrypt`
 //!   crate). Covers `hash` / `hashSync` / `compare` / `compareSync`
 //!   / `genSalt` / `genSaltSync`.
 //!

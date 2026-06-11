@@ -33,6 +33,7 @@ afterburner-thrust = { workspace = true, optional = true }
 # pulled in only by the `bin` feature (the CLI), never by library consumers.
 afterburner-cloud = { workspace = true, optional = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 # bin-only — gated behind `bin` feature so library consumers don't pull them.
 clap = { workspace = true, optional = true }
 rustyline = { workspace = true, optional = true }
@@ -53,12 +54,16 @@ crossterm = { workspace = true, optional = true }
 kovan-channel = { workspace = true, optional = true }
 
 [dev-dependencies]
+afterburner-afb.workspace = true
 # Serialize tests that spawn long-lived `burn` subprocesses. Each
 # subprocess cold-starts the wasmtime engine + plugin (~seconds in
 # debug builds), and running them in parallel oversubscribes CPU
 # until their timing assertions flake. `#[serial]` pins those tests
 # to a shared lock group while leaving the rest of the suite parallel.
 serial_test.workspace = true
+httpmock = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
 tempfile.workspace = true
 afterburner-core.workspace = true
 afterburner-wasi.workspace = true

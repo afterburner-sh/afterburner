@@ -9,7 +9,7 @@
 //! type-based codegen, no JSX transform. `tsc --noEmit` stays the
 //! user's concern.
 //!
-//! The oxc transformer preserves `isolatedModules` semantics — every
+//! The oxc transformer preserves `isolatedModules` semantics - every
 //! file is stripped independently, so cross-file const-enum inlining
 //! and emit-based type imports don't apply. That matches how modern
 //! bundlers (esbuild, bun, swc) handle TS strip.
@@ -32,11 +32,11 @@ use std::path::Path;
 ///
 /// Returns `Err` if:
 ///
-/// * `path`'s extension is `.tsx` — JSX transform isn't in the strip-
+/// * `path`'s extension is `.tsx` - JSX transform isn't in the strip-
 ///   only scope. Callers get a clear message rather than a silent
 ///   "invalid JS" downstream error.
 /// * The TS parser reports *syntactic* errors. Type errors are not
-///   reported — that's `tsc`'s job.
+///   reported - that's `tsc`'s job.
 /// * The extension resolver rejects the path (e.g. unknown extension
 ///   dressed as `.ts`).
 pub fn transpile(source: &str, path: &Path) -> Result<String, TsError> {
@@ -67,7 +67,7 @@ pub fn transpile(source: &str, path: &Path) -> Result<String, TsError> {
     let mut program = parsed.program;
 
     // `only_remove_type_imports` tells the transformer to stop at
-    // type-stripping — don't emit runtime helpers, don't rewrite
+    // type-stripping - don't emit runtime helpers, don't rewrite
     // imports, don't do const-enum inlining. Matches `tsc
     // --isolatedModules` semantics, which is what modern bundlers
     // (esbuild, swc) emit in strip mode.
@@ -117,7 +117,7 @@ pub fn transpile(source: &str, path: &Path) -> Result<String, TsError> {
 
 /// Public helper for the CLI run path so `.js` / `.mjs` files with
 /// `import` / `export` are lowered to CJS even without the TS strip.
-/// No-op for plain CJS source — the function returns the input
+/// No-op for plain CJS source - the function returns the input
 /// unchanged if no ESM declarations are present.
 pub fn lower_esm_js(source: &str, path: &Path) -> Result<String, TsError> {
     crate::esm::rewrite_esm_to_cjs(source, path).map_err(|e| TsError::Parse {
@@ -128,7 +128,7 @@ pub fn lower_esm_js(source: &str, path: &Path) -> Result<String, TsError> {
 
 /// Typed errors the transpile step surfaces. Separate from
 /// [`AfterburnerError`] because TS parse/config errors aren't a
-/// runtime sandbox concern — the callers at the CLI / library edge
+/// runtime sandbox concern - the callers at the CLI / library edge
 /// convert them into user-facing messages.
 ///
 /// [`AfterburnerError`]: crate::AfterburnerError
@@ -148,7 +148,7 @@ pub enum TsError {
 
 /// True if `path` has a TypeScript extension we should auto-transpile
 /// (`.ts`, `.mts`, `.cts`). `.tsx` matches but transpile will reject
-/// it with [`TsError::JsxNotSupported`] — callers don't need to
+/// it with [`TsError::JsxNotSupported`] - callers don't need to
 /// filter that out themselves.
 pub fn is_typescript(path: &Path) -> bool {
     matches!(

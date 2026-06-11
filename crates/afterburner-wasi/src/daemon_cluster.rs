@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Cluster-mode bind helpers — SO_REUSEPORT (Linux/macOS/BSD) /
+//! Cluster-mode bind helpers - SO_REUSEPORT (Linux/macOS/BSD) /
 //! SO_REUSEADDR (Windows) for multi-process accept-balance.
 //!
 //! Activated by setting `BURN_CLUSTER_REUSEPORT=1` in the subprocess
@@ -11,7 +11,7 @@
 //! `__host_worker_spawn_env` so each forked worker's daemon binds
 //! the listening socket with `SO_REUSEPORT`. The kernel then
 //! 4-tuple-hashes incoming connections across all listeners on the
-//! same `(addr, port)` — that's how Node 20 cluster's default
+//! same `(addr, port)` - that's how Node 20 cluster's default
 //! `SCHED_RR` is implemented at the OS level.
 //!
 //! Behaviour matrix:
@@ -27,7 +27,7 @@
 //! already-bound port; on Server 2016+ the kernel does load-balanced
 //! delivery for `SO_REUSEADDR` sockets that share a 5-tuple. Older
 //! Windows versions allow the bind but only the most-recent listener
-//! receives connections — accept-balance falls back to "no balance,
+//! receives connections - accept-balance falls back to "no balance,
 //! just no EADDRINUSE."
 
 use std::net::{SocketAddr, TcpListener, UdpSocket};

@@ -8,7 +8,7 @@
 //! Base64 is the universal binary framing across the JS boundary
 //! (request/response bodies, file payloads, codec wire formats), and
 //! the interpreter-side encoder/decoder in the `buffer` polyfill costs
-//! O(n) interpreted bytecode per byte — tens of seconds and >1e9
+//! O(n) interpreted bytecode per byte - tens of seconds and >1e9
 //! metered instructions on multi-MiB payloads. These bridges hoist the
 //! bit-twiddling to the host.
 //!
@@ -18,16 +18,16 @@
 //! base64-framing the wire is free), framing *base64 itself* as base64
 //! would be self-defeating. These bridges move raw bytes instead:
 //!
-//! * `__host_b64_encode(Uint8Array) -> string` — the typed array's
+//! * `__host_b64_encode(Uint8Array) -> string` - the typed array's
 //!   backing bytes are passed to the host by pointer (zero-copy on the
 //!   guest side; QuickJS's heap lives in linear memory), and the ASCII
 //!   result crosses back through an exact-fit out buffer.
-//! * `__host_b64_decode(string) -> Uint8Array` — the ASCII input
+//! * `__host_b64_decode(string) -> Uint8Array` - the ASCII input
 //!   crosses as a Rust `String` (one native UTF-8 copy), and the raw
 //!   decoded bytes come back through an exact-fit out buffer, returned
 //!   to JS as a `Uint8Array` backed by a QuickJS-heap allocation
 //!   (`ArrayBuffer::new_copy`, ≥8-byte aligned so callers can construct
-//!   any typed view over `.buffer` — same rationale as the columnar
+//!   any typed view over `.buffer` - same rationale as the columnar
 //!   input bridge).
 //!
 //! Output sizes are exactly computable from input sizes, so neither
@@ -51,7 +51,7 @@ use crate::host_api::{host_b64_decode, host_b64_encode};
 /// payloads this large already exceed engine output caps elsewhere).
 const MAX_INPUT_BYTES: usize = 1 << 30;
 
-/// `__host_b64_encode(bytes)` — raw bytes to base64 string.
+/// `__host_b64_encode(bytes)` - raw bytes to base64 string.
 ///
 /// Free function (not a closure) for the same reason as the columnar
 /// bridges: rquickjs's HRTB-based `Fn` impls reject closures whose
@@ -90,7 +90,7 @@ fn b64_encode<'js>(ctx: Ctx<'js>, data: TypedArray<'js, u8>) -> JsResult<String>
         .map_err(|_| Exception::throw_message(&ctx, "__host_b64_encode: non-ASCII host reply"))
 }
 
-/// `__host_b64_decode(str)` — base64 string to raw bytes.
+/// `__host_b64_decode(str)` - base64 string to raw bytes.
 fn b64_decode<'js>(ctx: Ctx<'js>, input: String) -> JsResult<TypedArray<'js, u8>> {
     if input.len() > MAX_INPUT_BYTES {
         return Err(Exception::throw_message(

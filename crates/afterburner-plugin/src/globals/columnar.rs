@@ -8,7 +8,7 @@
 //! Two Rust-implemented bridges + one JS-implemented dispatcher
 //! (installed via `ctx.eval(...)`):
 //!
-//! * `__AB_GET_COLUMNAR_INPUT__()` — reads `HostState::pending_input`
+//! * `__AB_GET_COLUMNAR_INPUT__()` - reads `HostState::pending_input`
 //!   into a wasm-side buffer and hands it back to JS as a
 //!   `Uint8Array`. Zero-copy on the JS side: the `Vec<u8>` we fill
 //!   via `host_get_input` is moved (not copied) into the
@@ -16,13 +16,13 @@
 //!   uses QuickJS's free-function callback to take ownership of the
 //!   Rust allocation. The user UDF later constructs typed views
 //!   (`Int32Array`, `Float64Array`, …) directly into the same
-//!   backing store — also zero-copy.
-//! * `__AB_COLUMNAR_REPLY__(uint8arr)` — reads the bytes the JS-side
+//!   backing store - also zero-copy.
+//! * `__AB_COLUMNAR_REPLY__(uint8arr)` - reads the bytes the JS-side
 //!   dispatcher wrote into a `Uint8Array` and forwards them through
 //!   `host_columnar_reply`. The host then performs the symmetric
 //!   boundary `memcpy` from linmem into `pending_columnar_reply` and
 //!   `WasmCombustor::thrust_columnar` decodes after `_start` returns.
-//! * `__ab_columnar_dispatch(userFn)` — pure-JS dispatcher (no
+//! * `__ab_columnar_dispatch(userFn)` - pure-JS dispatcher (no
 //!   capability gates of its own). Reads the `BatchHeader` +
 //!   `ColumnHeader[]` block at the start of the input blob, builds
 //!   the `{ row_count, columns: { name: TypedArrayView, ... } }`
@@ -33,7 +33,7 @@
 //! ## Sandbox properties
 //!
 //! TypedArray views are bounded to the wasm guest's own linear
-//! memory — Wasmtime guarantees the guest cannot read host memory
+//! memory - Wasmtime guarantees the guest cannot read host memory
 //! through these views. Per-call lifecycle stays identical to the
 //! JSON-shaped invoke path: a fresh Store is allocated from the
 //! pool, the input blob is copied into linmem, the UDF runs, the
@@ -71,12 +71,12 @@ const COLUMNAR_DISPATCHER: &str = r#"
     const DT_UTF8 = 12, DT_BYTEA = 18, DT_JSONB = 19;
     function isVarWidth(t) { return t === DT_UTF8 || t === DT_BYTEA || t === DT_JSONB; }
     // Indexed by ColumnDtype tag (1..19). 0 = unused / variable-width
-    // (the slot array's element size is 16 — INLINE_SLOT — but
+    // (the slot array's element size is 16 - INLINE_SLOT - but
     // var-width has a separate code path).
     const DTYPE_SIZE = [0, 1, 1, 2, 4, 8, 1, 2, 4, 8, 4, 8, 0, 4, 8, 16, 16, 16, 0, 0];
     const DTYPE_VIEW = [
         null,
-        Uint8Array,    // 1  Bool — same bytewidth as Uint8
+        Uint8Array,    // 1  Bool - same bytewidth as Uint8
         Int8Array,     // 2  Int8
         Int16Array,    // 3  Int16
         Int32Array,    // 4  Int32
@@ -87,14 +87,14 @@ const COLUMNAR_DISPATCHER: &str = r#"
         BigUint64Array,// 9  UInt64
         Float32Array,  // 10 Float32
         Float64Array,  // 11 Float64
-        null,          // 12 Utf8     — var-width (own path)
+        null,          // 12 Utf8     - var-width (own path)
         Int32Array,    // 13 Date32
         BigInt64Array, // 14 Timestamp
-        null,          // 15 Decimal128 — Phase 2
-        null,          // 16 Interval   — Phase 2
-        null,          // 17 Uuid       — Phase 2
-        null,          // 18 Bytea     — var-width (own path)
-        null,          // 19 Jsonb     — var-width (own path)
+        null,          // 15 Decimal128 - Phase 2
+        null,          // 16 Interval   - Phase 2
+        null,          // 17 Uuid       - Phase 2
+        null,          // 18 Bytea     - var-width (own path)
+        null,          // 19 Jsonb     - var-width (own path)
     ];
     function fixedTypedToTag(v) {
         if (v instanceof Int8Array) return 2;
@@ -257,7 +257,7 @@ const COLUMNAR_DISPATCHER: &str = r#"
             throw new Error("columnar UDF: column '" + out_names[i] + "' must be a fixed-width TypedArray or a string[] / Uint8Array[]; got " + tname);
         }
 
-        // Layout pass — same shape as before, plus heap regions
+        // Layout pass - same shape as before, plus heap regions
         // for var-width columns appended after data + validity + name.
         let cursor = HEADER + out_names.length * COL_HDR;
         cursor = (cursor + 7) & ~7;
@@ -343,19 +343,19 @@ const COLUMNAR_DISPATCHER: &str = r#"
 /// only `align_of::<u8>() == 1` byte alignment from the Rust default
 /// allocator. JS-side `new Float64Array(buf, off, len)` validates
 /// that the *absolute* backing pointer + offset is a multiple of
-/// 8 — so a u8-aligned Vec base trips a `RangeError: invalid offset`
+/// 8 - so a u8-aligned Vec base trips a `RangeError: invalid offset`
 /// even when our column data offsets are themselves 8-aligned within
 /// the blob. `new_copy` allocates inside QuickJS's heap, which
 /// guarantees ≥ 8-byte alignment, so the typed-view construction
 /// works for every Phase-1 dtype (Float64 / BigInt64 / Int32 / etc).
 /// Cost: one extra in-process `memcpy` of the blob (~100 KB to
-/// 1 MB) per call — ~10–100 µs, well under the JSON-decode work it
+/// 1 MB) per call - ~10–100 µs, well under the JSON-decode work it
 /// replaces. Removing this copy is a Phase-2 optimisation (allocate
 /// the Vec via a high-alignment newtype + transfer ownership).
 ///
 /// Written as a free function (not a closure) so the
 /// `for<'js> fn(Ctx<'js>) -> JsResult<TypedArray<'js, u8>>`
-/// higher-rank trait bound holds — closures capture a single
+/// higher-rank trait bound holds - closures capture a single
 /// inferred lifetime and trip the rquickjs Fn trait when the
 /// returned type is `'js`-bound.
 fn ab_get_columnar_input<'js>(ctx: Ctx<'js>) -> JsResult<TypedArray<'js, u8>> {
@@ -371,7 +371,7 @@ fn ab_get_columnar_input<'js>(ctx: Ctx<'js>) -> JsResult<TypedArray<'js, u8>> {
 /// (linmem → `HostState::pending_columnar_reply`).
 fn ab_columnar_reply<'js>(arr: TypedArray<'js, u8>) -> i32 {
     // `as_bytes()` returns the slice over the TypedArray's own
-    // backing store. Detached returns None — surface as a negative
+    // backing store. Detached returns None - surface as a negative
     // code the JS dispatcher converts to a thrown error.
     let Some(bytes) = arr.as_bytes() else {
         return -3;
@@ -389,7 +389,7 @@ pub fn install<'js>(globals: &Object<'js>) {
 
 /// Eval the JS-side dispatcher. Called from `globals::install` AFTER
 /// `__AB_GET_COLUMNAR_INPUT__` / `__AB_COLUMNAR_REPLY__` are
-/// installed — the dispatcher uses both at runtime so they must
+/// installed - the dispatcher uses both at runtime so they must
 /// exist first. Wizer preinit captures the resulting
 /// `__ab_columnar_dispatch` closure into the snapshot, so every
 /// columnar-invoke call boots with it already resident.

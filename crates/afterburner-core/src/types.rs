@@ -25,7 +25,7 @@ pub struct ScriptId {
 pub enum EngineMode {
     /// QuickJS compiled to WASM, executed via Wasmtime. Full sandbox.
     Wasm,
-    /// QuickJS via `rquickjs` FFI. Trusted code only — no WASM sandbox.
+    /// QuickJS via `rquickjs` FFI. Trusted code only - no WASM sandbox.
     Native,
 }
 
@@ -33,13 +33,13 @@ pub enum EngineMode {
 /// `None` means "no cap on this dimension."
 ///
 /// **Backend-portable field:** `timeout_ms` is wall-clock and behaves the
-/// same on every backend. Prefer it as the primary safety knob — it is the
+/// same on every backend. Prefer it as the primary safety knob - it is the
 /// only limit whose magnitude carries the same meaning across modes.
 ///
 /// **Backend-specific fields:** `fuel` and `memory_bytes` measure
 /// backend-internal quantities and are **not** numerically comparable
 /// between modes. A `fuel: Some(1_000_000)` value is reasonable in one
-/// backend and absurdly small in another — see the table below. Code that
+/// backend and absurdly small in another - see the table below. Code that
 /// runs under [`crate::engine::Combustor`] without knowing the concrete
 /// backend should rely on `timeout_ms` and treat `fuel` / `memory_bytes`
 /// as backend-tuning hints.
@@ -56,24 +56,24 @@ pub enum EngineMode {
 #[derive(Debug, Clone, Default)]
 pub struct FuelGauge {
     /// Backend-specific instruction budget. See type-level docs for the
-    /// per-mode semantics — values are NOT comparable across modes.
+    /// per-mode semantics - values are NOT comparable across modes.
     pub fuel: Option<u64>,
     /// Maximum bytes of linear memory (Wasm) or heap (native).
     pub memory_bytes: Option<usize>,
     /// Wall-clock cap. Same meaning across all backends.
     pub timeout_ms: Option<u64>,
     /// Ceiling on the bytes a single invocation may produce as its
-    /// result — the host-side capture of the script's output (result
+    /// result - the host-side capture of the script's output (result
     /// JSON, raw result bytes, script-mode stdout). `None` means the
     /// engine default ([`Self::DEFAULT_OUTPUT_BYTES`], 64 MiB), **not**
     /// unlimited: the capture buffer is host RAM, so output stays a
     /// bounded resource even under [`Self::unlimited`]. Exceeding the
     /// ceiling surfaces as
-    /// [`AfterburnerError::OutputTooLarge`](crate::AfterburnerError::OutputTooLarge)
-    /// — a structured error, never a bare trap.
+    /// [`AfterburnerError::OutputTooLarge`](crate::AfterburnerError::OutputTooLarge):
+    /// a structured error, never a bare trap.
     pub output_bytes: Option<usize>,
     /// Capability gate for Node-style built-in modules. Defaults to
-    /// [`Manifold::sealed`] — no host-backed modules accessible.
+    /// [`Manifold::sealed`] - no host-backed modules accessible.
     pub manifold: Manifold,
 }
 
@@ -86,7 +86,7 @@ impl FuelGauge {
 
     /// Unrestricted resource limits, sealed manifold. Useful for tests
     /// and for trusted code that still needs a capability-free starting
-    /// point — override individual fields as needed. Output capture
+    /// point - override individual fields as needed. Output capture
     /// stays at the [`Self::DEFAULT_OUTPUT_BYTES`] ceiling (host RAM
     /// is never an unbounded resource); raise `output_bytes`
     /// explicitly for larger results.
@@ -100,14 +100,14 @@ impl FuelGauge {
         }
     }
 
-    /// The effective output ceiling for this gauge —
+    /// The effective output ceiling for this gauge -
     /// [`output_bytes`](Self::output_bytes) or the engine default.
     pub fn output_ceiling(&self) -> usize {
         self.output_bytes.unwrap_or(Self::DEFAULT_OUTPUT_BYTES)
     }
 }
 
-/// Input for [`crate::engine::Combustor::run_script`] — the script
+/// Input for [`crate::engine::Combustor::run_script`] - the script
 /// source plus Node-style `process.argv` and `process.env` values.
 ///
 /// Separated from [`FuelGauge`] because this is per-invocation *data*
@@ -132,7 +132,7 @@ pub struct ScriptInvocation {
     pub cwd: String,
 }
 
-/// Result of [`crate::engine::Combustor::run_script`] — top-level
+/// Result of [`crate::engine::Combustor::run_script`] - top-level
 /// script-mode execution (no UDF envelope).
 ///
 /// Unlike the UDF [`thrust`](crate::engine::Combustor::thrust) path
@@ -140,7 +140,7 @@ pub struct ScriptInvocation {
 /// mode buffers whatever was written to stdout / stderr during
 /// execution and surfaces them alongside the Node-style `exit_code`.
 ///
-/// `Ok(ScriptOutcome)` means the script ran to completion — possibly
+/// `Ok(ScriptOutcome)` means the script ran to completion - possibly
 /// with `exit_code != 0` if the user code threw an uncaught exception.
 /// `Err(AfterburnerError)` is reserved for infrastructural failures
 /// that prevented a meaningful run: compile failure on the user
@@ -162,13 +162,13 @@ pub struct ScriptOutcome {
 
 /// Result of an output-framing-aware invocation
 /// ([`thrust_out`](crate::engine::Combustor::thrust_out) /
-/// [`thrust_raw_out`](crate::engine::Combustor::thrust_raw_out)) —
+/// [`thrust_raw_out`](crate::engine::Combustor::thrust_raw_out)) -
 /// the output-side mirror of the input framings.
 ///
 /// One compiled bytecode serves both shapes: the invoke wrapper
 /// branches on the **module's return value**. A `Uint8Array` /
 /// `ArrayBuffer` return crosses the boundary as opaque bytes through a
-/// host import ([`Bytes`](Self::Bytes)) — no `JSON.stringify`, no
+/// host import ([`Bytes`](Self::Bytes)) - no `JSON.stringify`, no
 /// string materialization, no base64, all O(n) and fuel-metered work
 /// the JSON framing pays. Every other return value takes the
 /// unchanged JSON-over-stdout contract ([`Json`](Self::Json)).
@@ -197,7 +197,7 @@ impl OutputValue {
     }
 
     /// Unwrap the raw-bytes shape; a JSON result serializes to its
-    /// canonical text bytes. Total — callers that want "give me bytes
+    /// canonical text bytes. Total - callers that want "give me bytes
     /// whatever the module returned" use this.
     pub fn into_bytes(self) -> crate::Result<Vec<u8>> {
         match self {

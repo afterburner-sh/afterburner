@@ -56,7 +56,7 @@ fn buffer_compare_returns_signed_byte_order() {
 fn buffer_subarray_returns_decodable_buffer() {
     // `Buffer.subarray()` MUST return a Buffer (not a bare Uint8Array)
     // so the returned view still decodes via `.toString(encoding)`.
-    // The `tar` package — and many npm deps — read header fields with
+    // The `tar` package - and many npm deps - read header fields with
     // `buf.subarray(off, end).toString('utf8')`; a bare Uint8Array
     // there yields comma-joined byte values ("68,69,70") instead of
     // "DEF", which made every tar checksum parse as garbage and broke

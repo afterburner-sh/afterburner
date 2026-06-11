@@ -25,7 +25,7 @@ fn mk_engine_with_drain(workers: usize, drain_deadline: Duration) -> Arc<ThrustE
 fn drop_drains_queued_jobs_before_exiting() {
     // Submit a wave of CPU-bound thrusts, drop the engine, and assert
     // every job's reply made it back to the caller (i.e. workers
-    // didn't drop the queue mid-flight). Drain deadline is 30s — well
+    // didn't drop the queue mid-flight). Drain deadline is 30s - well
     // above the actual completion time so we know we're testing the
     // drain path, not the force-exit fallback.
     let engine = mk_engine_with_drain(2, Duration::from_secs(30));
@@ -41,11 +41,11 @@ fn drop_drains_queued_jobs_before_exiting() {
     }
 
     // Drop while jobs are still in flight. shutdown(self) calls
-    // try_unwrap which succeeds (we hold the only Arc — handles share
+    // try_unwrap which succeeds (we hold the only Arc - handles share
     // only the reply channels).
     engine.shutdown();
 
-    // Every handle must return a real value — not a closed-channel Err.
+    // Every handle must return a real value - not a closed-channel Err.
     for (i, h) in handles.into_iter().enumerate() {
         let v = h.recv().expect("drain must complete every queued job");
         assert_eq!(v, json!(i));
@@ -98,7 +98,7 @@ fn force_exit_fires_when_drain_deadline_elapses() {
 
 #[test]
 fn drop_is_quick_with_idle_workers() {
-    // No queued work. Drop should not pay the full drain deadline —
+    // No queued work. Drop should not pay the full drain deadline -
     // workers see the Drain state, find empty queues, exit immediately.
     let engine = mk_engine_with_drain(4, Duration::from_secs(30));
     // Touch register to spin up the combustor before the timing

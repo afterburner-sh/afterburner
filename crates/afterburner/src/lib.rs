@@ -50,7 +50,7 @@
 //!
 //! Every thrust carries a [`Manifold`] (via [`FuelGauge`]) that controls
 //! what host-backed modules (`fs`, `crypto`, `net`, `env`) the script can
-//! reach. Default is [`Manifold::sealed`] — nothing accessible.
+//! reach. Default is [`Manifold::sealed`] - nothing accessible.
 
 #![warn(missing_debug_implementations)]
 
@@ -85,14 +85,14 @@ pub use afterburner_core::{
 //   use afterburner::wasi::WasmCombustor;   // backend-specific
 //
 // The crate-as-module aliases give callers full access to every public
-// item — re-exporting the crate avoids the maintenance toll of
+// item - re-exporting the crate avoids the maintenance toll of
 // hand-curating individual `pub use` lists.
 
-/// `afterburner-core` — the trait surface (`Combustor`, `Manifold`,
+/// `afterburner-core` - the trait surface (`Combustor`, `Manifold`,
 /// `BurnCache`, …) and shared error / value types.
 pub use afterburner_core as core;
 
-/// `afterburner-node-compat` — Plenum bundle source + host-side
+/// `afterburner-node-compat` - Plenum bundle source + host-side
 /// implementations of every Node built-in (fs / crypto / dns / zlib / …)
 /// plus the L3 shadow modules.
 pub use afterburner_node_compat as node_compat;
@@ -115,19 +115,19 @@ pub use afterburner_thrust as thrust_crate;
 // ---- Backend-named submodules (compat with the original API) -------
 //
 // The original 0.1 API exposed backends under `afterburner::wasm`,
-// `afterburner::native`, etc. — keep them as thin pub-use modules so
+// `afterburner::native`, etc. - keep them as thin pub-use modules so
 // existing call sites keep compiling. New code should prefer the
 // crate-name aliases above (`afterburner::wasi`, `afterburner::ignite`).
 
 #[cfg(feature = "wasm")]
 pub mod wasm {
-    //! WASM backend — untrusted code via Wasmtime + QuickJS plugin.
+    //! WASM backend - untrusted code via Wasmtime + QuickJS plugin.
     pub use afterburner_wasi::*;
 }
 
 #[cfg(feature = "native")]
 pub mod native {
-    //! Native backend — trusted code via rquickjs FFI.
+    //! Native backend - trusted code via rquickjs FFI.
     pub use afterburner_ignite::*;
 }
 
@@ -139,7 +139,7 @@ pub mod adaptive {
 
 #[cfg(feature = "flow")]
 pub mod flow {
-    //! Flow engine — compile + execute with data-chain payload support.
+    //! Flow engine - compile + execute with data-chain payload support.
     pub use afterburner_flow::*;
 }
 

@@ -5,7 +5,7 @@
 
 #![cfg(feature = "bin")]
 #![allow(non_snake_case)]
-//! Round-2 Node 20 built-in coverage — every module added to plug
+//! Round-2 Node 20 built-in coverage - every module added to plug
 //! the gap between "stubbed" and "actually loadable".
 //!
 //! Each test runs a small JS program through `burn -e` that imports
@@ -749,7 +749,7 @@ fn timers_promises_setTimeout_resolves_with_value() {
 fn nexttick_decouples_from_calling_stack() {
     // Pre-Phase-0 our `nextTick` was synchronous (`fn.apply(null, args)`
     // inline), which broke the core nextTick contract: the callback
-    // must NOT run on the calling stack — code AFTER the
+    // must NOT run on the calling stack - code AFTER the
     // `process.nextTick(...)` line must execute before the callback
     // fires.
     //

@@ -8,8 +8,8 @@
 //! [`crate::sign_handles::SignHandleStore`], but with two handle kinds
 //! (plain digest vs keyed HMAC) sharing one id space.
 //!
-//! Separate from `SignHandleStore` because the semantics differ —
-//! `finalize_digest` doesn't take a key, while sign's finalize does —
+//! Separate from `SignHandleStore` because the semantics differ -
+//! `finalize_digest` doesn't take a key, while sign's finalize does -
 //! and keeping them split makes each type's API obvious at the call
 //! site without a chain of `match` arms.
 
@@ -69,7 +69,7 @@ impl HashHandleStore {
     }
 
     /// Consume the handle and return the finalized digest bytes. Both
-    /// digest and HMAC paths return the raw bytes — encoding (hex /
+    /// digest and HMAC paths return the raw bytes - encoding (hex /
     /// base64) is the caller's job, same as the `hash()` one-shot.
     pub fn finalize(&self, handle: u64) -> Result<Vec<u8>> {
         let kind = self

@@ -4,7 +4,7 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 //! `scheduler.wait` / `scheduler.postTask` / `DisposableStack` /
-//! `AsyncDisposableStack` / `reportError` — Node 22+ globals around
+//! `AsyncDisposableStack` / `reportError` - Node 22+ globals around
 //! task scheduling and explicit resource management.
 
 #![cfg(feature = "bin")]

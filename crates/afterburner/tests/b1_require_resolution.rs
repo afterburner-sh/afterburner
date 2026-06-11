@@ -217,7 +217,7 @@ fn node_prefix_with_unknown_also_throws() {
 
 #[test]
 fn fs_promises_readfile_works_end_to_end() {
-    // Confirms that `fs/promises` doesn't just resolve — its API
+    // Confirms that `fs/promises` doesn't just resolve - its API
     // actually hits the host, matching `require('fs').promises`.
     let src = r#"
         (async () => {

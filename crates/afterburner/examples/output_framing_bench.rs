@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Output-framing cost probe — the result-side mirror of
+//! Output-framing cost probe - the result-side mirror of
 //! `input_framing_bench`.
 //!
 //! Measures, per result size, (a) wall time of one call and (b) the
@@ -14,11 +14,11 @@
 //! Run: `cargo run --release -p afterburner --example output_framing_bench`
 //!
 //! Scenarios per result size N:
-//!  * `json-result` — the module returns an N-byte string; the result
+//!  * `json-result` - the module returns an N-byte string; the result
 //!    crosses as `JSON.stringify` text over stdout (`run()`), paying
 //!    guest-side stringify + stdout framing. Inputs are tiny so input
 //!    framing is negligible: this is the full output-crossing tax.
-//!  * `raw-result`  — the module returns an N-byte `Uint8Array`; the
+//!  * `raw-result`  - the module returns an N-byte `Uint8Array`; the
 //!    bytes cross through the `host_raw_output` import
 //!    (`run_out()` → `OutputValue::Bytes`), skipping stringify and
 //!    stdout framing entirely.

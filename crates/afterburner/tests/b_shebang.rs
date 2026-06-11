@@ -10,10 +10,10 @@
 //! to a comment before handing the source to V8. We do the same in
 //! two spots:
 //!
-//! * `crates/afterburner-plugin/src/envelope.rs::wrap_*_source` —
+//! * `crates/afterburner-plugin/src/envelope.rs::wrap_*_source` -
 //!   every script-mode / UDF wrap normalises the user source so the
 //!   AsyncFunction body parses.
-//! * `crates/afterburner-node-compat/polyfills/require.js` — every
+//! * `crates/afterburner-node-compat/polyfills/require.js` - every
 //!   `require('./foo.js')` strips a hashbang on the loaded file
 //!   before passing it to the CJS Function constructor.
 //!
@@ -81,13 +81,13 @@ fn entry_script_with_node_shebang_runs() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         !stderr.contains("invalid first character of private name"),
-        "shebang regression — QuickJS choked on `#!`: {stderr}"
+        "shebang regression - QuickJS choked on `#!`: {stderr}"
     );
 }
 
 #[test]
 fn entry_script_with_arbitrary_shebang_runs() {
-    // Not just `#!/usr/bin/env node` — anything starting with `#!`
+    // Not just `#!/usr/bin/env node` - anything starting with `#!`
     // must be tolerated. Real-world Python wrappers, /bin/sh runners,
     // and one-off `#!ignore` test fixtures all hit the same path.
     let dir = tmp_dir("entry_arb_shebang");
@@ -113,7 +113,7 @@ fn shebang_preserves_line_numbers_in_errors() {
     // We replace `#!` with `//` (length-preserving) so error sites
     // still point at the same on-disk line a user editor shows. If we
     // ever switched to stripping the line outright, every stack trace
-    // for any shebang'd script would shift by one — silently wrong.
+    // for any shebang'd script would shift by one - silently wrong.
     let dir = tmp_dir("shebang_lineno");
     let out = run_script(
         &dir,
@@ -136,7 +136,7 @@ fn shebang_preserves_line_numbers_in_errors() {
 #[test]
 fn require_loads_file_with_shebang() {
     // `require('./helper.js')` must also tolerate a hashbang on the
-    // loaded file — npm / pnpm / yarn / bun all import many CLI
+    // loaded file - npm / pnpm / yarn / bun all import many CLI
     // entry points (every `node_modules/.../bin/*` script) by path,
     // and those scripts uniformly start with `#!/usr/bin/env node`.
     let dir = tmp_dir("require_shebang");
@@ -193,7 +193,7 @@ fn require_loads_file_with_utf8_bom() {
 fn require_loads_file_with_bom_and_shebang() {
     // Some toolchains (notably Windows-ported PowerShell-emitted
     // scripts) write BOM *and* a shebang. Both have to be peeled
-    // off in order — BOM first, then `#!`.
+    // off in order - BOM first, then `#!`.
     let dir = tmp_dir("require_bom_shebang");
     let mut helper = b"\xEF\xBB\xBF".to_vec();
     helper.extend_from_slice(b"#!/usr/bin/env node\nmodule.exports = 42;\n");
@@ -217,7 +217,7 @@ fn require_loads_file_with_bom_and_shebang() {
 
 #[test]
 fn eval_mode_with_shebang_in_source() {
-    // `burn -e CODE` is the CLI's eval path — it goes through the
+    // `burn -e CODE` is the CLI's eval path - it goes through the
     // same wrap_script_source envelope. Pasting a script-from-disk
     // inline (curl | sh style) often retains the shebang. Tolerate.
     let out = Command::new(BURN)

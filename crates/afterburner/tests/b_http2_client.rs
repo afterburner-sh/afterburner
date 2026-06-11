@@ -51,7 +51,7 @@ fn pick_port() -> u16 {
     port
 }
 
-/// Tiny single-connection HTTP/1.1 echo server — we accept one
+/// Tiny single-connection HTTP/1.1 echo server - we accept one
 /// request, send a 200 with a body that includes the
 /// `:path` value the burn-side h2 polyfill translated.
 fn run_echo_server(port: u16) {
@@ -197,7 +197,7 @@ fn http2_create_secure_server_returns_listenable_server() {
     // `http2.createSecureServer` delegates to createServer (TLS
     // termination happens daemon-side via ALPN). The returned Server
     // exposes `.listen` / `.close` / `.on('request', …)` like the
-    // cleartext http2 server. Pin the working surface — earlier
+    // cleartext http2 server. Pin the working surface - earlier
     // rounds threw `ERR_HTTP2_NOT_IMPLEMENTED`; that's no longer the
     // case once `createSecureServer` was wired through.
     let out = run_inline(

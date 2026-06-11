@@ -59,7 +59,7 @@ pub trait Installer: Sync {
 
 /// Progress sink, called from worker threads (so `Sync`). Default no-ops let an
 /// impl override only what it needs. Implementors must coordinate lock-free
-/// (atomics / channels) — these hooks must never block.
+/// (atomics / channels) - these hooks must never block.
 pub trait Progress: Sync {
     fn begin(&self, _total: usize) {}
     fn started(&self, _coord: &str) {}

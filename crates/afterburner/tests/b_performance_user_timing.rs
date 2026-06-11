@@ -4,7 +4,7 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 //! `performance.mark` / `measure` / `getEntries*` / `clearMarks` /
-//! `clearMeasures` / `timeOrigin` — User Timing Level 3 globals.
+//! `clearMeasures` / `timeOrigin` - User Timing Level 3 globals.
 
 #![cfg(feature = "bin")]
 

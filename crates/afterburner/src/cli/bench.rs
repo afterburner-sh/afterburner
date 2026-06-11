@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `burn bench` — throughput + p50/p99 latency harness.
+//! `burn bench` - throughput + p50/p99 latency harness.
 //!
 //! Register once; submit `iters` thrusts via the configured engine;
 //! measure total wall-clock + per-iteration latency; report throughput

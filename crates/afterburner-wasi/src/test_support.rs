@@ -14,7 +14,7 @@
 
 use crate::WasmConfig;
 
-/// Build the default `WasmConfig` — no external dependencies, plugin
+/// Build the default `WasmConfig` - no external dependencies, plugin
 /// is embedded at compile time.
 pub fn config_default() -> WasmConfig {
     WasmConfig::default()

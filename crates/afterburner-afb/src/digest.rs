@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Content addressing: SHA-256 of the whole compressed `.afb`.
 //!
-//! This is the package identity used everywhere — the runtime's
+//! This is the package identity used everywhere - the runtime's
 //! `ScriptId.hash`, the local cache filename, the registry primary key, the
 //! GCS object path. Unlike `afterburner_core::hex32` (an 8-byte *log* prefix),
 //! [`hex`] here is the full 64-char address; do not truncate it.

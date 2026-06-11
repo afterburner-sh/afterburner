@@ -11,7 +11,7 @@
 //! handles codecs (PNG / JPEG / WebP / GIF / BMP) and the per-pixel
 //! ops (rotate / flip / grayscale / extract / blur), while
 //! [`fast_image_resize`](https://crates.io/crates/fast_image_resize)
-//! drives the SIMD-accelerated resize path — that's the operation
+//! drives the SIMD-accelerated resize path - that's the operation
 //! real `sharp` users hit hardest, so it earns its own crate.
 //!
 //! ## Pipeline shape
@@ -105,7 +105,7 @@ enum Op {
     Resize(ResizeOpts),
     /// Rotation in degrees clockwise. Only multiples of 90 are
     /// guaranteed lossless (image's rotate90/180/270). Arbitrary
-    /// angles are rejected — the npm package supports them via
+    /// angles are rejected - the npm package supports them via
     /// libvips, but the rust `image` crate's general rotate isn't
     /// in this minimum subset.
     Rotate(i32),
@@ -125,7 +125,7 @@ enum Op {
         g: u8,
         b: u8,
     },
-    /// HSL adjustment — brightness multiplier, saturation multiplier,
+    /// HSL adjustment - brightness multiplier, saturation multiplier,
     /// hue rotation in degrees. brightness=1, saturation=1, hue=0 is
     /// the identity.
     Modulate {
@@ -141,7 +141,7 @@ enum Op {
         flat: f32,
         jagged: f32,
     },
-    /// Histogram stretch — find min/max per channel, scale to [0,255].
+    /// Histogram stretch - find min/max per channel, scale to [0,255].
     Normalize,
     /// Threshold to binary; pixels with luminance ≥ level go white.
     /// `grayscale: true` returns a single-channel image.
@@ -179,7 +179,7 @@ enum Output {
     /// subset (image's WebP encoder defaults to lossless). Set
     /// `lossless: true` to flip to that path.
     Webp { quality: u8, lossless: bool },
-    /// `metadata()` request — the encode step is skipped.
+    /// `metadata()` request - the encode step is skipped.
     Metadata,
 }
 
@@ -193,7 +193,7 @@ struct Pipeline {
 // ----- public entry points -----------------------------------------------
 
 /// Run a full pipeline (decode → ops → encode) and return the
-/// encoded bytes. For `Output::Metadata`, returns an empty Vec —
+/// encoded bytes. For `Output::Metadata`, returns an empty Vec -
 /// callers should use [`metadata`] for that path instead.
 pub fn run(pipeline_json: &str) -> Result<Vec<u8>, String> {
     let p = parse_pipeline(pipeline_json)?;
@@ -215,7 +215,7 @@ pub fn metadata(source_json: &str) -> Result<String, String> {
 
 /// Compute per-channel statistics on the decoded image. Mirrors
 /// `sharp.stats()`: `{channels:[{min,max,sum,squaresSum,mean,stdev}], isOpaque, entropy, sharpness}`.
-/// Entropy + sharpness fields stay 0 — those require a full FFT /
+/// Entropy + sharpness fields stay 0 - those require a full FFT /
 /// kernel pass that costs more than the rest of the metadata combined
 /// and are rarely consumed.
 pub fn stats(source_json: &str) -> Result<String, String> {
@@ -759,7 +759,7 @@ fn apply_sharpen(img: DynamicImage, sigma: f32, flat: f32, jagged: f32) -> Dynam
     let blur_rgba = blurred.to_rgba8();
     // sharp's m1/m2: flat (low-frequency) and jagged (high-frequency)
     // multipliers. We approximate by using a single amount that
-    // averages them — matches what most users expect from sharpen().
+    // averages them - matches what most users expect from sharpen().
     let amount = (flat + jagged) * 0.5;
     for (px, bpx) in src.pixels_mut().zip(blur_rgba.pixels()) {
         for c in 0..3 {
@@ -1000,7 +1000,7 @@ fn encode_output(img: &DynamicImage, output: &Output) -> Result<Vec<u8>, String>
         Output::Jpeg { quality } => {
             let mut buf = Vec::new();
             let encoder = JpegEncoder::new_with_quality(&mut buf, *quality);
-            // Preserve grayscale input — JPEG natively encodes 1-channel
+            // Preserve grayscale input - JPEG natively encodes 1-channel
             // luma, and downstream code that ran `.grayscale()`
             // expects the result to stay grayscale. RGB(A) input
             // flattens to RGB8 (JPEG can't carry alpha).

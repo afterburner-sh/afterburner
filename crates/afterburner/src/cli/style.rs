@@ -5,7 +5,7 @@
 
 //! Terminal styling + animation for the `burn` CLI.
 //!
-//! Colors come straight from the afterburner.sh design system — the *sunburst
+//! Colors come straight from the afterburner.sh design system - the *sunburst
 //! flame* gradient (pink-red → orange → gold) plus the supporting teal / violet
 //! / green. Everything degrades gracefully: when `NO_COLOR` is set, the stream
 //! isn't a TTY, or `TERM=dumb`, styling and animation are skipped and plain
@@ -21,37 +21,37 @@ use std::time::Duration;
 
 // ── brand palette (afterburner.sh) ──────────────────────────────────────────
 
-/// Sunburst gradient start — `rgb(255,46,84)` (`#ff2e54`).
+/// Sunburst gradient start - `rgb(255,46,84)` (`#ff2e54`).
 pub const FLAME_RED: Color = Color::Rgb {
     r: 255,
     g: 46,
     b: 84,
 };
-/// Primary accent — vibrant orange `#ff6118`.
+/// Primary accent - vibrant orange `#ff6118`.
 pub const ACCENT: Color = Color::Rgb {
     r: 255,
     g: 97,
     b: 24,
 };
-/// Sunburst gradient end — gold `#ffcf5e`.
+/// Sunburst gradient end - gold `#ffcf5e`.
 pub const GOLD: Color = Color::Rgb {
     r: 255,
     g: 207,
     b: 94,
 };
-/// Logo green `#5ec34c` — success.
+/// Logo green `#5ec34c` - success.
 pub const SUCCESS: Color = Color::Rgb {
     r: 94,
     g: 195,
     b: 76,
 };
-/// Logo teal `#27c7c7` — values / identifiers.
+/// Logo teal `#27c7c7` - values / identifiers.
 pub const TEAL: Color = Color::Rgb {
     r: 39,
     g: 199,
     b: 199,
 };
-/// Ghost gray `#64748d` — muted / secondary text.
+/// Ghost gray `#64748d` - muted / secondary text.
 pub const MUTED: Color = Color::Rgb {
     r: 100,
     g: 116,
@@ -118,17 +118,21 @@ pub fn gold(s: &str) -> String {
     paint(s, GOLD)
 }
 
-/// `✓ <msg>` in success green.
+/// `✓ <msg>` - glyph AND message in success green (cargo-style: the whole
+/// status line carries color, never a colored glyph next to default text).
+/// Pass a PLAIN `msg`: embedding a differently-colored span emits an inner
+/// reset that drops the green for the remainder - print such identifiers as
+/// separate styled args after the `ok(...)`.
 pub fn ok(msg: &str) -> String {
-    format!("{} {}", paint_bold("✓", SUCCESS), msg)
+    format!("{} {}", paint_bold("✓", SUCCESS), paint(msg, SUCCESS))
 }
-/// `✗ <msg>` in alert red.
+/// `✗ <msg>` - glyph and message in alert red.
 pub fn fail(msg: &str) -> String {
-    format!("{} {}", paint_bold("✗", FLAME_RED), msg)
+    format!("{} {}", paint_bold("✗", FLAME_RED), paint(msg, FLAME_RED))
 }
-/// `! <msg>` in gold.
+/// `! <msg>` - glyph and message in gold.
 pub fn warn(msg: &str) -> String {
-    format!("{} {}", paint_bold("!", GOLD), msg)
+    format!("{} {}", paint_bold("!", GOLD), paint(msg, GOLD))
 }
 /// A `→` step bullet in accent.
 pub fn bullet() -> String {
@@ -159,7 +163,7 @@ pub fn humanize_error(msg: &str) -> String {
 
 /// Color a REPL prompt for rustyline's `Highlighter`. `None` when styling is
 /// off. rustyline measures width on the plain prompt and only *displays* this,
-/// so no readline width markers (`\x01`/`\x02`) are needed — using them here is
+/// so no readline width markers (`\x01`/`\x02`) are needed - using them here is
 /// what corrupted cursor positioning.
 pub fn highlight_prompt(prompt: &str) -> Option<String> {
     if !colors_enabled() {
@@ -396,7 +400,7 @@ pub fn banner(version: &str) {
     banner_subtitle(version, "");
 }
 
-/// REPL welcome banner — animated wordmark on a terminal, one plain line otherwise.
+/// REPL welcome banner - animated wordmark on a terminal, one plain line otherwise.
 pub fn repl_banner(version: &str) {
     if !animations_enabled() {
         eprintln!("burn {version}: Afterburner sandbox REPL. :help for commands, :exit to quit.");

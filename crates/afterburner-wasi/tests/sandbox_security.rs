@@ -3,11 +3,11 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Security tests — every threat listed in the design doc's security
+//! Security tests - every threat listed in the design doc's security
 //! matrix exercised through the real WasmCombustor.
 //!
 //! These integration tests are gated on a working Javy CLI. When Javy
-//! isn't available the tests print a skip notice and exit 0 — CI failure
+//! isn't available the tests print a skip notice and exit 0 - CI failure
 //! there would obscure real regressions.
 
 use afterburner_core::{AfterburnerError, Combustor, FuelGauge};
@@ -82,7 +82,7 @@ fn memory_bomb_capped() {
     // WasmTrap (QuickJS allocation failure becoming an uncaught
     // exception), OR Engine (wasmtime's pooling-allocator pre-instantiate
     // rejects when the plugin's minimum memory size exceeds the
-    // FuelGauge cap). All five are acceptable — what matters is that
+    // FuelGauge cap). All five are acceptable - what matters is that
     // the runaway script never gets to actually run unbounded.
     assert!(
         matches!(
@@ -146,7 +146,7 @@ fn no_network_access_by_default() {
 #[test]
 fn no_process_spawn() {
     let c = combustor_or_skip!();
-    // `process.spawn`, `child_process` — none of it exists in Javy.
+    // `process.spawn`, `child_process` - none of it exists in Javy.
     let id = c
         .ignite("module.exports = () => require('child_process').execSync('/bin/ls')")
         .unwrap();
@@ -158,7 +158,7 @@ fn no_process_spawn() {
 
 #[test]
 fn fuel_exhaustion_returns_typed_error() {
-    // Synonym for infinite_loop_terminates_via_fuel — kept separately to
+    // Synonym for infinite_loop_terminates_via_fuel - kept separately to
     // align with the plan's security matrix checklist.
     let c = combustor_or_skip!();
     let id = c
@@ -189,7 +189,7 @@ fn concurrent_invocations_isolated() {
         .unwrap();
 
     // 8 threads, each calling thrust with a different n. Per-invocation
-    // Stores mean no state bleeds between calls — each must see only its
+    // Stores mean no state bleeds between calls - each must see only its
     // own input and compute the correct answer.
     let mut handles = Vec::new();
     for n in 1..=8u64 {

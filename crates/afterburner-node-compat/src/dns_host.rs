@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `dns` host functions — synchronous lookups built on `hickory-resolver`
+//! `dns` host functions - synchronous lookups built on `hickory-resolver`
 //! and `ToSocketAddrs`. We have no event loop, and the plugin can't
 //! host-call from inside an async stack (it's running synchronously
 //! inside Wasmtime), so every entry point here runs the actual
@@ -14,22 +14,22 @@
 //!
 //! ### Coverage
 //!
-//! * `lookup` — A/AAAA via `ToSocketAddrs` (matches Node's default
+//! * `lookup` - A/AAAA via `ToSocketAddrs` (matches Node's default
 //!   `lookup` semantics: first IP, family detected).
-//! * `resolve4` / `resolve6` — A / AAAA via hickory.
-//! * `resolve_mx` — MX records `[{exchange, priority}]`.
-//! * `resolve_txt` — TXT records `[["fragment", ...]]` (Node's
-//!   "array of arrays" shape — TXT records can have multiple
+//! * `resolve4` / `resolve6` - A / AAAA via hickory.
+//! * `resolve_mx` - MX records `[{exchange, priority}]`.
+//! * `resolve_txt` - TXT records `[["fragment", ...]]` (Node's
+//!   "array of arrays" shape - TXT records can have multiple
 //!   character-strings per record).
-//! * `resolve_cname` — CNAME chain.
-//! * `resolve_ns` — NS records.
-//! * `reverse` — PTR (reverse-IP → hostname).
+//! * `resolve_cname` - CNAME chain.
+//! * `resolve_ns` - NS records.
+//! * `reverse` - PTR (reverse-IP → hostname).
 //!
 //! ### Timeouts (P5)
 //!
 //! A hung resolver can otherwise wedge the calling thread forever.
 //! Same `kovan_channel::select!` pattern as `lookup`. If the timeout
-//! fires, we return a typed `AfterburnerError::Host` — the detached
+//! fires, we return a typed `AfterburnerError::Host` - the detached
 //! worker thread is orphaned and cleans itself up when the resolver
 //! eventually returns.
 
@@ -42,7 +42,7 @@ use std::thread;
 use std::time::Duration;
 
 /// Default per-call resolver timeout when the Manifold doesn't supply
-/// one. Matches the HTTP default (30 s) — DNS is usually sub-second,
+/// one. Matches the HTTP default (30 s) - DNS is usually sub-second,
 /// but adversarial or misconfigured resolvers can stall indefinitely
 /// without a hard cap.
 const DEFAULT_DNS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -62,7 +62,7 @@ fn timeout(m: &Manifold) -> Duration {
 }
 
 /// Run `f` on a worker thread and `select!` on its result vs. the
-/// configured timeout. Same pattern shared by every entry below —
+/// configured timeout. Same pattern shared by every entry below -
 /// keeping it factored out drops a hundred lines of boilerplate and
 /// guarantees uniform timeout semantics.
 fn with_timeout<T, F>(m: &Manifold, label: String, f: F) -> Result<T>
@@ -104,9 +104,9 @@ fn make_resolver(servers: &[String]) -> Result<Resolver> {
             let addr: std::net::SocketAddr = match trimmed.parse() {
                 Ok(a) => a,
                 Err(_) => {
-                    // Bare IP without port — append default DNS port 53.
+                    // Bare IP without port - append default DNS port 53.
                     let with_port = if trimmed.contains(':') && !trimmed.starts_with('[') {
-                        // IPv6 without brackets — wrap.
+                        // IPv6 without brackets - wrap.
                         format!("[{trimmed}]:53")
                     } else {
                         format!("{trimmed}:53")
@@ -118,7 +118,7 @@ fn make_resolver(servers: &[String]) -> Result<Resolver> {
                     })?
                 }
             };
-            // Add both UDP and TCP — DNS responses larger than 512 bytes
+            // Add both UDP and TCP - DNS responses larger than 512 bytes
             // (DNSSEC, big TXT) fall back to TCP; matching `getaddrinfo`
             // behavior keeps records like long SPF strings retrievable.
             for protocol in [Protocol::Udp, Protocol::Tcp] {
@@ -220,7 +220,7 @@ pub fn resolve_txt(hostname: &str, servers: &[String], m: &Manifold) -> Result<V
         let lookup = resolver
             .txt_lookup(&hn)
             .map_err(|e| AfterburnerError::Host(format!("dns.resolveTxt({hn}): {e}")))?;
-        // Node's `resolveTxt` returns `string[][]` — outer per record,
+        // Node's `resolveTxt` returns `string[][]` - outer per record,
         // inner per character-string fragment. TXT records can have
         // multiple <character-string>s per RR (RFC 1035 §3.3.14).
         Ok(lookup
@@ -349,7 +349,7 @@ mod tests {
         assert!(result.is_ok(), "localhost should resolve: {result:?}");
         assert!(
             elapsed < Duration::from_millis(500),
-            "localhost resolution took {elapsed:?} — unusually slow"
+            "localhost resolution took {elapsed:?} - unusually slow"
         );
     }
 
@@ -357,7 +357,7 @@ mod tests {
     fn short_timeout_bounds_unresolvable() {
         // An unreachable TLD that the resolver may dither on. We set
         // a 500 ms timeout and assert we either succeed promptly
-        // (resolver NXDOMAINs fast) or time out within 1.5s — never
+        // (resolver NXDOMAINs fast) or time out within 1.5s - never
         // hang. This is the production gate.
         let mut m = Manifold::open();
         m.http_timeout_ms = Some(500);
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn resolve_methods_respect_sealed_manifold() {
-        // Every entry checks `check_net` first — none of them get to
+        // Every entry checks `check_net` first - none of them get to
         // the resolver under `Manifold::sealed`.
         let m = Manifold::sealed();
         let no_servers: Vec<String> = vec![];

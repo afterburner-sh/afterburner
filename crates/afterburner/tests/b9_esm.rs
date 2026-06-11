@@ -374,7 +374,7 @@ fn esm_export_star_copies_non_default() {
     assert_ok(&out, "export * from");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("3"), "a+b wrong: {stdout}");
-    // `default` is intentionally NOT re-exported — matches Node's
+    // `default` is intentionally NOT re-exported - matches Node's
     // documented semantics for `export *`.
     assert!(
         stdout.contains("undefined"),
@@ -458,7 +458,7 @@ fn ts_with_esm_imports_and_type_annotations() {
 
 #[test]
 fn plain_cjs_js_file_runs_unchanged() {
-    // `.js` file with no import/export — the ESM lowering should
+    // `.js` file with no import/export - the ESM lowering should
     // pass it through untouched (the transform is a no-op when no
     // ESM declarations are present).
     let dir = scratch("plain_cjs");

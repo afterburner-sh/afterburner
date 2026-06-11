@@ -5,7 +5,7 @@
 
 #![cfg(feature = "bin")]
 #![allow(non_snake_case)]
-//! C2 — `vm.SourceTextModule` cyclic graph reference table.
+//! C2 - `vm.SourceTextModule` cyclic graph reference table.
 //!
 //! Validates:
 //! 1. Two modules A ↔ B that import each other link without errors.
@@ -190,7 +190,7 @@ fn three_node_cycle_ABC() {
                     // Depth-first eval order is A -> B -> C -> (back-edge to A is short-circuited).
                     // C runs first, B second, A last. So A.bv() reads B
                     // post-evaluate (works), B.cv() reads C post-evaluate
-                    // (works). C.av() is the back-edge — it captured A
+                    // (works). C.av() is the back-edge - it captured A
                     // pre-evaluate when its body ran, so it's undefined
                     // under snapshot semantics.
                     // Live-binding semantics applies to every back-edge

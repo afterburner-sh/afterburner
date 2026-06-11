@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Subtle Crypto host dispatcher — single host import, JSON-encoded args.
+//! Subtle Crypto host dispatcher - single host import, JSON-encoded args.
 //!
 //! Wire format:
 //! - input: `op_name`, `args_b64_json` (JSON array of base64url-encoded

@@ -139,6 +139,7 @@ fn scaffold_opts(cli: &Cli, a: &ScaffoldArgs) -> ScaffoldOpts {
         run: a.allow_run || cli.allow_child_process,
         vcs_git: a.vcs.as_deref() == Some("git"),
         force: a.force,
+        ts: a.ts,
     }
 }
 
@@ -174,15 +175,21 @@ fn report_scaffold(s: &Scaffolded) {
 
 pub fn package(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
     let dir = dir.unwrap_or_else(|| Path::new("."));
-    let local = pkg::LocalPackage::load(dir)?;
+    let mut local = pkg::LocalPackage::load(dir)?;
+    // TypeScript is build-time only: transpile every `.ts/.mts/.cts`
+    // source to `.js` here so the published `.afb` is always plain JS and
+    // the runtime sandbox never needs a transpiler. The package entry is
+    // rewritten to the `.js` path. (Pure-JS packages are untouched.)
+    transpile_ts_sources(&mut local)?;
     let (bytes, digest) = style::spin("packing", || local.build())?;
     let out = out
         .map(Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from(local.output_filename()));
     std::fs::write(&out, &bytes).with_context(|| format!("writing {}", out.display()))?;
     println!(
-        "{}",
-        style::ok(&format!("packaged {}", style::accent(&coord_str(&local))))
+        "{} {}",
+        style::ok("packaged"),
+        style::accent(&coord_str(&local))
     );
     print_digest(bytes.len() as u64, &hex(&digest));
     println!(
@@ -190,6 +197,52 @@ pub fn package(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
         style::muted("→"),
         style::value(&out.display().to_string())
     );
+    Ok(())
+}
+
+/// Transpile any TypeScript sources in `local` to JavaScript in place,
+/// rewriting their archive keys (`.ts` → `.js`) and the package entry.
+/// No-op without the `ts` feature (TS sources would already have been
+/// rejected at unpack-time by readers that can't transpile).
+fn transpile_ts_sources(local: &mut pkg::LocalPackage) -> Result<()> {
+    #[cfg(feature = "ts")]
+    {
+        use std::collections::BTreeMap;
+        let is_ts = |p: &str| {
+            let l = p.to_ascii_lowercase();
+            l.ends_with(".ts") || l.ends_with(".mts") || l.ends_with(".cts")
+        };
+        if !local.sources.keys().any(|k| is_ts(k)) {
+            return Ok(());
+        }
+        let mut out: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for (path, bytes) in std::mem::take(&mut local.sources) {
+            if is_ts(&path) {
+                let src = std::str::from_utf8(&bytes)
+                    .with_context(|| format!("{path}: TypeScript source is not UTF-8"))?;
+                let js = crate::ts::transpile(src, std::path::Path::new(&path))
+                    .map_err(|e| anyhow::anyhow!("transpiling {path}: {e}"))?;
+                let js_path = format!(
+                    "{}.js",
+                    path.rsplit_once('.').map(|(s, _)| s).unwrap_or(&path)
+                );
+                out.insert(js_path, js.into_bytes());
+            } else {
+                out.insert(path, bytes);
+            }
+        }
+        local.sources = out;
+        // Rewrite the entry to its transpiled `.js` form.
+        if is_ts(&local.manifest.package.entry) {
+            let e = &local.manifest.package.entry;
+            local.manifest.package.entry =
+                format!("{}.js", e.rsplit_once('.').map(|(s, _)| s).unwrap_or(e));
+        }
+    }
+    #[cfg(not(feature = "ts"))]
+    {
+        let _ = local;
+    }
     Ok(())
 }
 
@@ -258,7 +311,7 @@ pub fn yank(pkg: &str, undo: bool, registry: Option<&str>, token: Option<&str>) 
     Ok(())
 }
 
-/// `burn install [pkg]` — resolve the full dependency set (PubGrub) and fetch it
+/// `burn install [pkg]` - resolve the full dependency set (PubGrub) and fetch it
 /// concurrently into the content-addressed cache, with an animated progress bar.
 ///
 /// With `pkg`, installs that package plus its transitive dependencies. With no
@@ -276,7 +329,12 @@ pub fn install(
     let plan = build_install_plan(pkg, &client, locked)?;
     let items = plan.lockfile.install_items();
     if items.is_empty() {
-        println!("{}", style::muted("nothing to install"));
+        if plan.npm.is_empty() {
+            println!("{}", style::muted("nothing to install"));
+            return Ok(());
+        }
+        // No afb deps, but there may be npm deps to install.
+        install_npm_deps(&plan.npm)?;
         return Ok(());
     }
 
@@ -300,6 +358,44 @@ pub fn install(
     }
 
     report_install(&plan.lockfile, &summary);
+
+    // npm dependencies (the `[npm]` section) - resolved + extracted +
+    // cached by the NATIVE installer (no `npm` binary, no process spawn).
+    install_npm_deps(&plan.npm)?;
+    Ok(())
+}
+
+/// Resolve + cache the `[npm]` dependencies natively. Each package is
+/// integrity-checked, native-rejected, and stored in the content-addressed
+/// npm cache for the runtime linker. No Node toolchain involved.
+fn install_npm_deps(npm: &std::collections::BTreeMap<String, String>) -> Result<()> {
+    if npm.is_empty() {
+        return Ok(());
+    }
+    let base = std::env::var("BURN_NPM_REGISTRY")
+        .unwrap_or_else(|_| afterburner_cloud::npm::DEFAULT_NPM_REGISTRY.to_string());
+    let client = afterburner_cloud::npm::NpmClient::new(base);
+    let res = style::spin("resolving npm", || client.resolve_all(npm))?;
+    let n = res.packages.len();
+    for pkg in res.packages.values() {
+        afterburner_cloud::npm::store_npm(pkg)?;
+    }
+    println!(
+        "{} {}",
+        style::ok(&format!(
+            "installed {n} npm package{}",
+            if n == 1 { "" } else { "s" }
+        )),
+        style::muted("(native)"),
+    );
+    for pkg in res.packages.values() {
+        println!(
+            "  {} {} {}",
+            style::bullet(),
+            style::value(&format!("{}@{}", pkg.name, pkg.version)),
+            style::gold("npm"),
+        );
+    }
     Ok(())
 }
 
@@ -307,6 +403,8 @@ struct InstallPlan {
     lockfile: Lockfile,
     /// `Some(dir)` writes `burn.lock` there after a successful install.
     write_lock_to: Option<PathBuf>,
+    /// `[npm]` dependencies (name → semver range) to install natively.
+    npm: std::collections::BTreeMap<String, String>,
 }
 
 fn build_install_plan(
@@ -327,6 +425,7 @@ fn build_install_plan(
             Ok(InstallPlan {
                 lockfile: Lockfile::from_resolution(&res),
                 write_lock_to: None,
+                npm: Default::default(),
             })
         }
         None => {
@@ -338,17 +437,24 @@ fn build_install_plan(
                         "--locked needs an existing {LOCKFILE_NAME}; run `burn install` first"
                     )
                 })?;
+                // `--locked`: npm set comes from the on-disk manifest too.
+                let npm = pkg::LocalPackage::load(&dir)
+                    .map(|l| l.manifest.npm.clone())
+                    .unwrap_or_default();
                 return Ok(InstallPlan {
                     lockfile: Lockfile::parse(&text)?,
                     write_lock_to: None,
+                    npm,
                 });
             }
             let local = pkg::LocalPackage::load(&dir)?;
             let roots = manifest_roots(&local.manifest)?;
+            let npm = local.manifest.npm.clone();
             let res = style::spin("resolving", || resolve(&roots, &source, &runtime))?;
             Ok(InstallPlan {
                 lockfile: Lockfile::from_resolution(&res),
                 write_lock_to: Some(dir),
+                npm,
             })
         }
     }
@@ -569,9 +675,109 @@ pub fn owner(
     )
 }
 
-/// `burn test` — run every test file under `<dir>/tests/` through the runtime.
+/// `burn test` - run every test file under `<dir>/tests/` through the runtime.
 /// Each file is executed as its own `burn run` (clean process per file so
 /// `node:test`'s exit-code semantics hold); output is shown only on failure.
+/// `burn clean` - remove build artifacts (cargo-style). Default: this
+/// package's built `.afb` files (matching `<ns>-<name>-*.afb`) and
+/// `burn.lock` in `dir`. `--cache` also clears the shared download caches.
+pub fn clean(dir: Option<&Path>, cache: bool) -> Result<()> {
+    let dir = dir.unwrap_or_else(|| Path::new("."));
+    let mut removed = 0u64;
+    let mut report = |label: &str, path: &Path| {
+        println!("  {} {}", style::muted("removed"), style::value(label));
+        let _ = path;
+        removed += 1;
+    };
+
+    // Local build artifacts: `<ns>-<name>-*.afb` produced by `burn package`.
+    if let Ok(local) = pkg::LocalPackage::load(dir) {
+        let prefix = format!(
+            "{}-{}-",
+            local.manifest.package.namespace, local.manifest.package.name
+        );
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with(&prefix) && name.ends_with(".afb") {
+                    std::fs::remove_file(e.path()).ok();
+                    report(&name, &e.path());
+                }
+            }
+        }
+    }
+    // Lockfile.
+    let lock = dir.join(LOCKFILE_NAME);
+    if lock.exists() {
+        std::fs::remove_file(&lock).ok();
+        report(LOCKFILE_NAME, &lock);
+    }
+
+    // Shared caches (opt-in). These are CONTENT-ADDRESSED, so clearing them
+    // can never break another project's dependency chain: a missing entry is
+    // simply re-downloaded (byte-identical) on that project's next
+    // `burn install` / run. We still remove SAFELY for terminals running
+    // concurrently:
+    //   * registry packages are single files named for their digest - an
+    //     atomic unlink; a concurrent reader either opened it already (full
+    //     bytes) or now misses and re-downloads. No torn reads.
+    //   * npm packages are directories guarded by a `.burn-complete` marker
+    //     that `load_npm` checks BEFORE reading. We delete that marker FIRST,
+    //     so any concurrent reader treats a half-removed package as absent
+    //     (re-download) rather than reading partial files.
+    if cache {
+        if let Ok(root) = afterburner_cloud::cache::cache_root() {
+            let mut n = 0u64;
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                for e in entries.flatten() {
+                    if e.path().extension().map(|x| x == "afb").unwrap_or(false) {
+                        std::fs::remove_file(e.path()).ok();
+                        n += 1;
+                    }
+                }
+            }
+            if n > 0 {
+                report(&format!("registry package cache ({n})"), &root);
+            }
+        }
+        if let Ok(root) = afterburner_cloud::npm::npm_cache_root() {
+            let mut n = 0u64;
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                for e in entries.flatten() {
+                    if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        // marker first → concurrent readers see "incomplete"
+                        std::fs::remove_file(e.path().join(".burn-complete")).ok();
+                        std::fs::remove_dir_all(e.path()).ok();
+                        n += 1;
+                    }
+                }
+            }
+            if n > 0 {
+                report(&format!("npm cache ({n})"), &root);
+            }
+        }
+    }
+
+    if removed == 0 {
+        println!("{}", style::muted("nothing to clean"));
+    } else {
+        println!(
+            "{}",
+            style::ok(&format!(
+                "cleaned {removed} item{}",
+                if removed == 1 { "" } else { "s" }
+            ))
+        );
+        if !cache {
+            println!(
+                "  {}",
+                style::muted("(shared caches kept; `burn clean --cache` to clear them too)")
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn test(cli: &Cli, dir: Option<&Path>) -> Result<()> {
     let dir = dir.unwrap_or_else(|| Path::new("."));
     let tests_dir = dir.join("tests");
@@ -618,12 +824,14 @@ pub fn test(cli: &Cli, dir: Option<&Path>) -> Result<()> {
                 String::new()
             };
             println!(
-                "{}",
-                style::ok(&format!("{}{}", style::value(&rel), style::muted(&detail)))
+                "{} {}{}",
+                style::ok(""),
+                style::value(&rel),
+                style::muted(&detail)
             );
         } else {
             failed += 1;
-            println!("{}", style::fail(&style::value(&rel)));
+            println!("{} {}", style::fail(""), style::value(&rel));
             let stderr = String::from_utf8_lossy(&output.stderr);
             for line in stdout.lines().chain(stderr.lines()) {
                 println!("    {}", style::muted(line));

@@ -4,7 +4,7 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 #![cfg(feature = "bin")]
-//! Integration tests for `globalThis.WebAssembly` — the host-side
+//! Integration tests for `globalThis.WebAssembly` - the host-side
 //! wasmtime sub-runner that lets JS load arbitrary `.wasm` modules
 //! at runtime. This is the architectural escape hatch for the long
 //! tail of npm packages that ship a pre-compiled WASM build (sql.js,
@@ -22,11 +22,11 @@
 //!   * BufferSource shapes: Uint8Array / Buffer / ArrayBuffer
 //!   * `validate()` true / false
 //!   * `Module.exports()` / `Module.imports()` introspection
-//!   * Function exports — i32 in / out, multiple args
-//!   * Exported memory — read / write / `.buffer` snapshot
-//!   * Error paths — invalid bytes, missing export, wrong arg count,
+//!   * Function exports - i32 in / out, multiple args
+//!   * Exported memory - read / write / `.buffer` snapshot
+//!   * Error paths - invalid bytes, missing export, wrong arg count,
 //!     unsatisfied imports, compileStreaming rejected
-//!   * Typed errors — CompileError / LinkError / RuntimeError shape
+//!   * Typed errors - CompileError / LinkError / RuntimeError shape
 
 use serial_test::serial;
 use std::process::Command;
@@ -202,7 +202,7 @@ fn module_then_instance_separately() {
 #[serial]
 fn instantiate_with_module_handle() {
     // `WebAssembly.instantiate(module)` returns Instance, not
-    // {module, instance} — different return shape from the bytes
+    // {module, instance} - different return shape from the bytes
     // overload. Test both.
     let bytes_js = js_byte_array(&add_wasm());
     let src = format!(
@@ -480,7 +480,7 @@ fn instantiate_streaming_with_response_resolves() {
     // with "streaming not supported"; the surface is wired now.
     //
     // We feed it a real (`add`-exporting) module so the host-side
-    // wasm parser is happy — wasmtime rejects the bare 8-byte magic-
+    // wasm parser is happy - wasmtime rejects the bare 8-byte magic-
     // and-version module that the WAT/wasm spec calls "minimum
     // valid". Same `add_wasm()` helper the other tests use.
     let bytes_js = js_byte_array(&add_wasm());

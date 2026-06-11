@@ -4,7 +4,7 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 //! End-to-end integration tests for the WASM sandbox's node-compat
-//! layer — fs/crypto calls go through the `afterburner:host` imports
+//! layer - fs/crypto calls go through the `afterburner:host` imports
 //! gated by `Manifold`.
 
 use afterburner_core::{Combustor, FsAccess, FuelGauge, Manifold};
@@ -591,7 +591,7 @@ fn spawn_one_shot_http_server(body: Vec<u8>) -> u16 {
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept");
-        // Drain the request — ureq sends a well-formed HTTP request we
+        // Drain the request - ureq sends a well-formed HTTP request we
         // don't care to parse; we only need to wait until the headers
         // complete before replying.
         let mut buf = [0u8; 4096];
@@ -609,7 +609,7 @@ fn spawn_one_shot_http_server(body: Vec<u8>) -> u16 {
 }
 
 // JS snippet run under both native and WASM paths. Can't use
-// `async`/`await` or `.then()` — Javy's runtime doesn't enable the
+// `async`/`await` or `.then()` - Javy's runtime doesn't enable the
 // event loop, so microtasks don't drain in a thrust. The fetch polyfill
 // goes through `__host_http_request` synchronously; we call that host
 // function directly to verify `body_b64` carries arbitrary bytes
@@ -639,7 +639,7 @@ const BINARY_BODY_SCRIPT: &str = r#"
 #[test]
 fn wasm_fetch_binary_body_roundtrips_losslessly() {
     // End-to-end proof that `body_b64` carries bytes losslessly through
-    // the `__host_http_request` bridge — every byte 0..=255 including
+    // the `__host_http_request` bridge - every byte 0..=255 including
     // the high-bit values that utf8-lossy would replace with U+FFFD.
     let body: Vec<u8> = (0u8..=255).collect();
     let port = spawn_one_shot_http_server(body.clone());

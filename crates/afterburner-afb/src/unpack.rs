@@ -66,7 +66,7 @@ fn safe_rel_path(p: &Path) -> Result<String> {
                     .ok_or_else(|| AfbError::PathEscape(p.display().to_string()))?;
                 parts.push(s);
             }
-            // `..`, `/`, `C:` — anything that could escape the root.
+            // `..`, `/`, `C:` - anything that could escape the root.
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(AfbError::PathEscape(p.display().to_string()));
             }
@@ -148,7 +148,7 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
         }
 
         // Only materialize what v0.1 consumes. Other regular files (e.g.
-        // precompiled/*) are skipped — but their bytes still flow through
+        // precompiled/*) are skipped - but their bytes still flow through
         // the capped decoder as the iterator advances, so a bomb hidden in
         // an ignored entry is still caught.
         let wanted = rel == "afb.toml" || rel == "manifold.json" || rel.starts_with("source/");

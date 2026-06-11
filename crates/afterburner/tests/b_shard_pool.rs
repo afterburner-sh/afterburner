@@ -7,7 +7,7 @@
 //!
 //! Validates:
 //! * `--shards 1` (auto-detect on a single-CPU runner) preserves
-//!   single-shard semantics — same response shape as before B1.
+//!   single-shard semantics - same response shape as before B1.
 //! * Round-robin distribution: with N shards and per-shard
 //!   counters, X requests produce a deterministic counter spread.
 //! * Per-shard JS state isolation: shards don't see each other's
@@ -15,7 +15,7 @@
 //! * Listener bind: exactly one TCP listener bound across all
 //!   shards (no SO_REUSEPORT, no double-bind error).
 //! * Sandbox boundary: capability gates apply per-Store
-//!   identically — `--sandbox` denies on every shard, `-A` allows
+//!   identically - `--sandbox` denies on every shard, `-A` allows
 //!   on every shard.
 //! * Init failure: if any shard's daemon-init fails, the process
 //!   exits non-zero; surviving shards (if any) don't keep serving.
@@ -59,7 +59,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Spawn `burn -A -e <src>` with the standard 2-shard cap. Caller
 /// is responsible for shaping `src` so it prints the
-/// `LISTENING:<port>` marker — use `listening_marker_js(port)`
+/// `LISTENING:<port>` marker - use `listening_marker_js(port)`
 /// inside the `.listen` callback.
 fn spawn_burn_with_inline(source: &str, port: u16) -> ChildGuard {
     let mut cmd = Command::new(BURN);
@@ -97,7 +97,7 @@ fn shard_pool_listener_binds_once_no_eaddrinuse() {
 
     // Verify the listener serves; if multiple sockets were bound
     // (hypothetical SO_REUSEPORT regression), the GET would still
-    // succeed but the test would still pass — the real signal is
+    // succeed but the test would still pass - the real signal is
     // that init didn't crash, which is implicit in spawn_and_wait_listening
     // returning successfully.
     let resp = http_get(port, "/");
@@ -112,7 +112,7 @@ fn shard_pool_listener_binds_once_no_eaddrinuse() {
 fn shard_pool_round_robin_distributes_requests() {
     // The auto-detected shard count (= available_parallelism()) is
     // ≥ 1 on every box. We hit /counter many times and verify the
-    // VALUE we get back is monotonically grouped — first batch of
+    // VALUE we get back is monotonically grouped - first batch of
     // N gets counter=1 (each shard handled 1), second batch of N
     // gets counter=2, etc. This is the textbook RR signature: if
     // dispatch were random or sticky, we'd see counter=1 mixed with
@@ -136,7 +136,7 @@ fn shard_pool_round_robin_distributes_requests() {
     // 2, 4, 8, 16); we just assert the RR PROPERTY: in any window
     // of N requests, all the values are equal (each shard handled
     // exactly one). The simplest check: hit it 8 times, look at
-    // the unique values — should be a small set (1..=2 if N≥4).
+    // the unique values - should be a small set (1..=2 if N≥4).
     let mut values = Vec::new();
     for _ in 0..8 {
         let resp = http_get(port, "/c");
@@ -148,7 +148,7 @@ fn shard_pool_round_robin_distributes_requests() {
     sorted.dedup();
     // On any modern box (N≥2), the 8 requests RR-spread should
     // return at most 4 distinct values (8 ÷ N, where N≥2). If it's
-    // 8 distinct values, that's not RR — that's per-request fresh
+    // 8 distinct values, that's not RR - that's per-request fresh
     // state, which would be wrong.
     assert!(
         sorted.len() <= 4,
@@ -187,7 +187,7 @@ fn shard_pool_per_shard_state_isolation() {
 
     // Send enough requests that, regardless of how many shards the host
     // auto-detects (`available_parallelism()`), at least one shard is
-    // guaranteed to handle multiple — i.e. requests > shards. We scale
+    // guaranteed to handle multiple - i.e. requests > shards. We scale
     // off the host's parallelism so a 64-core box doesn't fail this
     // invariant the way a fixed 32-request loop did on a 36-core host.
     let par = std::thread::available_parallelism()
@@ -249,7 +249,7 @@ fn shard_pool_sandbox_denies_on_every_shard() {
         // The sandbox now also seals inbound listening (the listen
         // capability axis): grant the test's bind port back explicitly,
         // otherwise `.listen()` is denied and the daemon never readies.
-        // env stays sealed — that's what this test actually exercises.
+        // env stays sealed - that's what this test actually exercises.
         .arg("--allow-listen")
         .arg(port.to_string())
         .arg("-e")
@@ -317,7 +317,7 @@ fn shard_pool_allow_env_visible_on_every_shard() {
 #[serial]
 fn shard_pool_init_failure_exits_nonzero() {
     // A syntactically-broken script fails at init in every shard.
-    // The pool must detect the failure and exit non-zero — it
+    // The pool must detect the failure and exit non-zero - it
     // must NOT silently continue with the surviving shards.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
@@ -351,7 +351,7 @@ fn shard_pool_init_failure_exits_nonzero() {
 #[test]
 #[serial]
 fn shard_pool_plain_script_exits_zero_no_listeners() {
-    // No `.listen()`, no `setInterval` — pool reports
+    // No `.listen()`, no `setInterval` - pool reports
     // `any_has_refs() == false` after init, the CLI's main-thread
     // wait loop sees that and exits cleanly.
     let out = Command::new(BURN)
@@ -377,7 +377,7 @@ fn shard_pool_plain_script_exits_zero_no_listeners() {
     assert_eq!(
         stdout.matches("hi from plain script").count(),
         1,
-        "console.log was printed multiple times — init dedup broke: {stdout}"
+        "console.log was printed multiple times - init dedup broke: {stdout}"
     );
 }
 
@@ -463,7 +463,7 @@ fn shard_pool_concurrent_requests_complete() {
 fn shard_pool_burn_shards_one_forces_single_shard() {
     // BURN_SHARDS=1 reduces the pool to one shard. With one shard
     // the per-shard counter IS the global counter, so we get
-    // monotonic 1, 2, 3, ... — the pre-B1 single-Store contract.
+    // monotonic 1, 2, 3, ... - the pre-B1 single-Store contract.
     let port = pick_port();
     let mark = listening_marker_js(port);
     let src = format!(
@@ -484,7 +484,7 @@ fn shard_pool_burn_shards_one_forces_single_shard() {
         .arg(&src);
     let (_child, _watcher) = spawn_and_wait_listening(cmd, port, READY_TIMEOUT);
 
-    // 5 sequential requests must produce 1, 2, 3, 4, 5 — strict
+    // 5 sequential requests must produce 1, 2, 3, 4, 5 - strict
     // monotonic. If multi-shard accidentally took effect we'd see
     // 1, 1, 1, ... or some interleaving.
     for expected in 1..=5 {
@@ -509,7 +509,7 @@ fn shard_pool_burn_shards_four_spawns_four() {
     // sees a fresh counter on its first request) since we hit
     // each shard exactly once. With shard_count=1 we'd see
     // 1, 2, 3, 4. With shard_count=8 we'd still see all "1"s
-    // (only 4 shards used) — but only 4 distinct shards are
+    // (only 4 shards used) - but only 4 distinct shards are
     // actually present so subsequent requests show 2,3,4,...
     let port = pick_port();
     let mark = listening_marker_js(port);
@@ -563,7 +563,7 @@ fn shard_pool_burn_shards_four_spawns_four() {
 fn shard_pool_burn_shards_zero_falls_back() {
     // BURN_SHARDS=0 is invalid (must be ≥ 1). The CLI logs a
     // warning and falls back to auto-detect. The script still
-    // runs successfully — degraded gracefully, not a hard fail.
+    // runs successfully - degraded gracefully, not a hard fail.
     let port = pick_port();
     let mark = listening_marker_js(port);
     let src = format!(
@@ -575,7 +575,7 @@ fn shard_pool_burn_shards_zero_falls_back() {
         "#
     );
     let mut cmd = Command::new(BURN);
-    // Don't set BURN_QUIET — we want to capture the warning.
+    // Don't set BURN_QUIET - we want to capture the warning.
     cmd.env("BURN_SHARDS", "0").arg("-A").arg("-e").arg(&src);
     let (mut child, _watcher) = spawn_and_wait_listening(cmd, port, READY_TIMEOUT);
 
@@ -591,7 +591,7 @@ fn shard_pool_burn_shards_zero_falls_back() {
     if let Some(mut s) = child.stderr.take() {
         let _ = s.read_to_string(&mut err_buf);
     }
-    // Best-effort assertion — the stderr capture races with kill,
+    // Best-effort assertion - the stderr capture races with kill,
     // so we only check IF we got bytes.
     if !err_buf.is_empty() {
         let lower = err_buf.to_lowercase();
@@ -659,7 +659,7 @@ fn shard_pool_burn_shards_overlimit_clamped() {
         .arg("-e")
         .arg(&src);
     // 128 shards instantiated serially can take longer than the
-    // 60s default — bump to 120s for this test specifically.
+    // 60s default - bump to 120s for this test specifically.
     let (_child, _watcher) = spawn_and_wait_listening(cmd, port, Duration::from_secs(120));
 
     let resp = http_get(port, "/");
@@ -714,7 +714,7 @@ fn shard_pool_dgram_socket_does_not_eaddrinuse() {
     // UDP doesn't have a TCP-style listener-accept probe, so we
     // rely on the LISTENING marker (printed from the `listening`
     // event handler) for readiness. The wait_for_listening TCP
-    // fallback can't help here — there's no TCP socket.
+    // fallback can't help here - there's no TCP socket.
     let port = pick_port();
     let mark = listening_marker_js(port);
     let src = format!(
@@ -744,7 +744,7 @@ fn shard_pool_dgram_socket_does_not_eaddrinuse() {
     }
 }
 
-// ---- 17. SharedPortClaims unit-test-style — owner/follower --------
+// ---- 17. SharedPortClaims unit-test-style - owner/follower --------
 
 // Regression for a real race surfaced during B1: kovan-map's
 // HopscotchMap allows transient duplicates of the same key when
@@ -757,7 +757,7 @@ fn shard_pool_dgram_socket_does_not_eaddrinuse() {
 // `remove` cleared only the first; the leftover made the next
 // `try_claim` return `Follower(stale_id)` instead of `Owner(new)`.
 // Failure rate ~80% in `cargo test` debug, 0% in `cargo run` of
-// the same body — purely a function of how often concurrent
+// the same body - purely a function of how often concurrent
 // inserts hit the duplicate window vs. serialise.
 //
 // Fix shipped in `SharedPortClaims::release`: loop `remove` until

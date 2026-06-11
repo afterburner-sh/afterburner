@@ -29,7 +29,7 @@ fn tid(n: u32) -> TenantId {
 
 #[test]
 fn single_tenant_flood_is_throttled() {
-    // 10 tokens/sec, burst 2 — a flood of 50 from one tenant should
+    // 10 tokens/sec, burst 2 - a flood of 50 from one tenant should
     // see exactly 2 allowed and 48 rejected in the immediate window.
     let engine = mk_engine_with_admission(10, 2);
     let id = engine.register("module.exports = () => 1").unwrap();
@@ -77,7 +77,7 @@ fn other_tenants_unaffected_by_noisy_neighbor() {
     for h in noisy {
         let _ = h.recv();
     }
-    // Tenant 2 should still get its burst — 3 allowances — back-to-back.
+    // Tenant 2 should still get its burst - 3 allowances - back-to-back.
     let mut quiet = Vec::new();
     for _ in 0..3 {
         quiet.push(engine.thrust(&id, json!(null), FuelGauge::unlimited(), Some(tid(2))));
@@ -94,7 +94,7 @@ fn other_tenants_unaffected_by_noisy_neighbor() {
 #[test]
 fn tenant_none_bypasses_admission() {
     // Extremely restrictive admission: 1 tokens/sec, burst 1. A flood
-    // from the trusted (None-tenant) path must ALL pass — admission
+    // from the trusted (None-tenant) path must ALL pass - admission
     // is gated by tenant presence.
     let engine = mk_engine_with_admission(1, 1);
     let id = engine.register("module.exports = () => 1").unwrap();

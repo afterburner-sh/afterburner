@@ -8,7 +8,7 @@
 //!
 //! Under a sealed manifold, a filesystem-backed `require('./x.js')`
 //! used to report Node's "Cannot find module" even though the file
-//! existed and the real cause was a DENIED fs read — operators chased
+//! existed and the real cause was a DENIED fs read - operators chased
 //! phantom missing files instead of granting the capability. The
 //! resolver (`polyfills/require.js`) now disambiguates on the failure
 //! path: a manifold denial surfaces as EACCES
@@ -17,7 +17,7 @@
 //! relative specifier resolved against.
 //!
 //! Also pinned here: relative require is file-relative (Node
-//! semantics) — a module loaded from a subdirectory resolves its own
+//! semantics) - a module loaded from a subdirectory resolves its own
 //! `./sibling` next to ITSELF, not against the process CWD; the entry
 //! script resolves relative to its own file. Only `-e` eval mode
 //! falls back to the CWD (no requiring file exists).
@@ -94,7 +94,7 @@ fn missing_module_still_reports_cannot_find_with_resolution_base() {
     fs::write(dir.join("main.js"), "require('./definitely-absent.js');\n").unwrap();
 
     // Open manifold (no flags): fs reads are allowed, the file truly
-    // does not exist — the Node-shaped error must survive, and the
+    // does not exist - the Node-shaped error must survive, and the
     // message must show WHICH directory the specifier resolved
     // against (file-relative, not CWD).
     let main = dir.join("main.js");
@@ -119,7 +119,7 @@ fn missing_module_still_reports_cannot_find_with_resolution_base() {
 #[test]
 fn relative_require_resolves_against_requiring_file_with_fs_grant() {
     // Entry in <dir>, requiring ./sub/a.js, which requires
-    // ./inner/b.js — the second hop only resolves if a.js's require
+    // ./inner/b.js - the second hop only resolves if a.js's require
     // is rooted at <dir>/sub (file-relative), not at the process CWD
     // (which we point somewhere unrelated).
     let dir = tmp_dir("filerel");

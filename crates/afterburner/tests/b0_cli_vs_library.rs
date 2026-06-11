@@ -30,7 +30,7 @@ fn library_default_manifold_is_sealed() {
 
 #[test]
 fn library_udf_envelope_still_works() {
-    // Library's `register` + `run` path — the UDF envelope — is the
+    // Library's `register` + `run` path - the UDF envelope - is the
     // long-standing shape for programmatic callers. B0's script-mode
     // addition must not regress it.
     let ab = Afterburner::new().expect("build");
@@ -130,7 +130,7 @@ fn cli_banner_appears_on_first_implicit_open() {
         "banner missing on fresh cache dir: stderr = {stderr:?}"
     );
 
-    // Second run — ack-marker now exists, banner should go silent.
+    // Second run - ack-marker now exists, banner should go silent.
     let out2 = Command::new(BURN)
         .env_remove("BURN_QUIET")
         .env("XDG_CACHE_HOME", &cache_dir)
@@ -145,7 +145,7 @@ fn cli_banner_appears_on_first_implicit_open() {
         "banner repeated after ack: stderr = {stderr2:?}"
     );
 
-    // Cleanup — best effort.
+    // Cleanup - best effort.
     let _ = std::fs::remove_dir_all(&cache_dir);
 }
 

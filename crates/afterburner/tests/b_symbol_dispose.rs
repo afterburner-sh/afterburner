@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `Symbol.dispose` / `Symbol.asyncDispose` — Node 20+ TC39
+//! `Symbol.dispose` / `Symbol.asyncDispose` - Node 20+ TC39
 //! explicit-resource-management well-known symbols.
 
 #![cfg(feature = "bin")]
@@ -44,7 +44,7 @@ fn symbol_dispose_is_a_well_known_symbol() {
         r#"
         if (typeof Symbol.dispose !== 'symbol') { console.log('FAIL', typeof Symbol.dispose); process.exit(1); }
         if (typeof Symbol.asyncDispose !== 'symbol') { console.log('FAIL'); process.exit(1); }
-        // Per spec, the symbol is the same value across realms — `for`-shared.
+        // Per spec, the symbol is the same value across realms - `for`-shared.
         if (Symbol.dispose === Symbol.for('Symbol.dispose')) console.log('SHARED-OK');
         else console.log('FAIL not-shared');
         "#,

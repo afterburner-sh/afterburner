@@ -515,7 +515,7 @@ fn wrap_net(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     Ok(())
 }
 
-// `wrap_tls` mirrors `wrap_net` — daemon-on registers the real
+// `wrap_tls` mirrors `wrap_net` - daemon-on registers the real
 // coordinator, daemon-off registers stubs returning E_NO_DAEMON. The
 // plugin imports these unconditionally so we always declare them.
 #[cfg(not(feature = "daemon"))]
@@ -776,7 +776,7 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         )
         .map_err(link_err)?;
 
-    // Unlink / rename / mkdir / readdir — parity with the native path.
+    // Unlink / rename / mkdir / readdir - parity with the native path.
     // Without these, `fs.createWriteStream(path, { flags: 'w' })` cannot
     // truncate existing content before rewriting.
     linker
@@ -1181,7 +1181,7 @@ fn wrap_crypto(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         )
         .map_err(link_err)?;
 
-    // HTTP/3 listen — two host imports, one to stash the cert+key
+    // HTTP/3 listen - two host imports, one to stash the cert+key
     // strings, one to bind. Splitting them keeps the wasm trampoline
     // signature small (single u32 vs five mixed-i32-and-u32 args)
     // which sidesteps a wasmtime trampoline anomaly we hit when
@@ -1302,7 +1302,7 @@ fn wrap_crypto(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         )
         .map_err(link_err)?;
 
-    // Stubs when the http3 feature is off — keeps plugin instantiation
+    // Stubs when the http3 feature is off - keeps plugin instantiation
     // happy (abi_parity test pins both names unconditionally).
     #[cfg(not(feature = "http3"))]
     linker
@@ -1395,7 +1395,7 @@ fn wrap_crypto(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 let m = caller.data().manifold.clone();
                 match prime_host::generate_prime(bits as usize, safe != 0, &m) {
                     Ok(bytes) => {
-                        // Hex-encode the BE bytes so JS gets a string —
+                        // Hex-encode the BE bytes so JS gets a string -
                         // matches the convention used by `host_crypto_hash`.
                         let hex = hex::encode(&bytes);
                         write_out(&mut caller, &memory, out_ptr, out_cap, hex.as_bytes())
@@ -1548,7 +1548,7 @@ fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         .map_err(link_err)?;
 
     // v2 request path: carries request HEADERS (the legacy import drops
-    // them) and frames the body as base64 — arbitrary bytes cannot cross
+    // them) and frames the body as base64 - arbitrary bytes cannot cross
     // the JS string boundary unmangled (lone surrogates / UTF-8 coercion),
     // so the guest encodes and this import decodes immediately before the
     // request. The wire body is the exact original bytes; headers arrive
@@ -1685,7 +1685,7 @@ fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         )
         .map_err(link_err)?;
 
-    // Non-daemon builds still need to satisfy the wasm import — the
+    // Non-daemon builds still need to satisfy the wasm import - the
     // plugin .wasm is a single artifact and declares the import
     // unconditionally. Returning -1 tells the JS shim to fall back to
     // the synchronous `host_http_request` path, matching the
@@ -1713,7 +1713,7 @@ fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
 //
 // `host_dns_lookup` returns a single IP. The record-type-aware
 // resolvers (`host_dns_resolve_*` / `host_dns_reverse`) all return
-// JSON-encoded result strings — a uniform cross-boundary shape that
+// JSON-encoded result strings - a uniform cross-boundary shape that
 // keeps the i32 ABI stable even as the result list shape varies
 // (`["1.2.3.4"]` vs `[{"exchange": "...", "priority": 10}]` vs
 // `[["fragment", ...]]`). The plugin's polyfill JSON.parse's the
@@ -1952,7 +1952,7 @@ fn wrap_dns(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 let m = caller.data().manifold.clone();
                 match dns_host::resolve_txt(&name, &servers, &m) {
                     Ok(records) => {
-                        // Node's resolveTxt yields `string[][]` —
+                        // Node's resolveTxt yields `string[][]` -
                         // outer per RR, inner per character-string.
                         let v: Vec<serde_json::Value> = records
                             .into_iter()
@@ -2603,7 +2603,7 @@ fn wrap_crypto_signing_streaming(linker: &mut Linker<HostState>) -> Result<(), A
 
 /// Streaming `createHash` / `createHmac`. `hash_open` is for plain
 /// digests; `hmac_open` takes the key at open time (MAC is constructed
-/// once — HMAC doesn't accept a key change mid-stream). Both share the
+/// once - HMAC doesn't accept a key change mid-stream). Both share the
 /// same handle id space, update, and finalize path.
 fn wrap_crypto_hash_streaming(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     linker
@@ -2714,7 +2714,7 @@ fn wrap_crypto_hash_streaming(linker: &mut Linker<HostState>) -> Result<(), Afte
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
-                // Empty encoding means default — hex. Matches the
+                // Empty encoding means default - hex. Matches the
                 // one-shot host_crypto_hash which always emits hex.
                 let enc = if enc_len == 0 {
                     "hex".to_string()
@@ -2734,7 +2734,7 @@ fn wrap_crypto_hash_streaming(linker: &mut Linker<HostState>) -> Result<(), Afte
                     "binary" | "latin1" => bytes.iter().map(|b| *b as char).collect(),
                     // Parity with the native path's `encode_bytes`. Without
                     // this arm, `crypto.createHash('sha256').digest('utf8')`
-                    // works on native but errors on WASM — a silent
+                    // works on native but errors on WASM - a silent
                     // cross-engine divergence we don't want to ship.
                     "utf8" | "utf-8" => String::from_utf8_lossy(&bytes).into_owned(),
                     other => {
@@ -2779,7 +2779,7 @@ fn wrap_state(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                         let encoded = B64.encode(&bytes);
                         write_out(&mut caller, &memory, out_ptr, out_cap, encoded.as_bytes())
                     }
-                    None => -2, // NotFound — JS glue maps to undefined.
+                    None => -2, // NotFound - JS glue maps to undefined.
                 }
             },
         )
@@ -2879,7 +2879,7 @@ fn wrap_zlib(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     let Some(memory) = guest_memory(&mut caller) else {
                         return E_OTHER;
                     };
-                    // Bytes come in as a base64 string — matches the
+                    // Bytes come in as a base64 string - matches the
                     // native path wire format.
                     let input_b64 = match read_str(&memory, &caller, ptr, len) {
                         Some(s) => s,
@@ -2920,7 +2920,7 @@ fn wrap_zlib(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
 //
 // Unlike the zlib bridges (whose JS-visible API is string-shaped, so they
 // frame bytes as base64 on the wire), these two imports *implement* the
-// guest's base64 fast path — double-encoding would defeat their purpose.
+// guest's base64 fast path - double-encoding would defeat their purpose.
 // They therefore use raw framing: `encode` reads raw bytes from guest
 // memory and writes the ASCII encoding into the out region; `decode`
 // reads ASCII and writes raw bytes back. Output sizes are exactly
@@ -2953,7 +2953,7 @@ fn wrap_b64(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
-                // Encode straight off the guest-memory slice — no input
+                // Encode straight off the guest-memory slice - no input
                 // copy. The borrow ends before `write_out` needs `&mut`.
                 let encoded = {
                     let Some(input) = guest_slice(&memory, &caller, ptr, len) else {
@@ -3126,7 +3126,7 @@ fn wrap_last_error(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErro
 //
 // The plugin's bytecode-cache `invoke` mode reads the per-thrust input
 // (JSON text or raw bytes, per `host_input_format`) from
-// `HostState::pending_input` via this import — which lets us skip the
+// `HostState::pending_input` via this import - which lets us skip the
 // per-thrust preamble compile that would otherwise publish the input
 // as a JS global. The cached wrapped source calls
 // `__AB_GET_INPUT_VALUE__()` (installed in `modify_runtime`) which
@@ -3149,7 +3149,7 @@ fn wrap_input(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
         )
         .map_err(link_err)?;
 
-    // Framing flag for `pending_input` — `InputFormat` discriminant
+    // Framing flag for `pending_input` - `InputFormat` discriminant
     // (0 = JSON text, 1 = raw bytes). The plugin's input getter reads
     // this once per invocation to decide whether to materialize a JS
     // string for `JSON.parse` or hand the module a `Uint8Array`.
@@ -3167,7 +3167,7 @@ fn wrap_input(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
 //
 // When the invoke wrapper sees the module return a `Uint8Array` /
 // `ArrayBuffer`, it posts the bytes here instead of JSON-stringifying
-// to stdout — the output-side twin of `InputFormat::Raw`. The host
+// to stdout - the output-side twin of `InputFormat::Raw`. The host
 // stashes them in `HostState::pending_raw_output`;
 // `WasmCombustor::invoke_with_input` surfaces them as
 // `OutputValue::Bytes` after `_start` returns. The per-call output
@@ -3200,7 +3200,7 @@ fn wrap_raw_output(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErro
                     return E_OTHER;
                 };
                 // `guest_slice` (not `read_bytes`): unsigned wasm32
-                // address arithmetic with overflow-safe bounds — raw
+                // address arithmetic with overflow-safe bounds - raw
                 // results are exactly the multi-MiB payloads that can
                 // sit high in linear memory.
                 let Some(bytes) = guest_slice(&memory, &caller, blob_ptr, blob_len).map(Vec::from)
@@ -3219,8 +3219,8 @@ fn wrap_raw_output(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErro
 // ---- columnar UDF path --------------------------------------------------
 //
 // The columnar UDF path (`WasmCombustor::thrust_columnar`) feeds the
-// guest a binary blob — `BatchHeader` + `ColumnHeader[]` + per-column
-// data + validity + names — written into `HostState::pending_input`
+// guest a binary blob - `BatchHeader` + `ColumnHeader[]` + per-column
+// data + validity + names - written into `HostState::pending_input`
 // (the same channel the JSON invoke path uses). The plugin's
 // `columnar-invoke` mode reads this through the existing
 // `host_get_input` import, then uses `host_get_input_len` to know
@@ -3239,9 +3239,9 @@ fn wrap_raw_output(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErro
 // crossing the boundary is one `memcpy` per input column (host →
 // linmem at register time of the call) plus one `memcpy` per
 // result column (linmem → host at reply time). No JSON, no base64,
-// no encoding — just typed contiguous bytes with offset descriptors.
+// no encoding - just typed contiguous bytes with offset descriptors.
 fn wrap_columnar(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
-    // Length getter — the polyfill calls this *before* it allocates
+    // Length getter - the polyfill calls this *before* it allocates
     // the destination buffer in linmem so it picks exactly the right
     // capacity in one shot. Saves the JSON-style "guess, retry on
     // E_BUF_TOO_SMALL" loop on a path where the input is hundreds of
@@ -3254,14 +3254,14 @@ fn wrap_columnar(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError>
                 let n = caller.data().pending_input.len();
                 // i32 caps at 2 GiB; per-Store linmem is also bounded
                 // (max 4 GiB by wasm32 spec, default 1 GiB). A blob
-                // bigger than i32::MAX would be a misconfiguration —
+                // bigger than i32::MAX would be a misconfiguration -
                 // surface it as -1 so the polyfill can error cleanly.
                 i32::try_from(n).unwrap_or(-1)
             },
         )
         .map_err(link_err)?;
 
-    // Reply receiver — guest writes its result blob into linmem at
+    // Reply receiver - guest writes its result blob into linmem at
     // (blob_ptr, blob_len), then calls this so the host copies the
     // bytes into `pending_columnar_reply`. The host can't share-borrow
     // pending_columnar_reply during the read because we hold a
@@ -3317,8 +3317,8 @@ fn wrap_envelope(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError>
 
 // ---- http server (daemon mode) ------------------------------------------
 //
-// `host_http_listen` calls into `DaemonHttp::bind_listener` which —
-// under the `daemon` feature — binds a real TCP socket and spawns an
+// `host_http_listen` calls into `DaemonHttp::bind_listener` which -
+// under the `daemon` feature - binds a real TCP socket and spawns an
 // axum task on the stored tokio runtime. Without the feature it
 // degrades to an accounting-only stub, matching pre-B2.4 behaviour.
 //
@@ -3734,7 +3734,7 @@ fn wrap_shadow_argon2(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
 
 // ---- L3 shadow: jsonwebtoken -------------------------------------------
 //
-// Three host imports — sign / verify / decode. Options flow in as
+// Three host imports - sign / verify / decode. Options flow in as
 // a JSON blob to keep the ABI narrow; Rust parses only the fields
 // it recognizes and ignores unknown keys.
 
@@ -3942,7 +3942,7 @@ fn wrap_transpile(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError
                     Err(_) => return E_OTHER,
                 };
                 let Some(hook) = caller.data().transpile_hook.clone() else {
-                    // No hook registered — caller should fall back to
+                    // No hook registered - caller should fall back to
                     // loading the raw source. `-1` signals "no hook".
                     return -1;
                 };
@@ -3963,7 +3963,7 @@ fn wrap_transpile(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError
 
 // ---- process.exit --------------------------------------------------
 //
-// `host_process_exit(code)` never returns — the host traps with
+// `host_process_exit(code)` never returns - the host traps with
 // `I32Exit(code)`, which Wasmtime surfaces as a `wasmtime::Error`
 // that `map_daemon_trap` converts to `AfterburnerError::ProcessExit`.
 // wasmtime 44 host fns return `wasmtime::Result` rather than
@@ -4515,7 +4515,7 @@ fn wrap_net(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     record(&mut caller, "net_listen: invalid host");
                     return nerr::E_OTHER;
                 };
-                // Accept port 0 here — the OS picks a port and we
+                // Accept port 0 here - the OS picks a port and we
                 // surface it via the `Listening` event.
                 if !(0..=65535).contains(&port) {
                     record(&mut caller, &format!("net_listen: invalid port {port}"));
@@ -4953,7 +4953,7 @@ fn wrap_dgram(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
 // Argv crosses as a JSON-encoded array string so we don't need a
 // guest-side array marshaller. Manifold gating happens inside
 // `child_process_host::exec_sync`. The wasm path uses the same
-// node_compat host fn the native path uses — process spawning works
+// node_compat host fn the native path uses - process spawning works
 // from inside the wasm sandbox because the host (wasmtime caller)
 // drives `std::process::Command`, not the guest.
 
@@ -6370,7 +6370,7 @@ fn read_str(memory: &Memory, caller: &Caller<'_, HostState>, ptr: i32, len: i32)
 
 /// Borrow a `(ptr, len)` region of guest memory without copying.
 /// Treats `ptr` / `len` as unsigned (wasm32 addresses) and bounds-checks
-/// with overflow-safe arithmetic — large payloads high in linear memory
+/// with overflow-safe arithmetic - large payloads high in linear memory
 /// must not wrap the range computation.
 fn guest_slice<'a>(
     memory: &Memory,
@@ -6414,7 +6414,7 @@ fn write_out(
             data.len() as i32
         }
         None => {
-            // Can't write last_error here — we already hold a &mut into
+            // Can't write last_error here - we already hold a &mut into
             // linear memory; borrow checker would reject touching
             // caller.data_mut(). The raw code at least makes the
             // failure deterministic (E_OTHER with no message).
@@ -6446,7 +6446,7 @@ fn link_err<E: std::fmt::Display>(e: E) -> AfterburnerError {
     AfterburnerError::Engine(format!("linker.func_wrap: {e}"))
 }
 
-/// JSON string literal escaping — used for embedding HTTP response
+/// JSON string literal escaping - used for embedding HTTP response
 /// bodies inside a JSON result returned to the guest.
 fn js_string_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);

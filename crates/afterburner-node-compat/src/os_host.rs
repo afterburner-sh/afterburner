@@ -31,7 +31,7 @@ pub fn cpus() -> usize {
 }
 
 pub fn total_mem() -> u64 {
-    // Conservative default — getting accurate total memory cross-platform
+    // Conservative default - getting accurate total memory cross-platform
     // requires platform-specific syscalls we're not pulling in for Phase 2.
     0
 }

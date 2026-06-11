@@ -9,13 +9,13 @@
 //!
 //! * `WebAssembly.compileStreaming` / `instantiateStreaming` over a
 //!   real `Response`-like object.
-//! * `new WebAssembly.Memory({initial,maximum})` standalone — backed
+//! * `new WebAssembly.Memory({initial,maximum})` standalone - backed
 //!   by `wasmtime::Memory::new` in its own Store.
 //! * `new WebAssembly.Global({value:'i32', mutable:true}, init)`
-//!   standalone — value get/set through `__host_wasm_global_*_sa`.
+//!   standalone - value get/set through `__host_wasm_global_*_sa`.
 //! * `new WebAssembly.Table({element:'anyfunc', initial, maximum})`
-//!   standalone — `.length`, `.grow(delta)`.
-//! * `node:wasi` — real `wasi.start(module)` runs a WASI preview1
+//!   standalone - `.length`, `.grow(delta)`.
+//! * `node:wasi` - real `wasi.start(module)` runs a WASI preview1
 //!   module through `wasmtime-wasi`, surfaces the exit code.
 
 use serial_test::serial;
@@ -95,7 +95,7 @@ fn standalone_table_length_and_grow() {
 #[serial]
 fn compileStreaming_from_response() {
     let src = r#"
-        // Minimal valid wasm module — empty module with no exports.
+        // Minimal valid wasm module - empty module with no exports.
         const bytes = new Uint8Array([0,0x61,0x73,0x6d,1,0,0,0]);
         // Fake Response-like with an arrayBuffer() method.
         const fakeResponse = {
@@ -130,7 +130,7 @@ fn wasi_runs_module_with_exit_code() {
     //
     // wasmtime-wasi's preview1 implementation requires the module to
     // export `memory` even when the syscalls it calls don't read /
-    // write any pointer — the linker's setup checks the export up
+    // write any pointer - the linker's setup checks the export up
     // front.
     let src = r#"
         const bytes = new Uint8Array([
@@ -143,7 +143,7 @@ fn wasi_runs_module_with_exit_code() {
                 9,0x70,0x72,0x6f,0x63,0x5f,0x65,0x78,0x69,0x74, 0,1,
             // func section
             3,2,1,0,
-            // memory section — 1 page, no max
+            // memory section - 1 page, no max
             5,3,1,0,1,
             // export section: _start (func[1]) + memory (mem[0])
             // _start export(9) + memory export(9) + count(1) = 19 = 0x13

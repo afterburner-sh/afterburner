@@ -27,7 +27,7 @@ fn is_ident(s: &str) -> bool {
 impl Coord {
     /// Parse `namespace/name`, optionally suffixed with `@version`.
     ///
-    /// A bare `name` (no `/`) is rejected — the namespace is required for
+    /// A bare `name` (no `/`) is rejected - the namespace is required for
     /// registry operations. Use [`Coord::parse_or_default_ns`] when a fallback
     /// namespace (e.g. the logged-in username) is available.
     pub fn parse(spec: &str) -> Result<Self> {

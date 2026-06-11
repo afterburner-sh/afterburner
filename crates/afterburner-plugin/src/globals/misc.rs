@@ -30,7 +30,7 @@ pub fn install<'js>(globals: &Object<'js>) {
 fn install_diagnostics<'js>(globals: &Object<'js>) {
     // Expose the host's `last_error` slot as a JS-callable global.
     // Useful when a host call returns a sentinel (0 handle, -N code)
-    // and the polyfill needs the detailed message — e.g. to distinguish
+    // and the polyfill needs the detailed message - e.g. to distinguish
     // "permission denied" from "algorithm not supported" on a failed
     // `createHash` open.
     let _ = globals.set(
@@ -51,7 +51,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     // `__AB_GET_INPUT_VALUE__`) live in `globals::input`.
 
     // Daemon-mode envelope getter. Same shape as __AB_GET_INPUT__ but
-    // routes to `HostState::pending_envelope` — the long-lived Store
+    // routes to `HostState::pending_envelope` - the long-lived Store
     // re-entry channel. Plugin's `daemon_step` export calls this at
     // the top of every dispatch.
     let _ = globals.set(
@@ -89,7 +89,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             unsafe { host_http_reply(req_id as i64, b.as_ptr(), b.len() as u32) }
         }),
     );
-    // server.close() — releases the port + aborts the axum task.
+    // server.close() - releases the port + aborts the axum task.
     let _ = globals.set(
         "__host_http_close",
         Func::from(|server_id: f64| -> f64 { unsafe { host_http_close(server_id as i32) as f64 } }),
@@ -103,7 +103,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         Func::from(|source: String, path: String| -> String {
             let src_bytes = source.as_bytes();
             let path_bytes = path.as_bytes();
-            // Generous cap — transpile output is usually under 4x
+            // Generous cap - transpile output is usually under 4x
             // input for common TS+ESM code. If it exceeds the
             // buffer the import returns -2 and we surface the error.
             let cap: u32 = core::cmp::max(src_bytes.len() * 4, 16 * 1024) as u32;
@@ -379,7 +379,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         }),
     );
 
-    // process.exit — never returns; the host traps with I32Exit.
+    // process.exit - never returns; the host traps with I32Exit.
     let _ = globals.set(
         "__host_process_exit",
         Func::from(|code: f64| unsafe { host_process_exit(code as i32) }),
@@ -453,7 +453,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     // Numbers cross the JS↔WASM boundary as f64; for region_id /
     // byte_offset / values we cast to i64 inside the call. Bytes
     // travel as base64-encoded strings via `call_read` (auto-doubling
-    // buffer) — same shape used by the rest of the byte-payload host
+    // buffer) - same shape used by the rest of the byte-payload host
     // imports.
     let _ = globals.set(
         "__host_sab_alloc",
@@ -676,7 +676,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     //
     // The polyfill `polyfills/net.js` calls these from `net.connect`,
     // `socket.write`, `net.createServer`, etc. Byte payloads are
-    // base64-encoded strings on the wire — same convention used by
+    // base64-encoded strings on the wire - same convention used by
     // the zlib + crypto host imports.
     let _ = globals.set(
         "__host_net_connect",
@@ -878,12 +878,12 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     //
     // Db ids are i64 host-side; JS represents them as f64 (Number)
     // which exactly preserves any integer up to 2^53. We never reach
-    // that — ids increment one per `new Database(...)` and the
+    // that - ids increment one per `new Database(...)` and the
     // process recycles long before we run out.
     //
     // `run` / `get` / `all` return JSON strings via `call_read`
     // (auto-doubling buffer up to 16 MiB). On failure they return
-    // `__HOST_ERR__:<msg>` — same convention as the dns + os
+    // `__HOST_ERR__:<msg>` - same convention as the dns + os
     // bridges.
     let _ = globals.set(
         "__host_shadow_sqlite3_open",
@@ -1019,7 +1019,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     // ---- WebAssembly loader bridges ---------------------------------
     //
     // Module/Instance ids are i64 host-side; JS sees them as f64
-    // (Number — exact through 2^53). Output strings travel via
+    // (Number - exact through 2^53). Output strings travel via
     // call_read with auto-doubling buffer.
     let _ = globals.set(
         "__host_wasm_compile",
@@ -1222,7 +1222,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     let _ = globals.set(
         "__host_wasm_mem_write",
         Func::from(|id: f64, offset: f64, bytes_b64: String| -> f64 {
-            // Pass the base64 string straight through — the host
+            // Pass the base64 string straight through - the host
             // decodes. Matches the wire shape of the older
             // instance-export `__host_wasm_memory_write`.
             let bb = bytes_b64.as_bytes();
@@ -1449,7 +1449,7 @@ fn install_http_dns<'js>(globals: &Object<'js>) {
     );
 
     // Record-type-aware resolvers. Every bridge takes (hostname,
-    // servers_csv) — the polyfill passes an empty string for
+    // servers_csv) - the polyfill passes an empty string for
     // "use system config" and a comma-separated list otherwise.
     // The bridge returns a JSON string (success) or
     // `__HOST_ERR__:<msg>` (failure); the polyfill is responsible

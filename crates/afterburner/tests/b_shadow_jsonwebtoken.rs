@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! L3 shadow tests — jsonwebtoken.
+//! L3 shadow tests - jsonwebtoken.
 //!
 //! Richer surface than bcrypt/argon2: sign / verify / decode with
 //! multiple algorithms (HS256/384/512, RS256), rich options
@@ -229,7 +229,7 @@ fn wrong_issuer_fails_verify() {
 #[test]
 fn decode_does_not_verify_signature() {
     // Even with a clearly-forged signature, decode must return the
-    // payload — matches upstream (decode == parse, no verification).
+    // payload - matches upstream (decode == parse, no verification).
     let out = run_burn_eval(
         "const jwt = require('jsonwebtoken');\n\
          const real = jwt.sign({ forged: false }, 'right');\n\

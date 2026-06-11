@@ -3,14 +3,14 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `DaemonRuntime` — long-lived `Store<HostState>` that persists JS
+//! `DaemonRuntime` - long-lived `Store<HostState>` that persists JS
 //! state across many `daemon_step` invocations.
 //!
 //! Daemon mode is what lets `burn server.js` run real Node HTTP
 //! servers: after the user code registers handlers via
 //! `http.createServer(cb).listen(port)`, the Store sticks around so
 //! subsequent incoming HTTP requests (dispatched via
-//! [`DaemonRuntime::dispatch_event`]) hit the same JS state — same
+//! [`DaemonRuntime::dispatch_event`]) hit the same JS state - same
 //! globals, same handler table, same plenum caches.
 //!
 //! This is an intentional break from the fresh-per-thrust invariant
@@ -63,7 +63,7 @@ impl std::fmt::Debug for DaemonRuntime {
 impl DaemonRuntime {
     /// Spawn a daemon runtime from a prepared `InstancePre` and the
     /// user's source. Runs `daemon_step` once with the daemon-init
-    /// envelope — that evaluates the user source, which typically
+    /// envelope - that evaluates the user source, which typically
     /// installs HTTP handlers onto `globalThis.__ab_http_handlers`
     /// and binds listeners via `__host_http_listen`.
     ///
@@ -168,7 +168,7 @@ impl DaemonRuntime {
 
     /// Evaluate the user source as daemon-init. On success, JS state
     /// (handler tables, plenum caches, globals) persists in the
-    /// Store. On failure, `self` is still valid — callers can call
+    /// Store. On failure, `self` is still valid - callers can call
     /// [`drain_stdout`] / [`drain_stderr`] to retrieve whatever the
     /// script wrote before it threw.
     pub fn run_init(&mut self, source: &str, invocation: &ScriptInvocation) -> Result<()> {
@@ -193,7 +193,7 @@ impl DaemonRuntime {
     ///
     /// Use case: when the same user app needs to load into multiple
     /// daemon Stores (e.g. a multi-shard pool), pre-compile once and
-    /// run init with bytecode N times — each Store skips the per-
+    /// run init with bytecode N times - each Store skips the per-
     /// launch source parse + wrap + compile and just runs the
     /// already-baked image.
     ///
@@ -202,7 +202,7 @@ impl DaemonRuntime {
     /// the host applied at compile time. Re-running this method on
     /// the same Store re-evaluates the script, which is a behavioral
     /// no-op for typical daemon scripts (idempotent module init) but
-    /// could double-register handlers — same caveat as calling
+    /// could double-register handlers - same caveat as calling
     /// [`Self::run_init`] twice.
     pub fn run_init_with_bytecode(&mut self, bytecode: &[u8]) -> Result<()> {
         use base64::Engine;
@@ -219,7 +219,7 @@ impl DaemonRuntime {
     }
 
     /// Dispatch one event to the running daemon. Event shape:
-    /// `{ kind: "http-request", server_id, req_id, req: {...} }` —
+    /// `{ kind: "http-request", server_id, req_id, req: {...} }` -
     /// the plugin's `daemon_event` mode looks the handler up on
     /// `globalThis.__ab_http_handlers[server_id]` and invokes it.
     pub fn dispatch_event(&mut self, event: Value) -> Result<()> {
@@ -235,7 +235,7 @@ impl DaemonRuntime {
         Ok(())
     }
 
-    /// Snapshot of captured stdout. Cumulative — the caller is
+    /// Snapshot of captured stdout. Cumulative - the caller is
     /// responsible for tracking a high-water mark if it wants
     /// per-event deltas. B2.4 will route stdout to the real process
     /// in the long-running CLI case.
@@ -248,7 +248,7 @@ impl DaemonRuntime {
         self.store.data().stderr.contents().to_vec()
     }
 
-    /// Access the HTTP coordinator — B2.4 uses this to register axum
+    /// Access the HTTP coordinator - B2.4 uses this to register axum
     /// listener sockets keyed to the `server_id`s the script
     /// produced during daemon-init.
     pub fn http(&self) -> &Arc<DaemonHttp> {
@@ -263,7 +263,7 @@ impl DaemonRuntime {
         self.daemon_http.listener_count() > 0
     }
 
-    /// `true` if the daemon has anything keeping it alive — HTTP
+    /// `true` if the daemon has anything keeping it alive - HTTP
     /// listeners, ref'd timers, alive worker_threads children, or
     /// alive `net` connections / listeners. B7 extends the rule to
     /// raw TCP: while any socket is open or any listener is bound,
@@ -299,7 +299,7 @@ impl DaemonRuntime {
             return true;
         }
         // Outbound HTTP keeps the daemon alive while a request is in
-        // flight — without this the script-mode wrapper would exit
+        // flight - without this the script-mode wrapper would exit
         // the moment the synchronous user fn returns, even though
         // the response Promise hasn't resolved yet.
         #[cfg(feature = "daemon")]
@@ -314,7 +314,7 @@ impl DaemonRuntime {
     /// Install a worker_threads coordinator on this daemon's Store.
     /// Called by the CLI before `run_init` so user code that calls
     /// `new Worker(...)` during top-level evaluation already sees the
-    /// host import wired. Idempotent — second call replaces the slot.
+    /// host import wired. Idempotent - second call replaces the slot.
     pub fn install_workers(&mut self, workers: Arc<DaemonWorkers>) {
         self.store.data_mut().daemon_workers = Some(workers);
     }
@@ -361,7 +361,7 @@ impl DaemonRuntime {
     }
 
     /// Drop the registry entry for `conn_id` after dispatching `Close`
-    /// to JS — same role as `reap_worker` for `worker_threads`.
+    /// to JS - same role as `reap_worker` for `worker_threads`.
     #[cfg(feature = "daemon")]
     pub fn mark_net_closed(&self, conn_id: i32) {
         if let Some(n) = &self.store.data().daemon_net {
@@ -419,7 +419,7 @@ impl DaemonRuntime {
     }
 
     /// Install the outbound HTTP coordinator on this daemon's Store.
-    /// Same lifecycle as the other `install_*` methods — parent +
+    /// Same lifecycle as the other `install_*` methods - parent +
     /// worker call this before `run_init` so user code that calls
     /// `http.request` / `https.request` / `fetch` during top-level
     /// evaluation already sees the async host import.

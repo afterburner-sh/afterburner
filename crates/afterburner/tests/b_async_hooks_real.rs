@@ -5,13 +5,13 @@
 
 #![cfg(feature = "bin")]
 #![allow(non_snake_case)]
-//! R12 — `async_hooks.createHook` real firing.
+//! R12 - `async_hooks.createHook` real firing.
 //!
 //! Validates:
 //! 1. `createHook({init, before, after, destroy}).enable()` causes
 //!    every subsequent `new AsyncResource(...)` + `runInAsyncScope`
 //!    to fire all four callbacks in order.
-//! 2. Promise hooks fire — `.then(handler)` triggers init/before/after.
+//! 2. Promise hooks fire - `.then(handler)` triggers init/before/after.
 //! 3. setTimeout/queueMicrotask wrap their callbacks in AsyncResource.
 //! 4. `executionAsyncId()` reflects the live stack.
 //! 5. `AsyncLocalStorage` preserves store across Promise `await`.
@@ -251,7 +251,7 @@ fn AsyncLocalStorage_propagates_across_promise_then() {
             // `Promise.prototype.then`, so context propagation for
             // ALS works through explicit Promise chains
             // (and `setTimeout`, `setImmediate`, etc.). Test the
-            // explicit chain — that's what library code that needs
+            // explicit chain - that's what library code that needs
             // ALS in burn should use.
             function inner() {
                 return Promise.resolve().then(() => {

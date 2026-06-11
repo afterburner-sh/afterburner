@@ -8,7 +8,7 @@
 //! [`CapturePipe`] replaces the bare `MemoryOutputPipe` as the guest's
 //! stdout. The upstream pipe enforces its capacity by failing the
 //! over-budget `fd_write` with `StreamError::Closed` / `Trap`, which
-//! WASI p1 maps to errno 29 (`EIO`) — the guest's `Javy.IO.writeSync`
+//! WASI p1 maps to errno 29 (`EIO`) - the guest's `Javy.IO.writeSync`
 //! then throws and the whole call surfaces as an opaque
 //! `wasm trap: unreachable` with "os error 29" buried in stderr. That
 //! gave results a hard 1 MiB cliff with no structured diagnosis.
@@ -19,7 +19,7 @@
 //! flag the host consults after the run: `chamber::fire` and the
 //! script-mode path map a set flag to
 //! [`AfterburnerError::OutputTooLarge`](afterburner_core::AfterburnerError::OutputTooLarge)
-//! instead of an opaque trap. Storage grows on demand — nothing is
+//! instead of an opaque trap. Storage grows on demand - nothing is
 //! pre-allocated at the ceiling; a small result on a 64 MiB ceiling
 //! costs what the result costs.
 //!
@@ -28,7 +28,7 @@
 //! the upstream `MemoryOutputPipe` (which is the pipe this type
 //! replaces); the ceiling accounting is a plain atomic counter so the
 //! hot `fd_write` path adds two relaxed atomic ops, no locking of its
-//! own. Not a throughput path in the PERFORMANCE.md rule-7 sense —
+//! own. Not a throughput path in the PERFORMANCE.md rule-7 sense -
 //! the result crosses once per call.
 
 use std::sync::Arc;
@@ -44,7 +44,7 @@ use wasmtime_wasi::p2::{OutputStream, Pollable, StreamError};
 #[derive(Clone)]
 pub struct CapturePipe {
     /// Byte storage. Constructed with capacity == `ceiling`, so the
-    /// inner capacity check can never fire — [`CapturePipe::write`]
+    /// inner capacity check can never fire - [`CapturePipe::write`]
     /// rejects over-ceiling writes before they reach it.
     inner: MemoryOutputPipe,
     /// Hard cap on total bytes accepted. `FuelGauge::output_ceiling()`
@@ -74,7 +74,7 @@ impl CapturePipe {
         self.inner.contents()
     }
 
-    /// `true` once any write past the ceiling was rejected — the
+    /// `true` once any write past the ceiling was rejected - the
     /// capture is then truncated and the call's result is void.
     pub fn overflowed(&self) -> bool {
         self.overflow.load(Ordering::Acquire)
@@ -93,7 +93,7 @@ impl CapturePipe {
 
     /// Record an over-ceiling attempt and produce the stream error the
     /// guest sees (WASI p1 maps it to errno 29, same failure shape the
-    /// fixed-capacity pipe produced — the structured mapping happens
+    /// fixed-capacity pipe produced - the structured mapping happens
     /// host-side off the flag).
     fn reject(&self) -> StreamError {
         self.overflow.store(true, Ordering::Release);
@@ -122,7 +122,7 @@ impl OutputStream for CapturePipe {
     /// Never reports the stream as closed: a zero permit would make
     /// the p1 write loop error on its *leading* readiness check while
     /// the *trailing* post-flush check at an exactly-full capture (a
-    /// legal, complete result) takes the identical path — the two are
+    /// legal, complete result) takes the identical path - the two are
     /// indistinguishable here. Reporting a ≥1-byte permit instead
     /// routes the overflow decision through [`Self::write`], the one
     /// place that knows bytes are actually pending, so an exact-fit

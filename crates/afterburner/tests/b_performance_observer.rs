@@ -4,7 +4,7 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 //! `PerformanceObserver` / `PerformanceEntry` / `PerformanceMark` /
-//! `PerformanceMeasure` / `PerformanceObserverEntryList` — Web
+//! `PerformanceMeasure` / `PerformanceObserverEntryList` - Web
 //! Performance API for subscribing to mark/measure events.
 
 #![cfg(feature = "bin")]

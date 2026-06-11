@@ -41,7 +41,7 @@ pub struct Stored {
 /// path, manifest, manifold checks), then atomically store under the content
 /// address.
 ///
-/// A digest mismatch is fatal ([`CloudError::DigestMismatch`]) — the registry
+/// A digest mismatch is fatal ([`CloudError::DigestMismatch`]) - the registry
 /// handed us the wrong bytes. A `RuntimeTooOld` parse result is *not* fatal:
 /// the archive is well-formed, it just needs a newer engine, so it is cached
 /// with a warning.

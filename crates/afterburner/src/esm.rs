@@ -29,9 +29,9 @@
 //!
 //! Explicitly **not handled by this rewriter**:
 //!
-//! * Dynamic `import()` — needs async resolution; use
+//! * Dynamic `import()` - needs async resolution; use
 //!   `require()` directly when you need it at runtime.
-//! * Top-level `await` at module scope — CJS output doesn't model
+//! * Top-level `await` at module scope - CJS output doesn't model
 //!   module-as-promise; wrap with `(async () => { … })()` if you
 //!   need it.
 //!
@@ -54,7 +54,7 @@
 //! '__esModule', { value: true })` prologue for any module that
 //! used `export default` or named exports, so CJS consumers that
 //! check the interop flag (`require('./x').__esModule`) see a
-//! truthful answer — this matches TypeScript's `esModuleInterop`
+//! truthful answer - this matches TypeScript's `esModuleInterop`
 //! output.
 //!
 //! [#4050]: https://github.com/oxc-project/oxc/issues/4050
@@ -74,7 +74,7 @@ use std::path::Path;
 /// Rewrite any top-level ESM declarations in `source` into CJS
 /// equivalents. Source that contains no ESM declarations returns
 /// unchanged (no parse cost? we still parse, but emit an identical
-/// string — simpler than maintaining a second fast path).
+/// string - simpler than maintaining a second fast path).
 pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
     // Pre-pass: rewrite `import.meta.*` accesses to their CJS
     // equivalents. Done before the AST parse so the lowered output
@@ -106,8 +106,8 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
     // Build semantic info so we can find every `IdentifierReference`
     // that resolves to a named import. Each such reference gets
     // rewritten in place to `<temp>.<imported_name>`, which gives the
-    // module body live-binding semantics for named imports — the
-    // ES2015 spec's `module record import binding` shape — without
+    // module body live-binding semantics for named imports - the
+    // ES2015 spec's `module record import binding` shape - without
     // needing engine support. This matches what V8 / SpiderMonkey do
     // internally with module export getter slots.
     let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
@@ -139,7 +139,7 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
                 // reference rewrite. The semantic phase has already
                 // populated `BindingIdentifier::symbol_id` for each
                 // import specifier, so we read it straight from the
-                // AST node — no name-keyed scope lookup needed.
+                // AST node - no name-keyed scope lookup needed.
                 if let Some(specs) = decl.specifiers.as_ref() {
                     for spec in specs {
                         if let ImportDeclarationSpecifier::ImportSpecifier(s) = spec {
@@ -167,7 +167,7 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
                 has_named_or_default_export = true;
                 if let Some(inner) = decl.declaration.as_ref() {
                     // `export const foo = …` / `export function foo()` /
-                    // `export class Foo` — leave the inner declaration's
+                    // `export class Foo` - leave the inner declaration's
                     // *body* in place so any imported-name references
                     // inside it stay at their original byte offsets
                     // (the live-binding pass relies on those positions).
@@ -217,7 +217,7 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
     // Live-binding pass: walk every named-import local's resolved
     // references and rewrite each one to `<temp>.<imported>`. The
     // `IdentifierReference` AST node's span is the byte range of
-    // *just the identifier* — declarations and import-spec sites
+    // *just the identifier* - declarations and import-spec sites
     // don't appear in the reference table, so we never accidentally
     // splice the import declaration itself (it's already replaced
     // above by the `const __ab_esm_N = require(...)` shape).
@@ -232,7 +232,7 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
         }
     }
 
-    // Await-tracking pass — wrap every `await EXPR` so the value
+    // Await-tracking pass - wrap every `await EXPR` so the value
     // flows through user-patched `Promise.prototype.then` before the
     // engine resumes. This is the only path that makes
     // `async_hooks.createHook({init,before,after})` fire for native
@@ -241,7 +241,7 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
     // call routes the resolved value through one user-level `.then`
     // first, which our patched prototype catches.
     //
-    // The rewrite is span-surgical — two inserts per await — so it
+    // The rewrite is span-surgical - two inserts per await - so it
     // doesn't disturb the original expression text or its inner
     // byte spans (which the live-binding pass may have already
     // queued edits over).
@@ -254,14 +254,14 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
         }
     }
 
-    // Debugger statement-instrumentation pass — gated on
+    // Debugger statement-instrumentation pass - gated on
     // `BURN_DEBUGGER_INSTRUMENT=1`. When enabled, every statement
     // gets prefixed with `__ab_brk("<path>", line, col);`. The JS
     // global `__ab_brk` checks the active breakpoint table (populated
     // by `Debugger.setBreakpointByUrl`); when a hit matches the
     // current location, it fires `Debugger.paused` and blocks via
     // `__host_inspector_pause` until the connected DevTools client
-    // sends `Debugger.resume`/`stepX`. Off by default — the
+    // sends `Debugger.resume`/`stepX`. Off by default - the
     // instrumented call has a fast path (`if (!breakpoints.length)
     // return`) so its cost is one property read per statement, but
     // keeping it gated keeps non-debug runs zero-cost.
@@ -280,7 +280,7 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
     }
 
     if edits.is_empty() {
-        // No ESM — pass through. Keeps plain-CJS untouched.
+        // No ESM - pass through. Keeps plain-CJS untouched.
         return Ok(source.to_string());
     }
 
@@ -309,7 +309,7 @@ pub fn rewrite_esm_to_cjs(source: &str, path: &Path) -> Result<String, String> {
 /// Default + namespace imports stay declared as `const` because:
 ///
 /// * **default**: spec semantics for `import X from 'Y'` are a snapshot
-///   of `Y`'s default export at link time. CJS already enforces that —
+///   of `Y`'s default export at link time. CJS already enforces that -
 ///   `module.exports.default` is set once during evaluate and doesn't
 ///   change. A `const` binding matches.
 /// * **namespace**: `import * as Ns from 'Y'` binds the module
@@ -329,7 +329,7 @@ fn rewrite_import(
 ) -> (String, Vec<(String, String)>) {
     let src_lit = js_string_literal(src);
     let Some(specs) = specifiers else {
-        // `import 'Y'` — pure side-effect.
+        // `import 'Y'` - pure side-effect.
         return (format!("require({src_lit});"), Vec::new());
     };
     if specs.is_empty() {
@@ -351,7 +351,7 @@ fn rewrite_import(
             ImportDeclarationSpecifier::ImportSpecifier(s) => {
                 let imported = mod_export_name(&s.imported);
                 let local = s.local.name.to_string();
-                // `(local, imported)` — local is what the user code
+                // `(local, imported)` - local is what the user code
                 // refers to; imported is the property to read off the
                 // namespace object. Same string when there's no rename.
                 named.push((local, imported));
@@ -378,7 +378,7 @@ fn rewrite_import(
 
 fn rewrite_export_default(kind: &ExportDefaultDeclarationKind, source: &str) -> String {
     // `GetSpan::span()` works across the whole inherited-variant set
-    // of ExportDefaultDeclarationKind — no enumeration needed.
+    // of ExportDefaultDeclarationKind - no enumeration needed.
     let span = kind.span();
     let text = &source[span.start as usize..span.end as usize];
     match kind {
@@ -410,8 +410,8 @@ fn rewrite_export_named(
     source_text: &str,
 ) -> String {
     // Two shapes:
-    // (1) `export const foo = …` / function / class — ignore specifiers.
-    // (2) `export { a, b }` / `export { a } from 'Y'` — ignore declaration.
+    // (1) `export const foo = …` / function / class - ignore specifiers.
+    // (2) `export { a, b }` / `export { a } from 'Y'` - ignore declaration.
     if let Some(decl) = declaration {
         let (span, names) = decl_span_and_names(decl);
         let text = &source_text[span.start as usize..span.end as usize];
@@ -425,7 +425,7 @@ fn rewrite_export_named(
 
     let mut out = String::new();
     if let Some(src) = source_module {
-        // `export { a, b as c } from 'Y'` — re-export. One require
+        // `export { a, b as c } from 'Y'` - re-export. One require
         // per statement keyed on a fresh temp.
         let temp = next_temp();
         out.push_str(&format!(
@@ -440,7 +440,7 @@ fn rewrite_export_named(
         return out;
     }
 
-    // `export { a, b as c }` — specifiers reference bindings already
+    // `export { a, b as c }` - specifiers reference bindings already
     // in scope.
     for spec in specifiers {
         let local = mod_export_name(&spec.local);
@@ -458,7 +458,7 @@ fn rewrite_export_all(src: &str, exported_as: Option<&str>) -> String {
             format!("exports.{name} = require({src_lit});\n")
         }
         None => {
-            // `export * from 'Y'` — copy enumerable props except
+            // `export * from 'Y'` - copy enumerable props except
             // `default` (Node's semantics).
             format!(
                 "Object.keys(require({src_lit})).forEach(function(k) {{ \
@@ -660,7 +660,7 @@ fn rewrite_import_meta(source: &str) -> String {
                     i = after + b".resolve".len();
                     continue;
                 }
-                // Bare `import.meta` — synthesise an inline object.
+                // Bare `import.meta` - synthesise an inline object.
                 // The `resolve` callback closes over `require` so
                 // dynamic resolution still goes through the CJS
                 // resolver (npm packages, node_modules walk, etc.).
@@ -710,7 +710,7 @@ impl<'a> Visit<'a> for AwaitSpanCollector {
         let arg_span = expr.argument.span();
         self.spans
             .push((arg_span.start as usize, arg_span.end as usize));
-        // Descend into the argument — nested awaits in `await foo(await bar())`
+        // Descend into the argument - nested awaits in `await foo(await bar())`
         // need their own wrap too.
         oxc::ast_visit::walk::walk_await_expression(self, expr);
     }
@@ -727,7 +727,7 @@ struct BreakpointCollector {
 
 impl<'a> Visit<'a> for BreakpointCollector {
     fn visit_statement(&mut self, stmt: &Statement<'a>) {
-        // Skip declarations that introduce hoisted bindings —
+        // Skip declarations that introduce hoisted bindings -
         // injecting code before a `function f()` declaration would
         // separate the declaration from its scope-position semantics
         // (V8 hoists the binding to the top of the function). The
@@ -753,7 +753,7 @@ impl<'a> Visit<'a> for BreakpointCollector {
 }
 
 /// Convert a byte offset into (line, col) 1-based for the debugger
-/// surface. Walks the source from the start to count line breaks —
+/// surface. Walks the source from the start to count line breaks -
 /// O(N) per call; for instrumentation we sort the offsets and reuse
 /// a running scanner if needed, but for typical user scripts the
 /// per-statement cost is acceptable at transpile time.
@@ -814,7 +814,7 @@ mod import_meta_tests {
         let s = "const t = `${import.meta.dirname}`; const r = import.meta.dirname;";
         let out = rewrite_import_meta(s);
         // Template literal does NOT get the inner expression rewritten
-        // by this textual pass — that's a real edge case but matches
+        // by this textual pass - that's a real edge case but matches
         // every other pre-pass we run. The simple consumer just stays
         // out of import.meta inside templates.
         assert!(out.ends_with("__dirname;"));
@@ -831,7 +831,7 @@ mod import_meta_tests {
 
     #[test]
     fn requires_word_boundary_before_token() {
-        // Hypothetical `notimport.meta.dirname` should NOT match —
+        // Hypothetical `notimport.meta.dirname` should NOT match -
         // the leading `not` makes it a member access on `notimport`,
         // not the syntactic `import.meta` form.
         let s = "obj.notimport.meta.dirname";

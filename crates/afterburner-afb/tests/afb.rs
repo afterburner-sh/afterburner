@@ -169,7 +169,7 @@ fn too_large_rejected() {
 fn oversize_uncompressed_bomb() {
     // 6 × 48 MiB = 288 MiB of zeros: each entry is under the 64 MiB
     // per-entry cap, but the total exceeds the 256 MiB decompressed cap.
-    // The entries are not "wanted", so unpack never materializes them —
+    // The entries are not "wanted", so unpack never materializes them -
     // tar streams/discards them through the capped decoder, which must
     // trip *before* memory is exhausted. This exercises the streaming
     // total cap specifically (not the per-entry cap).

@@ -36,6 +36,12 @@ pub enum AfbError {
     #[error("disallowed tar entry type for {0:?} (only regular files and dirs allowed)")]
     DisallowedEntryType(String),
 
+    #[error("dependency {coord:?}: {detail}")]
+    Dependency { coord: String, detail: String },
+
+    #[error("native addon rejected: {detail}")]
+    NativeAddon { detail: String },
+
     #[error("unsupported .afb format version {found} (this reader supports {supported})")]
     FormatVersion { found: String, supported: String },
 

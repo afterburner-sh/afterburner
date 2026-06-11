@@ -230,7 +230,7 @@ fn watch_re_runs_on_file_change() {
         }
     });
 
-    // Poll until VERSION-1 lands. Generous window — burn cold-start
+    // Poll until VERSION-1 lands. Generous window - burn cold-start
     // under cross-binary CPU pressure can stretch past any short budget.
     let start = std::time::Instant::now();
     while start.elapsed() < Duration::from_secs(30) {

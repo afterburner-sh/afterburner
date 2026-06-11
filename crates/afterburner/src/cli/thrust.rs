@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `burn thrust` — UDF mode. JSON from stdin becomes the script's
+//! `burn thrust` - UDF mode. JSON from stdin becomes the script's
 //! `data` argument; `module.exports`'s return value is serialized back
 //! to stdout.
 
@@ -34,7 +34,7 @@ pub fn thrust_from_stdin(cli: &Cli, path: &PathBuf) -> Result<()> {
     let out = ab
         .run(&id, &input)
         .map_err(|e: AfterburnerError| anyhow::anyhow!("{e}"))?;
-    // In UDF mode we always print the return value — null included —
+    // In UDF mode we always print the return value - null included -
     // so downstream pipes see a well-formed JSON document every time.
     println!("{}", serde_json::to_string(&out).unwrap_or_default());
     Ok(())

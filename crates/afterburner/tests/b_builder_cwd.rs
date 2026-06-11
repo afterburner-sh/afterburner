@@ -6,7 +6,7 @@
 //! Phase 0 / Gap C regression: `Afterburner::builder().cwd(path)`
 //! prepends a JS prelude to registered sources that pins
 //! `globalThis.__host_cwd`, refreshes the entry require resolver, and
-//! rebinds the local `require` parameter — so a `require('foo')` call
+//! rebinds the local `require` parameter - so a `require('foo')` call
 //! in user code walks `<cwd>/node_modules/foo` instead of `/`.
 //!
 //! Why this matters: real npm packages live next to the embedding
@@ -31,11 +31,11 @@
 //!   * `.cwd(tmpdir).register("require('foo')")` resolves `foo` from
 //!     `<tmpdir>/node_modules/foo`.
 //!   * Without `.cwd()`, the same registration fails with
-//!     `MODULE_NOT_FOUND` (regression check — the change is opt-in).
+//!     `MODULE_NOT_FOUND` (regression check - the change is opt-in).
 //!   * Path-relative requires (`./util`, `../shared`) inside the cwd
 //!     resolve correctly.
 //!   * `__host_cwd` global reflects the configured path.
-//!   * Prelude is idempotent — the user's source still sees the
+//!   * Prelude is idempotent - the user's source still sees the
 //!     `module`, `exports`, `require` bindings the envelope passed.
 
 use afterburner::{Afterburner, FsAccess, Manifold};
@@ -43,7 +43,7 @@ use serde_json::json;
 use std::fs;
 use tempfile::TempDir;
 
-/// Read-only manifold scoped to a temp dir — what an embedder would
+/// Read-only manifold scoped to a temp dir - what an embedder would
 /// configure when it wants `require('foo')` to resolve out of its
 /// vendored `node_modules` and nothing else. Net, env, crypto,
 /// child_process, exit all stay denied.

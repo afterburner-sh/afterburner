@@ -5,7 +5,7 @@
 
 #![cfg(feature = "bin")]
 #![allow(non_snake_case)]
-//! B10 — `worker_threads` round-trip integration.
+//! B10 - `worker_threads` round-trip integration.
 //!
 //! Spawns `burn` with an inline parent script that creates a `Worker`
 //! pointing at a temp `child.js`, posts a message, and asserts the
@@ -49,7 +49,7 @@ fn run_burn_with_timeout(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                // Child exited — collect its output.
+                // Child exited - collect its output.
                 use std::io::Read;
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
@@ -138,7 +138,7 @@ fn worker_round_trip_message() {
             w.on('online', () => {{
                 w.postMessage('ping');
             }});
-            // 60s safety timer — cold CI runners (4-vCPU) need >10s
+            // 60s safety timer - cold CI runners (4-vCPU) need >10s
             // to walk burn-init + plugin + worker-child cold-spawn +
             // first message round-trip. Local boxes finish in <5s; the
             // ceiling only matters when the round-trip is actually

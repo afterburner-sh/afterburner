@@ -18,7 +18,7 @@
 //! 3. A worker subprocess inherits the parent's SAB by descriptor and
 //!    `Atomics.wait`s on a slot until the parent calls
 //!    `Atomics.notify`. The wait is a real OS futex (Linux) /
-//!    WaitOnAddress (Windows) — no busy poll on the JS side.
+//!    WaitOnAddress (Windows) - no busy poll on the JS side.
 //! 4. `Atomics.wait` with a pre-existing mismatched slot returns
 //!    `'not-equal'` synchronously.
 //! 5. `Atomics.wait` with a short timeout that no notify arrives for
@@ -193,7 +193,7 @@ fn cross_process_wait_notify() {
             w.on('message', (m) => {{
                 if (m.phase === 'ready') {{
                     // Small slack so the worker reaches Atomics.wait
-                    // before we notify — wait() parks on the slot
+                    // before we notify - wait() parks on the slot
                     // value match; if we store/notify before the
                     // park, the worker sees the post-store value and
                     // returns 'not-equal' (which is correct spec

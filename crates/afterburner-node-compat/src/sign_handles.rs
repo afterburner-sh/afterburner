@@ -11,7 +11,7 @@
 //! Because scripts are synchronous within a thrust and `DigestState`
 //! is `Clone`, the update path "clone out, feed the chunk, insert
 //! back" is race-free inside one thrust. Two concurrent thrusts each
-//! hold their own [`SignHandleStore`] — one per `HostState` in the
+//! hold their own [`SignHandleStore`] - one per `HostState` in the
 //! WASM path, one per thread-local on the native path.
 
 use crate::crypto_host::DigestState;
@@ -32,7 +32,7 @@ impl SignHandleStore {
 
     pub fn open(&self, algorithm: &str) -> Result<u64> {
         let state = DigestState::new(algorithm)?;
-        // Start ids at 1 so `0` is reserved as "invalid" — the JS glue
+        // Start ids at 1 so `0` is reserved as "invalid" - the JS glue
         // can check the return value cheaply.
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         self.states.insert(id, state);

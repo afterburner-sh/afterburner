@@ -5,7 +5,7 @@
 
 //! JS-side globals the plugin installs at `modify_runtime` time.
 //!
-//! Wizer preinit captures these — every thrust starts with all
+//! Wizer preinit captures these - every thrust starts with all
 //! `__host_*` bridges, `__AB_GET_INPUT__`, and the plenum polyfill
 //! bundle already visible to user scripts. The installers are split by
 //! capability group so no single file goes over the workspace line
@@ -17,7 +17,7 @@
 //!    `__host_*` bridges (and `__AB_GET_INPUT__`).
 //! 2. `ctx.eval(PLENUM_BUNDLE)` evaluates the Tier-1 polyfill bundle,
 //!    which builds `require()` and the Node-stdlib modules on top of
-//!    the bridges — so the bridges MUST exist first.
+//!    the bridges - so the bridges MUST exist first.
 
 mod codec;
 mod columnar;
@@ -48,7 +48,7 @@ const PLENUM_BUNDLE: &str =
 /// shaped methods QuickJS doesn't ship natively: `isEval`,
 /// `getEvalOrigin`, `isToplevel`, `isConstructor`, `getThis`,
 /// `getTypeName`, `getMethodName`. Real npm packages probe these at
-/// module-load time — `depd` (transitively required by `body-parser`,
+/// module-load time - `depd` (transitively required by `body-parser`,
 /// `serve-static`, `morgan`, `finalhandler`) calls `callSite.isEval()`
 /// inside `callSiteLocation`; without this patch the call traps with
 /// `TypeError: not a function` and Express init aborts.
@@ -57,7 +57,7 @@ const PLENUM_BUNDLE: &str =
 /// `Error.prepareStackTrace` that returns the raw frames array, walk
 /// to the first frame's prototype, install the missing methods. The
 /// previous `Error.prepareStackTrace` value is restored before user
-/// code runs — preserving the invariant that `e.stack` is a string
+/// code runs - preserving the invariant that `e.stack` is a string
 /// for unmodified scripts (no engine-side change). Stub return values
 /// match Node conventions (`false` / `null` / `undefined`).
 ///
@@ -107,7 +107,7 @@ pub fn install(ctx: Ctx<'_>) {
     // every Tier-1 polyfill into the snapshot.
     let _ = ctx.eval::<(), _>(PLENUM_BUNDLE);
 
-    // Columnar UDF dispatcher — JS-side helper that reads the input
+    // Columnar UDF dispatcher - JS-side helper that reads the input
     // blob via `__AB_GET_COLUMNAR_INPUT__`, builds typed views over
     // linmem, dispatches the user UDF, and posts the reply. Installed
     // after the plenum bundle so it can rely on `TextEncoder` /
@@ -116,14 +116,14 @@ pub fn install(ctx: Ctx<'_>) {
 
     // Patch the V8-style CallSite prototype after the plenum bundle so
     // the snapshot also captures the Node-shaped CallSite methods. The
-    // patch is independent of any plenum module — it only touches
+    // patch is independent of any plenum module - it only touches
     // `Error.prepareStackTrace` / `Error.captureStackTrace`.
     let _ = ctx.eval::<(), _>(CALLSITE_PROTO_PATCH);
 }
 
 /// Retry-doubling helper for variable-length host responses. Returns
 /// the UTF-8 decoded string on success, or a human-readable error
-/// message on failure — callers typically surface the latter to JS as
+/// message on failure - callers typically surface the latter to JS as
 /// a `__HOST_ERR__:...` sentinel that a polyfill then detects.
 pub(super) fn call_read<F>(mut call: F) -> Result<String, String>
 where
@@ -150,12 +150,12 @@ where
 }
 
 /// Exact-fit read of `HostState::pending_input`. Sizes the destination
-/// once via `host_get_input_len` — no retry-doubling: each doubling
+/// once via `host_get_input_len` - no retry-doubling: each doubling
 /// step zeroes the resized region (O(n) metered instructions) and
 /// triggers another host-side clone of the full input, so on multi-MiB
 /// inputs the old guess-and-retry protocol cost several full passes
 /// over the payload before the real copy even happened. The buffer is
-/// deliberately *not* pre-zeroed either — the host overwrites every
+/// deliberately *not* pre-zeroed either - the host overwrites every
 /// byte it reports, and the memset would be one more wasted metered
 /// pass over a multi-MiB payload.
 pub(super) fn read_pending_input() -> Result<Vec<u8>, String> {

@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Phase I — public API smoke tests.
+//! Phase I - public API smoke tests.
 //!
 //! Exercises the `Afterburner` facade end-to-end without going through
 //! the `burn` CLI. Catches regressions in the library-mode entry path
@@ -99,7 +99,7 @@ fn run_with_explicit_limits_does_not_mutate_default_gauge() {
 #[test]
 fn run_batch_whole_array_in_whole_array_out() {
     // The default (non-threaded) cache path hands the entire input
-    // array to the script and expects an array back — caller writes
+    // array to the script and expects an array back - caller writes
     // a `(rows) => rows.map(...)` script. The threaded path is
     // per-row (covered separately in data_flow.rs).
     let ab = Afterburner::new().expect("Afterburner::new");
@@ -143,7 +143,7 @@ fn unload_then_re_register_works() {
     assert_eq!(ab.run(&id, &json!({ "n": 1 })).expect("run"), json!(1));
     ab.unload(&id);
     // Re-registering the same source should yield the same content-
-    // addressed id and a working script — unload is a cache eviction,
+    // addressed id and a working script - unload is a cache eviction,
     // not a permanent mark.
     let id2 = ab.register(src).expect("re-register");
     assert_eq!(id, id2);
@@ -154,7 +154,7 @@ fn unload_then_re_register_works() {
 fn unload_unknown_id_is_noop() {
     let ab = Afterburner::new().expect("Afterburner::new");
     // Build a clearly-fake ScriptId via the public struct fields. The
-    // facade should tolerate a stale id with no-op semantics — the
+    // facade should tolerate a stale id with no-op semantics - the
     // test fails only on panic / silent corruption.
     let fake = ScriptId {
         hash: [0xff; 32],
@@ -181,7 +181,7 @@ fn fuel_exhaustion_surfaces_typed_error() {
     let err = ab
         .run(&id, &json!({}))
         .expect_err("tight fuel + busy loop should exhaust");
-    // Either FuelExhausted or Timeout is acceptable — both indicate
+    // Either FuelExhausted or Timeout is acceptable - both indicate
     // the limiter caught the runaway script.
     assert!(
         matches!(err, AfterburnerError::FuelExhausted) || matches!(err, AfterburnerError::Timeout),

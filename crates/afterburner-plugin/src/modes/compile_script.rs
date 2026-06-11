@@ -11,7 +11,7 @@
 //! source-parse + wrap + compile and invoke the cached bytecode
 //! directly.
 //!
-//! This is the foundation for B1 multi-shard sharing — N daemon
+//! This is the foundation for B1 multi-shard sharing - N daemon
 //! Store instances all invoke the same Vec<u8> instead of each
 //! re-paying the source-compile cost. Even at workers=1 it lets the
 //! host inspect compile errors out-of-band (compile failure surfaces

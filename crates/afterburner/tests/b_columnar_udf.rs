@@ -198,7 +198,7 @@ fn run_columnar_single_row_single_column() {
 #[test]
 fn run_columnar_idempotent_under_repeated_calls() {
     // Same registration + same batch must produce same output across N
-    // calls — confirms the per-call Store teardown leaves no residue
+    // calls - confirms the per-call Store teardown leaves no residue
     // in the cache that would corrupt subsequent calls.
     let burn = ab();
     let id = burn
@@ -500,13 +500,13 @@ fn run_columnar_bytea_passthrough() {
 
 #[test]
 fn run_columnar_typedarray_view_does_not_outlive_call() {
-    // The user UDF must NOT be able to capture a view across calls —
+    // The user UDF must NOT be able to capture a view across calls -
     // each call gets a fresh Store + linmem; a view from a prior call
     // would point into freed memory.
     //
     // We can't directly test "view from call 1 used in call 2" because
     // Wasmtime drops the entire Store at the end of call 1, so no JS
-    // state survives — there's literally nothing for a captured view
+    // state survives - there's literally nothing for a captured view
     // to attach to. This test just confirms that two consecutive calls
     // see independent inputs, which transitively confirms the
     // fresh-per-call invariant for the columnar path.
@@ -543,6 +543,6 @@ fn run_columnar_typedarray_view_does_not_outlive_call() {
     });
     let out2 = burn.run_columnar(&id, &b2).unwrap();
     // The second call sees its own inputs and produces its own
-    // outputs — no leakage from the first call.
+    // outputs - no leakage from the first call.
     assert_eq!(read_i32_col(&out2.columns[0].data), vec![100, 200]);
 }

@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `FlowEngine` — initialize once, then `load` / `execute` / `unload`
+//! `FlowEngine` - initialize once, then `load` / `execute` / `unload`
 //! user-authored JS modules against a chain input.
 //!
 //! The user writes the familiar `module.exports = function(input) { ... }`
@@ -66,7 +66,7 @@ pub fn default_fuel_gauge() -> FuelGauge {
 }
 
 /// One engine per process is the intended pattern. Modules are content-
-/// addressed — calling `load` twice with the same source returns the same
+/// addressed - calling `load` twice with the same source returns the same
 /// `ScriptId` and compiles only once.
 pub struct FlowEngine {
     cache: BurnCache,
@@ -92,7 +92,7 @@ impl FlowEngine {
         })
     }
 
-    /// Compile and cache a module. Idempotent — the second call with the
+    /// Compile and cache a module. Idempotent - the second call with the
     /// same source returns the same `ScriptId` and skips compilation.
     #[fastrace::trace(name = "FlowEngine::load")]
     pub fn load(&self, source: &str) -> Result<ScriptId> {
@@ -101,7 +101,7 @@ impl FlowEngine {
 
     /// Compile a bundle: an `entry` script plus a set of named helper
     /// modules that the entry can `require()`. Names are matched
-    /// verbatim — `require('./foo')` resolves to the entry with key
+    /// verbatim - `require('./foo')` resolves to the entry with key
     /// `"./foo"`. The whole bundle is hashed as one unit, so the same
     /// (entry, modules) inputs produce the same `ScriptId`.
     ///
@@ -117,7 +117,7 @@ impl FlowEngine {
     }
 
     /// Run a previously loaded module against a JSON input. Each call gets
-    /// a fresh sandbox context — globals do not leak between runs.
+    /// a fresh sandbox context - globals do not leak between runs.
     #[fastrace::trace(name = "FlowEngine::execute")]
     pub fn execute(&self, id: &ScriptId, input: &Value) -> Result<Value> {
         self.cache.execute(id, input, &self.fuel)
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn fs_method_call_without_manifold_throws() {
         // `require('fs')` returns a stub module even under
-        // `Manifold::sealed` — the polyfill always loads — but invoking
+        // `Manifold::sealed` - the polyfill always loads - but invoking
         // a method throws `Permission denied` because the host globals
         // aren't wired.
         let Some(engine) = make_engine() else { return };

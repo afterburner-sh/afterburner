@@ -5,7 +5,7 @@
 
 //! B2b phase gate: host-wide multiplex listener pool.
 //!
-//! Internal refactor — the JS-visible API of `http.createServer()` is
+//! Internal refactor - the JS-visible API of `http.createServer()` is
 //! unchanged. Tests here cover the new semantics:
 //!
 //! * EADDRINUSE surfaces synchronously as an 'error' event on the
@@ -13,7 +13,7 @@
 //!   (matches Node).
 //! * Two listeners on *different* ports in one script both work, and
 //!   requests route to the right handler by port.
-//! * `server.close()` releases the port — a subsequent `.listen(port)`
+//! * `server.close()` releases the port - a subsequent `.listen(port)`
 //!   on the same port succeeds.
 //! * `listen` failures emit an async 'error' event rather than
 //!   throwing synchronously (matches Node's listen-failure contract).
@@ -36,7 +36,7 @@ const BURN: &str = env!("CARGO_BIN_EXE_burn");
 /// Multiplex tests probe ports that may not actually be bound (the
 /// EADDRINUSE / phantom-listener paths), so the helper returns an
 /// Option instead of panicking on connect failure. Distinct from
-/// `common::http_get` which panics on connect — this is the variant
+/// `common::http_get` which panics on connect - this is the variant
 /// specific to "did the listener register?" probes.
 fn http_get(port: u16) -> Option<String> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -158,7 +158,7 @@ fn close_then_relisten_on_same_port_succeeds() {
                 results.push('first-closed');
                 // Give close enough time to complete the port release
                 // (abort is async inside tokio). 250ms is generous but
-                // bounded — a regressed close-leak still fails the
+                // bounded - a regressed close-leak still fails the
                 // test at the second listen's EADDRINUSE.
                 setTimeout(() => {{
                     const second = http.createServer((_req, res) => {{ res.end('second'); }});

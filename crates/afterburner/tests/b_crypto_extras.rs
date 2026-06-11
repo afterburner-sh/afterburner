@@ -110,7 +110,7 @@ fn crypto_fips_is_false() {
 #[test]
 fn crypto_create_secret_key_returns_key_object() {
     // `crypto.createSecretKey` is implemented (returns a KeyObject of
-    // type 'secret'). Pin the working contract — `type === 'secret'`,
+    // type 'secret'). Pin the working contract - `type === 'secret'`,
     // `export({ format: 'buffer' })` round-trips the input bytes.
     let out = run_inline(
         r#"

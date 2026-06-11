@@ -6,7 +6,7 @@
 //! A thin, synchronous HTTP client over the registry's `/api/v1` surface.
 //!
 //! One method per endpoint; every non-2xx maps to a typed [`CloudError`]. The
-//! client is `ureq`-backed (sync) to match the CLI's blocking handler style —
+//! client is `ureq`-backed (sync) to match the CLI's blocking handler style -
 //! there is no async runtime in `burn`'s command path.
 
 use crate::error::{CloudError, Result};
@@ -15,7 +15,7 @@ use secrecy::{ExposeSecret, SecretString};
 use std::io::Read;
 use std::time::Duration;
 
-/// Mirror of `afterburner_afb::MAX_AFB_BYTES` — never buffer more than a valid
+/// Mirror of `afterburner_afb::MAX_AFB_BYTES` - never buffer more than a valid
 /// package could be (zip-bomb / hostile-server defense on download).
 const MAX_DOWNLOAD_BYTES: u64 = afterburner_afb::MAX_AFB_BYTES as u64;
 
@@ -69,7 +69,7 @@ impl RegistryClient {
 
     // ── read (public) ───────────────────────────────────────────────────────
 
-    /// `GET /api/v1/packages?q=` — full-text search.
+    /// `GET /api/v1/packages?q=` - full-text search.
     pub fn search(&self, q: &str) -> Result<SearchResults> {
         decode_json(
             self.agent
@@ -79,7 +79,7 @@ impl RegistryClient {
         )
     }
 
-    /// `GET /api/v1/packages/{ns}/{name}` — package metadata + all versions.
+    /// `GET /api/v1/packages/{ns}/{name}` - package metadata + all versions.
     pub fn get_package(&self, ns: &str, name: &str) -> Result<PackageMeta> {
         decode_json(
             self.agent
@@ -88,7 +88,7 @@ impl RegistryClient {
         )
     }
 
-    /// `GET /api/v1/packages/{ns}/{name}/{ver}` — one version's metadata.
+    /// `GET /api/v1/packages/{ns}/{name}/{ver}` - one version's metadata.
     pub fn get_version(&self, ns: &str, name: &str, ver: &str) -> Result<VersionMeta> {
         decode_json(
             self.agent
@@ -97,7 +97,7 @@ impl RegistryClient {
         )
     }
 
-    /// `GET …/{ver}/download` — stream the exact `.afb` bytes.
+    /// `GET …/{ver}/download` - stream the exact `.afb` bytes.
     pub fn download(&self, ns: &str, name: &str, ver: &str) -> Result<Vec<u8>> {
         read_body(
             self.agent
@@ -106,7 +106,7 @@ impl RegistryClient {
         )
     }
 
-    /// `GET …/{name}/download` — latest non-yanked version's bytes.
+    /// `GET …/{name}/download` - latest non-yanked version's bytes.
     pub fn download_latest(&self, ns: &str, name: &str) -> Result<Vec<u8>> {
         read_body(
             self.agent
@@ -117,7 +117,7 @@ impl RegistryClient {
 
     // ── write (bearer) ──────────────────────────────────────────────────────
 
-    /// `POST /api/v1/login` — exchange credentials for a token. No bearer.
+    /// `POST /api/v1/login` - exchange credentials for a token. No bearer.
     pub fn login(&self, username: &str, password: &str) -> Result<LoginResponse> {
         decode_json(
             self.agent
@@ -126,7 +126,7 @@ impl RegistryClient {
         )
     }
 
-    /// `GET /api/v1/me` — the user behind the current token.
+    /// `GET /api/v1/me` - the user behind the current token.
     pub fn me(&self) -> Result<Me> {
         decode_json(
             self.agent
@@ -136,7 +136,7 @@ impl RegistryClient {
         )
     }
 
-    /// `POST /api/v1/publish` — upload raw `.afb` bytes.
+    /// `POST /api/v1/publish` - upload raw `.afb` bytes.
     pub fn publish(&self, afb_bytes: &[u8]) -> Result<PublishResponse> {
         decode_json(
             self.agent

@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `Afterburner` and its builder — the one-stop entry point.
+//! `Afterburner` and its builder - the one-stop entry point.
 //!
 //! Internally wraps either a single-threaded [`BurnCache`] around one of
 //! the backend combustors, or an [`afterburner_thrust::ThrustEngine`]
@@ -25,12 +25,12 @@ use std::time::Duration;
 ///
 /// `Default` picks the best available per feature set (adaptive > wasm >
 /// native). The impl is manual because the default variant is
-/// feature-conditional — `#[derive(Default)]` can't express that.
+/// feature-conditional - `#[derive(Default)]` can't express that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// rquickjs FFI — trusted code, sub-microsecond startup.
+    /// rquickjs FFI - trusted code, sub-microsecond startup.
     Native,
-    /// Wasmtime + QuickJS plugin — untrusted code, sandbox + capability gates.
+    /// Wasmtime + QuickJS plugin - untrusted code, sandbox + capability gates.
     #[cfg(feature = "wasm")]
     Wasm,
     /// First call native, background-compile to WASM, subsequent calls WASM.
@@ -38,7 +38,7 @@ pub enum Mode {
     Adaptive,
 }
 
-// Manual Default — can't derive with feature-gated variants.
+// Manual Default - can't derive with feature-gated variants.
 #[allow(clippy::derivable_impls)]
 impl Default for Mode {
     fn default() -> Self {
@@ -64,7 +64,7 @@ impl Default for Mode {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Engine holder — internal dispatch
+// Engine holder - internal dispatch
 // ─────────────────────────────────────────────────────────────────────────
 
 enum EngineHolder {
@@ -85,7 +85,7 @@ impl fmt::Debug for EngineHolder {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Afterburner — the public entry point
+// Afterburner - the public entry point
 // ─────────────────────────────────────────────────────────────────────────
 
 /// One-stop entry point. Construct via [`Afterburner::new`] or
@@ -98,7 +98,7 @@ pub struct Afterburner {
     /// Working directory for the registered scripts. When `Some`,
     /// `register()` prepends a small JS prelude that pins
     /// `globalThis.__host_cwd` and refreshes the entry-`require`
-    /// resolver so `require('foo')` walks `<cwd>/node_modules/foo` —
+    /// resolver so `require('foo')` walks `<cwd>/node_modules/foo` -
     /// matching how `cwd` flows through Node's CommonJS resolver. The
     /// prelude also rebinds the local `require` parameter (the UDF
     /// envelope passes `globalThis.require` by value at call time, so
@@ -133,7 +133,7 @@ impl Afterburner {
         AfterburnerBuilder::default()
     }
 
-    /// Compile + cache a source. Idempotent by content hash — registering
+    /// Compile + cache a source. Idempotent by content hash - registering
     /// the same source twice returns the same `ScriptId` and skips
     /// recompilation.
     ///
@@ -141,7 +141,7 @@ impl Afterburner {
     /// prepends a JS prelude that pins `globalThis.__host_cwd` and
     /// refreshes the require resolver so `require('foo')` walks from
     /// `<cwd>/node_modules/foo`. The prelude also rebinds the local
-    /// `require` parameter — the UDF envelope passes
+    /// `require` parameter - the UDF envelope passes
     /// `globalThis.require` *by value* at the function-call site, so
     /// updating the global is invisible without an explicit re-fetch.
     /// Without the rebind, `require('express')` walks from `/` and
@@ -208,18 +208,18 @@ impl Afterburner {
         }
     }
 
-    /// Run a registered script with a **raw byte** input — the module
+    /// Run a registered script with a **raw byte** input - the module
     /// receives a `Uint8Array` instead of a parsed JSON value. This is
     /// the bulk-payload fast path: [`run`](Self::run) frames the input
     /// as JSON text, which the sandboxed runtime must re-materialize
-    /// as a JS string and `JSON.parse` — both O(n) in the input size
+    /// as a JS string and `JSON.parse` - both O(n) in the input size
     /// and fuel-metered, dominating the cost of large calls (measured
     /// ~125 fuel/byte crossing in as JSON versus ~28 through this
     /// path; see `examples/input_framing_bench.rs`). With raw input
     /// the O(n) byte movement happens host-side; the only metered
     /// per-byte work is one copy into the runtime's heap.
     ///
-    /// The output contract is unchanged — the script's return value
+    /// The output contract is unchanged - the script's return value
     /// comes back as JSON, so the natural shape is "bulk bytes in,
     /// small summary out". Scripts moving bulk *typed* data in both
     /// directions should use [`run_columnar`](Self::run_columnar).
@@ -247,16 +247,16 @@ impl Afterburner {
     }
 
     /// Output-framing-aware run: the **module's return value** picks
-    /// the result shape — the output-side mirror of the input
+    /// the result shape - the output-side mirror of the input
     /// framings. A `Uint8Array` / `ArrayBuffer` return comes back as
     /// [`OutputValue::Bytes`] (raw bytes through a host import; no
     /// `JSON.stringify`, no guest-side string materialization, no
-    /// base64 — all O(n) fuel-metered work the JSON framing pays);
+    /// base64 - all O(n) fuel-metered work the JSON framing pays);
     /// every other value comes back as [`OutputValue::Json`] via the
     /// unchanged stdout contract. One registered script (one compiled
-    /// bytecode) serves both shapes — the invoke wrapper branches on
+    /// bytecode) serves both shapes - the invoke wrapper branches on
     /// the return type, exactly like the input side branches on
-    /// framing — so the same module can return JSON for one call and
+    /// framing - so the same module can return JSON for one call and
     /// bytes for the next.
     ///
     /// Results are bounded by `FuelGauge::output_bytes` (default
@@ -286,7 +286,7 @@ impl Afterburner {
         }
     }
 
-    /// Raw bytes in **and** output-framing-aware result — the
+    /// Raw bytes in **and** output-framing-aware result - the
     /// full-duplex bulk-payload path. Composition of
     /// [`run_raw`](Self::run_raw)'s input framing (module receives a
     /// `Uint8Array`) and [`run_out`](Self::run_out)'s output
@@ -312,7 +312,7 @@ impl Afterburner {
     }
 
     /// Run a registered script against a typed [`ColumnarBatch`] and
-    /// receive the result columns directly — no JSON parse / stringify
+    /// receive the result columns directly - no JSON parse / stringify
     /// on either side. Phase 1 of the UDF perf push: the data path
     /// is `host slice → wasm linmem → JS-side TypedArray view → user
     /// UDF → JS-side TypedArray result → wasm linmem → host slice`,
@@ -322,29 +322,29 @@ impl Afterburner {
     /// **Sandbox properties** are identical to [`run`](Self::run): a
     /// fresh Wasmtime Store per call, fuel + epoch + memory caps
     /// enforced, capability gates honoured. The columnar payload is
-    /// just bytes flowing through host imports — no new attack
+    /// just bytes flowing through host imports - no new attack
     /// surface beyond the existing `host_get_input` channel.
     ///
     /// **Phase 1.5 dtype scope:** `Bool` / `Int8`–`Int64` /
     /// `UInt8`–`UInt64` / `Float32` / `Float64` / `Date32` /
     /// `Timestamp` / `Utf8` / `Bytea` / `Jsonb`. 16-byte fixed dtypes
     /// (`Decimal128` / `Uuid` / `Interval`) have stable wire tags but
-    /// surface [`AfterburnerError::Engine`] from `encode_batch` —
+    /// surface [`AfterburnerError::Engine`] from `encode_batch` -
     /// Phase 2 adds them.
     ///
     /// **Engine-mode behaviour:**
     ///
-    /// * `Mode::Wasm` — direct call into [`WasmCombustor`].
-    /// * `Mode::Adaptive` — routes to the wasm tier; if the
+    /// * `Mode::Wasm` - direct call into [`WasmCombustor`].
+    /// * `Mode::Adaptive` - routes to the wasm tier; if the
     ///   background wasm compile is still in flight on the first
     ///   columnar call, blocks up to 5 s waiting for it (subsequent
     ///   calls hit the READY tier with no wait).
-    /// * `Mode::Native` — surfaces a clean
+    /// * `Mode::Native` - surfaces a clean
     ///   [`AfterburnerError::Engine`] (the native `rquickjs` backend
     ///   has no TypedArray-over-linmem mechanism; users on
     ///   native-only builds get the JSON-shaped [`run`](Self::run)
     ///   instead).
-    /// * Threaded engine (`.threaded(N)`) — bypasses the worker
+    /// * Threaded engine (`.threaded(N)`) - bypasses the worker
     ///   pipeline and dispatches directly into the inner
     ///   `WasmCombustor` (the wasmtime pool is itself thread-safe;
     ///   submitter parallelism comes from the caller fanning out N
@@ -386,7 +386,7 @@ impl Afterburner {
     }
 
     /// Like [`run_batch`](Self::run_batch) but with explicit per-call
-    /// limits — fuel / timeout / memory / capability [`Manifold`]. The
+    /// limits - fuel / timeout / memory / capability [`Manifold`]. The
     /// whole batch shares one budget (the engine sets fuel + epoch once
     /// per call); size batches accordingly. Sandbox enforcement is
     /// identical to [`run_with`](Self::run_with).
@@ -421,12 +421,12 @@ impl Afterburner {
     /// `Err`.
     ///
     /// Intended for CLI consumers. Library callers typically want
-    /// [`run`](Self::run) (UDF shape) instead — script mode's one-shot
+    /// [`run`](Self::run) (UDF shape) instead - script mode's one-shot
     /// semantics and captured-output model don't compose well with
     /// long-running embedders.
     ///
     /// Currently requires a single-threaded engine. The multi-threaded
-    /// `ThrustEngine` variant returns an error — script mode is not
+    /// `ThrustEngine` variant returns an error - script mode is not
     /// pool-scheduled (each call is an independent compile + run).
     pub fn run_script(&self, source: &str) -> Result<ScriptOutcome> {
         self.run_script_with(source, &ScriptInvocation::default(), &self.defaults)
@@ -492,7 +492,7 @@ pub struct AfterburnerBuilder {
     cwd: Option<PathBuf>,
     /// Optional shard count for daemon-mode (multi-shard pool).
     /// `None` → `available_parallelism()` at daemon spawn time.
-    /// Library affordance only — the CLI does NOT expose a flag /
+    /// Library affordance only - the CLI does NOT expose a flag /
     /// env-var; deployment caps CPU at the container layer.
     shards: Option<usize>,
     #[cfg(feature = "flow")]
@@ -505,10 +505,10 @@ pub struct AfterburnerBuilder {
 /// 1. `BURN_SHARDS` env var if set + parses + non-zero. Same env
 ///    var that pins the daemon's shard count, reused here so
 ///    operators have one knob across the whole system.
-/// 2. `std::thread::available_parallelism()` — container-aware
+/// 2. `std::thread::available_parallelism()` - container-aware
 ///    on Linux (cgroup CPU quotas honoured via
 ///    `sched_getaffinity`).
-/// 3. `1` if `available_parallelism()` errors (rare — usually
+/// 3. `1` if `available_parallelism()` errors (rare - usually
 ///    only on the strangest /proc-less containers).
 #[cfg(feature = "thrust")]
 fn auto_worker_count() -> usize {
@@ -548,28 +548,28 @@ impl AfterburnerBuilder {
         self
     }
 
-    /// `FuelGauge::fuel` — backend-specific instruction budget.
+    /// `FuelGauge::fuel` - backend-specific instruction budget.
     pub fn fuel(mut self, fuel: u64) -> Self {
         self.fuel = Some(fuel);
         self
     }
 
-    /// `FuelGauge::memory_bytes` — linear memory cap.
+    /// `FuelGauge::memory_bytes` - linear memory cap.
     pub fn memory_bytes(mut self, bytes: usize) -> Self {
         self.memory_bytes = Some(bytes);
         self
     }
 
-    /// `FuelGauge::timeout_ms` — wall-clock cap per thrust.
+    /// `FuelGauge::timeout_ms` - wall-clock cap per thrust.
     pub fn timeout_ms(mut self, ms: u64) -> Self {
         self.timeout_ms = Some(ms);
         self
     }
 
-    /// `FuelGauge::output_bytes` — per-call ceiling on the result
+    /// `FuelGauge::output_bytes` - per-call ceiling on the result
     /// capture (JSON result, raw result bytes, script-mode stdout).
     /// Unset means the engine default
-    /// ([`FuelGauge::DEFAULT_OUTPUT_BYTES`], 64 MiB) — output is
+    /// ([`FuelGauge::DEFAULT_OUTPUT_BYTES`], 64 MiB) - output is
     /// always a bounded resource; exceeding the ceiling surfaces as
     /// the structured [`AfterburnerError::OutputTooLarge`].
     pub fn output_bytes(mut self, bytes: usize) -> Self {
@@ -605,13 +605,13 @@ impl AfterburnerBuilder {
     /// rooted at `dir` (must be an absolute path).
     ///
     /// The sandbox's native-code compilation is persisted there and
-    /// reused by every later engine construction in any process —
+    /// reused by every later engine construction in any process -
     /// removing the cold-start compile cost for short-lived or
     /// freshly-forked embedders. Entries are keyed by module contents,
     /// compiler configuration, and runtime version, so upgrades miss
     /// cleanly; corrupt or stale files are ignored and recompiled.
     /// If the cache cannot be initialised (e.g. unwritable directory)
-    /// the engine logs a warning and proceeds without it — this is an
+    /// the engine logs a warning and proceeds without it - this is an
     /// optimisation only and never affects correctness or sandbox
     /// behaviour. Ignored by the `native` mode (nothing to cache).
     pub fn compile_cache_dir(mut self, dir: impl Into<PathBuf>) -> Self {
@@ -628,7 +628,7 @@ impl AfterburnerBuilder {
     ///
     /// The path must be valid UTF-8; non-UTF-8 paths are silently
     /// ignored at registration time (the prelude is omitted). Pass an
-    /// absolute path to avoid surprises — relative paths resolve
+    /// absolute path to avoid surprises - relative paths resolve
     /// against the host process's working directory at register time,
     /// not at run time.
     pub fn cwd(mut self, path: impl Into<PathBuf>) -> Self {
@@ -640,9 +640,9 @@ impl AfterburnerBuilder {
     /// its own Wasmtime Store + QuickJS isolate served from a
     /// dedicated OS thread.
     ///
-    /// Default: `std::thread::available_parallelism()` — container-
+    /// Default: `std::thread::available_parallelism()` - container-
     /// aware on Linux (cgroup CPU quotas honoured via
-    /// `sched_getaffinity`). Override only for specific reasons —
+    /// `sched_getaffinity`). Override only for specific reasons -
     /// oversubscribing cores incurs context-switch tax with zero
     /// throughput benefit; under-subscribing leaves performance on
     /// the table that the operator already paid for at the cgroup
@@ -655,12 +655,12 @@ impl AfterburnerBuilder {
     /// gates apply per-Store; Wasmtime guarantees per-Store memory
     /// isolation.
     ///
-    /// Library-only affordance — the `burn` CLI does not expose
+    /// Library-only affordance - the `burn` CLI does not expose
     /// a flag or env-var. Deployment caps shard count at the
     /// container CPU limit, which `available_parallelism()` reads
     /// transparently.
     pub fn shards(mut self, n: usize) -> Self {
-        // Hardcoded limits — the wasi crate's MAX_SHARDS constant
+        // Hardcoded limits - the wasi crate's MAX_SHARDS constant
         // is gated behind the `daemon` feature; we duplicate the
         // value here so library consumers building without daemon
         // can still call this method (e.g., for test setup that
@@ -693,14 +693,14 @@ impl AfterburnerBuilder {
     }
 
     /// Switch into multi-worker scheduler mode with the worker count
-    /// auto-detected from the OS — the same `available_parallelism()`
+    /// auto-detected from the OS - the same `available_parallelism()`
     /// call the daemon uses, so a `docker run --cpus=4` cap produces
     /// 4 workers, k8s `cpu: "4"` produces 4 workers, and so on.
     /// Honors `BURN_SHARDS` if set (so operators can pin a count
     /// without changing application code).
     ///
     /// Library equivalent of the daemon's auto-detect for batch
-    /// workloads — UDFs over billions of rows want one worker per
+    /// workloads - UDFs over billions of rows want one worker per
     /// CPU by default and a way to override at deploy time.
     #[cfg(feature = "thrust")]
     pub fn threaded_auto(self) -> ThreadedBuilder {
@@ -1074,7 +1074,7 @@ mod tests {
     #[test]
     fn register_bundle_requires_flow_mode_feature() {
         // Without `flow`, `register_bundle` isn't in the public API at
-        // all — compile-gated. Nothing to assert at runtime; this test
+        // all - compile-gated. Nothing to assert at runtime; this test
         // documents the feature gate.
     }
 

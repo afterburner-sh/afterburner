@@ -23,7 +23,7 @@ pub fn activate(ctx: Arc<dyn HostContext>) -> ActiveGuard {
 }
 
 /// Run `f` against the active context. If no embedder has set one,
-/// the function is called with `None` — caller decides the default.
+/// the function is called with `None` - caller decides the default.
 pub fn with<R>(f: impl FnOnce(Option<&Arc<dyn HostContext>>) -> R) -> R {
     ACTIVE.with(|slot| {
         let borrow = slot.borrow();

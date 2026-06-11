@@ -465,7 +465,7 @@ fn rsa_streaming_sign_matches_one_shot() {
 #[test]
 fn ecdsa_streaming_verify_roundtrips_one_shot() {
     // ECDSA signatures are non-deterministic (nonce), so we can't assert
-    // byte equality — but streaming sign ↔ one-shot verify (and the
+    // byte equality - but streaming sign ↔ one-shot verify (and the
     // reverse) must both succeed if the digest streams correctly.
     let (priv_pem, pub_pem) = fresh_p256_keypair();
     let src = format!(
@@ -540,7 +540,7 @@ fn process_is_event_emitter() {
 #[test]
 fn fs_create_read_stream_emits_chunks() {
     // Sandbox has no event loop: the convention is to attach `end`
-    // (and `error`) listeners *before* `data` — emission fires
+    // (and `error`) listeners *before* `data` - emission fires
     // synchronously when the first `data` listener attaches.
     let root = temp_root();
     let file = root.join("stream-in.txt");
@@ -639,7 +639,7 @@ fn buffer_compare_indexof() {
 fn every_node_builtin_loads() {
     // Round-2 Node 20 coverage shipped real polyfills for every
     // built-in. `require(<name>)` for any name listed in
-    // `Module.builtinModules` returns a non-null object — no
+    // `Module.builtinModules` returns a non-null object - no
     // module remains stubbed.
     let src = r#"
         module.exports = () => {
@@ -751,7 +751,7 @@ fn pbkdf2_known_vector() {
         module.exports = () => {
             const crypto = require('crypto');
             // RFC 6070 vector: P="password", S="salt", c=2, dkLen=20, sha1 not
-            // supported — use sha256 with a simpler self-test.
+            // supported - use sha256 with a simpler self-test.
             return crypto.pbkdf2Sync('password', 'salt', 1, 32, 'sha256').toString('hex');
         };
     "#;

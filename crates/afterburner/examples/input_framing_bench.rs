@@ -14,10 +14,10 @@
 //! Run: `cargo run --release -p afterburner --example input_framing_bench`
 //!
 //! Scenarios per size N (string payload of N ASCII bytes):
-//!  * `json`  — input `{"payload":"<N bytes>"}` through `run()`;
+//!  * `json`  - input `{"payload":"<N bytes>"}` through `run()`;
 //!    the script touches only `.payload.length` so output framing is
 //!    negligible. This is the full input-crossing tax.
-//!  * `raw`   — same payload bytes through `run_raw()` (when built
+//!  * `raw`   - same payload bytes through `run_raw()` (when built
 //!    with the raw fast path); script reads `.length` of the
 //!    `Uint8Array` it receives.
 
@@ -52,7 +52,7 @@ fn measure_fuel(call: &dyn Fn(&FuelGauge) -> Result<Value, AfterburnerError>) ->
             Err(e) => panic!("unexpected error while bracketing fuel: {e:?}"),
         }
     }
-    // Bisect to ~0.2% precision — plenty for orders-of-magnitude
+    // Bisect to ~0.2% precision - plenty for orders-of-magnitude
     // comparisons and keeps the 22 MB scenario under a minute.
     let mut lo = hi / 2;
     while hi - lo > hi / 512 {

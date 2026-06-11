@@ -8,7 +8,7 @@
 //! * `--allow-all` / `-A` → `Manifold::open()` (every flap wide open).
 //! * Each of `--allow-net`, `--allow-listen`, `--allow-fs`,
 //!   `--allow-env` grants exactly the capability it names. Absent
-//!   flags stay at the `sealed()` default — `PermissionDenied` on use.
+//!   flags stay at the `sealed()` default - `PermissionDenied` on use.
 //! * `*` in the value = unrestricted for that capability. Otherwise
 //!   the value is a comma-separated allow-list (hosts / ports / paths /
 //!   var names). Net entries may pin a port (`host:port`); see
@@ -22,7 +22,7 @@ use super::args::Cli;
 
 /// Assemble the Manifold the CLI will run under, per Q1-D:
 ///
-/// * No flags at all → `Manifold::open()` (CLI-only default — the
+/// * No flags at all → `Manifold::open()` (CLI-only default - the
 ///   library API still defaults to `sealed`). [`banner::maybe_show`]
 ///   prints a one-time warning at startup.
 /// * `--sandbox` or any `--allow-*` flag → start from `sealed()` and
@@ -36,7 +36,7 @@ pub fn build_manifold(cli: &Cli) -> Manifold {
     }
     // The Permission Model flags (`--allow-fs-read` / `--allow-fs-write`
     // / `--allow-child-process` / `--allow-worker`) are first-class
-    // sandbox triggers too — they imply `--sandbox` even when the
+    // sandbox triggers too - they imply `--sandbox` even when the
     // legacy `--allow-net` / `--allow-fs` / `--allow-env` flags are
     // absent.
     let any_allow = cli.allow_net.is_some()
@@ -127,7 +127,7 @@ pub fn build_manifold(cli: &Cli) -> Manifold {
 /// `*` (or an empty value) = any port; `lo-hi` as the single entry = a
 /// range; otherwise a comma-separated port allow-list. The value has
 /// already passed [`parse_allow_listen_arg`], so unparseable entries
-/// only arise if the two functions drift — those entries are dropped
+/// only arise if the two functions drift - those entries are dropped
 /// (narrowing, never widening).
 fn listen_from_arg(s: &str) -> ListenAccess {
     let entries = parse_allow_list(s);
@@ -155,7 +155,7 @@ fn parse_port_range(entry: &str) -> Option<(u16, u16)> {
 
 /// Clap value-parser for `--allow-listen`: `*`, a comma-separated list
 /// of ports, or a single inclusive `lo-hi` range. Mirrors the
-/// `--allow-net` philosophy — reject unmatchable entries at parse time
+/// `--allow-net` philosophy - reject unmatchable entries at parse time
 /// rather than producing a silent deny-everything grant.
 pub fn parse_allow_listen_arg(s: &str) -> Result<String, String> {
     let entries = parse_allow_list(s);
@@ -192,8 +192,8 @@ pub fn parse_allow_listen_arg(s: &str) -> Result<String, String> {
 /// Clap value-parser for `--allow-net`: accept the comma-separated
 /// host list, rejecting entries whose `:port` suffix is not a valid
 /// port number. Without this gate a typo like `--allow-net
-/// host:90o0` would produce an allow-list entry that can never match
-/// — i.e. a silent deny-everything sandbox.
+/// host:90o0` would produce an allow-list entry that can never match,
+/// i.e. a silent deny-everything sandbox.
 ///
 /// Entry grammar (shared with the runtime matcher,
 /// `afterburner_node_compat::http_host::split_host_port_pattern`):
@@ -245,7 +245,7 @@ pub fn has_wildcard(list: &[String]) -> bool {
 }
 
 /// True when the CLI is running under the implicit open-capabilities
-/// default — i.e. the user supplied neither `--sandbox` nor any
+/// default - i.e. the user supplied neither `--sandbox` nor any
 /// `--allow-*` flag and didn't explicitly set `-A`. The banner shows
 /// only in this case, so callers who set `-A` don't get warned twice.
 pub fn is_implicit_open(cli: &Cli) -> bool {
@@ -280,7 +280,7 @@ mod tests {
             "a.com,b.com:81, c.com",
             "[::1]:9000",
             "[::1]",
-            "::1", // bare IPv6 host — colons are not a port suffix
+            "::1", // bare IPv6 host - colons are not a port suffix
         ] {
             assert!(
                 parse_allow_net_arg(ok).is_ok(),

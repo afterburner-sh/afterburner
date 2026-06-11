@@ -25,6 +25,9 @@ semver = { workspace = true }
 pubgrub = { workspace = true }
 sha2 = { workspace = true }
 ureq = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+sha1 = { workspace = true }
 # Lock-free worker -> collector channel for `burn install`'s concurrent fetch
 # pool, matching the workspace's lock-free model: atomics for counters,
 # kovan_channel for events.

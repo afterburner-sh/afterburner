@@ -36,14 +36,14 @@ fn assert_marker(out: &std::process::Output, marker: &str) {
     );
 }
 
-/// Tiny wasm module — exports a memory `memory` initial=1 max=4 pages.
+/// Tiny wasm module - exports a memory `memory` initial=1 max=4 pages.
 /// Hand-encoded so the test is hermetic: no wabt / wasm-tools dep.
 fn wasm_memory_only() -> &'static str {
     // (module (memory (export "memory") 1 4))
     "new Uint8Array([0,0x61,0x73,0x6d,1,0,0,0,5,4,1,1,1,4,7,0x0a,1,6,0x6d,0x65,0x6d,0x6f,0x72,0x79,2,0])"
 }
 
-/// Tiny wasm module — exports memory + a global `g` (mut i32, init 7).
+/// Tiny wasm module - exports memory + a global `g` (mut i32, init 7).
 fn wasm_memory_and_global() -> &'static str {
     // (module
     //   (memory (export "memory") 1 4)
@@ -58,7 +58,7 @@ fn wasm_memory_and_global() -> &'static str {
     ])"
 }
 
-/// Tiny wasm module — exports memory + a function table `t`
+/// Tiny wasm module - exports memory + a function table `t`
 /// (funcref, initial 1, max 4) + the constant zero function used to
 /// fill the initial slot.
 fn wasm_memory_and_table() -> &'static str {

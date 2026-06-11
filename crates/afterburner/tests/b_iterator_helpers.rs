@@ -5,7 +5,7 @@
 
 #![cfg(feature = "bin")]
 #![allow(non_snake_case)]
-//! Stage-3 Iterator Helpers — `Iterator.from`, plus
+//! Stage-3 Iterator Helpers - `Iterator.from`, plus
 //! `Iterator.prototype.{map,filter,take,drop,reduce,toArray,forEach,
 //! every,some,find,flatMap}`.
 

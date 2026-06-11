@@ -9,23 +9,23 @@
 //! network-free regression tests (the live-registry integration lives
 //! in `b_npm_install_e2e`, which is `#[ignore]`'d).
 //!
-//! * `util.formatWithOptions` — npm formats ALL of its output/logs
+//! * `util.formatWithOptions` - npm formats ALL of its output/logs
 //!   through this; when it was missing, `npm.load()` threw and npm
 //!   silently produced no output and did nothing.
-//! * package.json `exports` **subpath** resolution — npm deps like
+//! * package.json `exports` **subpath** resolution - npm deps like
 //!   `@sigstore/protobuf-specs/rekor/v2` resolve only through the
 //!   `exports` map; the legacy `main`/index resolver couldn't reach
 //!   them (`MODULE_NOT_FOUND`).
-//! * `exports` **condition** priority — for a CJS `require()`, the
+//! * `exports` **condition** priority - for a CJS `require()`, the
 //!   `require`/`node` conditions must win over `import`; dual-build
 //!   packages (glob: import→esm, require→commonjs) otherwise loaded
 //!   their ESM build and failed to parse.
-//! * `fs.stat` **ENOENT code** — cacache treats a missing content
+//! * `fs.stat` **ENOENT code** - cacache treats a missing content
 //!   file as a cache miss only when the failed stat carries
 //!   `code === 'ENOENT'`; the host emits Linux's "No such file or
 //!   directory (os error 2)" text, which the mapper has to translate.
 //!   Without it, every COLD-cache `npm install` aborted on the first
-//!   content stat (warm caches masked it — hence CI-only failures).
+//!   content stat (warm caches masked it - hence CI-only failures).
 
 #![cfg(feature = "bin")]
 
@@ -165,7 +165,7 @@ fn exports_pattern_subpath_resolves() {
 #[test]
 fn fs_stat_missing_file_yields_enoent_code() {
     // npm's content cache (cacache) treats a missing content file as a
-    // cache MISS — but ONLY when the failed `fs.stat` rejects with an
+    // cache MISS - but ONLY when the failed `fs.stat` rejects with an
     // error whose `.code === 'ENOENT'`. Any other shape is rethrown as
     // fatal, which aborted `npm install` the moment the cache was cold
     // (warm caches hid it: the file existed, so stat never threw). The
@@ -201,7 +201,7 @@ fn fs_stat_missing_file_yields_enoent_code() {
 fn require_parse_error_names_the_module() {
     // A SyntaxError in a required module must name the offending file.
     // Without it, a broken dependency surfaces as a bare "Unexpected
-    // token …" with no hint which file is at fault — the diagnostic
+    // token …" with no hint which file is at fault - the diagnostic
     // that made the Buffer.subarray/tar bug findable in the first place.
     let dir = fresh("parseerr");
     let pkg = dir.join("node_modules/brokenpkg");

@@ -121,12 +121,12 @@ fn incoming_message_emits_buffer_chunks() {
                 }});
             }});
             req.on('end', () => {{
-                // Concat must succeed — proves chunks are Buffers in
+                // Concat must succeed - proves chunks are Buffers in
                 // the body-parser sense.
                 let total;
                 try {{
                     const bufs = [];
-                    // Re-emit to test concat — we already consumed above,
+                    // Re-emit to test concat - we already consumed above,
                     // so feed the asserted shape into a synthetic concat.
                     total = chunks.length;
                 }} catch (_) {{
@@ -149,7 +149,7 @@ fn incoming_message_emits_buffer_chunks() {
 
     // The body-parser-relevant invariant: `Buffer.isBuffer(chunk)`
     // returns true. (Our polyfill's `Buffer` is a `Uint8Array`
-    // subclass — same as Node since Buffer was reimplemented on top
+    // subclass - same as Node since Buffer was reimplemented on top
     // of Uint8Array. `chunk.constructor.name` may be `Buffer` or
     // `Uint8Array` depending on the polyfill internals; what
     // body-parser, multer, busboy etc. actually check is
@@ -209,7 +209,7 @@ fn body_parser_pattern_buffer_concat_succeeds() {
 #[test]
 #[serial]
 fn burn_plain_script_exits_cleanly() {
-    // A script with no `.listen()` should exit 0 quickly — daemon
+    // A script with no `.listen()` should exit 0 quickly - daemon
     // mode detects no listeners and exits.
     let child = Command::new(BURN)
         .env("BURN_QUIET", "1")

@@ -3,14 +3,14 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! V8 ValueSerializer wire format — byte-compatible encoder + decoder.
+//! V8 ValueSerializer wire format - byte-compatible encoder + decoder.
 //!
 //! Matches the format Node uses (V8 source `value-serializer.cc`) so
 //! buffers round-trip with real Node `v8.serialize` / `v8.deserialize`.
 //!
 //! Tags reproduced from V8's `SerializationTag` enum. Format version
 //! is pinned to 15 (Node 24+ baseline). Numeric values are little-
-//! endian; integer payloads are LEB128 (varint) — `kInt32` uses
+//! endian; integer payloads are LEB128 (varint) - `kInt32` uses
 //! ZigZag, `kUint32` is plain varint.
 //!
 //! Coverage: undefined, null, true/false, Int32, Uint32, Double,
@@ -43,7 +43,7 @@ mod tag {
     pub const UTF8_STRING: u8 = b'S';
     pub const ONE_BYTE_STRING: u8 = b'"';
     pub const TWO_BYTE_STRING: u8 = b'c';
-    #[allow(dead_code)] // V8 ref-table support — pending cyclic-graph wiring.
+    #[allow(dead_code)] // V8 ref-table support - pending cyclic-graph wiring.
     pub const OBJECT_REF: u8 = b'^';
     pub const BEGIN_OBJECT: u8 = b'o';
     pub const END_OBJECT: u8 = b'{';
@@ -190,7 +190,7 @@ impl Encoder {
     }
 
     fn write_double(&mut self, v: f64) {
-        // V8 host byte order — little-endian on x86_64 and aarch64,
+        // V8 host byte order - little-endian on x86_64 and aarch64,
         // which covers our portability target.
         self.out.extend_from_slice(&v.to_le_bytes());
     }
@@ -437,7 +437,7 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_value(&mut self) -> Result<V8Value> {
-        // Skip padding mid-stream — V8's PADDING tag is a no-op.
+        // Skip padding mid-stream - V8's PADDING tag is a no-op.
         while !self.at_end() && self.bytes[self.pos] == tag::PADDING {
             self.pos += 1;
         }
@@ -615,7 +615,7 @@ impl<'a> Decoder<'a> {
                     match sub {
                         err_tag::MESSAGE => message = Some(s),
                         err_tag::STACK => stack = Some(s),
-                        _ => {} // unknown subtag — skip
+                        _ => {} // unknown subtag - skip
                     }
                 }
                 Ok(V8Value::Error {

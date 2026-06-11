@@ -8,7 +8,7 @@
 //! Envelope: `{ mode: "script", source: string }`. The plugin wraps
 //! the user source with a Node-style module wrapper (providing
 //! `module`, `exports`, `require`) and runs it to completion. Unlike
-//! UDF mode, there is no `module.exports(data)` invocation — whatever
+//! UDF mode, there is no `module.exports(data)` invocation - whatever
 //! the source does at top level is the output. `console.log` goes to
 //! stdout; the final JSON return value of the thrust is JS `null`.
 //!

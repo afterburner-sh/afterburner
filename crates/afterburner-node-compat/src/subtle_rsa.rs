@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Subtle Crypto RSA — OAEP, PSS, PKCS1-v1.5 (encrypt/decrypt + sign/verify),
+//! Subtle Crypto RSA - OAEP, PSS, PKCS1-v1.5 (encrypt/decrypt + sign/verify),
 //! plus key generation / import / export across PKCS#8, SPKI, and JWK.
 
 use afterburner_core::{AfterburnerError, Result};
@@ -41,7 +41,7 @@ pub fn rsa_keygen(modulus_bits: usize, public_exponent: u64) -> Result<(Vec<u8>,
         .map_err(|e| AfterburnerError::Host(format!("RSA spki encode: {e}")))?
         .as_bytes()
         .to_vec();
-    let _ = pub_der; // silence unused — we now return SPKI by default
+    let _ = pub_der; // silence unused - we now return SPKI by default
     Ok((priv_der, pub_spki))
 }
 
@@ -229,7 +229,7 @@ pub fn rsa_export_jwk_priv(pkcs8_der: &[u8]) -> Result<String> {
     }
     let p = b64url(&primes[0].to_bytes_be());
     let q = b64url(&primes[1].to_bytes_be());
-    // dp = d mod (p-1), dq = d mod (q-1), qi = q^-1 mod p — reconstruct
+    // dp = d mod (p-1), dq = d mod (q-1), qi = q^-1 mod p - reconstruct
     // from d, p, q so the JWK matches what `node:crypto` emits.
     use num_bigint_dig::ModInverse;
     use num_traits::One;

@@ -45,7 +45,7 @@ fn raw_input_arrives_as_uint8array() {
 
 #[test]
 fn raw_input_preserves_arbitrary_binary_bytes() {
-    // Every byte value 0..=255, repeated — including invalid-UTF-8
+    // Every byte value 0..=255, repeated - including invalid-UTF-8
     // sequences and NULs that a string-framed crossing would mangle.
     let burn = ab();
     let id = burn
@@ -74,7 +74,7 @@ fn raw_input_preserves_arbitrary_binary_bytes() {
 fn raw_input_buffer_supports_typed_views() {
     // The backing ArrayBuffer is allocated in the runtime heap
     // (≥8-byte aligned), so constructing wider typed views over
-    // `.buffer` must work — same contract as the codec + columnar
+    // `.buffer` must work - same contract as the codec + columnar
     // bridges.
     let burn = ab();
     let id = burn
@@ -105,7 +105,7 @@ fn raw_input_empty_payload() {
 #[test]
 fn same_script_serves_json_and_raw_framing() {
     // One registered script (one compiled bytecode) handles both
-    // crossings — the wrapper branches on what the input getter
+    // crossings - the wrapper branches on what the input getter
     // returns.
     let burn = ab();
     let id = burn

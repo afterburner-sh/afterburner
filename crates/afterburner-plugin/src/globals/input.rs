@@ -8,22 +8,22 @@
 //! The host stashes the per-call input in `HostState::pending_input`;
 //! the wrapped script materializes it through one of these globals at
 //! the top of every invocation. Both bridges size their destination
-//! buffer exactly via `host_get_input_len` — on multi-MiB inputs the
+//! buffer exactly via `host_get_input_len` - on multi-MiB inputs the
 //! older retry-doubling protocol cost O(n) metered instructions per
 //! doubling step (zeroing each resize) plus repeated host-side clones,
 //! all pure overhead.
 //!
-//! * `__AB_GET_INPUT_VALUE__()` — format-aware getter the invoke
+//! * `__AB_GET_INPUT_VALUE__()` - format-aware getter the invoke
 //!   wrapper calls. Consults the `host_input_format` import: JSON
 //!   framing returns one JS string (the wrapper hands it to QuickJS's
 //!   native `JSON.parse`); raw framing returns a `Uint8Array` backed
 //!   by a QuickJS-heap allocation (≥8-byte aligned via
 //!   [`ArrayBuffer::new_copy`], so callers can construct any typed
-//!   view over `.buffer` — same rationale as the codec + columnar
+//!   view over `.buffer` - same rationale as the codec + columnar
 //!   bridges). Raw framing skips string materialization and
-//!   `JSON.parse` entirely — the O(n) byte movement happens on the
+//!   `JSON.parse` entirely - the O(n) byte movement happens on the
 //!   host side of the boundary, outside fuel metering.
-//! * `__AB_GET_INPUT__()` — string-shaped getter, kept for user code
+//! * `__AB_GET_INPUT__()` - string-shaped getter, kept for user code
 //!   and diagnostics that read the input text directly.
 
 use alloc::format;
@@ -49,7 +49,7 @@ fn input_to_string(buf: alloc::vec::Vec<u8>) -> String {
     String::from_utf8(buf).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
-/// `__AB_GET_INPUT_VALUE__()` — JS string (JSON framing) or
+/// `__AB_GET_INPUT_VALUE__()` - JS string (JSON framing) or
 /// `Uint8Array` (raw framing). Free function (not a closure) for the
 /// same reason as the codec / columnar bridges: rquickjs's HRTB-based
 /// `Fn` impls reject closures whose return types are `'js`-bound.
@@ -67,7 +67,7 @@ pub fn install<'js>(globals: &Object<'js>) {
     let _ = globals.set("__AB_GET_INPUT_VALUE__", Func::from(ab_get_input_value));
 
     // String-shaped getter. Any host error returns an empty string so
-    // the caller's `JSON.parse` surfaces the failure clearly — the
+    // the caller's `JSON.parse` surfaces the failure clearly - the
     // pre-existing contract for this global.
     let _ = globals.set(
         "__AB_GET_INPUT__",

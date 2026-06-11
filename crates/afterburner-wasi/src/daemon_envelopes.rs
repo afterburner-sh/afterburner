@@ -5,8 +5,8 @@
 
 //! Daemon-event-to-JSON-envelope converters, shared between the
 //! single-runtime CLI loop and the multi-shard pool. Every kind of
-//! daemon event the host can produce — HTTP request, worker
-//! lifecycle, raw-TCP connection, TLS connection, UDP datagram —
+//! daemon event the host can produce - HTTP request, worker
+//! lifecycle, raw-TCP connection, TLS connection, UDP datagram -
 //! gets translated into the `{kind: "...", ...}` shape the JS-side
 //! `__ab_*` dispatchers expect.
 //!
@@ -67,7 +67,7 @@ pub fn http_event_to_envelope(event: &DaemonEvent) -> serde_json::Value {
 }
 
 /// Worker lifecycle → envelope. Returns the envelope plus the
-/// `worker_id` the caller should reap (only `Some` for `Exit` —
+/// `worker_id` the caller should reap (only `Some` for `Exit` -
 /// the terminal lifecycle event).
 pub fn worker_event_to_envelope(evt: &WorkerEvent) -> (serde_json::Value, Option<i32>) {
     match evt {
@@ -124,7 +124,7 @@ pub fn worker_event_to_envelope(evt: &WorkerEvent) -> (serde_json::Value, Option
 /// envelopes so the JS side can clean up per-session state when a
 /// WebSocket disconnects mid-stream. CDP frames themselves come in
 /// as `inspector-cmd` with `id`, `method`, `params` parsed from the
-/// JSON-RPC payload — invalid frames are dropped on the host side.
+/// JSON-RPC payload - invalid frames are dropped on the host side.
 #[cfg(feature = "daemon")]
 pub fn inspector_event_to_envelope(
     evt: &crate::daemon_inspector::InspectorEvent,

@@ -7,13 +7,13 @@
 //! `process.on('exit')` must fire when a CLI script finishes by
 //! draining the event loop (rather than calling `process.exit()`).
 //!
-//! This is load-bearing for real Node programs: npm — and a great many
-//! CLIs — buffer ALL of their output and flush it from a single
+//! This is load-bearing for real Node programs: npm - and a great many
+//! CLIs - buffer ALL of their output and flush it from a single
 //! `process.on('exit')` handler, then exit *naturally* (they set
 //! `process.exitCode` and let the loop drain; they never call
 //! `process.exit()`). Before the daemon event loop learned to emit
 //! these events on natural drain, such programs produced **zero**
-//! output and never finalized — `burn npm install express` printed
+//! output and never finalized - `burn npm install express` printed
 //! nothing and installed nothing. See
 //! `afterburner-wasi/src/daemon_shard_pool.rs::emit_lifecycle` and the
 //! `'lifecycle'` branch of the daemon-event dispatcher.
@@ -167,7 +167,7 @@ fn explicit_process_exit_fires_exit_exactly_once() {
 #[test]
 fn exit_fires_after_pending_async_work_completes() {
     // Async work that resolves through the event loop must complete
-    // before 'exit' fires — the exact npm pattern (do async I/O, then
+    // before 'exit' fires - the exact npm pattern (do async I/O, then
     // flush from the exit handler).
     let (out, err, ok) = run_eval(
         "require('fs').promises.readFile('/etc/hostname', 'utf8') \

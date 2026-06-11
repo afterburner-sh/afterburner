@@ -13,7 +13,7 @@
 //! of writing JSON to stdout, so it can only be run via the
 //! `columnar-invoke` plugin mode.
 //!
-//! Output bytecode is base64 on stdout — the host stashes it
+//! Output bytecode is base64 on stdout - the host stashes it
 //! alongside the regular invoke bytecode in
 //! `WasmCombustor::CompiledScript` so `thrust_columnar` can ship it
 //! through the `columnar-invoke` envelope.

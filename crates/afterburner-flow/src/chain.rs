@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Chain helpers — utilities for callers that thread a JSON object
+//! Chain helpers - utilities for callers that thread a JSON object
 //! between flow steps.
 //!
 //! A common pattern: each step receives the full chain as input and

@@ -76,7 +76,7 @@ fn zlib_crc32_chains_with_seed() {
 
 #[test]
 fn zlib_brotli_compress_async_round_trips() {
-    // `zlib.brotliCompress` + `brotliDecompress` are real now —
+    // `zlib.brotliCompress` + `brotliDecompress` are real now -
     // earlier rounds returned `ERR_BROTLI_INVALID_PARAM` as a stub.
     // Pin the working contract: compressed bytes decompress to input.
     let out = run_inline(

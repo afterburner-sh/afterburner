@@ -13,7 +13,7 @@
 //!
 //! Per the workspace constraint (project memory:
 //! `project_docker_cap_constraint`), this test short-circuits cleanly
-//! when the runtime only has one CPU available — e.g., a Docker
+//! when the runtime only has one CPU available - e.g., a Docker
 //! container pinned via `--cpus=1`. No CAP_SYS_NICE or real-time
 //! scheduling is used; measurements rely on wall-clock only.
 //!
@@ -25,8 +25,8 @@
 //! source variants explicitly chosen so their SHA-256 hashes reduce to
 //! distinct worker indices.
 //!
-//! The hash formula is a stable crate contract, documented in plan §5.1
-//! — replicating it here is intentional so the integration test doesn't
+//! The hash formula is a stable crate contract, documented in plan §5.1,
+//! and replicating it here is intentional so the integration test doesn't
 //! need crate-private access.
 
 use afterburner_core::{FuelGauge, Manifold, ScriptId, sha256};
@@ -35,13 +35,13 @@ use serde_json::json;
 use std::time::{Duration, Instant};
 
 /// Same routing function `ThrustEngine` uses internally. Documented in
-/// plan §5.1 as stable — replicated here for test-only use.
+/// plan §5.1 as stable - replicated here for test-only use.
 fn route_worker(hash: &[u8; 32], n_workers: usize) -> usize {
     let bytes: [u8; 8] = hash[..8].try_into().unwrap();
     (u64::from_le_bytes(bytes) as usize) % n_workers
 }
 
-/// Find `per_worker` source strings (CPU-bound — loop of `iters` steps)
+/// Find `per_worker` source strings (CPU-bound - loop of `iters` steps)
 /// that each route to `target_worker` under N-worker hash routing.
 ///
 /// Appends a free-form version comment to the template until the hash
@@ -107,7 +107,7 @@ fn mk_engine(n_workers: usize) -> std::sync::Arc<ThrustEngine> {
 #[test]
 fn two_workers_beat_one_on_cross_script_load() {
     // CPU-throttled environment (Docker --cpus=1, restricted cgroup,
-    // etc.) — assert only that the engine still *works*, not that it
+    // etc.) - assert only that the engine still *works*, not that it
     // scales. See project memory `project_docker_cap_constraint`.
     if std::thread::available_parallelism()
         .map(|n| n.get())
@@ -160,7 +160,7 @@ fn two_workers_beat_one_on_cross_script_load() {
 
     // Speedup: t1 / t2. Ideal = 2.0. We assert ≥ 1.3× to stay robust
     // under background noise, debug-mode variance, and container CPU
-    // jitter. The plan targets 2× on a dedicated box — that's a release-
+    // jitter. The plan targets 2× on a dedicated box - that's a release-
     // mode, perf-harness claim; this is the regression gate.
     let speedup = t1.as_secs_f64() / t2.as_secs_f64();
     eprintln!("speedup: {speedup:.2}x");
@@ -202,7 +202,7 @@ fn hash_routing_is_stable_across_registrations() {
 #[test]
 fn fanout_completes_under_cap_load() {
     // Smaller-scale correctness check, intentionally short. Every
-    // thrust must complete with a real value — not be lost by hash
+    // thrust must complete with a real value - not be lost by hash
     // routing, not deadlock the worker loop. Runs even on 1-CPU
     // containers.
     let engine = mk_engine(4);

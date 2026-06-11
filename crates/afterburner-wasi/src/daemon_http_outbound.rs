@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Outbound HTTP — async, per-shard. Mirrors Node's libuv-driven
+//! Outbound HTTP - async, per-shard. Mirrors Node's libuv-driven
 //! request flow.
 //!
 //! When JS calls `http.request(opts, cb)` (or `https.request`,
@@ -21,7 +21,7 @@
 //! `make-fetch-happen` / `minipass-fetch`, undici, node-fetch, the
 //! pacote stack) need to actually progress: the JS-side `await
 //! fetch(url)` returns a Promise that *only* resolves when real
-//! async work completes — not the synchronous "wait for the entire
+//! async work completes - not the synchronous "wait for the entire
 //! body, then deliver" shape that fakes async via microtasks.
 //!
 //! ## Lock-free
@@ -33,7 +33,7 @@
 //! ## Per-shard
 //!
 //! Each daemon shard owns its own `DaemonHttpOutbound`. Responses
-//! are delivered to the shard that issued the request — JS-side
+//! are delivered to the shard that issued the request - JS-side
 //! Promise state is per-shard (each shard runs its own QuickJS),
 //! so cross-shard delivery would land in a Store with no matching
 //! pending entry.
@@ -66,7 +66,7 @@ pub struct HttpOutboundResponseEvent {
     pub req_id: ReqId,
     pub status: u16,
     pub headers: Vec<(String, String)>,
-    /// Body bytes — base64-encoded on the wire so the JSON envelope
+    /// Body bytes - base64-encoded on the wire so the JSON envelope
     /// stays binary-safe for tarballs / images.
     pub body_b64: String,
     /// Lossy UTF-8 view for legacy text-only callers. Constructed
@@ -97,7 +97,7 @@ pub struct DaemonHttpOutbound {
 #[cfg(feature = "daemon")]
 impl DaemonHttpOutbound {
     /// Build a coordinator bound to the given Tokio runtime. Channel
-    /// capacity is 1024 — chosen large enough that a chatty
+    /// capacity is 1024 - chosen large enough that a chatty
     /// installer (npm install resolving 50+ packages in parallel)
     /// doesn't backpressure on the dispatch loop.
     pub fn new(runtime: tokio::runtime::Handle) -> Arc<Self> {
@@ -133,7 +133,7 @@ impl DaemonHttpOutbound {
         let body_owned = body;
         let to = timeout.unwrap_or(self.default_timeout);
 
-        // Spawn a blocking task — the underlying http_host::request is
+        // Spawn a blocking task - the underlying http_host::request is
         // a synchronous reqwest call. Tokio's `spawn_blocking`
         // dispatches to its dedicated blocking pool so the reactor
         // doesn't stall. Swapping the inner call for an async
@@ -185,7 +185,7 @@ impl DaemonHttpOutbound {
 
             // Best-effort wall-clock cap. If we're past `to` and the
             // upstream hasn't returned, the spawn_blocking task is
-            // still running on the blocking pool — we can't cancel
+            // still running on the blocking pool - we can't cancel
             // it, but we can stop waiting. The runtime cleans up
             // on drop. Future iteration: switch to a real async
             // client with cancel support.
@@ -194,7 +194,7 @@ impl DaemonHttpOutbound {
             // Send the response onto the channel first; the
             // dispatcher's `try_recv_response` is what decrements
             // `in_flight` once it pops the event. Decrementing here
-            // would race the dispatcher's `has_refs()` check — it
+            // would race the dispatcher's `has_refs()` check - it
             // could see `in_flight == 0` between our decrement and
             // its `try_recv_response` call, conclude the daemon has
             // no work, and exit before delivering the response. By

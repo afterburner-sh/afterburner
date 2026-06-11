@@ -3,13 +3,13 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! NUMA topology discovery and per-worker affinity — P7.
+//! NUMA topology discovery and per-worker affinity - P7.
 //!
 //! On **Linux** we read `/sys/devices/system/node/nodeN/cpulist` to learn
 //! how many NUMA nodes exist and which CPUs belong to each, then call
 //! `sched_setaffinity` from the worker thread to pin it to its assigned
 //! node's CPU set. On **macOS, Windows, FreeBSD, etc.** the module
-//! returns a single-node topology and skips affinity entirely — the
+//! returns a single-node topology and skips affinity entirely - the
 //! scheduler's own balancing keeps steady-state throughput close to
 //! optimal on the hardware commodity users typically deploy.
 //!
@@ -21,7 +21,7 @@
 //!
 //! ### Docker capabilities
 //!
-//! `sched_setaffinity` is unprivileged — no `CAP_SYS_NICE`. Parsing
+//! `sched_setaffinity` is unprivileged - no `CAP_SYS_NICE`. Parsing
 //! `/sys/devices/system/node/*` requires only read permission on
 //! `/sys`, which default container configs grant. If the sysfs tree
 //! is missing (chroot/jail/seccomp), detection degrades gracefully to

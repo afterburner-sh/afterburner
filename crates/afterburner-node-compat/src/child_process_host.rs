@@ -5,7 +5,7 @@
 
 //! `child_process.*` host functions. Always denied when
 //! `Manifold::child_process == false`. Even when enabled, only available
-//! via the **native** engine path — the WASM plugin does not declare a
+//! via the **native** engine path - the WASM plugin does not declare a
 //! host import for `spawn`, so untrusted scripts cannot reach it.
 
 use afterburner_core::{AfterburnerError, Manifold, Result};

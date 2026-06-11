@@ -11,7 +11,7 @@
 //! tick zero.
 //!
 //! Why this matters: `depd` (transitively required by `body-parser`,
-//! `serve-static`, `morgan`, `finalhandler` — which is to say "every
+//! `serve-static`, `morgan`, `finalhandler` - which is to say "every
 //! Express middleware tree") inspects call frames inside
 //! `callSiteLocation` and calls `callSite.isEval()` first. Without the
 //! patch this throws `TypeError: not a function` and Express module
@@ -22,7 +22,7 @@
 //!     in) are functions on the proto and don't throw when called.
 //!   * The 7 patched-in methods return Node-conventional sentinel
 //!     values (`false`, `null`, `undefined`).
-//!   * `Error.prepareStackTrace` invariant — when user code does NOT
+//!   * `Error.prepareStackTrace` invariant - when user code does NOT
 //!     install a custom hook, `(new Error()).stack` is still a string.
 //!   * Hook is callable: when user code installs
 //!     `Error.prepareStackTrace = (_, frames) => frames.map(f => f.isEval())`,
@@ -79,7 +79,7 @@ fn callsite_methods_are_all_callable() {
             if (typeof f[m] !== 'function') {
                 throw new Error('CallSite method missing: ' + m);
             }
-            // Must not throw when called (Node convention — the API
+            // Must not throw when called (Node convention - the API
             // surface is non-throwing, sentinel values for "not
             // applicable").
             f[m]();
@@ -118,7 +118,7 @@ fn patched_methods_return_node_conventional_sentinels() {
 #[test]
 fn error_stack_remains_a_string_when_no_hook_installed() {
     // Regression: the patch must NOT set Error.prepareStackTrace
-    // globally — user code that doesn't install a hook must still see
+    // globally - user code that doesn't install a hook must still see
     // the default stack-string format.
     let out = run_burn(
         r#"

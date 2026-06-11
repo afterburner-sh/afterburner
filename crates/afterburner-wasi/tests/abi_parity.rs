@@ -5,12 +5,12 @@
 
 //! ABI drift gate. Host imports are declared in three places:
 //!
-//! 1. `crates/afterburner-plugin/src/host_api.rs` — `extern "C" { fn host_foo(...) }`.
-//! 2. `crates/afterburner-wasi/src/host_imports.rs` — `linker.func_wrap(NS, "host_foo", ...)`.
-//! 3. `docs/wit/afterburner-host.wit` — the shape contract (docs).
+//! 1. `crates/afterburner-plugin/src/host_api.rs` - `extern "C" { fn host_foo(...) }`.
+//! 2. `crates/afterburner-wasi/src/host_imports.rs` - `linker.func_wrap(NS, "host_foo", ...)`.
+//! 3. `docs/wit/afterburner-host.wit` - the shape contract (docs).
 //!
 //! The `extern` declaration and the `func_wrap` registration MUST name
-//! the same imports — a missing entry on either side manifests as a
+//! the same imports - a missing entry on either side manifests as a
 //! link error at Wasmtime instantiation time with a message like
 //! "unknown import". This test catches the drift at `cargo test` time
 //! instead.
@@ -96,7 +96,7 @@ fn plugin_imports() -> BTreeSet<String> {
 }
 
 fn extract_host_literal(line: &str) -> Option<String> {
-    // Look for `"host_xxx_yyy"` as a substring — simple but effective
+    // Look for `"host_xxx_yyy"` as a substring - simple but effective
     // because the plugin doesn't emit random `host_` string literals
     // outside of the import-naming spots.
     let start = line.find("\"host_")? + 1;
@@ -143,7 +143,7 @@ fn plugin_and_wasi_host_imports_match() {
 fn manifest_matches_plugin_and_wasi() {
     // The manifest at docs/wit/host-imports.txt is the SSOT. Both the
     // plugin's extern decls and the wasi linker registrations must
-    // list exactly the names the manifest does — no more, no less.
+    // list exactly the names the manifest does - no more, no less.
     // This catches:
     //   1. Adding an import without recording it in the manifest.
     //   2. Removing an import without pulling the manifest entry.
@@ -151,7 +151,7 @@ fn manifest_matches_plugin_and_wasi() {
     //      surface as a removal + addition pair).
     //
     // The pure plugin/wasi parity test above is still useful because
-    // it gives a sharper diagnosis when ONLY one side is missing —
+    // it gives a sharper diagnosis when ONLY one side is missing -
     // here we'd see both sides differ from the manifest equally.
     let manifest = manifest_imports();
     let plugin = plugin_imports();

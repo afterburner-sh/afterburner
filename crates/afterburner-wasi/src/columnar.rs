@@ -17,7 +17,7 @@
 //! This module defines a typed columnar wire format that lets the host
 //! hand wasm linear memory **already-laid-out** column buffers + a
 //! validity bitmap; the JS-side polyfill exposes them as
-//! `Int32Array`/`Float64Array`/etc. *views into linmem* — no
+//! `Int32Array`/`Float64Array`/etc. *views into linmem* - no
 //! `JSON.parse`, no per-element allocation. The user's UDF reads
 //! `batch.columns.c0[i]`, writes `out[i] = ...`, and the host reads
 //! the result column back through the symmetric exit boundary.
@@ -26,21 +26,21 @@
 //!
 //! Per call:
 //!
-//! 1. One `wasmtime::Memory::write` per input column — `memcpy` from
+//! 1. One `wasmtime::Memory::write` per input column - `memcpy` from
 //!    host slice into wasm linmem. Unavoidable: wasm guests have a
 //!    separate address space; there is no Wasmtime mechanism to make
 //!    a guest read host pointers.
 //! 2. JS-side TypedArray views are constructed with
-//!    `new Int32Array(memory.buffer, offset, len)` — *views* into
+//!    `new Int32Array(memory.buffer, offset, len)` - *views* into
 //!    linmem, not copies.
-//! 3. User UDF reads/writes through the views — direct linmem
+//! 3. User UDF reads/writes through the views - direct linmem
 //!    loads/stores; no allocation, no conversion.
-//! 4. One `wasmtime::Memory::data()` slice per output column — symmetric
+//! 4. One `wasmtime::Memory::data()` slice per output column - symmetric
 //!    `memcpy` back into host-owned [`OwnedColumn`] vectors.
 //!
 //! Total data movement per call: **one host→guest `memcpy` per input
 //! column + one guest→host `memcpy` per output column.** No JSON, no
-//! base64, no varint, no Arrow framing, no protobuf — just typed
+//! base64, no varint, no Arrow framing, no protobuf - just typed
 //! contiguous bytes plus a packed validity bitmap.
 //!
 //! ## Vendor-neutral type set
@@ -56,9 +56,9 @@
 //!
 //! The validity convention follows DuckDB's published vector format:
 //! one bit per row, packed into u64 chunks LSB-first, **bit set = valid**
-//! (the inverse of Arrow's null-bitmap convention — Arrow also uses
+//! (the inverse of Arrow's null-bitmap convention - Arrow also uses
 //! "1 = valid", so the conventions coincide). `validity: None` on the
-//! host side means "all rows valid" — zero-cost; the guest skips the
+//! host side means "all rows valid" - zero-cost; the guest skips the
 //! validity slice read entirely.
 //!
 //! ## What's NOT in this module
@@ -120,7 +120,7 @@ impl ColumnDtype {
     /// Per-row byte count of the column's *primary* data buffer.
     ///
     /// * Fixed-width dtypes: the size of one element.
-    /// * Variable-width (Utf8 / Bytea / Jsonb): always 16 bytes — the
+    /// * Variable-width (Utf8 / Bytea / Jsonb): always 16 bytes - the
     ///   inline-or-pointer slot. Long-slot bytes live in a separate
     ///   heap buffer; `size_bytes` covers the slot array only.
     ///
@@ -207,16 +207,16 @@ impl ColumnDtype {
 /// Inline-or-pointer slot size for variable-width dtypes (Utf8 /
 /// Bytea / Jsonb). 16 bytes per row, DuckDB-style `string_t` layout:
 ///
-/// * `len ≤ 12`: `[len: u32 LE][bytes: [u8; 12]]` — inline; first
+/// * `len ≤ 12`: `[len: u32 LE][bytes: [u8; 12]]` - inline; first
 ///   `len` bytes of the data field carry the value, remainder is
 ///   padding.
 /// * `len > 12`:  `[len: u32 LE][prefix: [u8; 4]][heap_off: u32 LE]`
-///   — the 4-byte prefix is the first four bytes of the value (used
+///   where the 4-byte prefix is the first four bytes of the value (used
 ///   for fast comparisons / hash bucketing); `heap_off` is the
 ///   absolute byte offset into the column's heap buffer where the
 ///   full `len` bytes live.
 pub const INLINE_SLOT_BYTES: usize = 16;
-/// Inline cap — slot values up to this size embed in the slot
+/// Inline cap - slot values up to this size embed in the slot
 /// itself, longer values point at the heap buffer.
 pub const INLINE_SLOT_INLINE_MAX: usize = 12;
 
@@ -228,7 +228,7 @@ pub const INLINE_SLOT_INLINE_MAX: usize = 12;
 ///
 /// # Validity convention
 ///
-/// `validity: None` means "every row is valid" (zero-cost — the
+/// `validity: None` means "every row is valid" (zero-cost - the
 /// guest never reads a validity slice in this case). `Some(slice)`
 /// must hold `ceil(row_count / 8)` bytes packed LSB-first; bit
 /// `i` corresponds to row `i`; **bit set = valid** (matches Arrow
@@ -258,7 +258,7 @@ pub struct ColumnRef<'a> {
     pub validity: Option<&'a [u8]>,
 }
 
-/// Host-side input batch — caller owns every byte; this struct borrows
+/// Host-side input batch - caller owns every byte; this struct borrows
 /// for the duration of [`crate::wasm_engine::WasmCombustor::thrust_columnar`].
 pub struct ColumnarBatch<'a> {
     pub row_count: u32,
@@ -284,7 +284,7 @@ impl<'a> ColumnarBatch<'a> {
 /// `memcpy` per output column to land them in heap-owned `Vec`s before
 /// the Store dropped (which would have freed the linmem). The caller
 /// downstream may do a second `memcpy` into its own allocator (e.g. a
-/// columnar engine's aligned-buffer arena) — that copy is post-boundary
+/// columnar engine's aligned-buffer arena) - that copy is post-boundary
 /// and outside this crate's scope.
 #[derive(Debug)]
 pub struct ColumnarOutput {
@@ -392,7 +392,7 @@ pub struct BatchHeader {
     /// but stored explicitly so a future revision could move the
     /// column-header table without an ABI break.
     pub columns_offset: u32,
-    /// Reserved — must be 0. Lets the guest detect a forward-compatible
+    /// Reserved - must be 0. Lets the guest detect a forward-compatible
     /// blob written by a newer host with the same `BatchHeader` size
     /// but different downstream tail.
     pub _reserved: u32,
@@ -404,7 +404,7 @@ pub const COLUMN_HEADER_BYTES: usize = std::mem::size_of::<ColumnHeader>();
 /// Per-column header, byte-packed `#[repr(C)]`. The guest reads these
 /// sequentially out of the `[ColumnHeader; column_count]` array.
 ///
-/// Field order matters for ABI stability — never reorder. Adding new
+/// Field order matters for ABI stability - never reorder. Adding new
 /// fields is allowed (it grows the header size; the
 /// [`COLUMN_HEADER_BYTES`] constant is the SSOT for both sides) but
 /// reordering existing fields is not.
@@ -419,7 +419,7 @@ pub struct ColumnHeader {
     /// `row_count × dtype.size_bytes()` bytes.
     pub data_offset: u32,
     /// Byte offset of the validity bitmap relative to the blob.
-    /// `0` means "no validity bitmap — every row valid".
+    /// `0` means "no validity bitmap - every row valid".
     pub validity_offset: u32,
     /// Byte offset of the column name (UTF-8, no terminator).
     pub name_offset: u32,
@@ -448,7 +448,7 @@ pub struct ColumnHeader {
 #[derive(Debug)]
 pub struct EncodedBatch {
     pub bytes: Vec<u8>,
-    /// Per-column data offsets — handy for tests and the bench
+    /// Per-column data offsets - handy for tests and the bench
     /// extrapolation that wants to assert "the i-th column's first
     /// byte is at offset N". Same order as
     /// [`ColumnarBatch::columns`].
@@ -459,7 +459,7 @@ pub struct EncodedBatch {
 /// The output is one contiguous `Vec<u8>` ready to copy into wasm
 /// linear memory.
 ///
-/// The serialiser does the *only* host-side `memcpy` per column —
+/// The serialiser does the *only* host-side `memcpy` per column -
 /// from the caller's slice into the staging buffer that becomes the
 /// guest blob. The guest reads the blob in place via TypedArray views;
 /// no second copy on the guest side.
@@ -510,13 +510,13 @@ pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, Afterburn
         if col.dtype.is_fixed_width() {
             if col.heap.is_some() {
                 return Err(AfterburnerError::Engine(format!(
-                    "column[{idx}] '{}': dtype {:?} is fixed-width — `heap` must be None",
+                    "column[{idx}] '{}': dtype {:?} is fixed-width - `heap` must be None",
                     col.name, col.dtype,
                 )));
             }
         } else if col.heap.is_none() {
             return Err(AfterburnerError::Engine(format!(
-                "column[{idx}] '{}': dtype {:?} is variable-width — `heap` is required (use Some(&[]) for empty)",
+                "column[{idx}] '{}': dtype {:?} is variable-width - `heap` is required (use Some(&[]) for empty)",
                 col.name, col.dtype,
             )));
         }
@@ -534,7 +534,7 @@ pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, Afterburn
                     let heap_off = u32::from_le_bytes(slot[12..16].try_into().unwrap()) as usize;
                     if heap_off.checked_add(len).is_none_or(|end| end > heap.len()) {
                         return Err(AfterburnerError::Engine(format!(
-                            "column[{idx}] '{}' row {r}: slot len={len}, heap_off={heap_off}, heap_len={} — out of bounds",
+                            "column[{idx}] '{}' row {r}: slot len={len}, heap_off={heap_off}, heap_len={} - out of bounds",
                             col.name,
                             heap.len(),
                         )));
@@ -559,7 +559,7 @@ pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, Afterburn
     // Layout pass: header, then column-header table, then for each
     // column its data, then validity (if any), then name. 8-byte-align
     // every variable region so TypedArray views land on natural
-    // boundaries — Wasmtime will reject `new Float64Array(buf, off,
+    // boundaries - Wasmtime will reject `new Float64Array(buf, off,
     // len)` otherwise. Names are 1-byte aligned.
     let header_end = BATCH_HEADER_BYTES;
     let column_table_end = header_end + COLUMN_HEADER_BYTES * column_count;
@@ -571,7 +571,7 @@ pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, Afterburn
         // Align to 8 BEFORE writing this column's data buffer.
         // Required because `new Float64Array(buf, off, len)` (and
         // every other 8-byte typed view) checks that the **buffer-
-        // relative** offset is a multiple of 8 — QuickJS rejects
+        // relative** offset is a multiple of 8 - QuickJS rejects
         // anything else with `RangeError: invalid offset`. Aligning
         // only after the data + before the next column's data isn't
         // enough: the previous column's 4-byte-aligned name may
@@ -596,7 +596,7 @@ pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, Afterburn
 
         // Heap follows for variable-width dtypes. 1-byte alignment
         // suffices because the JS-side reads heap bytes via
-        // `Uint8Array` (1-aligned) — only the slot array needs the
+        // `Uint8Array` (1-aligned) - only the slot array needs the
         // 8-aligned boundary that the data buffer already gets.
         // 0/0 sentinel for fixed-width columns.
         let (heap_offset, heap_len) = if let Some(heap) = col.heap {
@@ -670,8 +670,8 @@ pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, Afterburn
 
 /// Decode the columnar reply blob the guest wrote back.
 ///
-/// The guest emits the same wire shape as [`encode_batch`] produces —
-/// `BatchHeader` + per-column headers + column buffers — so the host
+/// The guest emits the same wire shape as [`encode_batch`] produces -
+/// `BatchHeader` + per-column headers + column buffers - so the host
 /// reads it identically. Each output column is `memcpy`'d out of the
 /// guest's linmem into a host-owned `Vec<u8>` because the Store is
 /// about to drop and the linmem with it.
@@ -757,7 +757,7 @@ pub fn decode_batch(blob: &[u8]) -> Result<ColumnarOutput, AfterburnerError> {
         // Read the heap buffer for variable-width dtypes. Fixed-width
         // columns must have heap_len == 0 (and heap_offset == 0); we
         // tolerate non-zero heap_offset for fixed-width as long as
-        // heap_len is zero (defensive — guest may write any value).
+        // heap_len is zero (defensive - guest may write any value).
         let heap = if dtype.is_fixed_width() {
             if heap_len != 0 {
                 return Err(AfterburnerError::Engine(format!(
@@ -1063,7 +1063,7 @@ mod tests {
             .flat_map(|v| v.to_le_bytes())
             .collect();
         let mut batch = ColumnarBatch::new(3);
-        // Six Float64 columns with 2-character names — exactly the
+        // Six Float64 columns with 2-character names - exactly the
         // shape that broke the previous encoder (each "cN" name was
         // 4-byte aligned at the end, leaving the next column's data
         // offset at +4 mod 8).
@@ -1114,7 +1114,7 @@ mod tests {
 
     #[test]
     fn encode_max_columns_typical_workload() {
-        // 32 columns × 2048 rows × Float64 — the user's billion-row
+        // 32 columns × 2048 rows × Float64 - the user's billion-row
         // bench shape. Confirm the encoder handles it cleanly and
         // the resulting blob is within the per-Store linmem budget
         // (1 GiB default).
@@ -1154,7 +1154,7 @@ mod tests {
 
     /// Build a `(slots: Vec<u8>, heap: Vec<u8>)` pair from a list of
     /// byte sequences using DuckDB-style inline-or-pointer slots.
-    /// Test-only — production callers (ScramDB-side adapter, etc.)
+    /// Test-only - production callers (ScramDB-side adapter, etc.)
     /// build their slot arrays from their own internal layouts.
     fn build_var_column(values: &[&[u8]]) -> (Vec<u8>, Vec<u8>) {
         let mut slots = vec![0u8; values.len() * INLINE_SLOT_BYTES];
@@ -1288,7 +1288,7 @@ mod tests {
         let mut slots = vec![0u8; INLINE_SLOT_BYTES];
         slots[0..4].copy_from_slice(&13u32.to_le_bytes()); // len=13 (long)
         slots[12..16].copy_from_slice(&100u32.to_le_bytes()); // heap_off=100
-        let heap = vec![0u8; 8]; // only 8 bytes — out of range
+        let heap = vec![0u8; 8]; // only 8 bytes - out of range
         let mut batch = ColumnarBatch::new(1);
         batch.push(ColumnRef {
             name: "x",

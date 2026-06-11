@@ -38,7 +38,7 @@ fn ceiling(bytes: usize) -> FuelGauge {
 
 #[test]
 fn large_json_results_roundtrip() {
-    // 2 / 8 / 32 MiB result strings — all dead at >1 MiB before the
+    // 2 / 8 / 32 MiB result strings - all dead at >1 MiB before the
     // ceiling-bounded capture (fd_write errno 29 inside
     // __ab_write_stdout → opaque trap).
     let burn = ab();
@@ -142,7 +142,7 @@ fn raw_bytes_out_identity() {
 
 #[test]
 fn raw_bytes_out_empty() {
-    // Zero-length bytes are still a bytes-shaped result — distinct
+    // Zero-length bytes are still a bytes-shaped result - distinct
     // from a JSON null.
     let burn = ab();
     let id = burn

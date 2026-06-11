@@ -208,7 +208,7 @@
       margin-bottom: 32px;
     }
 
-    /* hero burn buttons — larger size + video plays on hover */
+    /* hero burn buttons - larger size + video plays on hover */
     .btn--burn {
       position: relative;
       isolation: isolate;
@@ -244,7 +244,7 @@
       pointer-events: none;
     }
 
-    /* dark scrim — guarantees contrast for white text over the video */
+    /* dark scrim - guarantees contrast for white text over the video */
     .btn--burn::after {
       content: '';
       position: absolute;
@@ -256,7 +256,7 @@
       pointer-events: none;
     }
 
-    /* warm color wash on top of the scrim — keeps the brand heat */
+    /* warm color wash on top of the scrim - keeps the brand heat */
     .btn--burn::before {
       content: '';
       position: absolute;
@@ -312,7 +312,7 @@
       font-weight: 600;
     }
 
-    /* ============= HERO VISUAL — orbital ============= */
+    /* ============= HERO VISUAL - orbital ============= */
     .hero__visual {
       position: relative;
       display: grid;
@@ -419,7 +419,7 @@
       }
     }
 
-    /* orbiting chips — positioned via JS by setting --angle */
+    /* orbiting chips - positioned via JS by setting --angle */
     .orbital__chip {
       position: absolute;
       top: 50%;
@@ -631,7 +631,7 @@
       color: var(--fg);
     }
 
-    /* live__copy h2 em — styled in shared .hero__title em rule */
+    /* live__copy h2 em - styled in shared .hero__title em rule */
     .live__copy p {
       font-size: 16px;
       line-height: 1.6;
@@ -1669,7 +1669,7 @@
       color: var(--fg);
     }
 
-    /* cta h2 em — styled in shared .hero__title em rule */
+    /* cta h2 em - styled in shared .hero__title em rule */
     .cta p {
       font-size: var(--text-subheading);
       color: var(--fg-muted);
@@ -1971,7 +1971,7 @@
         display: none;
       }
 
-      /* Hero: orbital was 540px tall and burns vertical space — drop it on tablet/mobile.
+      /* Hero: orbital was 540px tall and burns vertical space - drop it on tablet/mobile.
        The hero copy is the message; the visual is decoration. */
       .hero__visual {
         display: none;
@@ -2112,7 +2112,7 @@
 
     @media (max-width: 600px) {
 
-      /* hard line breaks in display headings collapse on phones — line-wrap should
+      /* hard line breaks in display headings collapse on phones - line-wrap should
        follow the viewport, not the desktop layout. */
       .live__copy h2 br,
       .control__head h2 br,
@@ -2572,7 +2572,6 @@
         <div class="hero__meta">
           <span><b>node · npm · pnpm · yarn · bun</b> pass-through shim</span>
           <span><b>Node 26</b> compat surface</span>
-          <span><b>Apache-2.0</b></span>
         </div>
       </div>
 
@@ -3026,7 +3025,7 @@
         <span class="kicker">// Per-core throughput</span>
         <h2>Sandboxed JS UDFs over big data,<br /><em class="grad-text">at the speed limit.</em></h2>
         <p>One JavaScript function over a billion rows. Per CPU core. Compared head-to-head against the published
-          in-process and sandboxed JS-UDF tier — Postgres PL/V8 and Snowflake JS UDFs, the apples-to-apples peers.</p>
+          in-process and sandboxed JS-UDF tier - Postgres PL/V8 and Snowflake JS UDFs, the apples-to-apples peers.</p>
       </div>
 
       <div class="bench__card reveal" id="benchCard">
@@ -3261,7 +3260,7 @@
         },
         heavy: {
           title: '32-column <code>Float64</code> sum-of-columns',
-          sub: '32 column reads + 32 adds per row · 1B rows · per CPU core. Interpreter-bound — per-row dispatch in the peer tier dominates.',
+          sub: '32 column reads + 32 adds per row · 1B rows · per CPU core. Interpreter-bound - per-row dispatch in the peer tier dominates.',
           bars: [
             { name: 'Afterburner',                value: 48000, brand: true, note: '~6× over PL/V8' },
             { name: 'PL/V8',                      value:  8000,              hint: 'Postgres in-process V8' },
@@ -3286,7 +3285,7 @@
         subEl.textContent = d.sub;
 
         // Scale bars to the largest value in the current tab so the
-        // leader fills the track. Other tabs scale independently —
+        // leader fills the track. Other tabs scale independently -
         // the chart is about ratio, not absolute axis carryover.
         const max = Math.max(...d.bars.map(b => b.value));
 
@@ -3350,7 +3349,7 @@
         });
       }
 
-      // First render gated on viewport entry — animations only fire when
+      // First render gated on viewport entry - animations only fire when
       // the chart is visible, so the entrance lands when the user
       // arrives, not silently while the page is still off-screen.
       let armed = false;
@@ -3388,7 +3387,7 @@
       });
     })();
 
-    /* ============= BURN BUTTONS — play video on hover ============= */
+    /* ============= BURN BUTTONS - play video on hover ============= */
     document.querySelectorAll('.btn--burn').forEach(btn => {
       const vid = btn.querySelector('.burn-bg');
       if (!vid) return;

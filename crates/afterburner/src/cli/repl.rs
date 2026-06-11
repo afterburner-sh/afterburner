@@ -3,18 +3,18 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! `burn repl` — interactive REPL.
+//! `burn repl` - interactive REPL.
 //!
 //! Meta-commands:
 //!
-//! * `:fuel N` — set the per-call fuel cap.
-//! * `:mode native|wasm|adaptive` — rebuild the engine in a given mode.
-//! * `:allow net=*`, `:allow fs=/tmp`, `:allow env=HOME` — grant
+//! * `:fuel N` - set the per-call fuel cap.
+//! * `:mode native|wasm|adaptive` - rebuild the engine in a given mode.
+//! * `:allow net=*`, `:allow fs=/tmp`, `:allow env=HOME` - grant
 //!   capabilities on the live engine (rebuilds the manifold).
-//! * `:help` — list commands. `:exit` / `:quit` — exit.
+//! * `:help` - list commands. `:exit` / `:quit` - exit.
 //!
 //! Scripts run in UDF shape (`module.exports = () => ...` or plain
-//! expressions — the latter are wrapped). No state shared across
+//! expressions - the latter are wrapped). No state shared across
 //! lines; matches the fresh-per-call invariant.
 
 use crate::Afterburner;
@@ -58,7 +58,7 @@ pub fn repl(cli: &Cli) -> Result<()> {
     let mut live_cli = cli.clone();
     let mut ab = build_afterburner(&live_cli)?;
     // Accumulated declarations (var/let/const/function/class) so REPL state
-    // persists across lines — the engine runs each line isolated.
+    // persists across lines - the engine runs each line isolated.
     let mut decls: Vec<(String, String)> = Vec::new();
 
     super::style::repl_banner(env!("CARGO_PKG_VERSION"));

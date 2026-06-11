@@ -151,7 +151,7 @@ fn source_text_module_linker_returning_namespace_object_directly_works() {
     let out = run(r#"
         const vm = require('vm');
         async function main() {
-            // Accept a plain object as the linker result — Node tolerates
+            // Accept a plain object as the linker result - Node tolerates
             // this if the dep is "already evaluated" (eg. a built-in).
             const main = new vm.SourceTextModule(
                 "import { x } from 'shim'; export const y = x + 1;"

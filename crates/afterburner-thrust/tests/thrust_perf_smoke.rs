@@ -3,14 +3,14 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! T8 perf smoke — trivial script throughput + p50 / p99 latency.
+//! T8 perf smoke - trivial script throughput + p50 / p99 latency.
 //!
 //! ### Where the gate sits *today*
 //!
 //! The plan's full T8 ambition is "≥100 K thrusts/sec on 8 cores". That
 //! number assumes wasmtime's `PoolingAllocationConfig` + `InstancePre`
 //! shaving per-thrust setup down to sub-100 µs. We have **not** wired
-//! that yet — see `WasmCombustor::new` in `afterburner-wasi/src/wasm_engine.rs`,
+//! that yet - see `WasmCombustor::new` in `afterburner-wasi/src/wasm_engine.rs`,
 //! which still uses the default per-call `Store::new` + linker
 //! instantiation. Each thrust currently costs ~1–3 ms in release mode,
 //! which caps aggregate throughput around ~3 K/sec at 8 workers.
@@ -24,15 +24,15 @@
 //!
 //! ### Tiers
 //!
-//! * `perf_smoke_correctness_default` — always runs. 1 000 thrusts,
+//! * `perf_smoke_correctness_default` - always runs. 1 000 thrusts,
 //!   asserts results + reasonable wall clock. No throughput gate.
-//! * `perf_smoke_throughput_release_only` — `#[ignore]`. Run with:
+//! * `perf_smoke_throughput_release_only` - `#[ignore]`. Run with:
 //!   `cargo test -p afterburner-thrust --release --test thrust_perf_smoke
 //!   -- --ignored --nocapture`
 //!   Reports throughput + p50/p99 of submit-to-recv latency under
 //!   queue-saturation (the realistic steady state); asserts the
 //!   per-worker throughput floor.
-//! * `perf_smoke_steady_state_latency_release_only` — `#[ignore]`.
+//! * `perf_smoke_steady_state_latency_release_only` - `#[ignore]`.
 //!   Submits thrusts *one at a time* (no queue saturation) and
 //!   measures pure execution latency per thrust. Asserts p99 ≤ 10× p50,
 //!   matching the plan's tail-latency clause without conflating it
@@ -67,7 +67,7 @@ fn run_workload(n_workers: usize, n_thrusts: usize) -> (Duration, Vec<u128>) {
     let id = engine.register("module.exports = (d) => d.n + 1").unwrap();
     let lim = FuelGauge::unlimited();
 
-    // Submit then collect — recording per-handle latency from submit-time.
+    // Submit then collect - recording per-handle latency from submit-time.
     let mut submit_times = Vec::with_capacity(n_thrusts);
     let mut handles = Vec::with_capacity(n_thrusts);
     let t0 = Instant::now();
@@ -122,7 +122,7 @@ fn perf_smoke_correctness_default() {
     // on a noisy CI box.
     assert!(
         total < Duration::from_secs(120),
-        "1000 trivial thrusts took {total:?} — something is severely wrong"
+        "1000 trivial thrusts took {total:?} - something is severely wrong"
     );
     assert!(
         throughput > 5.0,
@@ -158,7 +158,7 @@ fn perf_smoke_throughput_release_only() {
          total={total:?} throughput={throughput:.0}/sec p50={p50}us p99={p99}us"
     );
 
-    // Current floor (no pooling allocator yet — see module docs).
+    // Current floor (no pooling allocator yet - see module docs).
     // Empirical: ~380/sec per worker on this box; floor at 200/sec
     // per worker leaves slack for slower CI runners while still
     // catching a scheduler-stack regression that, e.g., serialized
@@ -180,7 +180,7 @@ fn perf_smoke_throughput_release_only() {
 #[test]
 #[ignore = "release-mode latency gate; run with --release --ignored"]
 fn perf_smoke_steady_state_latency_release_only() {
-    // Sequential per-thrust latency — no queueing — so the p99/p50
+    // Sequential per-thrust latency - no queueing - so the p99/p50
     // ratio reflects pure execution variance + scheduler jitter, not
     // queue depth. This is the right place for the plan's
     // "p99 < 10× p50" tail-latency clause.
@@ -221,7 +221,7 @@ fn perf_smoke_steady_state_latency_release_only() {
     if p50 > 0 {
         let ratio = p99 as f64 / p50 as f64;
         // 10× is the plan's bar. Some headroom for first-iteration
-        // outliers that escape the warm-up window — but if it blows
+        // outliers that escape the warm-up window - but if it blows
         // 15× something is wrong.
         assert!(
             ratio <= 15.0,

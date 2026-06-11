@@ -8,16 +8,16 @@
 //!
 //! Pinned defenses:
 //!
-//! * **`NetAccess::None`** — `--sandbox` without `--allow-net` blocks
+//! * **`NetAccess::None`** - `--sandbox` without `--allow-net` blocks
 //!   `tls.connect` with `EACCES`.
-//! * **Allow-list narrowing** — `--allow-net 127.0.0.2` permits that
+//! * **Allow-list narrowing** - `--allow-net 127.0.0.2` permits that
 //!   host but blocks `127.0.0.1`.
-//! * **`OutboundHttp` blocks raw TLS** — covered by a unit test in
+//! * **`OutboundHttp` blocks raw TLS** - covered by a unit test in
 //!   `daemon_tls.rs`; the CLI cannot construct an HTTP-only manifold.
 //! * **Library mode rejects `tls.createServer().listen()` and
-//!   `tls.connect`** — `Afterburner::run_script` never installs
+//!   `tls.connect`** - `Afterburner::run_script` never installs
 //!   `DaemonTls`, so both paths surface `ENO_DAEMON`.
-//! * **`rejectUnauthorized=true` rejects self-signed by default** —
+//! * **`rejectUnauthorized=true` rejects self-signed by default** -
 //!   covered in `b7_tls::handshake_failure_self_signed_with_strict_verification`;
 //!   not duplicated here.
 
@@ -128,7 +128,7 @@ fn library_mode_rejects_tls_listen() {
             const tls = require('tls');
             const fakePem = '-----BEGIN CERTIFICATE-----\nA\n-----END CERTIFICATE-----\n';
             // The cert/key strings are bogus, but library mode should
-            // refuse before validating them — the check happens in the
+            // refuse before validating them - the check happens in the
             // host stub, not in the rustls parser.
             try {
                 const server = tls.createServer({ cert: fakePem, key: fakePem });
