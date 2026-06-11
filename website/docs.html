@@ -883,7 +883,7 @@
       <h4>Get started</h4>
       <a class="sb-link active" href="#introduction">Introduction</a>
       <a class="sb-link" href="#installation">Installation</a>
-      <a class="sb-link" href="#first-burn">Your first burn <span class="tag">5m</span></a>
+      <a class="sb-link" href="#first-burn">Your first package <span class="tag">5m</span></a>
     </div>
     <div class="sb-section">
       <h4>Core concepts</h4>
@@ -894,7 +894,8 @@
       <a class="sb-link" href="#state">Cross-call state</a>
     </div>
     <div class="sb-section">
-      <h4>Embedder seams</h4>
+      <h4>Embed in Rust</h4>
+      <a class="sb-link" href="#programmatic">Programmatic API</a>
       <a class="sb-link" href="#extend">Extension points</a>
       <a class="sb-link" href="#extend-cache">BurnCacheBackend</a>
       <a class="sb-link" href="#extend-host">HostContext</a>
@@ -964,10 +965,13 @@
 
       <h2 id="introduction"><span class="anchor">#</span>Introduction</h2>
       <p>
-        Afterburner is a JavaScript runtime built in Rust. The <code>burn</code> binary runs your existing Node apps (<code>burn server.js</code>, <code>burn npm install</code>, <code>burn app.ts</code>), and the embeddable <code>afterburner</code> crate exposes the same engine to your Rust program. Every Node built-in (<code>fs</code>, <code>crypto</code>, <code>http</code>, <code>zlib</code>, <code>child_process</code>, …) is gated by a capability you configure per script.
+        Afterburner is a JavaScript runtime built in Rust, and the way you build on it is by writing <strong>packages</strong>: small, capability-sealed units of JavaScript or TypeScript that you scaffold, test, and publish to a registry, then install anywhere the runtime runs. Each package declares exactly what it may touch — network, filesystem, environment — so installing one is never a blank cheque. The <code>burn</code> toolchain takes you end to end: <code>burn init</code> to scaffold, <code>burn test</code> to run it in the sandbox, <code>burn package</code> to build a single content-addressed <code>.afb</code>, and <code>burn install</code> / <code>burn publish</code> to share it.
       </p>
       <p>
-        Memory caps, deterministic fuel metering, an N-worker scheduler, and a fully sandboxed execution mode are the production-grade machinery underneath. The surface you touch is one builder and three methods (<code>register</code>, <code>run</code>, <code>unregister</code>), or just type <code>burn</code> at the shell.
+        The same <code>burn</code> binary also runs your existing Node apps (<code>burn server.js</code>, <code>burn npm install</code>, <code>burn app.ts</code>), and the embeddable <code>afterburner</code> crate exposes the engine to your own Rust program (see the <a href="#programmatic" style="color: var(--action);">Programmatic API</a>). Memory caps, deterministic fuel metering, an N-worker scheduler, and a fully sandboxed execution mode are the production-grade machinery underneath — and every Node built-in (<code>fs</code>, <code>crypto</code>, <code>http</code>, <code>zlib</code>, <code>child_process</code>, …) is gated by a capability you grant explicitly.
+      </p>
+      <p>
+        New here? Start with <a href="#first-burn" style="color: var(--action);">Your first package</a>, then read <a href="#packages" style="color: var(--action);">Packages &amp; dependencies</a> for the full authoring reference.
       </p>
 
       <div class="callout callout--note">
@@ -1030,27 +1034,42 @@ afterburner 0.1.2</pre>
 
       <p>The prebuilt binary ships with <code>--features release-cli</code> (every backend, every L3 shadow, TypeScript loader). Nothing external is needed at runtime; SQLite, OpenSSL, libclang are all statically linked in. See <a href="#build" style="color: var(--action);">Building from source</a> if you want to compile the workspace yourself.</p>
 
-      <h2 id="first-burn"><span class="anchor">#</span>Your first burn</h2>
-      <p>Five lines. Register a script, hand it some JSON, get JSON back:</p>
+      <h2 id="first-burn"><span class="anchor">#</span>Your first package</h2>
+      <p>The primary way to use Afterburner is to <strong>write a package</strong>: a small, capability-sealed unit of JavaScript (or TypeScript) that you test, build into a single <code>.afb</code> file, and publish to the registry. Scaffold one:</p>
 
       <div class="codeblock">
         <div class="codeblock__head">
-          <span class="lang">rust</span>
-          <button class="copy-btn">Copy</button>
+          <span class="lang">shell</span>
+          <button class="copy-btn" data-copy="burn init ./greeter --namespace acme --name greeter">Copy</button>
         </div>
-<pre><span class="tok-kw">use</span> afterburner::Afterburner;
-<span class="tok-kw">use</span> serde_json::json;
-
-<span class="tok-kw">fn</span> <span class="tok-fn">main</span>() -&gt; Result&lt;(), Box&lt;<span class="tok-kw">dyn</span> std::error::Error&gt;&gt; {
-    <span class="tok-kw">let</span> ab = Afterburner::<span class="tok-fn">new</span>()?;
-    <span class="tok-kw">let</span> id = ab.<span class="tok-fn">register</span>(<span class="tok-str">"module.exports = (d) =&gt; d.n + 1"</span>)?;
-    <span class="tok-kw">let</span> out = ab.<span class="tok-fn">run</span>(&amp;id, &amp;json!({ <span class="tok-str">"n"</span>: <span class="tok-num">41</span> }))?;
-    <span class="tok-fn">assert_eq!</span>(out, json!(<span class="tok-num">42</span>));
-    Ok(())
-}</pre>
+<pre>$ <span class="tok-mod">burn</span> init ./greeter --namespace acme --name greeter
+✓ created acme/greeter (module)
+  afb.toml  manifold.json  source/main.js  tests/  README.md</pre>
       </div>
 
-      <p><code>Afterburner::new()</code> uses the <strong>adaptive</strong> mode by default: a fast cold start on the first call, then a fully sandboxed execution path from the second call onward. You don't pick. It picks.</p>
+      <p>Open <code>source/main.js</code>. A package exports one function — input in, result out:</p>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">javascript</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre><span class="tok-com">// source/main.js</span>
+<span class="tok-kw">module</span>.exports = <span class="tok-kw">function</span> (input) {
+  <span class="tok-kw">return</span> { hello: (input &amp;&amp; input.name) || <span class="tok-str">"world"</span> };
+};</pre>
+      </div>
+
+      <p>It is <strong>sealed by default</strong> — that scaffolded <code>manifold.json</code> grants nothing, so this code cannot touch the network, filesystem, or environment until you open a door. Test it through the real runtime, then build the <code>.afb</code> and publish:</p>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">shell</span>
+          <button class="copy-btn" data-copy="burn test">Copy</button>
+        </div>
+<pre>$ <span class="tok-mod">burn</span> test          <span class="tok-com"># run tests/ in the sandbox</span>
+$ <span class="tok-mod">burn</span> package       <span class="tok-com"># → acme-greeter-0.1.0.afb (content-addressed)</span>
+$ <span class="tok-mod">burn</span> publish       <span class="tok-com"># upload to the registry</span></pre>
+      </div>
+      <p>That's the whole loop. The <a href="#packages" style="color: var(--action);">Packages &amp; dependencies</a> section is the full authoring reference — manifest fields, the capability Manifold, declaring dependencies, and how anyone installs your package with <code>burn install</code>. If instead you want to embed Afterburner as a Rust library, see the <a href="#programmatic" style="color: var(--action);">Programmatic API</a>.</p>
 
       <h2 id="manifold"><span class="anchor">#</span>The Manifold</h2>
       <p>
@@ -1208,6 +1227,35 @@ state.<span class="tok-fn">setJSON</span>(<span class="tok-str">'lastSeen'</span
 
 module.exports = () =&gt; ({ hits, seen });</pre>
       </div>
+
+      <h2 id="programmatic"><span class="anchor">#</span>Programmatic API</h2>
+      <p>Beyond packages, Afterburner is a Rust library — embed the engine directly to run untrusted JavaScript inside your own application. Add the crate and you have a sandboxed runtime in a handful of lines: register a script, hand it JSON, get JSON back.</p>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">toml</span>
+          <button class="copy-btn" data-copy="afterburner = &quot;0.1&quot;">Copy</button>
+        </div>
+<pre><span class="tok-com"># Cargo.toml</span>
+[dependencies]
+afterburner = <span class="tok-str">"0.1"</span></pre>
+      </div>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">rust</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre><span class="tok-kw">use</span> afterburner::Afterburner;
+<span class="tok-kw">use</span> serde_json::json;
+
+<span class="tok-kw">fn</span> <span class="tok-fn">main</span>() -&gt; Result&lt;(), Box&lt;<span class="tok-kw">dyn</span> std::error::Error&gt;&gt; {
+    <span class="tok-kw">let</span> ab = Afterburner::<span class="tok-fn">new</span>()?;
+    <span class="tok-kw">let</span> id = ab.<span class="tok-fn">register</span>(<span class="tok-str">"module.exports = (d) =&gt; d.n + 1"</span>)?;
+    <span class="tok-kw">let</span> out = ab.<span class="tok-fn">run</span>(&amp;id, &amp;json!({ <span class="tok-str">"n"</span>: <span class="tok-num">41</span> }))?;
+    <span class="tok-fn">assert_eq!</span>(out, json!(<span class="tok-num">42</span>));
+    Ok(())
+}</pre>
+      </div>
+      <p><code>Afterburner::new()</code> uses the <strong>adaptive</strong> mode by default: a fast cold start on the first call, then a fully sandboxed execution path from the second call onward. You don't pick. It picks. Everything from <a href="#manifold" style="color: var(--action);">The Manifold</a> onward — capability grants, fuel and timeouts, cross-call state — is configured on the builder; the extension points below let you swap the engine's seams.</p>
 
       <h2 id="extend"><span class="anchor">#</span>Embedder extension points</h2>
       <p>Three pluggable seams on the Rust side, each with a sensible default. Swap your own when the default is too tight.</p>
@@ -1697,12 +1745,13 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
     <ul>
       <li><a href="#introduction">Introduction</a></li>
       <li><a href="#installation">Installation</a></li>
-      <li><a href="#first-burn">Your first burn</a></li>
+      <li><a href="#first-burn">Your first package</a></li>
       <li><a href="#manifold">Manifold</a></li>
       <li><a href="#fuel">Fuel &amp; limits</a></li>
       <li><a href="#tiers">Adaptive tiers</a></li>
       <li><a href="#scheduler">Scheduler</a></li>
       <li><a href="#state">Cross-call state</a></li>
+      <li><a href="#programmatic">Programmatic API</a></li>
       <li><a href="#extend">Extension points</a></li>
       <li class="toc-sub"><a href="#extend-cache">BurnCacheBackend</a></li>
       <li class="toc-sub"><a href="#extend-host">HostContext</a></li>
