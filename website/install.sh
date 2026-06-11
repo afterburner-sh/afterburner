@@ -14,7 +14,7 @@
 
 set -eu
 
-repo="vertexclique/afterburner"
+repo="afterburner-sh/afterburner"
 install_dir="${BURN_INSTALL:-${HOME}/.local/bin}"
 
 die() {

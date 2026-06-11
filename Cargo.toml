@@ -44,8 +44,8 @@ authors = ["Theo Bulut <vertexclique@gmail.com>"]
 # Apache-2.0 four years after its release). Apache-2.0 crates (afterburner-afb,
 # burndb, burn/*) set `license = "Apache-2.0"` explicitly in their [package].
 license = "BUSL-1.1"
-repository = "https://github.com/vertexclique/afterburner"
-homepage = "https://github.com/vertexclique/afterburner"
+repository = "https://github.com/afterburner-sh/afterburner"
+homepage = "https://github.com/afterburner-sh/afterburner"
 documentation = "https://docs.rs/afterburner"
 # Every crate publishes with the top-level README (workspace-inherited;
 # cargo resolves this relative to the workspace root and bundles it).
