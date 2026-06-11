@@ -903,6 +903,10 @@
     <div class="sb-section">
       <h4>Packages</h4>
       <a class="sb-link" href="#packages">Packages &amp; deps</a>
+      <a class="sb-link" href="#packages-anatomy">Package anatomy</a>
+      <a class="sb-link" href="#packages-afbtoml">afb.toml manifest</a>
+      <a class="sb-link" href="#packages-manifold">manifold.json</a>
+      <a class="sb-link" href="#packages-entry">Entry function</a>
       <a class="sb-link" href="#packages-scaffold">Scaffold</a>
       <a class="sb-link" href="#packages-deps">Declaring deps</a>
       <a class="sb-link" href="#packages-security">Dependency security</a>
@@ -1284,6 +1288,92 @@ module.exports = () =&gt; ({ hits, seen });</pre>
 
       <h2 id="packages"><span class="anchor">#</span>Packages &amp; dependencies</h2>
       <p>A <code>.afb</code> is a single content-addressed, compressed package: a manifest (<code>afb.toml</code>), a capability grant (<code>manifold.json</code>), and your <code>source/</code>. Packages publish to a registry and resolve dependencies the way Cargo does — declared, version-resolved, digest-pinned, and cached — not vendored into your artifact.</p>
+
+      <h3 id="packages-anatomy">Package anatomy</h3>
+      <p>Every package is a directory with three required parts. <code>burn package</code> compresses them deterministically into a single <code>.afb</code> file named for its SHA-256 content digest.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">text</span><button class="copy-btn">Copy</button></div>
+<pre>my-pkg/
+├─ <span class="tok-fn">afb.toml</span>          <span class="tok-com"># manifest: identity, entry, dependencies</span>
+├─ <span class="tok-fn">manifold.json</span>     <span class="tok-com"># capability grant: what this code may touch</span>
+├─ <span class="tok-fn">source/</span>
+│  ├─ main.js        <span class="tok-com"># the entry point (or main.ts)</span>
+│  └─ lib/util.js    <span class="tok-com"># any number of sibling modules</span>
+├─ <span class="tok-fn">tests/</span>
+│  └─ my-pkg.test.js <span class="tok-com"># run by `burn test`</span>
+└─ README.md</pre>
+      </div>
+      <p>Only <code>source/</code>, <code>afb.toml</code>, and <code>manifold.json</code> are packed. Everything in <code>source/</code> is carried verbatim and is resolvable with <code>require()</code>; nothing outside it is. Dependencies are <em>not</em> packed — they are declared (below) and resolved at install time.</p>
+
+      <h3 id="packages-afbtoml">afb.toml — the manifest</h3>
+      <p>The complete manifest. <code>[format]</code>, <code>[package]</code>, and <code>[runtime]</code> are required; <code>[dependencies]</code> and <code>[npm]</code> are optional.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">toml</span><button class="copy-btn">Copy</button></div>
+<pre>[format]
+version = <span class="tok-str">"1.0"</span>              <span class="tok-com"># .afb format version (current: 1.0)</span>
+
+[package]
+namespace = <span class="tok-str">"acme"</span>          <span class="tok-com"># your registry namespace (lowercase a-z0-9-_)</span>
+name      = <span class="tok-str">"widget"</span>        <span class="tok-com"># package name; published as acme/widget</span>
+version   = <span class="tok-str">"0.1.0"</span>         <span class="tok-com"># semver — bump on every publish</span>
+entry     = <span class="tok-str">"source/main.js"</span> <span class="tok-com"># the module that exports the entry function</span>
+language  = <span class="tok-str">"js"</span>            <span class="tok-com"># "js" or "typescript"</span>
+license   = <span class="tok-str">"Apache-2.0"</span>    <span class="tok-com"># SPDX id (optional)</span>
+description = <span class="tok-str">"One-line summary."</span>   <span class="tok-com"># optional, indexed by search</span>
+homepage   = <span class="tok-str">"https://example.com"</span> <span class="tok-com"># optional</span>
+keywords   = [<span class="tok-str">"text"</span>, <span class="tok-str">"util"</span>]      <span class="tok-com"># optional, indexed by search</span>
+
+[runtime]
+min = <span class="tok-str">"0.1.0"</span>                <span class="tok-com"># minimum engine version this package needs</span>
+
+[dependencies]               <span class="tok-com"># other registry packages — pinned by digest</span>
+<span class="tok-str">"acme/json-tools"</span> = <span class="tok-str">"sha256:9f86d0…"</span>
+
+[npm]                        <span class="tok-com"># npm packages — semver ranges</span>
+date-fns = <span class="tok-str">"^3"</span></pre>
+      </div>
+      <p>Use <code>burn add acme/json-tools</code> to pin a registry dependency (it resolves the digest for you) and edit <code>[npm]</code> directly for npm packages — both install with <code>burn install</code>.</p>
+
+      <h3 id="packages-manifold">manifold.json — the capability grant</h3>
+      <p>The Manifold is the package's entire permission surface. It is <strong>sealed by default</strong>: a fresh package can touch nothing — no network, no filesystem, no environment, no subprocess. You open exactly the doors your code needs, and the registry shows reviewers those grants before anyone installs. Every field is deny-by-default.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">json</span><button class="copy-btn">Copy</button></div>
+<pre>{
+  <span class="tok-str">"fs"</span>: <span class="tok-str">"None"</span>,                         <span class="tok-com">// or {"ReadOnly":["/data"]} / {"ReadWrite":["/tmp"]}</span>
+  <span class="tok-str">"net"</span>: { <span class="tok-str">"OutboundHttp"</span>: [<span class="tok-str">"api.example.com"</span>] }, <span class="tok-com">// "None" | {"OutboundHttp":[hosts]} | "Any"</span>
+  <span class="tok-str">"env"</span>: <span class="tok-str">"None"</span>,                        <span class="tok-com">// "None" | {"Allow":["API_KEY"]} | "All"</span>
+  <span class="tok-str">"crypto"</span>: <span class="tok-num">false</span>,                     <span class="tok-com">// allow require('crypto')</span>
+  <span class="tok-str">"child_process"</span>: <span class="tok-num">false</span>,             <span class="tok-com">// allow spawning subprocesses</span>
+  <span class="tok-str">"allow_exit"</span>: <span class="tok-num">false</span>,                <span class="tok-com">// process.exit() ends the call vs throwing</span>
+  <span class="tok-str">"http_timeout_ms"</span>: <span class="tok-num">30000</span>,          <span class="tok-com">// per-request wall-clock cap</span>
+  <span class="tok-str">"listen"</span>: <span class="tok-str">"None"</span>                      <span class="tok-com">// inbound server ports: "None" | {"Ports":[8080]}</span>
+}</pre>
+      </div>
+      <p>A few rules worth internalizing: <code>net</code> host-allow-lists match exact hostnames (a port may be appended, e.g. <code>"api.example.com:443"</code>); <code>fs</code> grants are rooted at the listed paths and reads/writes outside them are denied; an absent field stays at its sealed default, so a manifold can never be accidentally widened by omission. The <code>burn init --allow-net host --allow-fs-read /data</code> flags write these grants for you.</p>
+
+      <h3 id="packages-entry">The entry function</h3>
+      <p>A package's entry module assigns its export with <code>module.exports</code>. The export is normally a function — sync or async — that takes one JSON-serializable input and returns a JSON-serializable result. That is the whole contract; the host passes input in and reads the return (or the resolved promise) out.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">javascript</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-com">// source/main.js</span>
+<span class="tok-kw">const</span> util = <span class="tok-fn">require</span>(<span class="tok-str">'./lib/util'</span>);   <span class="tok-com">// sibling modules: relative require</span>
+<span class="tok-kw">const</span> dates = <span class="tok-fn">require</span>(<span class="tok-str">'date-fns'</span>);   <span class="tok-com">// npm dep: bare specifier (from [npm])</span>
+
+<span class="tok-kw">module</span>.exports = <span class="tok-kw">async function</span> (input) {
+  <span class="tok-kw">const</span> res = <span class="tok-kw">await</span> <span class="tok-fn">fetch</span>(<span class="tok-str">'https://api.example.com/v1/x'</span>); <span class="tok-com">// needs net grant</span>
+  <span class="tok-kw">return</span> { ok: res.ok, value: util.transform(<span class="tok-kw">await</span> res.json()) };
+};</pre>
+      </div>
+      <p>Inside the sandbox you have a Node-compatible surface (<code>fetch</code>, <code>crypto</code>, <code>fs</code>, <code>path</code>, streams, and more) — but every capability-backed call is gated by the Manifold above. A package authored in TypeScript exports the same way; the type annotations are stripped to JavaScript when you <code>burn package</code>.</p>
+
+      <h3 id="packages-test">Test &amp; pack</h3>
+      <p>Tests live in <code>tests/*.test.js</code> and run through the real runtime with <code>burn test</code> (Node's built-in <code>node:test</code> + <code>node:assert</code>). When it's green, build and publish:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> test          <span class="tok-com"># run tests/ through the sandbox</span>
+$ <span class="tok-mod">burn</span> package       <span class="tok-com"># build the .afb (deterministic, content-addressed)</span>
+$ <span class="tok-mod">burn</span> publish       <span class="tok-com"># build + upload to the registry</span></pre>
+      </div>
 
       <h3 id="packages-scaffold">Scaffold a package</h3>
       <p>Start a new package in JavaScript or TypeScript. TypeScript is a build-time convenience: <code>burn package</code> transpiles <code>.ts</code> to <code>.js</code> at pack time, so the published <code>.afb</code> is always plain JavaScript.</p>
