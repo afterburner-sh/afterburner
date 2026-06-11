@@ -156,7 +156,7 @@ requires a commercial license — including via forks, rebrands, vendored, or
 embedded copies. See **[LICENSING.md](LICENSING.md)**; contact
 `info@afterburner.sh`.
 
-"Afterburner" and related marks are trademarks of Psila.AI; see
+"Afterburner" and related marks are trademarks of vertexclique; see
 [TRADEMARK.md](TRADEMARK.md). Contributions require a [CLA](CLA.md).
 
 ---

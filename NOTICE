@@ -1,7 +1,7 @@
 Afterburner
-Copyright (c) 2026 Psila.AI
+Copyright (c) 2026 vertexclique
 
-This product includes software developed by Psila.AI and contributors.
+This product includes software developed by vertexclique and contributors.
 
 The engine crates (afterburner, afterburner-core, afterburner-wasi,
 afterburner-ignite, afterburner-flow, afterburner-adaptive,
@@ -18,7 +18,7 @@ examples/ (see examples/LICENSE), and the afterburner-afb and burn/*
 packages — are licensed under Apache-2.0 via their own LICENSE /
 `license` metadata and are not subject to the Business Source License.
 
-"Afterburner", "burn", and related Marks are trademarks of Psila.AI. See
+"Afterburner", "burn", and related Marks are trademarks of vertexclique. See
 TRADEMARK.md. Use of the source code under the LICENSE does not grant any
 trademark rights.
 
