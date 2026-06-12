@@ -357,6 +357,17 @@ pub fn install(
             .with_context(|| format!("writing {}", path.display()))?;
     }
 
+    // Make every installed package require()-able from here: link each one
+    // into ./node_modules/<ns>/<name> (extracted from the content-addressed
+    // cache). Package installs link next to their manifest; a bare
+    // `burn install ns/pkg` links into the cwd npm-style, so a standalone
+    // script's `require('ns/pkg')` works immediately.
+    let link_dir = plan
+        .write_lock_to
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    link_afb_deps(&items, &link_dir)?;
+
     report_install(&plan.lockfile, &summary);
 
     // npm dependencies (the `[npm]` section) - resolved + extracted +
@@ -385,7 +396,7 @@ fn install_npm_deps(
     let client = afterburner_cloud::npm::NpmClient::new(base);
     let res = style::spin("resolving npm", || client.resolve_all(npm))?;
     let n = res.packages.len();
-    for pkg in res.packages.values() {
+    for pkg in &res.packages {
         afterburner_cloud::npm::store_npm(pkg)?;
     }
     if let Some(dir) = link_into {
@@ -403,7 +414,7 @@ fn install_npm_deps(
             "(native)"
         }),
     );
-    for pkg in res.packages.values() {
+    for pkg in &res.packages {
         println!(
             "  {} {} {}",
             style::bullet(),
@@ -414,18 +425,47 @@ fn install_npm_deps(
     Ok(())
 }
 
+/// Link every locked registry dependency into `dir/node_modules/<ns>/<name>`
+/// as a symlink to its extracted `pkg-src/<digest>` tree, so the module
+/// loader resolves `require("ns/name")` exactly like any other package.
+fn link_afb_deps(items: &[afterburner_cloud::InstallItem], dir: &std::path::Path) -> Result<()> {
+    let nm = dir.join("node_modules");
+    for item in items {
+        let src = afterburner_cloud::cache::ensure_extracted(&item.digest)
+            .with_context(|| format!("extracting {}", item.coord))?;
+        afterburner_cloud::cache::link_dir(&src, &nm.join(&item.coord))
+            .with_context(|| format!("linking {}", item.coord))?;
+    }
+    Ok(())
+}
+
 /// Self-heal for `burn run` / `burn test`: when the package manifest declares
-/// `[npm]` deps but `dir/node_modules` is missing (fresh clone, after
+/// dependencies but `dir/node_modules` is missing (fresh clone, after
 /// `burn clean`), resolve + link them now - cargo builds on `cargo run`, burn
 /// installs on `burn run`. A present node_modules is trusted as-is.
 pub fn ensure_npm_linked(dir: &std::path::Path) -> Result<()> {
     let Ok(local) = pkg::LocalPackage::load(dir) else {
         return Ok(());
     };
-    if local.manifest.npm.is_empty() || dir.join("node_modules").exists() {
+    if dir.join("node_modules").exists() {
         return Ok(());
     }
-    install_npm_deps(&local.manifest.npm, Some(dir))
+    // Registry deps re-link from the lockfile when present (no network);
+    // a missing lockfile resolves fresh through the normal install path.
+    if !local.manifest.dependencies.is_empty() {
+        let lock_path = dir.join(LOCKFILE_NAME);
+        if let Ok(text) = std::fs::read_to_string(&lock_path)
+            && let Ok(lock) = Lockfile::parse(&text)
+        {
+            link_afb_deps(&lock.install_items(), dir)?;
+        } else {
+            return install(None, None, None, false);
+        }
+    }
+    if !local.manifest.npm.is_empty() {
+        install_npm_deps(&local.manifest.npm, Some(dir))?;
+    }
+    Ok(())
 }
 
 struct InstallPlan {
