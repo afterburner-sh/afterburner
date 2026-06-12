@@ -308,13 +308,27 @@ function __plenum_install_http(moduleName) {
 
         // -------- server-side createServer ------------------------------
 
-        function createServer(requestListener) {
+        function createServer(optionsOrListener, maybeListener) {
+            // Node signature: createServer([options], [requestListener]).
+            var requestListener = typeof optionsOrListener === 'function'
+                ? optionsOrListener
+                : maybeListener;
             var server = Object.create(EventEmitter.prototype);
             EventEmitter.call(server);
 
             if (typeof requestListener === 'function') {
                 server.on('request', requestListener);
             }
+
+            // Timeout knobs frameworks set unconditionally at construction
+            // (fastify, express). Accepted and recorded; the daemon's own
+            // request timeout governs actual enforcement.
+            server.timeout = 0;
+            server.setTimeout = function(ms, cb) {
+                server.timeout = ms || 0;
+                if (typeof cb === 'function') server.on('timeout', cb);
+                return server;
+            };
 
             server.listen = function(portOrOpts, hostOrBacklogOrCb, backlogOrCb, cbArg) {
                 // `.listen(port, [host], [backlog], [cb])` and
@@ -810,6 +824,22 @@ function __plenum_install_http(moduleName) {
         };
         exports.ServerResponse.prototype.hasHeader = function(k) {
             return Object.prototype.hasOwnProperty.call(this._headers, String(k).toLowerCase());
+        };
+        // Socket plumbing for response-capture harnesses (light-my-request
+        // hands the response a throwaway Writable). We only track the
+        // reference; actual bytes flow through write()/end() above.
+        exports.ServerResponse.prototype.assignSocket = function(socket) {
+            this.socket = socket;
+            this.connection = socket;
+            return this;
+        };
+        exports.ServerResponse.prototype.detachSocket = function(_socket) {
+            this.socket = null;
+            this.connection = null;
+            return this;
+        };
+        exports.ServerResponse.prototype.flushHeaders = function() {
+            this.headersSent = true;
         };
         exports.ServerResponse.prototype.writeHead = function(status, statusMsg, headers) {
             this.statusCode = status | 0;
