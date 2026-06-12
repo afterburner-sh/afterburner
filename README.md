@@ -65,12 +65,12 @@ Pin a specific version with `BURN_VERSION`:
 
 ```sh
 # POSIX (put the latest version if you want, below command might be outdated)
-BURN_VERSION=v0.1.2 curl -fsSL https://afterburner.sh | sh
+BURN_VERSION=v0.1.3 curl -fsSL https://afterburner.sh | sh
 ```
 
 ```powershell
 # PowerShell (put the latest version if you want, below command might be outdated)
-$env:BURN_VERSION = 'v0.1.2'; iwr -useb https://afterburner.sh | iex
+$env:BURN_VERSION = 'v0.1.3'; iwr -useb https://afterburner.sh | iex
 ```
 
 Or grab a tarball directly from the [Releases page](https://github.com/afterburner-sh/afterburner/releases). Archives are named `burn-<version>-<target>.tar.gz` (or `.zip` for Windows) and ship with a `.sha256` next to them.

@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "afterburner-adaptive",
  "afterburner-afb",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-adaptive"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "afterburner-core",
  "afterburner-ignite",
@@ -122,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-afb"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "afterburner-core",
  "semver",
@@ -138,7 +138,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-cloud"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "afterburner-afb",
  "afterburner-core",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "fastrace",
  "kovan-map",
@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-flow"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "afterburner-core",
  "afterburner-wasi",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-ignite"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "afterburner-core",
  "afterburner-node-compat",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-node-compat"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-plugin"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "base64 0.22.1",
  "javy-plugin-api",
@@ -262,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-thrust"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "afterburner-core",
  "afterburner-wasi",
@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-wasi"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "afterburner-core",
  "afterburner-ignite",
