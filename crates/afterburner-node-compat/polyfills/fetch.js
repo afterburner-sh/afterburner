@@ -199,9 +199,22 @@
         // base64-encode the raw bytes.
         this._bodyText = '';
         this._bodyB64 = init.bodyB64 || null;
+        this._bodyStream = null;
         if (body != null && this._bodyB64 === null) {
             var Buf = globalThis.Buffer || require('buffer').Buffer;
-            if (body instanceof ArrayBuffer) {
+            if (typeof body === 'object' && typeof body.getReader === 'function') {
+                // ReadableStream BodyInit - the `new Response(res.body, res)`
+                // rebuild every fetch-based framework does (Hono, itty, ...).
+                // Our own lazy streams carry the original bytes as hints, so
+                // rebuilding from them is a SYNC copy; a foreign stream is
+                // kept and drained on first read.
+                if (body._afbB64 !== undefined || body._afbText !== undefined) {
+                    this._bodyB64 = body._afbB64 != null ? body._afbB64 : null;
+                    this._bodyText = body._afbText != null ? body._afbText : '';
+                } else {
+                    this._bodyStream = body;
+                }
+            } else if (body instanceof ArrayBuffer) {
                 this._bodyB64 = Buf.from(new Uint8Array(body)).toString('base64');
             } else if (ArrayBuffer.isView(body)) {
                 // Uint8Array / DataView / other typed arrays — copy the
@@ -221,9 +234,30 @@
         this.url = init.url || '';
         this.bodyUsed = false;
     }
+    /// Drain a foreign ReadableStream body into one Buffer.
+    function drainStream(stream) {
+        var Buffer = require('buffer').Buffer;
+        var reader = stream.getReader();
+        var chunks = [];
+        function pump() {
+            return reader.read().then(function(r) {
+                if (r.done) return Buffer.concat(chunks.map(function(c) {
+                    return Buffer.isBuffer(c) ? c
+                        : ArrayBuffer.isView(c) ? Buffer.from(c.buffer, c.byteOffset, c.byteLength)
+                        : Buffer.from(String(c), 'utf8');
+                }));
+                if (r.value != null) chunks.push(r.value);
+                return pump();
+            });
+        }
+        return pump();
+    }
     Response.prototype.text = function() {
         if (this.bodyUsed) return Promise.reject(new TypeError('Body already consumed'));
         this.bodyUsed = true;
+        if (this._bodyStream) {
+            return drainStream(this._bodyStream).then(function(buf) { return buf.toString('utf8'); });
+        }
         // Decode base64 → utf8 when binary bytes are authoritative so
         // text() sees proper decoded characters rather than the lossy
         // roundtrip.
@@ -239,6 +273,11 @@
     Response.prototype.arrayBuffer = function() {
         if (this.bodyUsed) return Promise.reject(new TypeError('Body already consumed'));
         this.bodyUsed = true;
+        if (this._bodyStream) {
+            return drainStream(this._bodyStream).then(function(buf) {
+                return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length);
+            });
+        }
         var Buffer = require('buffer').Buffer;
         // `bodyB64` roundtrips binary losslessly; fall back to utf8
         // encode of the text view when the host didn't provide it.
@@ -248,6 +287,52 @@
         }
         return Promise.resolve(Buffer.from(this._bodyText, 'utf8').buffer);
     };
+    /// Spec accessor: `res.body` is a ReadableStream of the payload (null
+    /// when there is none). Built lazily over the stored bytes and tagged
+    /// with `_afbB64`/`_afbText` hints so `new Response(res.body, res)`
+    /// rebuilds SYNCHRONOUSLY from the original data instead of an async
+    /// drain. Accessing `body` does not consume; reading does.
+    Object.defineProperty(Response.prototype, 'body', {
+        configurable: true,
+        get: function() {
+            if (this._bodyStream) return this._bodyStream;
+            if (this._bodyB64 === null && this._bodyText === '') return null;
+            if (!this._afbBodyOut) {
+                var b64 = this._bodyB64;
+                var text = this._bodyText;
+                var bytes = function() {
+                    var Buffer = require('buffer').Buffer;
+                    var buf = b64 !== null ? Buffer.from(b64, 'base64') : Buffer.from(text, 'utf8');
+                    return new Uint8Array(buf.buffer, buf.byteOffset, buf.length);
+                };
+                var rs;
+                if (typeof ReadableStream === 'function') {
+                    rs = new ReadableStream({
+                        start: function(c) { c.enqueue(bytes()); c.close(); }
+                    });
+                } else {
+                    // Minimal duck-typed reader for hosts without streams.
+                    rs = { getReader: function() {
+                        var done = false;
+                        return {
+                            read: function() {
+                                if (done) return Promise.resolve({ done: true, value: undefined });
+                                done = true;
+                                return Promise.resolve({ done: false, value: bytes() });
+                            },
+                            releaseLock: function() {},
+                            cancel: function() { return Promise.resolve(); }
+                        };
+                    } };
+                }
+                rs._afbB64 = b64;
+                rs._afbText = text;
+                this._afbBodyOut = rs;
+            }
+            return this._afbBodyOut;
+        }
+    });
+
     /// `Response.prototype.bytes()` — Node 22+ shortcut that returns
     /// a Uint8Array view of the body. Avoids the arrayBuffer ↔ view
     /// round-trip dance for the common "give me bytes" case.
