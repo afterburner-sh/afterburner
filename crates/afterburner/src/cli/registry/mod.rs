@@ -334,7 +334,7 @@ pub fn install(
             return Ok(());
         }
         // No afb deps, but there may be npm deps to install.
-        install_npm_deps(&plan.npm)?;
+        install_npm_deps(&plan.npm, plan.write_lock_to.as_deref())?;
         return Ok(());
     }
 
@@ -360,15 +360,23 @@ pub fn install(
     report_install(&plan.lockfile, &summary);
 
     // npm dependencies (the `[npm]` section) - resolved + extracted +
-    // cached by the NATIVE installer (no `npm` binary, no process spawn).
-    install_npm_deps(&plan.npm)?;
+    // cached by the NATIVE installer (no `npm` binary, no process spawn),
+    // then linked into ./node_modules so `burn run` / `burn test` resolve
+    // them exactly like Node would.
+    install_npm_deps(&plan.npm, plan.write_lock_to.as_deref())?;
     Ok(())
 }
 
 /// Resolve + cache the `[npm]` dependencies natively. Each package is
 /// integrity-checked, native-rejected, and stored in the content-addressed
-/// npm cache for the runtime linker. No Node toolchain involved.
-fn install_npm_deps(npm: &std::collections::BTreeMap<String, String>) -> Result<()> {
+/// npm cache. With `link_into = Some(dir)` (a local-package install), the
+/// resolved set is additionally materialized as `dir/node_modules` symlinks
+/// into the cache - the build artifact the runtime resolves bare specifiers
+/// from. No Node toolchain involved.
+fn install_npm_deps(
+    npm: &std::collections::BTreeMap<String, String>,
+    link_into: Option<&std::path::Path>,
+) -> Result<()> {
     if npm.is_empty() {
         return Ok(());
     }
@@ -380,13 +388,20 @@ fn install_npm_deps(npm: &std::collections::BTreeMap<String, String>) -> Result<
     for pkg in res.packages.values() {
         afterburner_cloud::npm::store_npm(pkg)?;
     }
+    if let Some(dir) = link_into {
+        afterburner_cloud::npm::link_node_modules(&res, dir)?;
+    }
     println!(
         "{} {}",
         style::ok(&format!(
             "installed {n} npm package{}",
             if n == 1 { "" } else { "s" }
         )),
-        style::muted("(native)"),
+        style::muted(if link_into.is_some() {
+            "(native, linked into node_modules)"
+        } else {
+            "(native)"
+        }),
     );
     for pkg in res.packages.values() {
         println!(
@@ -397,6 +412,20 @@ fn install_npm_deps(npm: &std::collections::BTreeMap<String, String>) -> Result<
         );
     }
     Ok(())
+}
+
+/// Self-heal for `burn run` / `burn test`: when the package manifest declares
+/// `[npm]` deps but `dir/node_modules` is missing (fresh clone, after
+/// `burn clean`), resolve + link them now - cargo builds on `cargo run`, burn
+/// installs on `burn run`. A present node_modules is trusted as-is.
+pub fn ensure_npm_linked(dir: &std::path::Path) -> Result<()> {
+    let Ok(local) = pkg::LocalPackage::load(dir) else {
+        return Ok(());
+    };
+    if local.manifest.npm.is_empty() || dir.join("node_modules").exists() {
+        return Ok(());
+    }
+    install_npm_deps(&local.manifest.npm, Some(dir))
 }
 
 struct InstallPlan {
@@ -712,6 +741,13 @@ pub fn clean(dir: Option<&Path>, cache: bool) -> Result<()> {
         std::fs::remove_file(&lock).ok();
         report(LOCKFILE_NAME, &lock);
     }
+    // node_modules: a build artifact `burn install` materializes (symlinks
+    // into the shared cache). Safe to remove; the next install/run relinks.
+    let nm = dir.join("node_modules");
+    if nm.exists() {
+        std::fs::remove_dir_all(&nm).ok();
+        report("node_modules", &nm);
+    }
 
     // Shared caches (opt-in). These are CONTENT-ADDRESSED, so clearing them
     // can never break another project's dependency chain: a missing entry is
@@ -780,6 +816,8 @@ pub fn clean(dir: Option<&Path>, cache: bool) -> Result<()> {
 
 pub fn test(cli: &Cli, dir: Option<&Path>) -> Result<()> {
     let dir = dir.unwrap_or_else(|| Path::new("."));
+    // Tests resolve the same [npm] deps as the entry; link them if missing.
+    ensure_npm_linked(dir)?;
     let tests_dir = dir.join("tests");
     if !tests_dir.is_dir() {
         anyhow::bail!(

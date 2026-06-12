@@ -391,6 +391,49 @@ fn collect(root: &Path, cur: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Resu
     Ok(())
 }
 
+// ---- node_modules linking (the dev-loop materializer) -----------------------
+
+/// Materialize `dir/node_modules` from the cache: one entry per resolved
+/// package, flat (the resolver dedupes to a single version per name), each a
+/// symlink into the content-addressed cache (a copy on platforms without
+/// symlinks). This is the cargo model: `node_modules` is a build artifact
+/// next to the manifest - never packed into the `.afb` (the runtime linker
+/// serves embedders from the cache directly) - and `burn clean` removes it.
+pub fn link_node_modules(res: &NpmResolution, dir: &std::path::Path) -> Result<()> {
+    let nm = dir.join("node_modules");
+    std::fs::create_dir_all(&nm).map_err(CloudError::Io)?;
+    for pkg in res.packages.values() {
+        let target = npm_cache_dir(&pkg.name, &pkg.version)?;
+        let link = nm.join(&pkg.name);
+        if let Some(parent) = link.parent() {
+            std::fs::create_dir_all(parent).map_err(CloudError::Io)?;
+        }
+        // Replace whatever is there (older version link, stale copy).
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&link);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).map_err(CloudError::Io)?;
+        #[cfg(not(unix))]
+        copy_dir_recursive(&target, &link)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(to).map_err(CloudError::Io)?;
+    for entry in std::fs::read_dir(from).map_err(CloudError::Io)? {
+        let entry = entry.map_err(CloudError::Io)?;
+        let dst = to.join(entry.file_name());
+        if entry.file_type().map_err(CloudError::Io)?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst)?;
+        } else {
+            std::fs::copy(entry.path(), &dst).map_err(CloudError::Io)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

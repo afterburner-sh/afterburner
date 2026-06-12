@@ -97,7 +97,11 @@ pub fn run_package_or_file(
     match file {
         Some(p) => run_file(cli, &p.to_path_buf(), user_args),
         None => {
-            let entry = resolve_package_entry(std::path::Path::new("."))?;
+            let dir = std::path::Path::new(".");
+            let entry = resolve_package_entry(dir)?;
+            // cargo builds on `cargo run`; burn links missing [npm] deps on
+            // `burn run` (no-op when node_modules exists or none declared).
+            super::registry::ensure_npm_linked(dir)?;
             run_file(cli, &entry, user_args)
         }
     }
