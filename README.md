@@ -65,12 +65,12 @@ Pin a specific version with `BURN_VERSION`:
 
 ```sh
 # POSIX (put the latest version if you want, below command might be outdated)
-BURN_VERSION=v0.1.2 curl -fsSL https://afterburner.sh | sh
+BURN_VERSION=v0.1.3 curl -fsSL https://afterburner.sh | sh
 ```
 
 ```powershell
 # PowerShell (put the latest version if you want, below command might be outdated)
-$env:BURN_VERSION = 'v0.1.2'; iwr -useb https://afterburner.sh | iex
+$env:BURN_VERSION = 'v0.1.3'; iwr -useb https://afterburner.sh | iex
 ```
 
 Or grab a tarball directly from the [Releases page](https://github.com/afterburner-sh/afterburner/releases). Archives are named `burn-<version>-<target>.tar.gz` (or `.zip` for Windows) and ship with a `.sha256` next to them.
@@ -142,6 +142,29 @@ burn publish                                          # upload to the registry
 
 Full authoring guide and the dependency-security model are in the
 [documentation](https://afterburner.sh/docs#packages).
+
+---
+
+## Use with AI coding agents
+
+One command routes every piece of JavaScript your AI assistant writes
+through the sealed sandbox instead of raw `node`:
+
+```sh
+burn agent install     # arrow-key multi-select: Claude Code, Codex, Gemini CLI, Cursor, Copilot, Antigravity
+burn agent status      # what's detected, wired, and current
+burn agent uninstall   # exact inverse - configs restored, nothing left behind
+```
+
+It wires a pre-tool hook into each assistant's config (plus a short
+instruction block where the assistant reads one). When the assistant
+tries `node app.js`, `npm test`, or `npx tsx ...`, the hook hands back
+the corrected command - `burn --sandbox node app.js` - and the assistant
+re-runs it sealed: no network, no filesystem, no env access. Capabilities
+are granted per run, narrowly, only when the code genuinely needs them
+(`burn --sandbox --allow-net=api.example.com node app.js`). Runtime
+failures surface in the conversation prefixed `BURN:` so they're
+unmistakably the runtime speaking. One-off bypass: `BURN_AGENT_HOOK=0`.
 
 ---
 

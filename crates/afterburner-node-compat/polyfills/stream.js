@@ -33,9 +33,13 @@ __register_module('stream', function(module, exports, require) {
         this._read = (opts.read || function() {}).bind(this);
         this._flowing = null; // null = unset, true = flowing, false = paused
         var self = this;
-        // Auto-flow on first data listener.
+        // Auto-flow on first data listener. The pump is deferred a
+        // microtask so the listener is attached before _read() pushes.
         this.on('newListener', function(name) {
-            if (name === 'data' && self._flowing === null) self._flowing = true;
+            if (name === 'data' && self._flowing === null) {
+                self._flowing = true;
+                queueMicrotask(function() { self._pump(); });
+            }
         });
     }
     Readable.prototype = Object.create(EventEmitter.prototype);
@@ -53,11 +57,30 @@ __register_module('stream', function(module, exports, require) {
         if (this._destroyed) return false;
         if (this._flowing) {
             this.emit('data', chunk);
+            // Keep pulling: Node re-invokes _read() as the consumer keeps
+            // up. Deferred so a synchronous multi-push _read never recurses.
+            var self = this;
+            queueMicrotask(function() { self._pump(); });
         } else {
             this._buffer.push(chunk);
             this.emit('readable');
         }
         return true;
+    };
+    // Ask the underlying source (`_read`, set via `new Readable({read})`
+    // or assigned by subclasses) for more data. Re-entrancy-guarded; a
+    // source that pushes nothing simply stops the flow until the next
+    // explicit resume()/read().
+    Readable.prototype._pump = function() {
+        if (this._pumping || this._ended || this._destroyed) return;
+        if (typeof this._read !== 'function') return;
+        this._pumping = true;
+        try {
+            this._read(this._highWaterMark);
+        } catch (e) {
+            this.emit('error', e);
+        }
+        this._pumping = false;
     };
     Readable.prototype._drainBuffer = function() {
         while (this._buffer.length && this._flowing !== false) {
@@ -65,6 +88,11 @@ __register_module('stream', function(module, exports, require) {
         }
     };
     Readable.prototype.read = function() {
+        if (this._buffer.length === 0) {
+            // Paused-mode pull: give the source a chance to fill the
+            // buffer synchronously (Node calls _read here too).
+            this._pump();
+        }
         if (this._buffer.length === 0) return null;
         return this._buffer.shift();
     };
@@ -72,9 +100,31 @@ __register_module('stream', function(module, exports, require) {
         this._flowing = false;
         return this;
     };
+    // setEncoding(enc): emit strings instead of Buffers. Body collectors
+    // (fastify's content-type parser, raw-body) call this before reading.
+    Readable.prototype.setEncoding = function(enc) {
+        this._encoding = enc || 'utf8';
+        var self = this;
+        if (!this._encodingWrapped) {
+            this._encodingWrapped = true;
+            var origEmit = this.emit;
+            this.emit = function(name, chunk) {
+                if (name === 'data' && self._encoding && chunk != null && typeof chunk !== 'string') {
+                    var args = Array.prototype.slice.call(arguments);
+                    args[1] = (typeof Buffer !== 'undefined' && Buffer.isBuffer(chunk))
+                        ? chunk.toString(self._encoding)
+                        : String(chunk);
+                    return origEmit.apply(this, args);
+                }
+                return origEmit.apply(this, arguments);
+            };
+        }
+        return this;
+    };
     Readable.prototype.resume = function() {
         this._flowing = true;
         this._drainBuffer();
+        this._pump();
         return this;
     };
     Readable.prototype.pipe = function(dest, opts) {

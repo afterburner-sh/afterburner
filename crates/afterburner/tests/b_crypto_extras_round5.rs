@@ -32,6 +32,14 @@ fn run(src: &str) -> std::process::Output {
 fn run_with_env(src: &str, env: &[(&str, &str)]) -> std::process::Output {
     let mut cmd = Command::new(BURN);
     cmd.env("BURN_QUIET", "1").arg("-A").arg("-e").arg(src);
+    // The host shell's color vars would override the TERM each test pins
+    // (COLORTERM=truecolor beats TERM=dumb in getColorDepth) - clear them
+    // unless the test sets them itself.
+    for k in ["COLORTERM", "FORCE_COLOR", "NO_COLOR"] {
+        if !env.iter().any(|(ek, _)| ek == &k) {
+            cmd.env_remove(k);
+        }
+    }
     for (k, v) in env {
         cmd.env(k, v);
     }

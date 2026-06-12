@@ -161,11 +161,40 @@ fn dispatch_node(cli: &mut Cli) -> Result<()> {
 /// our shim and re-enter burn.
 fn dispatch_via_shim(cli: &mut Cli, target: &str) -> Result<()> {
     check_shim_depth()?;
-    let shim_dir = shim::ensure_shim_dir()?;
+    let shim_dir = shim::ensure_shim_dir(&capability_flags(cli))?;
     let real = find_real_binary(target, &shim_dir)
         .ok_or_else(|| anyhow::anyhow!("burn: '{target}' not found on PATH"))?;
     let args = passthrough_args(cli, target);
     exec_with_shim(&real, &args, &shim_dir)
+}
+
+/// The invoking run's sandbox/capability flags, baked into the PATH shim
+/// so every `node` re-entry in the child-process tree keeps the same
+/// posture (`burn --sandbox npm test` seals the nested test runs too).
+fn capability_flags(cli: &Cli) -> Vec<String> {
+    let mut f = Vec::new();
+    if cli.sandbox {
+        f.push("--sandbox".to_string());
+    }
+    if cli.allow_all {
+        f.push("--allow-all".to_string());
+    }
+    if cli.allow_child_process {
+        f.push("--allow-child-process".to_string());
+    }
+    for (flag, value) in [
+        ("--allow-net", &cli.allow_net),
+        ("--allow-listen", &cli.allow_listen),
+        ("--allow-fs", &cli.allow_fs),
+        ("--allow-fs-read", &cli.allow_fs_read),
+        ("--allow-fs-write", &cli.allow_fs_write),
+        ("--allow-env", &cli.allow_env),
+    ] {
+        if let Some(v) = value {
+            f.push(format!("{flag}={v}"));
+        }
+    }
+    f
 }
 
 /// The target's argument vector. Prefer `cli.rest_args` (the common

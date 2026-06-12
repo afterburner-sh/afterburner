@@ -160,6 +160,34 @@ __register_module('util', function(module, exports, require) {
 
     exports.deprecate = function(fn, _msg) { return fn; };
 
+    // util.debuglog(section): a conditional stderr logger enabled by
+    // NODE_DEBUG. Reading the env may itself be denied in a sealed
+    // sandbox - that means "not enabled", never an error. The returned
+    // function carries `.enabled` like Node's.
+    exports.debuglog = function(section, cb) {
+        var enabled = false;
+        try {
+            var spec = (typeof process !== 'undefined' && process.env && process.env.NODE_DEBUG) || '';
+            enabled = spec.split(',').some(function(s) {
+                s = s.trim().toUpperCase();
+                if (!s) return false;
+                // NODE_DEBUG supports * wildcards (e.g. `net*`).
+                var re = new RegExp('^' + s.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
+                return re.test(String(section).toUpperCase());
+            });
+        } catch (_) { enabled = false; }
+        var log = enabled
+            ? function() {
+                var msg = exports.format.apply(null, arguments);
+                console.error(String(section).toUpperCase() + ': ' + msg);
+            }
+            : function() {};
+        log.enabled = enabled;
+        if (typeof cb === 'function') cb(log);
+        return log;
+    };
+    exports.debug = exports.debuglog;
+
     // util.types delegates to the full `util/types` module so the
     // surface stays in one place and `require('util').types` returns
     // the same object as `require('util/types')`. The ALL ~40

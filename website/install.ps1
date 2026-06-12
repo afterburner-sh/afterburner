@@ -6,7 +6,7 @@
 # by user agent — PowerShell gets this; curl/wget get install.sh.)
 #
 # Honors:
-#   $env:BURN_VERSION   pinned tag (e.g. v0.1.1). Defaults to "latest".
+#   $env:BURN_VERSION   pinned tag (e.g. v0.1.3). Defaults to "latest".
 #   $env:BURN_INSTALL   install dir. Defaults to $env:USERPROFILE\.local\bin.
 
 $ErrorActionPreference = 'Stop'

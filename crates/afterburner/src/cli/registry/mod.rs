@@ -334,7 +334,7 @@ pub fn install(
             return Ok(());
         }
         // No afb deps, but there may be npm deps to install.
-        install_npm_deps(&plan.npm)?;
+        install_npm_deps(&plan.npm, plan.write_lock_to.as_deref())?;
         return Ok(());
     }
 
@@ -357,18 +357,37 @@ pub fn install(
             .with_context(|| format!("writing {}", path.display()))?;
     }
 
+    // Make every installed package require()-able from here: link each one
+    // into ./node_modules/<ns>/<name> (extracted from the content-addressed
+    // cache). Package installs link next to their manifest; a bare
+    // `burn install ns/pkg` links into the cwd npm-style, so a standalone
+    // script's `require('ns/pkg')` works immediately.
+    let link_dir = plan
+        .write_lock_to
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    link_afb_deps(&items, &link_dir)?;
+
     report_install(&plan.lockfile, &summary);
 
     // npm dependencies (the `[npm]` section) - resolved + extracted +
-    // cached by the NATIVE installer (no `npm` binary, no process spawn).
-    install_npm_deps(&plan.npm)?;
+    // cached by the NATIVE installer (no `npm` binary, no process spawn),
+    // then linked into ./node_modules so `burn run` / `burn test` resolve
+    // them exactly like Node would.
+    install_npm_deps(&plan.npm, plan.write_lock_to.as_deref())?;
     Ok(())
 }
 
 /// Resolve + cache the `[npm]` dependencies natively. Each package is
 /// integrity-checked, native-rejected, and stored in the content-addressed
-/// npm cache for the runtime linker. No Node toolchain involved.
-fn install_npm_deps(npm: &std::collections::BTreeMap<String, String>) -> Result<()> {
+/// npm cache. With `link_into = Some(dir)` (a local-package install), the
+/// resolved set is additionally materialized as `dir/node_modules` symlinks
+/// into the cache - the build artifact the runtime resolves bare specifiers
+/// from. No Node toolchain involved.
+fn install_npm_deps(
+    npm: &std::collections::BTreeMap<String, String>,
+    link_into: Option<&std::path::Path>,
+) -> Result<()> {
     if npm.is_empty() {
         return Ok(());
     }
@@ -377,8 +396,11 @@ fn install_npm_deps(npm: &std::collections::BTreeMap<String, String>) -> Result<
     let client = afterburner_cloud::npm::NpmClient::new(base);
     let res = style::spin("resolving npm", || client.resolve_all(npm))?;
     let n = res.packages.len();
-    for pkg in res.packages.values() {
+    for pkg in &res.packages {
         afterburner_cloud::npm::store_npm(pkg)?;
+    }
+    if let Some(dir) = link_into {
+        afterburner_cloud::npm::link_node_modules(&res, dir)?;
     }
     println!(
         "{} {}",
@@ -386,15 +408,62 @@ fn install_npm_deps(npm: &std::collections::BTreeMap<String, String>) -> Result<
             "installed {n} npm package{}",
             if n == 1 { "" } else { "s" }
         )),
-        style::muted("(native)"),
+        style::muted(if link_into.is_some() {
+            "(native, linked into node_modules)"
+        } else {
+            "(native)"
+        }),
     );
-    for pkg in res.packages.values() {
+    for pkg in &res.packages {
         println!(
             "  {} {} {}",
             style::bullet(),
             style::value(&format!("{}@{}", pkg.name, pkg.version)),
             style::gold("npm"),
         );
+    }
+    Ok(())
+}
+
+/// Link every locked registry dependency into `dir/node_modules/<ns>/<name>`
+/// as a symlink to its extracted `pkg-src/<digest>` tree, so the module
+/// loader resolves `require("ns/name")` exactly like any other package.
+fn link_afb_deps(items: &[afterburner_cloud::InstallItem], dir: &std::path::Path) -> Result<()> {
+    let nm = dir.join("node_modules");
+    for item in items {
+        let src = afterburner_cloud::cache::ensure_extracted(&item.digest)
+            .with_context(|| format!("extracting {}", item.coord))?;
+        afterburner_cloud::cache::link_dir(&src, &nm.join(&item.coord))
+            .with_context(|| format!("linking {}", item.coord))?;
+    }
+    Ok(())
+}
+
+/// Self-heal for `burn run` / `burn test`: when the package manifest declares
+/// dependencies but `dir/node_modules` is missing (fresh clone, after
+/// `burn clean`), resolve + link them now - cargo builds on `cargo run`, burn
+/// installs on `burn run`. A present node_modules is trusted as-is.
+pub fn ensure_npm_linked(dir: &std::path::Path) -> Result<()> {
+    let Ok(local) = pkg::LocalPackage::load(dir) else {
+        return Ok(());
+    };
+    if dir.join("node_modules").exists() {
+        return Ok(());
+    }
+    // Registry deps re-link from the lockfile when present (no network);
+    // a missing lockfile resolves fresh through the normal install path.
+    if !local.manifest.dependencies.is_empty() {
+        let lock_path = dir.join(LOCKFILE_NAME);
+        if let Ok(text) = std::fs::read_to_string(&lock_path)
+            && let Ok(lock) = Lockfile::parse(&text)
+        {
+            link_afb_deps(&lock.install_items(), dir)?;
+        } else {
+            return install(None, None, None, false);
+        }
+    }
+    if !local.manifest.npm.is_empty() {
+        install_npm_deps(&local.manifest.npm, Some(dir))?;
     }
     Ok(())
 }
@@ -712,6 +781,13 @@ pub fn clean(dir: Option<&Path>, cache: bool) -> Result<()> {
         std::fs::remove_file(&lock).ok();
         report(LOCKFILE_NAME, &lock);
     }
+    // node_modules: a build artifact `burn install` materializes (symlinks
+    // into the shared cache). Safe to remove; the next install/run relinks.
+    let nm = dir.join("node_modules");
+    if nm.exists() {
+        std::fs::remove_dir_all(&nm).ok();
+        report("node_modules", &nm);
+    }
 
     // Shared caches (opt-in). These are CONTENT-ADDRESSED, so clearing them
     // can never break another project's dependency chain: a missing entry is
@@ -780,6 +856,8 @@ pub fn clean(dir: Option<&Path>, cache: bool) -> Result<()> {
 
 pub fn test(cli: &Cli, dir: Option<&Path>) -> Result<()> {
     let dir = dir.unwrap_or_else(|| Path::new("."));
+    // Tests resolve the same [npm] deps as the entry; link them if missing.
+    ensure_npm_linked(dir)?;
     let tests_dir = dir.join("tests");
     if !tests_dir.is_dir() {
         anyhow::bail!(

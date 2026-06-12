@@ -141,7 +141,10 @@ pub fn bullet() -> String {
 
 /// The `burn:` error prefix in the brand alert color.
 pub fn error_prefix() -> String {
-    paint_bold("burn:", FLAME_RED)
+    // Uppercase so runtime failures are unmistakably attributable when the
+    // output lands in an AI-assistant transcript ("BURN: ..." reads as the
+    // runtime speaking, not the assistant or the user's script).
+    paint_bold("BURN:", FLAME_RED)
 }
 
 /// Sanitize an error message for display: never surface the JS engine's name,

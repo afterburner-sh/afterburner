@@ -85,3 +85,71 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
+
+/// `~/.cache/burn/pkg-src` - extracted, require-ready package trees, one
+/// dir per content digest (immutable once complete, like the npm cache).
+pub fn src_root() -> Result<PathBuf> {
+    let dir = dirs::cache_dir().ok_or(CloudError::NoCacheDir)?;
+    Ok(dir.join("burn").join("pkg-src"))
+}
+
+/// Extract a cached `.afb` into its `pkg-src/<digest>` tree, generating a
+/// `package.json` whose `main` points at the manifest entry - exactly the
+/// shape the module loader resolves for any `node_modules` entry. Returns
+/// the extracted dir; idempotent (a complete dir is reused as-is).
+///
+/// # Errors
+/// I/O failure, a missing blob, or a corrupt archive.
+pub fn ensure_extracted(digest_hex: &str) -> Result<PathBuf> {
+    let dir = src_root()?.join(digest_hex);
+    if dir.join(".burn-complete").exists() {
+        return Ok(dir);
+    }
+    let blob = path_for(digest_hex)?;
+    let bytes = std::fs::read(&blob)
+        .map_err(|e| CloudError::Cache(format!("reading {}: {e}", blob.display())))?;
+    let afb = afterburner_afb::Afb::from_bytes(&bytes)
+        .map_err(|e| CloudError::Cache(format!("parsing {}: {e}", blob.display())))?;
+
+    let tmp = dir.with_extension("tmp");
+    let _ = std::fs::remove_dir_all(&tmp);
+    for (rel, data) in &afb.source {
+        let p = tmp.join(rel);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&p, data)?;
+    }
+    let pkg_json = serde_json::json!({
+        "name": afb.qualified_name(),
+        "version": afb.manifest.package.version,
+        "main": afb.manifest.package.entry,
+    });
+    std::fs::write(
+        tmp.join("package.json"),
+        serde_json::to_string_pretty(&pkg_json).map_err(|e| CloudError::Cache(e.to_string()))?,
+    )?;
+    std::fs::write(tmp.join(".burn-complete"), b"1")?;
+    let _ = std::fs::remove_dir_all(&dir);
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&tmp, &dir)?;
+    Ok(dir)
+}
+
+/// Symlink `link` -> `target` (a copy on platforms without symlinks),
+/// replacing whatever was there. The same primitive the npm linker uses
+/// for materializing `node_modules` entries.
+pub fn link_dir(target: &Path, link: &Path) -> Result<()> {
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _ = std::fs::remove_file(link);
+    let _ = std::fs::remove_dir_all(link);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link)?;
+    #[cfg(not(unix))]
+    crate::npm::copy_dir_for_link(target, link)?;
+    Ok(())
+}

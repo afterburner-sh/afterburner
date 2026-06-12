@@ -1,4 +1,4 @@
-// GENERATED — do not edit. Source: afterburner-node-compat/polyfills/
+// GENERATED - do not edit. Source: afterburner-node-compat/polyfills/
 // Rebuild with: AFTERBURNER_REBUILD_PLENUM=1 cargo build -p afterburner-node-compat
 
 // ---- require.js ----
@@ -5624,9 +5624,22 @@ __register_module('events', function(module, exports, require) {
         // base64-encode the raw bytes.
         this._bodyText = '';
         this._bodyB64 = init.bodyB64 || null;
+        this._bodyStream = null;
         if (body != null && this._bodyB64 === null) {
             var Buf = globalThis.Buffer || require('buffer').Buffer;
-            if (body instanceof ArrayBuffer) {
+            if (typeof body === 'object' && typeof body.getReader === 'function') {
+                // ReadableStream BodyInit - the `new Response(res.body, res)`
+                // rebuild every fetch-based framework does (Hono, itty, ...).
+                // Our own lazy streams carry the original bytes as hints, so
+                // rebuilding from them is a SYNC copy; a foreign stream is
+                // kept and drained on first read.
+                if (body._afbB64 !== undefined || body._afbText !== undefined) {
+                    this._bodyB64 = body._afbB64 != null ? body._afbB64 : null;
+                    this._bodyText = body._afbText != null ? body._afbText : '';
+                } else {
+                    this._bodyStream = body;
+                }
+            } else if (body instanceof ArrayBuffer) {
                 this._bodyB64 = Buf.from(new Uint8Array(body)).toString('base64');
             } else if (ArrayBuffer.isView(body)) {
                 // Uint8Array / DataView / other typed arrays — copy the
@@ -5646,9 +5659,30 @@ __register_module('events', function(module, exports, require) {
         this.url = init.url || '';
         this.bodyUsed = false;
     }
+    /// Drain a foreign ReadableStream body into one Buffer.
+    function drainStream(stream) {
+        var Buffer = require('buffer').Buffer;
+        var reader = stream.getReader();
+        var chunks = [];
+        function pump() {
+            return reader.read().then(function(r) {
+                if (r.done) return Buffer.concat(chunks.map(function(c) {
+                    return Buffer.isBuffer(c) ? c
+                        : ArrayBuffer.isView(c) ? Buffer.from(c.buffer, c.byteOffset, c.byteLength)
+                        : Buffer.from(String(c), 'utf8');
+                }));
+                if (r.value != null) chunks.push(r.value);
+                return pump();
+            });
+        }
+        return pump();
+    }
     Response.prototype.text = function() {
         if (this.bodyUsed) return Promise.reject(new TypeError('Body already consumed'));
         this.bodyUsed = true;
+        if (this._bodyStream) {
+            return drainStream(this._bodyStream).then(function(buf) { return buf.toString('utf8'); });
+        }
         // Decode base64 → utf8 when binary bytes are authoritative so
         // text() sees proper decoded characters rather than the lossy
         // roundtrip.
@@ -5664,6 +5698,11 @@ __register_module('events', function(module, exports, require) {
     Response.prototype.arrayBuffer = function() {
         if (this.bodyUsed) return Promise.reject(new TypeError('Body already consumed'));
         this.bodyUsed = true;
+        if (this._bodyStream) {
+            return drainStream(this._bodyStream).then(function(buf) {
+                return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length);
+            });
+        }
         var Buffer = require('buffer').Buffer;
         // `bodyB64` roundtrips binary losslessly; fall back to utf8
         // encode of the text view when the host didn't provide it.
@@ -5673,6 +5712,52 @@ __register_module('events', function(module, exports, require) {
         }
         return Promise.resolve(Buffer.from(this._bodyText, 'utf8').buffer);
     };
+    /// Spec accessor: `res.body` is a ReadableStream of the payload (null
+    /// when there is none). Built lazily over the stored bytes and tagged
+    /// with `_afbB64`/`_afbText` hints so `new Response(res.body, res)`
+    /// rebuilds SYNCHRONOUSLY from the original data instead of an async
+    /// drain. Accessing `body` does not consume; reading does.
+    Object.defineProperty(Response.prototype, 'body', {
+        configurable: true,
+        get: function() {
+            if (this._bodyStream) return this._bodyStream;
+            if (this._bodyB64 === null && this._bodyText === '') return null;
+            if (!this._afbBodyOut) {
+                var b64 = this._bodyB64;
+                var text = this._bodyText;
+                var bytes = function() {
+                    var Buffer = require('buffer').Buffer;
+                    var buf = b64 !== null ? Buffer.from(b64, 'base64') : Buffer.from(text, 'utf8');
+                    return new Uint8Array(buf.buffer, buf.byteOffset, buf.length);
+                };
+                var rs;
+                if (typeof ReadableStream === 'function') {
+                    rs = new ReadableStream({
+                        start: function(c) { c.enqueue(bytes()); c.close(); }
+                    });
+                } else {
+                    // Minimal duck-typed reader for hosts without streams.
+                    rs = { getReader: function() {
+                        var done = false;
+                        return {
+                            read: function() {
+                                if (done) return Promise.resolve({ done: true, value: undefined });
+                                done = true;
+                                return Promise.resolve({ done: false, value: bytes() });
+                            },
+                            releaseLock: function() {},
+                            cancel: function() { return Promise.resolve(); }
+                        };
+                    } };
+                }
+                rs._afbB64 = b64;
+                rs._afbText = text;
+                this._afbBodyOut = rs;
+            }
+            return this._afbBodyOut;
+        }
+    });
+
     /// `Response.prototype.bytes()` — Node 22+ shortcut that returns
     /// a Uint8Array view of the body. Avoids the arrayBuffer ↔ view
     /// round-trip dance for the common "give me bytes" case.
@@ -7653,13 +7738,27 @@ function __plenum_install_http(moduleName) {
 
         // -------- server-side createServer ------------------------------
 
-        function createServer(requestListener) {
+        function createServer(optionsOrListener, maybeListener) {
+            // Node signature: createServer([options], [requestListener]).
+            var requestListener = typeof optionsOrListener === 'function'
+                ? optionsOrListener
+                : maybeListener;
             var server = Object.create(EventEmitter.prototype);
             EventEmitter.call(server);
 
             if (typeof requestListener === 'function') {
                 server.on('request', requestListener);
             }
+
+            // Timeout knobs frameworks set unconditionally at construction
+            // (fastify, express). Accepted and recorded; the daemon's own
+            // request timeout governs actual enforcement.
+            server.timeout = 0;
+            server.setTimeout = function(ms, cb) {
+                server.timeout = ms || 0;
+                if (typeof cb === 'function') server.on('timeout', cb);
+                return server;
+            };
 
             server.listen = function(portOrOpts, hostOrBacklogOrCb, backlogOrCb, cbArg) {
                 // `.listen(port, [host], [backlog], [cb])` and
@@ -8155,6 +8254,22 @@ function __plenum_install_http(moduleName) {
         };
         exports.ServerResponse.prototype.hasHeader = function(k) {
             return Object.prototype.hasOwnProperty.call(this._headers, String(k).toLowerCase());
+        };
+        // Socket plumbing for response-capture harnesses (light-my-request
+        // hands the response a throwaway Writable). We only track the
+        // reference; actual bytes flow through write()/end() above.
+        exports.ServerResponse.prototype.assignSocket = function(socket) {
+            this.socket = socket;
+            this.connection = socket;
+            return this;
+        };
+        exports.ServerResponse.prototype.detachSocket = function(_socket) {
+            this.socket = null;
+            this.connection = null;
+            return this;
+        };
+        exports.ServerResponse.prototype.flushHeaders = function() {
+            this.headersSent = true;
         };
         exports.ServerResponse.prototype.writeHead = function(status, statusMsg, headers) {
             this.statusCode = status | 0;
@@ -15054,9 +15169,13 @@ __register_module('stream', function(module, exports, require) {
         this._read = (opts.read || function() {}).bind(this);
         this._flowing = null; // null = unset, true = flowing, false = paused
         var self = this;
-        // Auto-flow on first data listener.
+        // Auto-flow on first data listener. The pump is deferred a
+        // microtask so the listener is attached before _read() pushes.
         this.on('newListener', function(name) {
-            if (name === 'data' && self._flowing === null) self._flowing = true;
+            if (name === 'data' && self._flowing === null) {
+                self._flowing = true;
+                queueMicrotask(function() { self._pump(); });
+            }
         });
     }
     Readable.prototype = Object.create(EventEmitter.prototype);
@@ -15074,11 +15193,30 @@ __register_module('stream', function(module, exports, require) {
         if (this._destroyed) return false;
         if (this._flowing) {
             this.emit('data', chunk);
+            // Keep pulling: Node re-invokes _read() as the consumer keeps
+            // up. Deferred so a synchronous multi-push _read never recurses.
+            var self = this;
+            queueMicrotask(function() { self._pump(); });
         } else {
             this._buffer.push(chunk);
             this.emit('readable');
         }
         return true;
+    };
+    // Ask the underlying source (`_read`, set via `new Readable({read})`
+    // or assigned by subclasses) for more data. Re-entrancy-guarded; a
+    // source that pushes nothing simply stops the flow until the next
+    // explicit resume()/read().
+    Readable.prototype._pump = function() {
+        if (this._pumping || this._ended || this._destroyed) return;
+        if (typeof this._read !== 'function') return;
+        this._pumping = true;
+        try {
+            this._read(this._highWaterMark);
+        } catch (e) {
+            this.emit('error', e);
+        }
+        this._pumping = false;
     };
     Readable.prototype._drainBuffer = function() {
         while (this._buffer.length && this._flowing !== false) {
@@ -15086,6 +15224,11 @@ __register_module('stream', function(module, exports, require) {
         }
     };
     Readable.prototype.read = function() {
+        if (this._buffer.length === 0) {
+            // Paused-mode pull: give the source a chance to fill the
+            // buffer synchronously (Node calls _read here too).
+            this._pump();
+        }
         if (this._buffer.length === 0) return null;
         return this._buffer.shift();
     };
@@ -15093,9 +15236,31 @@ __register_module('stream', function(module, exports, require) {
         this._flowing = false;
         return this;
     };
+    // setEncoding(enc): emit strings instead of Buffers. Body collectors
+    // (fastify's content-type parser, raw-body) call this before reading.
+    Readable.prototype.setEncoding = function(enc) {
+        this._encoding = enc || 'utf8';
+        var self = this;
+        if (!this._encodingWrapped) {
+            this._encodingWrapped = true;
+            var origEmit = this.emit;
+            this.emit = function(name, chunk) {
+                if (name === 'data' && self._encoding && chunk != null && typeof chunk !== 'string') {
+                    var args = Array.prototype.slice.call(arguments);
+                    args[1] = (typeof Buffer !== 'undefined' && Buffer.isBuffer(chunk))
+                        ? chunk.toString(self._encoding)
+                        : String(chunk);
+                    return origEmit.apply(this, args);
+                }
+                return origEmit.apply(this, arguments);
+            };
+        }
+        return this;
+    };
     Readable.prototype.resume = function() {
         this._flowing = true;
         this._drainBuffer();
+        this._pump();
         return this;
     };
     Readable.prototype.pipe = function(dest, opts) {
@@ -17364,6 +17529,34 @@ __register_module('util', function(module, exports, require) {
     };
 
     exports.deprecate = function(fn, _msg) { return fn; };
+
+    // util.debuglog(section): a conditional stderr logger enabled by
+    // NODE_DEBUG. Reading the env may itself be denied in a sealed
+    // sandbox - that means "not enabled", never an error. The returned
+    // function carries `.enabled` like Node's.
+    exports.debuglog = function(section, cb) {
+        var enabled = false;
+        try {
+            var spec = (typeof process !== 'undefined' && process.env && process.env.NODE_DEBUG) || '';
+            enabled = spec.split(',').some(function(s) {
+                s = s.trim().toUpperCase();
+                if (!s) return false;
+                // NODE_DEBUG supports * wildcards (e.g. `net*`).
+                var re = new RegExp('^' + s.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$');
+                return re.test(String(section).toUpperCase());
+            });
+        } catch (_) { enabled = false; }
+        var log = enabled
+            ? function() {
+                var msg = exports.format.apply(null, arguments);
+                console.error(String(section).toUpperCase() + ': ' + msg);
+            }
+            : function() {};
+        log.enabled = enabled;
+        if (typeof cb === 'function') cb(log);
+        return log;
+    };
+    exports.debug = exports.debuglog;
 
     // util.types delegates to the full `util/types` module so the
     // surface stays in one place and `require('util').types` returns

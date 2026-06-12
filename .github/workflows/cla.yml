@@ -41,6 +41,7 @@ jobs:
           branch: 'cla-signatures'
           # The CLA contributors agree to.
           path-to-document: 'https://github.com/afterburner-sh/afterburner/blob/master/CLA.md'
-          allowlist: dependabot[bot]
+          # Maintainers and bots are exempt - the CLA gates external PRs.
+          allowlist: vertexclique,dependabot[bot]
           custom-pr-sign-comment: 'I have read the CLA Document and I hereby sign the CLA'
           custom-allsigned-prcomment: 'All contributors have signed the CLA. ✓'

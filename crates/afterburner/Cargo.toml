@@ -50,6 +50,8 @@ thiserror = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
 # bin-only — colored, animated CLI output (brand palette + spinners).
 crossterm = { workspace = true, optional = true }
+# bin-only — arrow-key MultiSelect for `burn agent install`'s assistant picker.
+dialoguer = { workspace = true, optional = true }
 # bin-only — lock-free worker -> render channel for `burn install`'s progress bar.
 kovan-channel = { workspace = true, optional = true }
 
@@ -128,6 +130,7 @@ bin = [
     "dep:afterburner-cloud",
     "dep:libc",
     "dep:crossterm",
+    "dep:dialoguer",
     "dep:kovan-channel",
     "adaptive",
     "thrust",

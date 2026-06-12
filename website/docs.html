@@ -619,10 +619,54 @@
     .toc { display: none; }
   }
   @media (max-width: 860px) {
-    .layout { grid-template-columns: 1fr; gap: 32px; padding: 28px 20px; }
-    .sidebar { position: static; max-height: none; }
+    /* minmax(0,1fr): a plain 1fr track refuses to shrink below its
+       content's min width (520px tables, long pre lines) - the page then
+       lays out wider than the phone and the browser zooms everything out,
+       which is what made the docs unreadable on mobile. */
+    .layout { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 24px 20px; }
+    .doc { min-width: 0; }
+
+    /* Inline code is nowrap by design on desktop; on a phone a long
+       flag/path span otherwise widens the page. Wrap it, breaking inside
+       the token when there is no better point. */
+    .doc code:not(pre code),
+    .installer__hint code {
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    /* Tables keep their designed min width and pan inside their own
+       scroll container instead of stretching the page. */
+    .doc-table {
+      display: block;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      max-width: 100%;
+    }
     .nav__search { display: none; }
-    .nav__inner { padding: 12px 20px; }
+    .nav__inner { padding: 12px 16px; gap: 8px; }
+    .nav__cta .btn--ghost { display: none; }
+    .nav__burger { display: block; }
+
+    /* Sidebar becomes an off-canvas drawer behind the hamburger. */
+    .sidebar {
+      position: fixed;
+      top: 0; left: 0; bottom: 0;
+      width: min(320px, 86vw);
+      z-index: 60;
+      margin: 0;
+      max-height: none;
+      background: #fff;
+      transform: translateX(-105%);
+      transition: transform 0.25s ease;
+      overflow-y: auto;
+      padding: 20px 20px calc(28px + env(safe-area-inset-bottom));
+      box-shadow: 24px 0 56px rgba(15, 23, 42, 0.16);
+      overscroll-behavior: contain;
+    }
+    body.sb-open .sidebar { transform: none; }
+    body.sb-open { overflow: hidden; }
+    .sb-mobile { display: block; }
     .doc-title { font-size: 40px; letter-spacing: -0.03em; }
     .doc-lede { font-size: 16px; margin-bottom: 24px; }
     .doc-meta { margin-bottom: 36px; }
@@ -631,17 +675,6 @@
     .hero-card__art { display: none; }
     .hero-card h2 { font-size: 24px; }
     .hero-card p { font-size: 14px; }
-
-    /* sidebar compresses into a horizontal scrollable strip - keeps nav useful
-       without dominating the viewport before the article starts. */
-    .sidebar {
-      display: flex; flex-wrap: wrap; gap: 6px;
-      padding: 0 0 8px;
-    }
-    .sb-section { margin-bottom: 0; }
-    .sb-section h4 { display: none; }
-    .sb-link { padding: 6px 10px; font-size: 12.5px; }
-    .sb-link .tag { display: none; }
 
     .doc h2 { font-size: 26px; margin-top: 48px; }
     .doc h3 { font-size: 18px; margin-top: 28px; }
@@ -845,6 +878,47 @@
     transform: translateY(-1px);
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55), 0 0 12px rgba(0, 0, 0, 0.35);
   }
+
+  /* ============= MOBILE OVERHAUL ============= */
+  .nav__burger {
+    display: none;
+    appearance: none;
+    background: none;
+    border: 0;
+    padding: 10px;
+    margin-left: auto;
+    cursor: pointer;
+    border-radius: 10px;
+  }
+  .nav__burger span {
+    display: block;
+    width: 22px; height: 2px;
+    background: var(--fg);
+    border-radius: 2px;
+    transition: transform 0.25s ease, opacity 0.2s ease;
+  }
+  .nav__burger span + span { margin-top: 5px; }
+  body.sb-open .nav__burger span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+  body.sb-open .nav__burger span:nth-child(2) { opacity: 0; }
+  body.sb-open .nav__burger span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
+  .docs-scrim {
+    position: fixed; inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    opacity: 0; visibility: hidden;
+    transition: opacity 0.2s ease, visibility 0.2s;
+    z-index: 55;
+  }
+  body.sb-open .docs-scrim { opacity: 1; visibility: visible; }
+
+  .sb-mobile { display: none; }
+
+  /* These live after the base rules above so the cascade cannot lose:
+     the earlier 860px block runs before .nav__burger's display:none. */
+  @media (max-width: 860px) {
+    .nav__burger { display: block; }
+    .sb-mobile { display: block; }
+  }
 </style>
 </head>
 <body>
@@ -853,7 +927,7 @@
 <nav class="nav">
   <div class="nav__inner">
     <a href="index.html" class="nav__brand">
-      <img src="art/afterburner-square.png" alt="Afterburner" />
+      <img src="art/afterburner-square.png" alt="Afterburner" width="28" height="28" decoding="async" />
       <span>afterburner</span>
       <span class="badge">docs</span>
     </a>
@@ -862,6 +936,9 @@
       <input type="text" placeholder="Search the docs…" />
       <kbd>⌘K</kbd>
     </div>
+    <button class="nav__burger" type="button" aria-label="Docs menu" aria-expanded="false" aria-controls="docsSidebar">
+      <span></span><span></span><span></span>
+    </button>
     <div class="nav__cta">
       <a href="index.html" class="btn btn--ghost btn--sm">Home</a>
       <a href="https://nodejs.org/docs/latest-v26.x/api/" class="btn btn--ghost btn--sm">Node.js Docs</a>
@@ -875,10 +952,18 @@
 </nav>
 
 <!-- ============= LAYOUT ============= -->
+<div class="docs-scrim" aria-hidden="true"></div>
 <div class="layout">
 
   <!-- =========== SIDEBAR =========== -->
-  <aside class="sidebar">
+  <aside class="sidebar" id="docsSidebar">
+    <div class="sb-section sb-mobile">
+      <h4>Site</h4>
+      <a class="sb-link" href="index.html">← Home</a>
+      <a class="sb-link" href="https://registry.afterburner.sh">Package Registry</a>
+      <a class="sb-link" href="https://nodejs.org/docs/latest-v26.x/api/">Node.js Docs</a>
+      <a class="sb-link" href="https://github.com/afterburner-sh/afterburner">GitHub</a>
+    </div>
     <div class="sb-section">
       <h4>Get started</h4>
       <a class="sb-link active" href="#introduction">Introduction</a>
@@ -915,6 +1000,7 @@
     <div class="sb-section">
       <h4>Reference</h4>
       <a class="sb-link" href="#cli">burn CLI</a>
+      <a class="sb-link" href="#ai-agents">AI coding agents</a>
       <a class="sb-link" href="#node-compat">Node compat surface</a>
       <a class="sb-link" href="#env">Environment vars</a>
       <a class="sb-link" href="#crates">Workspace crates</a>
@@ -957,7 +1043,7 @@
             <span style="color: rgba(255,255,255,0.7); font-size: 11px;" id="copyBadge">Click to copy</span>
           </div>
         </div>
-        <img class="hero-card__art" src="art/afterburner-square.png" alt="" />
+        <img class="hero-card__art" src="art/afterburner-square.png" alt="" loading="lazy" decoding="async" />
       </div>
     </div>
 
@@ -1029,7 +1115,7 @@
         </div>
 <pre>$ <span class="tok-mod">cargo install</span> afterburner --features bin
 $ <span class="tok-mod">burn</span> --version
-afterburner 0.1.2</pre>
+afterburner 0.1.3</pre>
       </div>
 
       <p>The prebuilt binary ships with <code>--features release-cli</code> (every backend, every L3 shadow, TypeScript loader). Nothing external is needed at runtime; SQLite, OpenSSL, libclang are all statically linked in. See <a href="#build" style="color: var(--action);">Building from source</a> if you want to compile the workspace yourself.</p>
@@ -1556,6 +1642,43 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
         </tbody>
       </table></div>
 
+      <h2 id="ai-agents"><span class="anchor">#</span>AI coding agents</h2>
+      <p>One command makes your AI assistant run every piece of JavaScript it writes <strong>sealed inside the sandbox</strong> instead of raw <code>node</code>. Supported: <strong>Claude Code, OpenAI Codex, Gemini CLI, Cursor, GitHub Copilot, Antigravity (agy)</strong> - pick any combination in one arrow-key multi-select.</p>
+
+      <h3 id="ai-agents-install">Install</h3>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">shell</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre>$ <span class="tok-mod">burn</span> agent install                 <span class="tok-com"># multi-select; detected assistants pre-checked</span>
+$ <span class="tok-mod">burn</span> agent install --host claude-code --host gemini   <span class="tok-com"># scripted, no picker</span>
+$ <span class="tok-mod">burn</span> agent status                  <span class="tok-com"># what's detected, wired, and current</span></pre>
+      </div>
+      <p>This wires a pre-tool hook into each assistant's own config (user scope; <code>--project</code> writes the repo's config where supported) and adds a short instruction block to its memory file. When the assistant tries <code>node app.js</code>, <code>npm test</code>, or <code>npx tsx ...</code>, the hook hands back the corrected command - <code>burn --sandbox node app.js</code> - and the assistant re-runs it sealed: no network, no filesystem, no env. The assistant conforms its code to the sealed runtime; when a capability is genuinely required it grants it narrowly per run (<code>burn --sandbox --allow-net=api.example.com node app.js</code>). Runtime failures surface in the conversation prefixed <code>BURN:</code> so they are unmistakably the runtime speaking. The hook itself is a microsecond string check - no engine, no network - so your assistant stays fast.</p>
+
+      <h3 id="ai-agents-disable">Enable / disable</h3>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">shell</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre>$ <span class="tok-mod">burn</span> agent disable                 <span class="tok-com"># pause the redirect everywhere (hooks stay wired)</span>
+$ <span class="tok-mod">burn</span> agent enable                  <span class="tok-com"># resume</span>
+$ BURN_AGENT_HOOK=0 ...               <span class="tok-com"># one-off bypass for a single command</span></pre>
+      </div>
+
+      <h3 id="ai-agents-uninstall">Uninstall</h3>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">shell</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre>$ <span class="tok-mod">burn</span> agent uninstall               <span class="tok-com"># multi-select of currently wired assistants</span>
+$ <span class="tok-mod">burn</span> agent uninstall --all         <span class="tok-com"># remove from every assistant, no questions</span></pre>
+      </div>
+      <p>Uninstall is the exact inverse of install: hook entries and instruction blocks are spliced out, everything else in your configs is preserved byte-for-byte, and files we created that hold nothing else are removed. Re-running <code>burn agent install</code> after moving or upgrading the binary repairs the baked path in place - never a duplicate entry.</p>
+
       <h2 id="node-compat"><span class="anchor">#</span>Node compat surface</h2>
       <p>Afterburner targets the <strong>Node.js 26</strong> surface. <code>burn npm install</code> and <code>require('express')</code> from a real <code>node_modules</code> tree both work end-to-end - see <a href="https://github.com/afterburner-sh/afterburner/tree/master/examples/express-app" style="color: var(--action);"><code>examples/express-app</code></a>. Pure-JS modules are always available; host-backed ones are gated by the <code>Manifold</code>; surface-only entries load and expose the right shapes.</p>
 
@@ -1674,7 +1797,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><td><code>AFTERBURNER_LOG_FORMAT</code></td><td><code>text</code></td><td>Reporter format: <code>text</code> (stderr) or <code>json</code> (stdout NDJSON)</td></tr>
           <tr><td><code>AFTERBURNER_REBUILD_PLENUM</code></td><td>unset</td><td>Set to <code>1</code> to regenerate <code>generated/plenum_bundle.js</code>.</td></tr>
           <tr><td><code>BURN_MAX_LINEAR_MEMORY</code></td><td><code>1G</code> (1 GiB)</td><td>Per-instance WASM linear-memory ceiling enforced by Wasmtime's pooling allocator. Accepts plain bytes or a <code>K</code>/<code>M</code>/<code>G</code> suffix (e.g. <code>4G</code> = 4 GiB, <code>128M</code> = 128 MiB). Hard-clamped to 4 GiB (the wasm32 ABI limit). Bump it for long-running daemon-mode workloads (Express, Fastify, etc.) that accumulate per-request state across many calls; lower it when running many concurrent instances on small hosts. <code>--memory &lt;N&gt;</code> on the CLI sets a tighter per-call cap below this hard limit and is independent of <code>-A</code>.</td></tr>
-          <tr><td><code>BURN_VERSION</code></td><td><code>latest</code></td><td>Version pin used by the <code>install.sh</code> / <code>install.ps1</code> bootstrap (e.g. <code>v0.1.2</code>). Has no effect after the binary is installed.</td></tr>
+          <tr><td><code>BURN_VERSION</code></td><td><code>latest</code></td><td>Version pin used by the <code>install.sh</code> / <code>install.ps1</code> bootstrap (e.g. <code>v0.1.3</code>). Has no effect after the binary is installed.</td></tr>
           <tr><td><code>BURN_INSTALL</code></td><td><code>~/.local/bin</code></td><td>Install dir for the bootstrap installers. The runtime itself doesn't read this.</td></tr>
           <tr><td><code>BURN_INSTALL_NO_PATH</code></td><td>unset</td><td>Set to <code>1</code> to skip the bootstrap installer's automatic <code>$PATH</code> update (it normally appends an <code>export PATH=...</code> line to your shell rc - <code>~/.bashrc</code>, <code>~/.zshrc</code>, fish config, or <code>~/.profile</code> - or sets the User <code>Path</code> environment variable on Windows). Use this if you manage <code>$PATH</code> yourself via dotfiles, chezmoi, or a NixOS / nix-home / Guix configuration.</td></tr>
           <tr><td><code>BURN_QUIET</code></td><td>unset</td><td>Set to <code>1</code> to suppress the first-run capability banner and other non-essential stderr notices. Same as <code>--quiet</code> / <code>-q</code>.</td></tr>
@@ -1773,6 +1896,7 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
       <li><a href="#cli">burn CLI</a></li>
       <li class="toc-sub"><a href="#cli-subcommands">Subcommands</a></li>
       <li class="toc-sub"><a href="#cli-flags">Flag reference</a></li>
+      <li><a href="#ai-agents">AI coding agents</a></li>
       <li><a href="#node-compat">Node compat</a></li>
       <li class="toc-sub"><a href="#sandbox-omissions">Sandbox omissions</a></li>
       <li><a href="#env">Environment vars</a></li>
@@ -2073,5 +2197,21 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
   })();
 </script>
 
+<script>
+  (() => {
+    const burger = document.querySelector('.nav__burger');
+    const scrim = document.querySelector('.docs-scrim');
+    if (!burger) return;
+    const set = (open) => {
+      document.body.classList.toggle('sb-open', open);
+      burger.setAttribute('aria-expanded', String(open));
+    };
+    burger.addEventListener('click', () => set(!document.body.classList.contains('sb-open')));
+    scrim && scrim.addEventListener('click', () => set(false));
+    document.querySelectorAll('.sidebar .sb-link').forEach(a => a.addEventListener('click', () => set(false)));
+    addEventListener('keydown', (e) => { if (e.key === 'Escape') set(false); });
+    matchMedia('(min-width: 861px)').addEventListener('change', () => set(false));
+  })();
+</script>
 </body>
 </html>

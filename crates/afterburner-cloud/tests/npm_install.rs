@@ -112,13 +112,13 @@ fn installs_a_package_with_transitive_dep_from_mock_registry() {
     let res = client.resolve_all(&roots).expect("resolve");
 
     // both the root and its transitive dep are resolved + extracted
-    let widget = res.packages.get("widget").expect("widget resolved");
+    let widget = res.by_name("widget").expect("widget resolved");
     assert_eq!(widget.version, "2.0.1");
     assert_eq!(
         widget.files.get("index.js").map(|v| v.as_slice()),
         Some(&b"module.exports = require('dep') + 1;"[..])
     );
-    let dep = res.packages.get("dep").expect("transitive dep resolved");
+    let dep = res.by_name("dep").expect("transitive dep resolved");
     assert_eq!(dep.version, "1.2.0");
     assert_eq!(
         dep.files.get("index.js").map(|v| v.as_slice()),
@@ -200,4 +200,131 @@ fn missing_package_is_a_clear_error() {
     roots.insert("nope".to_string(), "*".to_string());
     let err = client.resolve_all(&roots).unwrap_err();
     assert!(format!("{err}").contains("not found"), "got: {err}");
+}
+
+#[test]
+fn conflicting_dep_ranges_resolve_as_two_versions_with_nested_override() {
+    let server = MockServer::start();
+
+    // c@1.0.0 and c@2.0.0 - the contested dependency.
+    let (c1_tar, c1_sha) = make_tarball(&[
+        ("package.json", br#"{"name":"c","version":"1.0.0"}"#),
+        ("index.js", b"module.exports = 1;"),
+    ]);
+    let (c2_tar, c2_sha) = make_tarball(&[
+        ("package.json", br#"{"name":"c","version":"2.0.0"}"#),
+        ("index.js", b"module.exports = 2;"),
+    ]);
+    let c1_url = server.url("/c/-/c-1.0.0.tgz");
+    let c2_url = server.url("/c/-/c-2.0.0.tgz");
+    server.mock(|when, then| {
+        when.method(GET).path("/c");
+        then.status(200).json_body(serde_json::json!({
+            "name": "c",
+            "versions": {
+                "1.0.0": { "name":"c","version":"1.0.0",
+                    "dist": { "tarball": c1_url, "shasum": c1_sha } },
+                "2.0.0": { "name":"c","version":"2.0.0",
+                    "dist": { "tarball": c2_url, "shasum": c2_sha } },
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/c/-/c-1.0.0.tgz");
+        then.status(200).body(c1_tar);
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/c/-/c-2.0.0.tgz");
+        then.status(200).body(c2_tar);
+    });
+
+    // a → c@^1, b → c@^2 (the flat-resolver conflict case).
+    for (name, range) in [("a", "^1.0.0"), ("b", "^2.0.0")] {
+        let (tar, sha) = make_tarball(&[
+            (
+                "package.json",
+                format!(
+                    r#"{{"name":"{name}","version":"1.0.0","dependencies":{{"c":"{range}"}}}}"#
+                )
+                .as_bytes(),
+            ),
+            ("index.js", b"module.exports = require('c');"),
+        ]);
+        let url = server.url(format!("/{name}/-/{name}-1.0.0.tgz"));
+        let path = format!("/{name}");
+        let tgz_path = format!("/{name}/-/{name}-1.0.0.tgz");
+        let body = serde_json::json!({
+            "name": name,
+            "versions": { "1.0.0": { "name": name, "version": "1.0.0",
+                "dependencies": { "c": range },
+                "dist": { "tarball": url, "shasum": sha } } }
+        });
+        server.mock(move |when, then| {
+            when.method(GET).path(path);
+            then.status(200).json_body(body);
+        });
+        server.mock(move |when, then| {
+            when.method(GET).path(tgz_path);
+            then.status(200).body(tar);
+        });
+    }
+
+    let client = NpmClient::new(server.base_url());
+    let mut roots = BTreeMap::new();
+    roots.insert("a".to_string(), "^1.0.0".to_string());
+    roots.insert("b".to_string(), "^1.0.0".to_string());
+    let res = client
+        .resolve_all(&roots)
+        .expect("conflicting ranges must coexist");
+
+    // Both versions of c are in the closure; a's pick is hoisted (BFS,
+    // roots first, "a" before "b" in BTreeMap order).
+    let c_versions: Vec<&str> = res
+        .packages
+        .iter()
+        .filter(|p| p.name == "c")
+        .map(|p| p.version.as_str())
+        .collect();
+    assert_eq!(c_versions, ["1.0.0", "2.0.0"]);
+    assert_eq!(res.hoisted.get("c").map(String::as_str), Some("1.0.0"));
+    assert_eq!(
+        res.edges
+            .get("b@1.0.0")
+            .and_then(|d| d.get("c"))
+            .map(String::as_str),
+        Some("2.0.0")
+    );
+
+    // Materialize: b becomes a real dir owning a nested override of c.
+    let dir = std::env::temp_dir().join(format!("burn-npm-nest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for pkg in &res.packages {
+        afterburner_cloud::npm::store_npm(pkg).unwrap();
+    }
+    afterburner_cloud::npm::link_node_modules(&res, &dir).unwrap();
+
+    let nm = dir.join("node_modules");
+    assert!(nm.join("a").exists(), "a placed at top level");
+    assert_eq!(
+        std::fs::read(nm.join("c/index.js")).unwrap(),
+        b"module.exports = 1;",
+        "hoisted c is 1.0.0"
+    );
+    let nested = nm.join("b/node_modules/c/index.js");
+    assert_eq!(
+        std::fs::read(&nested).unwrap(),
+        b"module.exports = 2;",
+        "b's override is nested under b"
+    );
+    assert!(
+        !nm.join("b").is_symlink(),
+        "a package owning overrides is a copy, not a cache symlink"
+    );
+    assert!(
+        nm.join("a").is_symlink(),
+        "an unconflicted package stays a cache symlink"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

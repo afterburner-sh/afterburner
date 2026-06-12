@@ -49,9 +49,23 @@ pub struct NpmPackage {
 /// The full resolved npm closure for a package's `[npm]` section.
 #[derive(Debug, Clone, Default)]
 pub struct NpmResolution {
-    /// name → resolved package (deduplicated: one version per name - a flat
-    /// install, like a deduped npm tree).
-    pub packages: BTreeMap<String, NpmPackage>,
+    /// Every resolved package, in resolution (BFS) order. npm semantics:
+    /// several versions of one name may coexist in the closure.
+    pub packages: Vec<NpmPackage>,
+    /// The hoisted top-level choice per name - the first version resolved
+    /// (roots are processed first, so a root's pick always wins its name).
+    pub hoisted: BTreeMap<String, String>,
+    /// Resolved dependency edges: `"name@version"` → dep name → the dep
+    /// version that requester's range resolved to.
+    pub edges: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl NpmResolution {
+    /// First resolved package with this name (the hoisted one).
+    #[must_use]
+    pub fn by_name(&self, name: &str) -> Option<&NpmPackage> {
+        self.packages.iter().find(|p| p.name == name)
+    }
 }
 
 /// A registry client over `ureq`. `base` lets tests point at a mock.
@@ -77,45 +91,67 @@ impl NpmClient {
 
     /// Resolve a `[npm]` section (name → semver range) and its full
     /// transitive `dependencies` closure into extracted, integrity-checked
-    /// packages. Flat/deduped: the first-resolved version of a name wins
-    /// (npm's hoisting in spirit); a conflicting range that the chosen
-    /// version does not satisfy is reported.
+    /// packages. npm semantics: a range reuses an already-resolved version
+    /// of the name when one satisfies it; otherwise an ADDITIONAL version
+    /// of the same name joins the closure (materialized as a nested
+    /// override by the linker), exactly like npm's tree. BFS so roots win
+    /// the hoisted top-level slot for their names.
     pub fn resolve_all(&self, roots: &BTreeMap<String, String>) -> Result<NpmResolution> {
         let mut out = NpmResolution::default();
-        // work queue of (name, range)
-        let mut queue: Vec<(String, String)> =
-            roots.iter().map(|(n, r)| (n.clone(), r.clone())).collect();
+        // (name, range, requester "name@version" or None for roots)
+        let mut queue: std::collections::VecDeque<(String, String, Option<String>)> = roots
+            .iter()
+            .map(|(n, r)| (n.clone(), r.clone(), None))
+            .collect();
+        // name → every version resolved so far, in resolution order.
+        let mut versions: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        // packuments are fetched once per name even when a second version
+        // of it must be resolved.
+        let mut packuments: BTreeMap<String, Packument> = BTreeMap::new();
 
-        while let Some((name, range)) = queue.pop() {
-            if let Some(existing) = out.packages.get(&name) {
-                // Already resolved: ensure the existing version satisfies
-                // this additional range, else it's a real conflict.
-                if !satisfies(&existing.version, &range) {
-                    return Err(CloudError::Resolve(format!(
-                        "npm dependency conflict for {name:?}: have {} but another \
-                         dependency requires {range}",
-                        existing.version
-                    )));
+        while let Some((name, range, requester)) = queue.pop_front() {
+            let record_edge = |out: &mut NpmResolution, version: &str| {
+                if let Some(req) = &requester {
+                    out.edges
+                        .entry(req.clone())
+                        .or_default()
+                        .insert(name.clone(), version.to_string());
                 }
+            };
+            // Reuse any already-resolved version that satisfies this range.
+            if let Some(existing) = versions
+                .get(&name)
+                .and_then(|vs| vs.iter().find(|v| satisfies(v, &range)))
+            {
+                let existing = existing.clone();
+                record_edge(&mut out, &existing);
                 continue;
             }
-            let packument = self.fetch_packument(&name)?;
-            let (version, dist, deps) = pick_version(&name, &range, &packument)?;
+            if !packuments.contains_key(&name) {
+                packuments.insert(name.clone(), self.fetch_packument(&name)?);
+            }
+            let (version, dist, deps) = pick_version(&name, &range, &packuments[&name])?;
             let tarball = self.download_tarball(&dist.tarball)?;
             verify_shasum(&name, &version, &dist.shasum, &tarball)?;
             let files = extract_tarball(&name, &tarball)?;
             afterburner_afb::native::reject_native(files.keys().map(String::as_str))
                 .map_err(|e| CloudError::Package(format!("npm package {name}@{version}: {e}")))?;
-            out.packages.insert(
-                name.clone(),
-                NpmPackage {
-                    name: name.clone(),
-                    version: version.clone(),
-                    files,
-                },
-            );
+            record_edge(&mut out, &version);
+            out.hoisted
+                .entry(name.clone())
+                .or_insert_with(|| version.clone());
+            versions
+                .entry(name.clone())
+                .or_default()
+                .push(version.clone());
+            out.packages.push(NpmPackage {
+                name: name.clone(),
+                version: version.clone(),
+                files,
+            });
+            let key = format!("{name}@{version}");
             for (dn, dr) in deps {
-                queue.push((dn, dr));
+                queue.push_back((dn, dr, Some(key.clone())));
             }
         }
         Ok(out)
@@ -215,15 +251,62 @@ fn satisfies(version: &str, range: &str) -> bool {
     }
 }
 
-/// Parse an npm range into a semver `VersionReq`. Handles `*`/empty/`latest`
-/// as "any", and normalizes a leading `v`. node-semver and the `semver`
-/// crate agree on `^`, `~`, comparators, and `x` ranges for the common case.
-fn parse_range(range: &str) -> Option<VersionReq> {
+/// An npm range: an OR (`||`) of AND groups. The `semver` crate models one
+/// AND group; npm composes them (`^9.14.0 || ^10.1.0` is how fastify pins
+/// pino), so a full range is a list of alternatives.
+struct NpmReq(Vec<VersionReq>);
+
+impl NpmReq {
+    fn matches(&self, v: &Version) -> bool {
+        self.0.iter().any(|r| r.matches(v))
+    }
+}
+
+/// Parse an npm range. Handles `*`/empty/`latest` as "any", `||`
+/// alternatives, hyphen ranges (`1.2.3 - 2.0.0`), and space-separated AND
+/// comparators (`>=1.2.3 <2`, which the `semver` crate wants comma-joined).
+/// `^`, `~`, plain comparators, and `x` wildcards parse natively.
+fn parse_range(range: &str) -> Option<NpmReq> {
     let r = range.trim();
     if r.is_empty() || r == "*" || r == "latest" || r == "x" || r == "X" {
-        return Some(VersionReq::STAR);
+        return Some(NpmReq(vec![VersionReq::STAR]));
     }
-    VersionReq::parse(r).ok()
+    let mut alts = Vec::new();
+    for alt in r.split("||") {
+        let alt = alt.trim();
+        if alt.is_empty() {
+            // npm treats an empty alternative as "any".
+            alts.push(VersionReq::STAR);
+        } else {
+            alts.push(parse_and_group(alt)?);
+        }
+    }
+    Some(NpmReq(alts))
+}
+
+/// One `||`-free AND group into the `semver` crate's comma form.
+fn parse_and_group(alt: &str) -> Option<VersionReq> {
+    // Hyphen range: `A - B` (the spaces are mandatory in npm).
+    if let Some((a, b)) = alt.split_once(" - ") {
+        return VersionReq::parse(&format!(">={}, <={}", a.trim(), b.trim())).ok();
+    }
+    // npm separates AND comparators with whitespace and allows a space
+    // between operator and version (`>= 1.2.3`); rejoin those, then
+    // comma-join for the `semver` crate.
+    let parts: Vec<&str> = alt.split_whitespace().collect();
+    let mut comps: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < parts.len() {
+        let p = parts[i];
+        if matches!(p, ">" | ">=" | "<" | "<=" | "=" | "^" | "~") && i + 1 < parts.len() {
+            comps.push(format!("{}{}", p, parts[i + 1]));
+            i += 2;
+        } else {
+            comps.push(p.to_string());
+            i += 1;
+        }
+    }
+    VersionReq::parse(&comps.join(", ")).ok()
 }
 
 /// `@scope/name` → `@scope%2fname` for the registry path.
@@ -391,6 +474,107 @@ fn collect(root: &Path, cur: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Resu
     Ok(())
 }
 
+// ---- node_modules linking (the dev-loop materializer) -----------------------
+
+/// Materialize `dir/node_modules` from the cache with npm's tree
+/// semantics. Hoisted names land flat, each a symlink into the
+/// content-addressed cache (a copy on platforms without symlinks). A
+/// package whose resolved dep differs from what lexical walk-up would
+/// find is materialized as a COPY owning a nested `node_modules` with the
+/// override - the cache stays immutable, the layout stays npm-shaped.
+/// This is the cargo model: `node_modules` is a build artifact next to
+/// the manifest - never packed into the `.afb` - and `burn clean` removes
+/// it.
+pub fn link_node_modules(res: &NpmResolution, dir: &std::path::Path) -> Result<()> {
+    let nm = dir.join("node_modules");
+    std::fs::create_dir_all(&nm).map_err(CloudError::Io)?;
+    let scope = res.hoisted.clone();
+    for (name, version) in &res.hoisted {
+        place(res, name, version, &nm, &scope, 0)?;
+    }
+    Ok(())
+}
+
+/// Place one `name@version` at `nm/name`. `scope` maps each dep name to
+/// the version lexical walk-up resolves to at this level; deps whose
+/// resolved edge differs become nested overrides (and, mirroring npm's
+/// layout, sibling overrides shadow the hoisted level for each other).
+fn place(
+    res: &NpmResolution,
+    name: &str,
+    version: &str,
+    nm: &std::path::Path,
+    scope: &BTreeMap<String, String>,
+    depth: u32,
+) -> Result<()> {
+    if depth > 32 {
+        return Err(CloudError::Resolve(format!(
+            "npm override nesting exceeds 32 levels at {name}@{version} (dependency cycle?)"
+        )));
+    }
+    let target = npm_cache_dir(name, version)?;
+    let link = nm.join(name);
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent).map_err(CloudError::Io)?;
+    }
+    // Replace whatever is there (older version link, stale copy).
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_dir_all(&link);
+
+    let key = format!("{name}@{version}");
+    let overrides: Vec<(&String, &String)> = res
+        .edges
+        .get(&key)
+        .map(|deps| {
+            deps.iter()
+                .filter(|(dn, dv)| scope.get(*dn) != Some(dv))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if overrides.is_empty() {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).map_err(CloudError::Io)?;
+        #[cfg(not(unix))]
+        copy_dir_recursive(&target, &link)?;
+        return Ok(());
+    }
+    // Conflicting deps: this package needs its own nested node_modules,
+    // so it must be a real directory (the cache copy stays pristine).
+    copy_dir_recursive(&target, &link)?;
+    let nested = link.join("node_modules");
+    std::fs::create_dir_all(&nested).map_err(CloudError::Io)?;
+    let mut inner_scope = scope.clone();
+    for (dn, dv) in &overrides {
+        inner_scope.insert((*dn).clone(), (*dv).clone());
+    }
+    for (dn, dv) in overrides {
+        place(res, dn, dv, &nested, &inner_scope, depth + 1)?;
+    }
+    Ok(())
+}
+
+/// Recursive dir copy - the non-unix fallback for cache linking (also
+/// used by `cache::link_dir`).
+#[cfg(not(unix))]
+pub(crate) fn copy_dir_for_link(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    copy_dir_recursive(from, to)
+}
+
+fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(to).map_err(CloudError::Io)?;
+    for entry in std::fs::read_dir(from).map_err(CloudError::Io)? {
+        let entry = entry.map_err(CloudError::Io)?;
+        let dst = to.join(entry.file_name());
+        if entry.file_type().map_err(CloudError::Io)?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst)?;
+        } else {
+            std::fs::copy(entry.path(), &dst).map_err(CloudError::Io)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +588,22 @@ mod tests {
         assert!(satisfies("4.5.6", ""));
         assert!(satisfies("1.0.0", "~1.0.0"));
         assert!(!satisfies("1.1.0", "~1.0.0"));
+    }
+
+    #[test]
+    fn range_parsing_npm_compositions() {
+        // OR alternatives (fastify pins pino exactly like this).
+        assert!(satisfies("9.20.1", "^9.14.0 || ^10.1.0"));
+        assert!(satisfies("10.2.0", "^9.14.0 || ^10.1.0"));
+        assert!(!satisfies("8.0.0", "^9.14.0 || ^10.1.0"));
+        assert!(!satisfies("10.0.0", "^9.14.0 || ^10.1.0"));
+        // Hyphen range.
+        assert!(satisfies("1.5.0", "1.2.3 - 2.0.0"));
+        assert!(!satisfies("2.1.0", "1.2.3 - 2.0.0"));
+        // Space-separated AND comparators, with and without operator gaps.
+        assert!(satisfies("1.5.0", ">=1.2.3 <2"));
+        assert!(!satisfies("2.0.0", ">=1.2.3 <2"));
+        assert!(satisfies("1.5.0", ">= 1.2.3 < 2"));
     }
 
     #[test]
