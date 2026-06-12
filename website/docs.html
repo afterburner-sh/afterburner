@@ -915,6 +915,7 @@
     <div class="sb-section">
       <h4>Reference</h4>
       <a class="sb-link" href="#cli">burn CLI</a>
+      <a class="sb-link" href="#ai-agents">AI coding agents</a>
       <a class="sb-link" href="#node-compat">Node compat surface</a>
       <a class="sb-link" href="#env">Environment vars</a>
       <a class="sb-link" href="#crates">Workspace crates</a>
@@ -1556,6 +1557,43 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
         </tbody>
       </table></div>
 
+      <h2 id="ai-agents"><span class="anchor">#</span>AI coding agents</h2>
+      <p>One command makes your AI assistant run every piece of JavaScript it writes <strong>sealed inside the sandbox</strong> instead of raw <code>node</code>. Supported: <strong>Claude Code, OpenAI Codex, Gemini CLI, Cursor, GitHub Copilot</strong> - pick any combination in one arrow-key multi-select.</p>
+
+      <h3 id="ai-agents-install">Install</h3>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">shell</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre>$ <span class="tok-mod">burn</span> agent install                 <span class="tok-com"># multi-select; detected assistants pre-checked</span>
+$ <span class="tok-mod">burn</span> agent install --host claude-code --host gemini   <span class="tok-com"># scripted, no picker</span>
+$ <span class="tok-mod">burn</span> agent status                  <span class="tok-com"># what's detected, wired, and current</span></pre>
+      </div>
+      <p>This wires a pre-tool hook into each assistant's own config (user scope; <code>--project</code> writes the repo's config where supported) and adds a short instruction block to its memory file. When the assistant tries <code>node app.js</code>, <code>npm test</code>, or <code>npx tsx ...</code>, the hook hands back the corrected command - <code>burn --sandbox node app.js</code> - and the assistant re-runs it sealed: no network, no filesystem, no env. The assistant conforms its code to the sealed runtime; when a capability is genuinely required it grants it narrowly per run (<code>burn --sandbox --allow-net=api.example.com node app.js</code>). Runtime failures surface in the conversation prefixed <code>BURN:</code> so they are unmistakably the runtime speaking. The hook itself is a microsecond string check - no engine, no network - so your assistant stays fast.</p>
+
+      <h3 id="ai-agents-disable">Enable / disable</h3>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">shell</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre>$ <span class="tok-mod">burn</span> agent disable                 <span class="tok-com"># pause the redirect everywhere (hooks stay wired)</span>
+$ <span class="tok-mod">burn</span> agent enable                  <span class="tok-com"># resume</span>
+$ BURN_AGENT_HOOK=0 ...               <span class="tok-com"># one-off bypass for a single command</span></pre>
+      </div>
+
+      <h3 id="ai-agents-uninstall">Uninstall</h3>
+      <div class="codeblock">
+        <div class="codeblock__head">
+          <span class="lang">shell</span>
+          <button class="copy-btn">Copy</button>
+        </div>
+<pre>$ <span class="tok-mod">burn</span> agent uninstall               <span class="tok-com"># multi-select of currently wired assistants</span>
+$ <span class="tok-mod">burn</span> agent uninstall --all         <span class="tok-com"># remove from every assistant, no questions</span></pre>
+      </div>
+      <p>Uninstall is the exact inverse of install: hook entries and instruction blocks are spliced out, everything else in your configs is preserved byte-for-byte, and files we created that hold nothing else are removed. Re-running <code>burn agent install</code> after moving or upgrading the binary repairs the baked path in place - never a duplicate entry.</p>
+
       <h2 id="node-compat"><span class="anchor">#</span>Node compat surface</h2>
       <p>Afterburner targets the <strong>Node.js 26</strong> surface. <code>burn npm install</code> and <code>require('express')</code> from a real <code>node_modules</code> tree both work end-to-end - see <a href="https://github.com/afterburner-sh/afterburner/tree/master/examples/express-app" style="color: var(--action);"><code>examples/express-app</code></a>. Pure-JS modules are always available; host-backed ones are gated by the <code>Manifold</code>; surface-only entries load and expose the right shapes.</p>
 
@@ -1773,6 +1811,7 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
       <li><a href="#cli">burn CLI</a></li>
       <li class="toc-sub"><a href="#cli-subcommands">Subcommands</a></li>
       <li class="toc-sub"><a href="#cli-flags">Flag reference</a></li>
+      <li><a href="#ai-agents">AI coding agents</a></li>
       <li><a href="#node-compat">Node compat</a></li>
       <li class="toc-sub"><a href="#sandbox-omissions">Sandbox omissions</a></li>
       <li><a href="#env">Environment vars</a></li>

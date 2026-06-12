@@ -121,6 +121,10 @@ libc = "0.2"
 # Colored + animated `burn` CLI output (brand palette spinners/styling). Used
 # only by the `bin` feature.
 crossterm = "0.28"
+# Arrow-key Select/MultiSelect menus for interactive CLI pickers. Used only
+# by the `bin` feature; default features off so it pulls just the core
+# prompt rendering (no editor/fuzzy/history extras).
+dialoguer = { version = "0.11", default-features = false }
 
 wasmtime = { version = "44", features = ["cranelift", "cache"] }
 wasmtime-wasi = "44"

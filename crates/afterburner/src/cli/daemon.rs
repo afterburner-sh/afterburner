@@ -165,7 +165,12 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     let init_bytecode = match combustor.compile_daemon_init_bytecode(source, &invocation) {
         Ok(bc) => Arc::new(bc),
         Err(e) => {
-            let _ = std::io::stderr().write_all(format!("burn: {e}\n").as_bytes());
+            let msg = format!(
+                "{} {}\n",
+                super::style::error_prefix(),
+                super::style::humanize_error(&e.to_string())
+            );
+            let _ = std::io::stderr().write_all(msg.as_bytes());
             std::process::exit(1);
         }
     };
@@ -215,7 +220,12 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
             match e {
                 AfterburnerError::ProcessExit(code) => std::process::exit(code),
                 other => {
-                    let _ = std::io::stderr().write_all(format!("burn: {other}\n").as_bytes());
+                    let msg = format!(
+                        "{} {}\n",
+                        super::style::error_prefix(),
+                        super::style::humanize_error(&other.to_string())
+                    );
+                    let _ = std::io::stderr().write_all(msg.as_bytes());
                     std::process::exit(1);
                 }
             }

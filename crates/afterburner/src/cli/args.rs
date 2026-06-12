@@ -404,6 +404,63 @@ pub enum Cmd {
         #[arg(long, value_name = "USER")]
         remove: Option<String>,
     },
+
+    /// Wire AI coding assistants (Claude Code, Codex, Gemini, Cursor,
+    /// Copilot) to run the JavaScript they generate inside the sandbox.
+    Agent {
+        #[command(subcommand)]
+        action: AgentCmd,
+    },
+}
+
+/// `burn agent <action>` - assistant integration management.
+#[derive(Subcommand, Debug, Clone)]
+pub enum AgentCmd {
+    /// Install the sandbox hook (and instructions) into assistants.
+    /// Interactive multi-select by default; detected ones pre-checked.
+    Install {
+        /// Target specific assistants (repeatable). Skips the picker.
+        #[arg(long = "host", value_name = "HOST")]
+        hosts: Vec<String>,
+        /// Write the project's config instead of the home-dir one
+        /// (Claude Code / Gemini; the rest are always user-scoped).
+        #[arg(long)]
+        project: bool,
+        /// Non-interactive: wire every detected assistant.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Remove the sandbox hook and instructions (the exact inverse of
+    /// install). User config around them is left untouched.
+    Uninstall {
+        /// Target specific assistants (repeatable). Skips the picker.
+        #[arg(long = "host", value_name = "HOST")]
+        hosts: Vec<String>,
+        /// Unwire every supported assistant without asking.
+        #[arg(long)]
+        all: bool,
+        /// Remove from the project's config instead of the home-dir one.
+        #[arg(long)]
+        project: bool,
+        /// Non-interactive: unwire every currently wired assistant.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Show what's detected, wired, and current per assistant.
+    Status,
+    /// Re-enable the sandbox redirect after `disable`.
+    Enable,
+    /// Pause the sandbox redirect everywhere without uninstalling
+    /// (hooks stay wired; they just allow everything through).
+    Disable,
+    /// The per-tool-call hook the assistant spawns (stdin JSON in,
+    /// verdict JSON out). Not for interactive use.
+    #[command(hide = true)]
+    Hook {
+        /// Which assistant dialect to speak.
+        #[arg(long, value_name = "HOST")]
+        host: String,
+    },
 }
 
 /// Shared flags for `burn new` / `burn init`.

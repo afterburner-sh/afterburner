@@ -145,6 +145,29 @@ Full authoring guide and the dependency-security model are in the
 
 ---
 
+## Use with AI coding agents
+
+One command routes every piece of JavaScript your AI assistant writes
+through the sealed sandbox instead of raw `node`:
+
+```sh
+burn agent install     # arrow-key multi-select: Claude Code, Codex, Gemini CLI, Cursor, Copilot
+burn agent status      # what's detected, wired, and current
+burn agent uninstall   # exact inverse - configs restored, nothing left behind
+```
+
+It wires a pre-tool hook into each assistant's config (plus a short
+instruction block where the assistant reads one). When the assistant
+tries `node app.js`, `npm test`, or `npx tsx ...`, the hook hands back
+the corrected command - `burn --sandbox node app.js` - and the assistant
+re-runs it sealed: no network, no filesystem, no env access. Capabilities
+are granted per run, narrowly, only when the code genuinely needs them
+(`burn --sandbox --allow-net=api.example.com node app.js`). Runtime
+failures surface in the conversation prefixed `BURN:` so they're
+unmistakably the runtime speaking. One-off bypass: `BURN_AGENT_HOOK=0`.
+
+---
+
 ## Library usage (embedding the engine)
 
 Besides the package toolchain, you can embed the engine directly in a Rust

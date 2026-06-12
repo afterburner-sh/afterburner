@@ -28,11 +28,16 @@ use std::path::{Path, PathBuf};
 
 /// Create the shim dir (if missing), populate it with a `node` shim
 /// that re-enters the current `burn` binary, and return the dir path.
-pub fn ensure_shim_dir() -> Result<PathBuf> {
+///
+/// `flags` are baked into the shim command line ahead of the forwarded
+/// arguments, so the invoking run's sandbox/capability posture survives
+/// every re-entry in the child-process tree (`burn --sandbox npm test`
+/// seals npm's nested `node` runs too, not just npm itself).
+pub fn ensure_shim_dir(flags: &[String]) -> Result<PathBuf> {
     let dir = shim_dir_path();
     fs::create_dir_all(&dir).with_context(|| format!("creating shim dir {dir:?}"))?;
     let burn_exe = env::current_exe().context("locating burn binary")?;
-    write_node_shim(&dir, &burn_exe)?;
+    write_node_shim(&dir, &burn_exe, flags)?;
     Ok(dir)
 }
 
@@ -42,15 +47,17 @@ fn shim_dir_path() -> PathBuf {
 }
 
 #[cfg(unix)]
-fn write_node_shim(dir: &Path, burn_exe: &Path) -> Result<()> {
+fn write_node_shim(dir: &Path, burn_exe: &Path, flags: &[String]) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let shim_path = dir.join("node");
     let burn_str = burn_exe.to_string_lossy();
     // Escape single quotes for a POSIX single-quoted string: ' → '\''.
     // `exec` replaces the shell with burn so the trampoline adds no
     // process overhead after the first fork.
-    let escaped = burn_str.replace('\'', r"'\''");
-    let body = format!("#!/usr/bin/env sh\nexec '{escaped}' \"$@\"\n");
+    let sq = |s: &str| s.replace('\'', r"'\''");
+    let escaped = sq(&burn_str);
+    let baked: String = flags.iter().map(|f| format!(" '{}'", sq(f))).collect();
+    let body = format!("#!/usr/bin/env sh\nexec '{escaped}'{baked} \"$@\"\n");
     fs::write(&shim_path, body).with_context(|| format!("writing {shim_path:?}"))?;
     let mut perms = fs::metadata(&shim_path)?.permissions();
     perms.set_mode(0o755);
@@ -59,12 +66,13 @@ fn write_node_shim(dir: &Path, burn_exe: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn write_node_shim(dir: &Path, burn_exe: &Path) -> Result<()> {
+fn write_node_shim(dir: &Path, burn_exe: &Path, flags: &[String]) -> Result<()> {
     let shim_path = dir.join("node.cmd");
     let burn_str = burn_exe.to_string_lossy();
     // `%*` forwards all arguments; the outer quotes handle spaces in
     // the burn install path. CRLF to match Windows batch conventions.
-    let body = format!("@\"{burn_str}\" %*\r\n");
+    let baked: String = flags.iter().map(|f| format!(" \"{f}\"")).collect();
+    let body = format!("@\"{burn_str}\"{baked} %*\r\n");
     fs::write(&shim_path, body).with_context(|| format!("writing {shim_path:?}"))?;
     Ok(())
 }

@@ -32,7 +32,7 @@
 
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::args::Cli;
 use super::daemon::{execute, script_label};
@@ -138,6 +138,19 @@ fn resolve_package_entry(dir: &std::path::Path) -> Result<PathBuf> {
 }
 
 pub fn run_file(cli: &Cli, path: &PathBuf, user_args: &[String]) -> Result<()> {
+    // Package-manager internals (npm/yarn/pnpm cli scripts re-entering
+    // through the PATH shim) are host tooling, not user code: they need
+    // fs/env/net to do their job, and a sealed run would brick `burn
+    // --sandbox npm test` before the user's script even starts. Run THEM
+    // open; the sandbox/grant flags still reach the actual scripts they
+    // spawn via the flags baked into the shim (see `shim::ensure_shim_dir`).
+    let opened;
+    let cli = if cli.sandbox && is_pm_internal(path) {
+        opened = pm_open(cli);
+        &opened
+    } else {
+        cli
+    };
     if cli.watch {
         return watch::run_with_watch(cli, path, user_args);
     }
@@ -151,6 +164,39 @@ pub fn run_file(cli: &Cli, path: &PathBuf, user_args: &[String]) -> Result<()> {
         return super::worker::execute(cli, &js_source, &label, user_args);
     }
     execute(cli, &js_source, &label, user_args)
+}
+
+/// Whether `path` is a package manager's own cli script (the things the
+/// PATH shim re-enters with when npm/yarn/pnpm internally spawn `node`).
+/// Canonicalized first: `~/.nvm/versions/node/*/bin/npm` is a symlink into
+/// `node_modules/npm/` and the shim hands us the symlink.
+fn is_pm_internal(path: &Path) -> bool {
+    let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let p = real.to_string_lossy().replace('\\', "/");
+    let name = p.rsplit('/').next().unwrap_or("");
+    matches!(name, "npm-cli.js" | "npx-cli.js" | "yarn.js" | "pnpm.cjs")
+        || [
+            "/node_modules/npm/",
+            "/node_modules/yarn/",
+            "/node_modules/pnpm/",
+            "/node_modules/corepack/",
+        ]
+        .iter()
+        .any(|frag| p.contains(frag))
+}
+
+/// `cli` with the manifold-restricting flags cleared - the open posture a
+/// package manager's own code runs under.
+fn pm_open(cli: &Cli) -> Cli {
+    let mut open = cli.clone();
+    open.sandbox = false;
+    open.allow_net = None;
+    open.allow_listen = None;
+    open.allow_fs = None;
+    open.allow_fs_read = None;
+    open.allow_fs_write = None;
+    open.allow_env = None;
+    open
 }
 
 pub fn run_source(cli: &Cli, source: &str, user_args: &[String]) -> Result<()> {

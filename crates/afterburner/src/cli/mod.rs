@@ -13,6 +13,7 @@
 //! can exercise the flag-to-[`Manifold`] translation without spawning
 //! the binary.
 
+mod agent;
 mod args;
 mod banner;
 mod bench;
@@ -40,6 +41,20 @@ pub use manifold::{build_manifold, has_wildcard, is_implicit_open, parse_allow_l
 
 /// Entry point. `main()` in the `burn` binary delegates here.
 pub fn run() -> Result<()> {
+    // Hook hot path: assistants spawn `burn agent hook --host <h>` before
+    // EVERY shell command they run - dispatch straight off argv so the
+    // invocation pays for nothing but the verdict (no clap, no banner).
+    {
+        let argv: Vec<String> = std::env::args().collect();
+        if argv.get(1).is_some_and(|a| a == "agent") && argv.get(2).is_some_and(|a| a == "hook") {
+            let host = argv
+                .iter()
+                .position(|a| a == "--host")
+                .and_then(|i| argv.get(i + 1))
+                .map_or("", String::as_str);
+            return agent::hook_entry(host);
+        }
+    }
     // Animated brand banner ahead of clap's top-level help.
     if matches!(
         std::env::args().nth(1).as_deref(),
@@ -238,5 +253,8 @@ fn dispatch(mut cli: Cli) -> Result<()> {
             add,
             remove,
         } => registry::owner(pkg.as_deref(), list, add.as_deref(), remove.as_deref()),
+
+        // ── AI assistant integration ────────────────────────────────────────
+        Cmd::Agent { action } => agent::dispatch(&action),
     }
 }
