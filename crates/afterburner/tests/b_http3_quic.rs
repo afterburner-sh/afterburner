@@ -45,7 +45,7 @@ fn pick_port() -> u16 {
 fn gen_cert_pem() -> (String, String) {
     let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
         .expect("gen self-signed cert");
-    (cert.cert.pem(), cert.key_pair.serialize_pem())
+    (cert.cert.pem(), cert.signing_key.serialize_pem())
 }
 
 fn spawn_h3(source: &str) -> Child {

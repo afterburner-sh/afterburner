@@ -1277,7 +1277,7 @@ mod tests {
     fn build_server_config_round_trip() {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("cert");
         let cert_pem = cert.cert.pem();
-        let key_pem = cert.key_pair.serialize_pem();
+        let key_pem = cert.signing_key.serialize_pem();
         let mut err = String::new();
         let cfg = build_server_config(&cert_pem, &key_pem, "", &mut err);
         assert!(cfg.is_some(), "err: {err}");
@@ -1295,19 +1295,19 @@ mod tests {
             {
                 "servername": "alpha.example",
                 "cert": alpha.cert.pem(),
-                "key": alpha.key_pair.serialize_pem(),
+                "key": alpha.signing_key.serialize_pem(),
             },
             {
                 "servername": "beta.example",
                 "cert": beta.cert.pem(),
-                "key": beta.key_pair.serialize_pem(),
+                "key": beta.signing_key.serialize_pem(),
             },
         ])
         .to_string();
         let mut err = String::new();
         let cfg = build_server_config(
             &default.cert.pem(),
-            &default.key_pair.serialize_pem(),
+            &default.signing_key.serialize_pem(),
             &sni_json,
             &mut err,
         );
@@ -1320,7 +1320,7 @@ mod tests {
         let mut err = String::new();
         let cfg = build_server_config(
             &default.cert.pem(),
-            &default.key_pair.serialize_pem(),
+            &default.signing_key.serialize_pem(),
             r#"[{"servername": "x", "cert": ""}]"#,
             &mut err,
         );
@@ -1333,7 +1333,7 @@ mod tests {
         use std::sync::Arc;
         let cert = rcgen::generate_simple_self_signed(vec!["*.example.com".into()]).expect("cert");
         let pair =
-            parse_certified_key(&cert.cert.pem(), &cert.key_pair.serialize_pem()).expect("pair");
+            parse_certified_key(&cert.cert.pem(), &cert.signing_key.serialize_pem()).expect("pair");
         let mut map = std::collections::HashMap::new();
         map.insert("*.example.com".to_string(), Arc::new(pair));
         // Single-label wildcard match.

@@ -48,7 +48,7 @@ struct TestCerts {
 fn make_test_certs() -> TestCerts {
     let cert = generate_simple_self_signed(vec!["localhost".into()]).expect("rcgen");
     let cert_pem = cert.cert.pem();
-    let key_pem = cert.key_pair.serialize_pem();
+    let key_pem = cert.signing_key.serialize_pem();
     let cert_der = cert.cert.der().clone();
     TestCerts {
         cert_pem,
@@ -591,7 +591,7 @@ fn get_peer_cert_chain_returns_full_chain() {
 fn make_named_certs(san: &str) -> (String, String, CertificateDer<'static>) {
     let cert = generate_simple_self_signed(vec![san.into()]).expect("rcgen");
     let cert_pem = cert.cert.pem();
-    let key_pem = cert.key_pair.serialize_pem();
+    let key_pem = cert.signing_key.serialize_pem();
     let cert_der = cert.cert.der().clone();
     (cert_pem, key_pem, cert_der)
 }
