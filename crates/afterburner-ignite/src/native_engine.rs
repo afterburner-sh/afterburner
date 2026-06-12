@@ -693,7 +693,17 @@ fn do_thrust(
     rt.runtime.set_interrupt_handler(None);
 
     match result {
-        Ok(v) => Ok(v),
+        Ok(v) => {
+            // Output-ceiling parity with the wasm path's capture pipe:
+            // the serialized result must fit FuelGauge::output_bytes
+            // (exactly-at passes, past errors) regardless of engine tier.
+            let ceiling = limits.output_ceiling();
+            if v.len() > ceiling {
+                ab_event!(Level::Warn, "native.thrust.output_too_large", "limit" => ceiling);
+                return Err(AfterburnerError::OutputTooLarge { limit: ceiling });
+            }
+            Ok(v)
+        }
         Err(e) => {
             if let Some(budget) = fuel_budget
                 && counter.load(Ordering::Relaxed) >= budget
@@ -701,9 +711,25 @@ fn do_thrust(
                 ab_event!(Level::Warn, "native.thrust.fuel_exhausted", "budget" => budget);
                 return Err(AfterburnerError::FuelExhausted);
             }
-            Err(e)
+            Err(map_value_api_markers(e))
         }
     }
+}
+
+/// Recover typed value-API errors from the envelope's marker exceptions
+/// (the JS layer cannot construct Rust error variants directly).
+fn map_value_api_markers(e: AfterburnerError) -> AfterburnerError {
+    let msg = e.to_string();
+    if let Some(pos) = msg.find("__AB_UNEXPECTED_RAW__:") {
+        let digits: String = msg[pos + "__AB_UNEXPECTED_RAW__:".len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Ok(len) = digits.parse() {
+            return AfterburnerError::UnexpectedRawOutput { len };
+        }
+    }
+    e
 }
 
 /// Build + evaluate the envelope-wrapped script and return
@@ -735,14 +761,17 @@ fn run_script(ctx: &Ctx<'_>, source: &str, input_json: &str) -> Result<String> {
             var __result = (typeof __fn === 'function') ? __fn(__input) : __fn;
             // If the user didn't return a thenable, hand back the
             // stringified result directly - no Promise wrap, no pump.
+            // __abr: value-API parity with the wasm path - raw byte
+            // returns surface the __AB_UNEXPECTED_RAW__ marker (mapped
+            // to UnexpectedRawOutput host-side). Kept terse: this
+            // envelope is parsed per call, so source bytes are latency.
+            var __abr=function(r){{if(r&&(r instanceof Uint8Array||r instanceof ArrayBuffer))throw Error('__AB_UNEXPECTED_RAW__:'+r.byteLength);return JSON.stringify(r===undefined?null:r);}};
             if (__result === null || typeof __result !== 'object' || typeof __result.then !== 'function') {{
-                return JSON.stringify(__result === undefined ? null : __result);
+                return __abr(__result);
             }}
             // Slow path: thenable. Return the Promise chain; caller
             // will pump microtasks and `.finish::<String>()` on it.
-            return __result.then(function(v) {{
-                return JSON.stringify(v === undefined ? null : v);
-            }});
+            return __result.then(__abr);
         }})()
         "#,
         input = js_string_literal(input_json),
