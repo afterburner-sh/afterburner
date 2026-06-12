@@ -152,17 +152,23 @@ fn deny_json(host: Host, reason: &str) -> String {
     body.to_string()
 }
 
-/// Process one hook payload. Returns the response to print, or `None` to
-/// stay silent (allow). Split from [`run`] for direct golden-testing.
-#[must_use]
-pub fn respond(host: Host, stdin: &str) -> Option<String> {
-    if matches!(
+/// Whether the redirect is globally suppressed: the `BURN_AGENT_HOOK`
+/// env escape hatch or the persistent `burn agent disable` flag file.
+/// Read once per invocation; kept out of [`respond`] so the dialect logic
+/// is testable without touching the developer's real `$HOME`.
+fn redirect_suppressed() -> bool {
+    matches!(
         std::env::var("BURN_AGENT_HOOK").as_deref(),
         Ok("0" | "off" | "false")
     ) || disabled_path().exists()
-    {
-        return None;
-    }
+}
+
+/// Process one hook payload. Returns the response to print, or `None` to
+/// stay silent (allow). Pure: classify + dialect only, no global state -
+/// the enable/disable gate is applied by the caller ([`run`]) so this
+/// stays directly golden-testable.
+#[must_use]
+pub fn respond(host: Host, stdin: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(stdin).ok()?; // fail-open
     let command = extract_command(&v)?;
     match classify(&command) {
@@ -179,6 +185,10 @@ pub fn run(host: &str) -> anyhow::Result<()> {
     let mut stdin = String::new();
     // A read error is fail-open: allow silently.
     if std::io::stdin().read_to_string(&mut stdin).is_err() {
+        return Ok(());
+    }
+    // The global gate (env / disable flag) lives here, not in respond().
+    if redirect_suppressed() {
         return Ok(());
     }
     if let Some(out) = respond(Host::parse(host), &stdin) {
