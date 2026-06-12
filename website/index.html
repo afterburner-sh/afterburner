@@ -1967,9 +1967,7 @@
         grid-template-columns: 1fr 1fr;
       }
 
-      .nav__links {
-        display: none;
-      }
+      /* (links live in the burger dropdown - see MOBILE OVERHAUL) */
 
       /* Hero: orbital was 540px tall and burns vertical space - drop it on tablet/mobile.
        The hero copy is the message; the visual is decoration. */
@@ -2144,7 +2142,7 @@
       }
 
       .hero__title {
-        font-size: clamp(32px, 9vw, 44px);
+        font-size: clamp(27px, 7.8vw, 38px);
         margin-bottom: 16px;
       }
 
@@ -2473,6 +2471,138 @@
         height: 12px;
       }
     }
+    /* ============= MOBILE OVERHAUL ============= */
+    /* Grid/flex children may not shrink below their content's min width by
+       default - one nowrap code line then pushes every sibling past the
+       viewport. Opt every section grid child into shrinking. */
+    .hero__inner>*,
+    .live__inner>*,
+    .demo__layout>*,
+    .control__grid>*,
+    .runs__grid>*,
+    .use__grid>*,
+    .features__grid>*,
+    .footer__top>* {
+      min-width: 0;
+    }
+
+    .installer__cmd,
+    .live-term__body,
+    .demo__code,
+    .demo__output {
+      max-width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    /* Long inline code (flag examples) is nowrap by design on desktop;
+       on a narrow phone it would widen the page - wrap it instead. */
+    @media (max-width: 600px) {
+      p>code,
+      li>code {
+        white-space: normal;
+        overflow-wrap: anywhere;
+      }
+    }
+
+    .nav__burger {
+      display: none;
+      appearance: none;
+      background: none;
+      border: 0;
+      padding: 10px;
+      margin-left: auto;
+      margin-right: 2px;
+      cursor: pointer;
+      border-radius: 10px;
+    }
+
+    .nav__burger span {
+      display: block;
+      width: 22px;
+      height: 2px;
+      background: var(--fg);
+      border-radius: 2px;
+      transition: transform 0.25s ease, opacity 0.2s ease;
+    }
+
+    .nav__burger span+span {
+      margin-top: 5px;
+    }
+
+    .nav.menu-open .nav__burger span:nth-child(1) {
+      transform: translateY(7px) rotate(45deg);
+    }
+
+    .nav.menu-open .nav__burger span:nth-child(2) {
+      opacity: 0;
+    }
+
+    .nav.menu-open .nav__burger span:nth-child(3) {
+      transform: translateY(-7px) rotate(-45deg);
+    }
+
+    .nav__links-extra {
+      display: none;
+    }
+
+    @media (max-width: 980px) {
+      .nav__burger {
+        display: block;
+      }
+
+      /* The link row becomes a dropdown panel under the (sticky) bar. */
+      .nav__links {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 2px;
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: rgba(255, 255, 255, 0.97);
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        border-bottom: 1px solid var(--stroke);
+        padding: 10px 16px 16px;
+        box-shadow: 0 24px 48px rgba(15, 23, 42, 0.10);
+        opacity: 0;
+        visibility: hidden;
+        transform: translateY(-8px);
+        transition: opacity 0.2s ease, transform 0.2s ease, visibility 0.2s;
+      }
+
+      .nav.menu-open .nav__links {
+        opacity: 1;
+        visibility: visible;
+        transform: none;
+      }
+
+      .nav__links a {
+        padding: 13px 14px;
+        font-size: 15px;
+        border-radius: 10px;
+      }
+
+      .nav__links a:active {
+        background: rgba(255, 97, 24, 0.08);
+      }
+
+      .nav__links-extra {
+        display: block;
+        border-top: 1px solid var(--stroke);
+        border-radius: 0 0 10px 10px;
+      }
+
+      .nav__links-extra+.nav__links-extra {
+        border-top: 0;
+      }
+
+      .nav__cta .btn--ghost {
+        display: none;
+      }
+    }
   </style>
 </head>
 
@@ -2482,17 +2612,22 @@
   <nav class="nav">
     <div class="nav__inner">
       <a href="index.html" class="nav__brand">
-        <img src="art/afterburner-square.png" alt="Afterburner" />
+        <img src="art/afterburner-square.png" alt="Afterburner" width="28" height="28" decoding="async" />
         <span>Afterburner</span>
       </a>
-      <div class="nav__links">
+      <div class="nav__links" id="navLinks">
         <a href="#features">Features</a>
         <a href="#demo">Try it</a>
         <a href="#control">Configure</a>
         <a href="#runs">Features</a>
         <a href="docs.html">Docs</a>
         <a href="https://registry.afterburner.sh">Registry</a>
+        <a class="nav__links-extra" href="https://nodejs.org/docs/latest-v26.x/api/">Node.js Docs</a>
+        <a class="nav__links-extra" href="https://github.com/afterburner-sh/afterburner">GitHub</a>
       </div>
+      <button class="nav__burger" type="button" aria-label="Menu" aria-expanded="false" aria-controls="navLinks">
+        <span></span><span></span><span></span>
+      </button>
       <div class="nav__cta">
         <a href="https://nodejs.org/docs/latest-v26.x/api/" class="btn btn--ghost btn--sm">Node.js Docs</a>
         <a href="https://github.com/afterburner-sh/afterburner" class="btn btn--ghost btn--sm">GitHub</a>
@@ -2630,7 +2765,7 @@
 
           <!-- core logo -->
           <div class="orbital__core">
-            <img src="art/afterburner-square.png" alt="" />
+            <img src="art/afterburner-square.png" alt="" loading="lazy" decoding="async" />
           </div>
         </div>
       </div>
@@ -3168,7 +3303,7 @@
     <div class="site-footer__inner">
       <div class="footer__top">
         <div class="footer__brand">
-          <img src="art/afterburner-square.png" alt="Afterburner" />
+          <img src="art/afterburner-square.png" alt="Afterburner" width="28" height="28" decoding="async" />
           <p>A JavaScript runtime built in Rust. Run real Node apps with the limits and capabilities you choose. Embed
             in Rust with one crate.</p>
         </div>
@@ -3817,6 +3952,21 @@ fn main() -> anyhow::Result<()> {
 
   </script>
 
+<script>
+  (() => {
+    const nav = document.querySelector('.nav');
+    const burger = document.querySelector('.nav__burger');
+    if (!nav || !burger) return;
+    const close = () => { nav.classList.remove('menu-open'); burger.setAttribute('aria-expanded', 'false'); };
+    burger.addEventListener('click', () => {
+      const open = nav.classList.toggle('menu-open');
+      burger.setAttribute('aria-expanded', String(open));
+    });
+    nav.querySelectorAll('.nav__links a').forEach(a => a.addEventListener('click', close));
+    addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+    matchMedia('(min-width: 981px)').addEventListener('change', close);
+  })();
+</script>
 </body>
 
 </html>
