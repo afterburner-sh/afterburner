@@ -556,6 +556,7 @@ fn place(
 
 /// Recursive dir copy - the non-unix fallback for cache linking (also
 /// used by `cache::link_dir`).
+#[cfg(not(unix))]
 pub(crate) fn copy_dir_for_link(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
     copy_dir_recursive(from, to)
 }
