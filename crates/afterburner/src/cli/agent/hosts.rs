@@ -16,6 +16,7 @@
 //! | Gemini CLI   | `~/.gemini/settings.json`       | `BeforeTool`           |
 //! | Cursor       | `~/.cursor/hooks.json`          | `beforeShellExecution` |
 //! | Copilot CLI  | `~/.copilot/hooks/burn.json`    | `preToolUse`           |
+//! | Antigravity  | `~/.gemini/config/hooks.json`   | `PreToolUse` (named group) |
 //!
 //! The hook command bakes in **this binary's absolute path** (not the bare
 //! name) so the assistant can spawn it regardless of `PATH`. Idempotence
@@ -70,6 +71,12 @@ pub const HOSTS: &[HostSpec] = &[
         label: "GitHub Copilot",
         bins: &["copilot"],
         config_dir: ".copilot",
+    },
+    HostSpec {
+        key: "antigravity",
+        label: "Antigravity (agy)",
+        bins: &["agy"],
+        config_dir: ".gemini/config",
     },
 ];
 
@@ -128,6 +135,7 @@ fn config_path(key: &str, user: bool) -> PathBuf {
         "codex" => home().join(".codex").join("config.toml"),
         "cursor" => home().join(".cursor").join("hooks.json"),
         "copilot" => home().join(".copilot").join("hooks").join("burn.json"),
+        "antigravity" => home().join(".gemini").join("config").join("hooks.json"),
         _ => base.join(".burn-agent-unknown"),
     }
 }
@@ -430,6 +438,94 @@ pub fn install_copilot_hook(path: &Path, command: &str) -> std::io::Result<Strin
     Ok(format!("+ {verb} hook -> {}", path.display()))
 }
 
+// ── Antigravity (named hook groups in hooks.json) ────────────────────────────
+
+/// The top-level group key we own in agy's `hooks.json` - install writes
+/// it whole, uninstall deletes it whole, nothing else is touched.
+const AGY_GROUP: &str = "burn-agent";
+
+/// Write the `burn-agent` group into `~/.gemini/config/hooks.json`:
+/// `{"burn-agent":{"enabled":true,"PreToolUse":[{matcher,hooks:[…]}]}}`.
+/// Same repair-in-place + leave-malformed-files-alone contract as the
+/// other JSON hosts.
+///
+/// # Errors
+/// Propagates directory-create / write I/O failure.
+pub fn install_antigravity_hook(path: &Path, command: &str) -> std::io::Result<String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut root: serde_json::Value = if text.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => {
+                return Ok(format!(
+                    "! {} is not valid JSON - left unchanged; add the hook manually",
+                    path.display()
+                ));
+            }
+        }
+    };
+    let Some(root_obj) = root.as_object_mut() else {
+        return Ok(format!(
+            "! {} is not a JSON object - left unchanged",
+            path.display()
+        ));
+    };
+    let present = root_obj.contains_key(AGY_GROUP);
+    root_obj.insert(
+        AGY_GROUP.to_string(),
+        serde_json::json!({
+            "enabled": true,
+            "PreToolUse": [{
+                "matcher": "run_command",
+                "hooks": [{ "type": "command", "command": command }],
+            }],
+        }),
+    );
+    let body = serde_json::to_string_pretty(&root).map_err(std::io::Error::other)?;
+    std::fs::write(
+        path,
+        body + "
+",
+    )?;
+    let verb = if present { "refreshed" } else { "wired" };
+    Ok(format!("+ {verb} hook -> {}", path.display()))
+}
+
+/// Delete the `burn-agent` group (the inverse of
+/// [`install_antigravity_hook`]).
+///
+/// # Errors
+/// Propagates write I/O failure.
+pub fn uninstall_antigravity_hook(path: &Path) -> std::io::Result<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(format!("= nothing to remove: {}", path.display()));
+    };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Ok(format!(
+            "! {} is not valid JSON - left unchanged",
+            path.display()
+        ));
+    };
+    let removed = root
+        .as_object_mut()
+        .is_some_and(|o| o.remove(AGY_GROUP).is_some());
+    if !removed {
+        return Ok(format!("= no {AGY_GROUP} group in {}", path.display()));
+    }
+    let body = serde_json::to_string_pretty(&root).map_err(std::io::Error::other)?;
+    std::fs::write(
+        path,
+        body + "
+",
+    )?;
+    Ok(format!("- removed hook <- {}", path.display()))
+}
+
 // ── orchestration ────────────────────────────────────────────────────────────
 
 /// Wire the pre-tool hook for `key`. `user=true` writes the home-dir config
@@ -447,6 +543,7 @@ pub fn wire_host(key: &str, user: bool) -> std::io::Result<String> {
         "codex" => install_codex_hook(&path, &cmd),
         "cursor" => install_cursor_hook(&path, &cmd),
         "copilot" => install_copilot_hook(&path, &cmd),
+        "antigravity" => install_antigravity_hook(&path, &cmd),
         other => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unknown host: {other}"),
@@ -473,6 +570,7 @@ pub fn unwire_host(key: &str, user: bool) -> std::io::Result<String> {
                 Ok(format!("= nothing to remove: {}", path.display()))
             }
         }
+        "antigravity" => uninstall_antigravity_hook(&path),
         other => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("unknown host: {other}"),
@@ -728,6 +826,46 @@ mod tests {
         // Uninstall = delete the dedicated file.
         std::fs::remove_file(&path).unwrap();
         assert!(!path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn antigravity_group_install_uninstall_round_trip() {
+        let dir = tmp("agy");
+        let path = dir.join("hooks.json");
+        std::fs::write(&path, r#"{"user-group":{"enabled":true}}"#).unwrap();
+
+        install_antigravity_hook(&path, "/x/burn agent hook --host antigravity").unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["burn-agent"]["enabled"], true);
+        assert_eq!(v["burn-agent"]["PreToolUse"][0]["matcher"], "run_command");
+        assert!(
+            v["burn-agent"]["PreToolUse"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains(MARKER)
+        );
+        assert_eq!(v["user-group"]["enabled"], true, "other groups preserved");
+
+        // Refresh in place: still one group.
+        install_antigravity_hook(&path, "/new/burn agent hook --host antigravity").unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            v["burn-agent"]["PreToolUse"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .contains("/new/")
+        );
+
+        let msg = uninstall_antigravity_hook(&path).unwrap();
+        assert!(msg.contains("removed"));
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(v.get("burn-agent").is_none());
+        assert_eq!(v["user-group"]["enabled"], true);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -43,6 +43,7 @@ pub enum Host {
     Gemini,
     Cursor,
     Copilot,
+    Antigravity,
     /// Unknown host string: emit a generic `{decision, reason}` shape.
     Generic,
 }
@@ -58,6 +59,7 @@ impl Host {
             "gemini" => Self::Gemini,
             "cursor" => Self::Cursor,
             "copilot" => Self::Copilot,
+            "antigravity" | "agy" => Self::Antigravity,
             _ => Self::Generic,
         }
     }
@@ -68,7 +70,14 @@ impl Host {
 fn is_shell_tool(name: &str) -> bool {
     matches!(
         name,
-        "Bash" | "bash" | "shell" | "Shell" | "run_shell_command" | "run_terminal_cmd" | "terminal"
+        "Bash"
+            | "bash"
+            | "shell"
+            | "Shell"
+            | "run_shell_command"
+            | "run_command"
+            | "run_terminal_cmd"
+            | "terminal"
     )
 }
 
@@ -100,6 +109,15 @@ fn extract_command(v: &serde_json::Value) -> Option<String> {
             return Some(cmd.to_string());
         }
     }
+    // Antigravity (agy): {"toolCall":{"name":…,"args":{"CommandLine":…}}}.
+    if let Some(cmd) = v
+        .get("toolCall")
+        .and_then(|t| t.get("args"))
+        .and_then(|a| a.get("CommandLine"))
+        .and_then(|c| c.as_str())
+    {
+        return Some(cmd.to_string());
+    }
     // Cursor's beforeShellExecution payload: top-level `command`.
     v.get("command")
         .and_then(|c| c.as_str())
@@ -116,7 +134,10 @@ fn deny_json(host: Host, reason: &str) -> String {
                 "permissionDecisionReason": reason,
             }
         }),
-        Host::Gemini => serde_json::json!({ "decision": "deny", "reason": reason }),
+        // agy speaks the same {decision, reason} dialect as Gemini CLI.
+        Host::Gemini | Host::Antigravity => {
+            serde_json::json!({ "decision": "deny", "reason": reason })
+        }
         Host::Cursor => serde_json::json!({
             "permission": "deny",
             "user_message": "Rerouting JavaScript into the burn sandbox",
@@ -230,6 +251,22 @@ mod tests {
         let out = respond(Host::Cursor, &payload).expect("deny");
         assert!(out.contains("\"permission\":\"deny\""));
         assert!(out.contains("agent_message"));
+    }
+
+    #[test]
+    fn antigravity_tool_call_shape_is_understood() {
+        let payload = serde_json::json!({
+            "toolCall": { "name": "run_command", "args": { "CommandLine": "node app.js" } },
+        })
+        .to_string();
+        let out = respond(Host::Antigravity, &payload).expect("deny");
+        assert!(out.contains("\"decision\":\"deny\""));
+        assert!(out.contains("burn --sandbox node app.js"));
+        let safe = serde_json::json!({
+            "toolCall": { "name": "run_command", "args": { "CommandLine": "git status" } },
+        })
+        .to_string();
+        assert!(respond(Host::Antigravity, &safe).is_none());
     }
 
     #[test]

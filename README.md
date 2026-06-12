@@ -151,7 +151,7 @@ One command routes every piece of JavaScript your AI assistant writes
 through the sealed sandbox instead of raw `node`:
 
 ```sh
-burn agent install     # arrow-key multi-select: Claude Code, Codex, Gemini CLI, Cursor, Copilot
+burn agent install     # arrow-key multi-select: Claude Code, Codex, Gemini CLI, Cursor, Copilot, Antigravity
 burn agent status      # what's detected, wired, and current
 burn agent uninstall   # exact inverse - configs restored, nothing left behind
 ```

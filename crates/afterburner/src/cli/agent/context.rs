@@ -33,8 +33,12 @@ fn context_path(key: &str, user: bool) -> Option<PathBuf> {
     match (key, user) {
         ("claude-code", true) => Some(home().join(".claude").join("CLAUDE.md")),
         ("claude-code", false) => Some(cwd().join("CLAUDE.md")),
-        ("gemini", true) => Some(home().join(".gemini").join("GEMINI.md")),
-        ("gemini", false) => Some(cwd().join("GEMINI.md")),
+        // agy parses the same GEMINI.md files as Gemini CLI; the managed
+        // block is identical and sentinel-keyed, so installing for both
+        // hosts refreshes rather than duplicates. (Uninstalling either
+        // removes the shared block - re-run install for the one you keep.)
+        ("gemini" | "antigravity", true) => Some(home().join(".gemini").join("GEMINI.md")),
+        ("gemini" | "antigravity", false) => Some(cwd().join("GEMINI.md")),
         ("codex", true) => Some(home().join(".codex").join("AGENTS.md")),
         ("codex", false) => Some(cwd().join("AGENTS.md")),
         _ => None,
