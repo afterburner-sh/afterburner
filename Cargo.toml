@@ -115,8 +115,8 @@ ureq = { version = "2", features = ["json"] }
 tempfile = "3"
 flate2 = "1"
 brotli = { version = "8", default-features = false, features = ["std"] }
-kovan-map = "0.1.13"
-kovan-channel = "0.1.13"
+kovan-map = "0.1.14"
+kovan-channel = "0.1.14"
 libc = "0.2"
 # Colored + animated `burn` CLI output (brand palette spinners/styling). Used
 # only by the `bin` feature.
