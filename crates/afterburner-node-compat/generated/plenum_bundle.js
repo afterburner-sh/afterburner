@@ -20169,6 +20169,95 @@ __register_module('wasi', function(module, exports, require) {
         };
     }
 
+    // Tolerant `TextDecoder`: the native (javy) decoder accepts ONLY the
+    // exact label 'utf-8' and throws on the labels real-world code passes -
+    // emscripten builds (h3-js, sql.js, ...) do `new TextDecoder('utf8')`
+    // (no dash) for narrow strings and `new TextDecoder('utf-16le')` for
+    // wide strings. Wrap whatever decoder we have so every common label
+    // works: utf-8 aliases delegate to the fast native decoder; utf-16 and
+    // latin1 decode in pure JS. Replaces the decoder unconditionally, since
+    // even when a native one exists it is the too-strict one.
+    (function () {
+        var NativeTD = globalThis.TextDecoder;
+        function normLabel(label) {
+            var e = String(label == null ? 'utf-8' : label).toLowerCase().trim();
+            if (e === '' || e === 'utf8' || e === 'utf-8' || e === 'unicode-1-1-utf-8' ||
+                e === 'unicode11utf8' || e === 'unicode20utf8' || e === 'x-unicode20utf8') return 'utf-8';
+            if (e === 'utf-16le' || e === 'utf-16' || e === 'ucs-2' || e === 'ucs2' ||
+                e === 'unicode' || e === 'csunicode') return 'utf-16le';
+            if (e === 'utf-16be' || e === 'unicodefffe') return 'utf-16be';
+            if (e === 'latin1' || e === 'iso-8859-1' || e === 'iso8859-1' || e === 'l1' ||
+                e === 'ascii' || e === 'us-ascii' || e === 'windows-1252' || e === 'cp1252' ||
+                e === 'binary') return 'latin1';
+            return null;
+        }
+        function toBytes(input) {
+            if (input === undefined || input === null) return new Uint8Array(0);
+            if (input instanceof Uint8Array) return input;
+            if (input instanceof ArrayBuffer) return new Uint8Array(input);
+            if (typeof input.byteLength === 'number') {
+                return new Uint8Array(input.buffer || input, input.byteOffset || 0, input.byteLength);
+            }
+            return new Uint8Array(0);
+        }
+        function decodeUtf8Js(bytes) {
+            var s = '', i = 0;
+            while (i < bytes.length) {
+                var b1 = bytes[i++];
+                if (b1 < 0x80) { s += String.fromCharCode(b1); }
+                else if (b1 < 0xC0) { s += '�'; }
+                else if (b1 < 0xE0) { s += String.fromCharCode(((b1 & 0x1F) << 6) | (bytes[i++] & 0x3F)); }
+                else if (b1 < 0xF0) {
+                    var c2 = bytes[i++] & 0x3F, c3 = bytes[i++] & 0x3F;
+                    s += String.fromCharCode(((b1 & 0x0F) << 12) | (c2 << 6) | c3);
+                } else {
+                    var d2 = bytes[i++] & 0x3F, d3 = bytes[i++] & 0x3F, d4 = bytes[i++] & 0x3F;
+                    var cp = (((b1 & 0x07) << 18) | (d2 << 12) | (d3 << 6) | d4) - 0x10000;
+                    s += String.fromCharCode(0xD800 + (cp >> 10), 0xDC00 + (cp & 0x3FF));
+                }
+            }
+            return s;
+        }
+        function decodeUtf16(bytes, le) {
+            var s = '', n = bytes.length & ~1;
+            for (var i = 0; i < n; i += 2) {
+                s += String.fromCharCode(le ? (bytes[i] | (bytes[i + 1] << 8))
+                                            : ((bytes[i] << 8) | bytes[i + 1]));
+            }
+            return s;
+        }
+        function decodeLatin1(bytes) {
+            var s = '';
+            for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+            return s;
+        }
+        function TolerantTextDecoder(label, options) {
+            if (!(this instanceof TolerantTextDecoder)) return new TolerantTextDecoder(label, options);
+            var enc = normLabel(label);
+            if (enc === null) throw new RangeError("Failed to construct 'TextDecoder': the encoding label provided ('" + label + "') is invalid.");
+            this._enc = enc;
+            this.encoding = enc === 'latin1' ? 'windows-1252' : enc;
+            this.fatal = !!(options && options.fatal);
+            this.ignoreBOM = !!(options && options.ignoreBOM);
+            this._native = null;
+            if (enc === 'utf-8' && typeof NativeTD === 'function' && NativeTD !== TolerantTextDecoder) {
+                try { this._native = new NativeTD('utf-8'); } catch (_) { this._native = null; }
+            }
+        }
+        TolerantTextDecoder.prototype.decode = function (input, opts) {
+            if (input === undefined) return '';
+            var bytes = toBytes(input);
+            if (this._enc === 'utf-8') {
+                if (this._native) { try { return this._native.decode(bytes, opts); } catch (_) { /* fall through */ } }
+                return decodeUtf8Js(bytes);
+            }
+            if (this._enc === 'utf-16le') return decodeUtf16(bytes, true);
+            if (this._enc === 'utf-16be') return decodeUtf16(bytes, false);
+            return decodeLatin1(bytes);
+        };
+        globalThis.TextDecoder = TolerantTextDecoder;
+    })();
+
     // `btoa` / `atob` — base64 encoders. QuickJS doesn't ship these.
     if (typeof globalThis.btoa !== 'function') {
         globalThis.btoa = function(str) {
