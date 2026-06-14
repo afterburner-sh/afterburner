@@ -12,7 +12,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use javy_plugin_api::javy::quickjs::{Object, prelude::Func};
+use javy_plugin_api::javy::quickjs::{Ctx, Object, prelude::Func};
 
 use super::call_read;
 use crate::host_api::*;
@@ -25,6 +25,13 @@ pub fn install<'js>(globals: &Object<'js>) {
     install_zlib(globals);
     install_hostctx(globals);
     install_state(globals);
+}
+
+/// Force a QuickJS cycle-collection pass. Refcounting frees acyclic garbage
+/// immediately, but reference cycles survive until the collector runs; a
+/// long-lived daemon that never tears its Store down must trigger this itself.
+fn host_force_gc<'js>(ctx: Ctx<'js>) {
+    ctx.run_gc();
 }
 
 fn install_diagnostics<'js>(globals: &Object<'js>) {
@@ -46,6 +53,16 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             }
         }),
     );
+
+    // Long-lived-daemon heap control. A one-shot Store reclaims everything on
+    // drop, so it never needs to collect. A warm Store re-entered millions of
+    // times is the opposite: reference CYCLES (promise chains, mutually-
+    // referencing closures) that the refcount path can never free accumulate
+    // until the cycle collector runs. The allocation-threshold collector does
+    // not bound them reliably — QuickJS retunes the threshold to ~1.5x the live
+    // set after any transient spike and then rarely fires — so a daemon must be
+    // able to collect on its own cadence. `__host_gc` exposes that pass.
+    let _ = globals.set("__host_gc", Func::from(host_force_gc));
 
     // Per-thrust input bridges (`__AB_GET_INPUT__` /
     // `__AB_GET_INPUT_VALUE__`) live in `globals::input`.
