@@ -5,7 +5,7 @@
 
 //! Linked packages e2e - the virtual-filesystem composition
 //! (`Afb::linked_source`) running through the REAL engine invoke path
-//! (`register` + `run`, the same path burndb's `burn.invoke` rides).
+//! (`register` + `run`, the same path an embedder's `burn.invoke` rides).
 //!
 //! Cargo model: the `.afb` carries only the package's OWN source. afb
 //! dependency packages and npm packages are resolved + cached separately
