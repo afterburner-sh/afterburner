@@ -175,6 +175,12 @@ pub struct ConnectOptions {
     /// Optional CA PEM blob for custom-root verification. When set,
     /// supplements the default Mozilla bundle.
     pub ca_pem: String,
+    /// Client certificate PEM for mutual TLS. Both `cert_pem` and
+    /// `key_pem` must be non-empty to present a client cert.
+    pub cert_pem: String,
+    /// Client private key PEM for mutual TLS. Both `cert_pem` and
+    /// `key_pem` must be non-empty to present a client cert.
+    pub key_pem: String,
 }
 
 #[derive(Clone)]
@@ -372,6 +378,8 @@ impl DaemonTls {
         cert_pem: &str,
         key_pem: &str,
         sni_map_json: &str,
+        client_ca_pem: &str,
+        request_client_cert: bool,
         last_error: &mut String,
     ) -> i32 {
         if host.is_empty() {
@@ -386,7 +394,14 @@ impl DaemonTls {
         // build still happens for followers so a malformed PEM
         // surfaces consistently across shards rather than only
         // on the binding shard.
-        let server_config = match build_server_config(cert_pem, key_pem, sni_map_json, last_error) {
+        let server_config = match build_server_config(
+            cert_pem,
+            key_pem,
+            sni_map_json,
+            client_ca_pem,
+            request_client_cert,
+            last_error,
+        ) {
             Some(c) => c,
             None => return errors::E_BAD_CERT,
         };
@@ -609,14 +624,53 @@ fn build_client_config(
             }
         }
     }
+
+    // Determine whether the caller wants to present a client cert.
+    let has_client_cert = !opts.cert_pem.is_empty() && !opts.key_pem.is_empty();
+
     let builder = ClientConfig::builder();
     let mut cfg = if opts.reject_unauthorized {
-        builder.with_root_certificates(roots).with_no_client_auth()
+        let wants_cert = builder.with_root_certificates(roots);
+        if has_client_cert {
+            let pair = match parse_certified_key(&opts.cert_pem, &opts.key_pem) {
+                Ok(p) => p,
+                Err(e) => {
+                    *last_error = format!("tls.connect: client cert/key: {e}");
+                    return None;
+                }
+            };
+            match wants_cert.with_client_auth_cert(pair.cert, pair.key) {
+                Ok(c) => c,
+                Err(e) => {
+                    *last_error = format!("tls.connect: client auth cert: {e}");
+                    return None;
+                }
+            }
+        } else {
+            wants_cert.with_no_client_auth()
+        }
     } else {
-        builder
+        let wants_cert = builder
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoVerify))
-            .with_no_client_auth()
+            .with_custom_certificate_verifier(Arc::new(NoVerify));
+        if has_client_cert {
+            let pair = match parse_certified_key(&opts.cert_pem, &opts.key_pem) {
+                Ok(p) => p,
+                Err(e) => {
+                    *last_error = format!("tls.connect: client cert/key: {e}");
+                    return None;
+                }
+            };
+            match wants_cert.with_client_auth_cert(pair.cert, pair.key) {
+                Ok(c) => c,
+                Err(e) => {
+                    *last_error = format!("tls.connect: client auth cert: {e}");
+                    return None;
+                }
+            }
+        } else {
+            wants_cert.with_no_client_auth()
+        }
     };
     if !opts.alpn.is_empty() {
         cfg.alpn_protocols = opts.alpn.iter().map(|s| s.as_bytes().to_vec()).collect();
@@ -628,6 +682,8 @@ fn build_server_config(
     cert_pem: &str,
     key_pem: &str,
     sni_map_json: &str,
+    client_ca_pem: &str,
+    request_client_cert: bool,
     last_error: &mut String,
 ) -> Option<Arc<ServerConfig>> {
     let default_certified = match parse_certified_key(cert_pem, key_pem) {
@@ -681,11 +737,48 @@ fn build_server_config(
         out
     };
 
+    // Build the client verifier: either mTLS (when requestCert is true
+    // and a client CA PEM is supplied) or no-client-auth (the default,
+    // one-way TLS path preserved exactly as before).
+    let client_auth = if request_client_cert && !client_ca_pem.is_empty() {
+        let mut ca_roots = RootCertStore::empty();
+        let mut cursor = std::io::Cursor::new(client_ca_pem.as_bytes());
+        for item in rustls_pemfile::certs(&mut cursor) {
+            match item {
+                Ok(c) => {
+                    if let Err(e) = ca_roots.add(c) {
+                        *last_error = format!("tls.listen: client CA add: {e}");
+                        return None;
+                    }
+                }
+                Err(e) => {
+                    *last_error = format!("tls.listen: client CA parse: {e}");
+                    return None;
+                }
+            }
+        }
+        let verifier =
+            match rustls::server::WebPkiClientVerifier::builder(Arc::new(ca_roots)).build() {
+                Ok(v) => v,
+                Err(e) => {
+                    *last_error = format!("tls.listen: client verifier build: {e}");
+                    return None;
+                }
+            };
+        Some(verifier)
+    } else {
+        None
+    };
+
     if sni_map.is_empty() {
         // Single-cert path - keep the simpler with_single_cert builder
         // so error messages stay clean for the most common shape.
-        return ServerConfig::builder()
-            .with_no_client_auth()
+        let builder = ServerConfig::builder();
+        let wants_cert = match client_auth {
+            Some(v) => builder.with_client_cert_verifier(v),
+            None => builder.with_no_client_auth(),
+        };
+        return wants_cert
             .with_single_cert(
                 default_certified.cert.clone(),
                 default_certified.key.clone_key(),
@@ -703,9 +796,12 @@ fn build_server_config(
         default: Arc::new(default_certified),
         by_name: sni_map.into_iter().collect(),
     };
-    let cfg = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_cert_resolver(Arc::new(resolver));
+    let builder = ServerConfig::builder();
+    let wants_cert = match client_auth {
+        Some(v) => builder.with_client_cert_verifier(v),
+        None => builder.with_no_client_auth(),
+    };
+    let cfg = wants_cert.with_cert_resolver(Arc::new(resolver));
     Some(Arc::new(cfg))
 }
 
@@ -1279,7 +1375,7 @@ mod tests {
         let cert_pem = cert.cert.pem();
         let key_pem = cert.signing_key.serialize_pem();
         let mut err = String::new();
-        let cfg = build_server_config(&cert_pem, &key_pem, "", &mut err);
+        let cfg = build_server_config(&cert_pem, &key_pem, "", "", false, &mut err);
         assert!(cfg.is_some(), "err: {err}");
     }
 
@@ -1309,6 +1405,8 @@ mod tests {
             &default.cert.pem(),
             &default.signing_key.serialize_pem(),
             &sni_json,
+            "",
+            false,
             &mut err,
         );
         assert!(cfg.is_some(), "err: {err}");
@@ -1322,6 +1420,8 @@ mod tests {
             &default.cert.pem(),
             &default.signing_key.serialize_pem(),
             r#"[{"servername": "x", "cert": ""}]"#,
+            "",
+            false,
             &mut err,
         );
         assert!(cfg.is_none(), "should reject missing key");
@@ -1342,5 +1442,317 @@ mod tests {
         assert!(wildcard_match(&map, "example.com").is_none());
         // Different domain - no match.
         assert!(wildcard_match(&map, "api.other.com").is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // mTLS in-process handshake tests
+    //
+    // These generate a tiny CA + leaf cert pair with rcgen 0.14, spin
+    // up a real tokio_rustls server + client in-process, and verify:
+    //
+    //   (a) a client presenting a cert signed by the CA is accepted;
+    //       both sides can see the peer cert chain.
+    //   (b) a client presenting NO cert is rejected by the server
+    //       (handshake fails).
+    //   (c) a client presenting a cert signed by a DIFFERENT CA is
+    //       rejected.
+    //   (d) one-way TLS (no requestCert) is unaffected: a client with
+    //       no client cert still connects fine.
+    //
+    // The CA cert is self-signed; the leaf cert is signed by that CA.
+    // -----------------------------------------------------------------
+
+    /// Generate a CA cert + key pair using rcgen 0.14's `CertifiedIssuer`
+    /// which bundles both the `Certificate` and the `Issuer` needed to
+    /// sign leaf certs.
+    fn make_ca() -> rcgen::CertifiedIssuer<'static, rcgen::KeyPair> {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+        let ca_key = KeyPair::generate().expect("CA key");
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        rcgen::CertifiedIssuer::self_signed(params, ca_key).expect("CA cert")
+    }
+
+    /// Generate a leaf cert signed by the given CA issuer.
+    fn make_leaf_signed_by(
+        ca: &rcgen::CertifiedIssuer<'_, rcgen::KeyPair>,
+        san: &str,
+    ) -> (rcgen::Certificate, rcgen::KeyPair) {
+        use rcgen::{CertificateParams, KeyPair};
+        let leaf_key = KeyPair::generate().expect("leaf key");
+        let params = CertificateParams::new(vec![san.to_string()]).expect("leaf params");
+        let leaf_cert = params.signed_by(&leaf_key, ca).expect("leaf cert");
+        (leaf_cert, leaf_key)
+    }
+
+    /// Bind a TLS server, run one accept, and return the peer cert chain
+    /// DER bytes from the completed handshake. `client_fn` receives the
+    /// bound port and must drive the client connection to completion.
+    /// Returns `Err` if the server-side accept or handshake failed.
+    async fn run_mtls_handshake<F, Fut>(
+        server_cfg: Arc<ServerConfig>,
+        client_fn: F,
+    ) -> Result<Vec<Vec<u8>>, String>
+    where
+        F: FnOnce(u16) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        use tokio::net::TcpListener;
+        use tokio_rustls::TlsAcceptor;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| e.to_string())?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+
+        // Drive the client on a separate task so server and client run
+        // concurrently inside the same tokio runtime.
+        tokio::spawn(client_fn(port));
+
+        let acceptor = TlsAcceptor::from(server_cfg);
+        let (stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
+        let tls = acceptor.accept(stream).await.map_err(|e| e.to_string())?;
+
+        let (_, conn) = tls.get_ref();
+        let chain = conn
+            .peer_certificates()
+            .map(|c| c.iter().map(|d| d.as_ref().to_vec()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        Ok(chain)
+    }
+
+    #[tokio::test]
+    async fn mtls_authorized_client_accepted() {
+        // CA + leaf cert for the server identity.
+        let server_ca = make_ca();
+        let (server_leaf, server_leaf_key) = make_leaf_signed_by(&server_ca, "localhost");
+
+        // Separate CA + leaf cert for the client identity.
+        let client_ca = make_ca();
+        let (client_leaf, client_leaf_key) = make_leaf_signed_by(&client_ca, "client.test");
+
+        let server_cert_pem = server_leaf.pem();
+        let server_key_pem = server_leaf_key.serialize_pem();
+        let client_ca_pem = client_ca.pem();
+
+        // Build the mTLS server config: requires client cert verified against client_ca.
+        let mut err = String::new();
+        let server_cfg = build_server_config(
+            &server_cert_pem,
+            &server_key_pem,
+            "",
+            &client_ca_pem,
+            true,
+            &mut err,
+        )
+        .expect(&format!("server config: {err}"));
+
+        // Build the mTLS client config: verifies server against server_ca,
+        // presents client_leaf signed by client_ca.
+        let server_ca_pem = server_ca.pem();
+        let client_cert_pem = client_leaf.pem();
+        let client_key_pem = client_leaf_key.serialize_pem();
+
+        let client_opts = ConnectOptions {
+            reject_unauthorized: true,
+            servername: "localhost".into(),
+            alpn: Vec::new(),
+            ca_pem: server_ca_pem,
+            cert_pem: client_cert_pem,
+            key_pem: client_key_pem,
+        };
+        let mut client_err = String::new();
+        let client_cfg = build_client_config(&client_opts, &mut client_err)
+            .expect(&format!("client config: {client_err}"));
+
+        let peer_chain = run_mtls_handshake(server_cfg, move |port| async move {
+            use rustls::pki_types::ServerName;
+            use tokio::io::AsyncWriteExt;
+            use tokio_rustls::TlsConnector;
+
+            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("TCP connect");
+            let connector = TlsConnector::from(client_cfg);
+            let sn = ServerName::try_from("localhost".to_string()).expect("sn");
+            let mut stream = connector.connect(sn, tcp).await.expect("client handshake");
+            // Send a byte so the server-side read doesn't stall.
+            let _ = stream.write_all(b"ping").await;
+            let _ = stream.shutdown().await;
+        })
+        .await
+        .expect("server handshake");
+
+        // The server must have received the client cert chain.
+        assert!(!peer_chain.is_empty(), "server must see client cert chain");
+    }
+
+    #[tokio::test]
+    async fn mtls_client_without_cert_rejected() {
+        // CA + leaf for the server.
+        let server_ca = make_ca();
+        let (server_leaf, server_leaf_key) = make_leaf_signed_by(&server_ca, "localhost");
+
+        // A separate CA is the expected client CA; the connecting
+        // client presents no cert at all, so the handshake must fail.
+        let client_ca = make_ca();
+
+        let mut err = String::new();
+        let server_cfg = build_server_config(
+            &server_leaf.pem(),
+            &server_leaf_key.serialize_pem(),
+            "",
+            &client_ca.pem(),
+            true,
+            &mut err,
+        )
+        .expect(&format!("server config: {err}"));
+
+        let server_ca_pem = server_ca.pem();
+        // Client that presents NO client cert.
+        let client_opts = ConnectOptions {
+            reject_unauthorized: true,
+            servername: "localhost".into(),
+            alpn: Vec::new(),
+            ca_pem: server_ca_pem,
+            cert_pem: String::new(),
+            key_pem: String::new(),
+        };
+        let mut client_err = String::new();
+        let client_cfg = build_client_config(&client_opts, &mut client_err)
+            .expect(&format!("client config: {client_err}"));
+
+        // The server should reject the connection; run_mtls_handshake
+        // returns Err when the acceptor.accept() call fails.
+        let result = run_mtls_handshake(server_cfg, move |port| async move {
+            use rustls::pki_types::ServerName;
+            use tokio_rustls::TlsConnector;
+
+            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("TCP connect");
+            let connector = TlsConnector::from(client_cfg);
+            let sn = ServerName::try_from("localhost".to_string()).expect("sn");
+            // This will fail; the client just tries and ignores the error.
+            let _ = connector.connect(sn, tcp).await;
+        })
+        .await;
+
+        assert!(
+            result.is_err(),
+            "server must reject a client with no cert; got Ok"
+        );
+    }
+
+    #[tokio::test]
+    async fn mtls_client_wrong_ca_rejected() {
+        // CA + leaf for the server.
+        let server_ca = make_ca();
+        let (server_leaf, server_leaf_key) = make_leaf_signed_by(&server_ca, "localhost");
+
+        // The server trusts client_ca_trusted. The client presents a
+        // cert signed by a DIFFERENT CA (client_ca_untrusted).
+        let client_ca_trusted = make_ca();
+        let client_ca_untrusted = make_ca();
+        let (client_leaf_bad, client_leaf_bad_key) =
+            make_leaf_signed_by(&client_ca_untrusted, "bad.client");
+
+        let mut err = String::new();
+        let server_cfg = build_server_config(
+            &server_leaf.pem(),
+            &server_leaf_key.serialize_pem(),
+            "",
+            &client_ca_trusted.pem(),
+            true,
+            &mut err,
+        )
+        .expect(&format!("server config: {err}"));
+
+        let server_ca_pem = server_ca.pem();
+        let client_cert_pem = client_leaf_bad.pem();
+        let client_key_pem = client_leaf_bad_key.serialize_pem();
+
+        let client_opts = ConnectOptions {
+            reject_unauthorized: true,
+            servername: "localhost".into(),
+            alpn: Vec::new(),
+            ca_pem: server_ca_pem,
+            cert_pem: client_cert_pem,
+            key_pem: client_key_pem,
+        };
+        let mut client_err = String::new();
+        let client_cfg = build_client_config(&client_opts, &mut client_err)
+            .expect(&format!("client config: {client_err}"));
+
+        let result = run_mtls_handshake(server_cfg, move |port| async move {
+            use rustls::pki_types::ServerName;
+            use tokio_rustls::TlsConnector;
+
+            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("TCP connect");
+            let connector = TlsConnector::from(client_cfg);
+            let sn = ServerName::try_from("localhost".to_string()).expect("sn");
+            let _ = connector.connect(sn, tcp).await;
+        })
+        .await;
+
+        assert!(
+            result.is_err(),
+            "server must reject a client cert from an untrusted CA; got Ok"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_way_tls_unaffected_by_mtls_option() {
+        // Confirm that one-way TLS (request_client_cert: false) still
+        // works when the client presents no cert. This is the regression
+        // guard: mTLS changes must not break the existing TLS path.
+        let server_ck = rcgen::generate_simple_self_signed(vec!["localhost".into()]).expect("srv");
+        let server_cert_pem = server_ck.cert.pem();
+        let server_key_pem = server_ck.signing_key.serialize_pem();
+
+        let mut err = String::new();
+        // request_client_cert: false -> one-way TLS, client CA PEM ignored.
+        let server_cfg =
+            build_server_config(&server_cert_pem, &server_key_pem, "", "", false, &mut err)
+                .expect(&format!("server config: {err}"));
+
+        // Client verifies the server cert via ca_pem (the self-signed cert
+        // is also its own CA).
+        let client_opts = ConnectOptions {
+            reject_unauthorized: true,
+            servername: "localhost".into(),
+            alpn: Vec::new(),
+            ca_pem: server_cert_pem.clone(),
+            cert_pem: String::new(),
+            key_pem: String::new(),
+        };
+        let mut client_err = String::new();
+        let client_cfg = build_client_config(&client_opts, &mut client_err)
+            .expect(&format!("client config: {client_err}"));
+
+        let peer_chain = run_mtls_handshake(server_cfg, move |port| async move {
+            use rustls::pki_types::ServerName;
+            use tokio::io::AsyncWriteExt;
+            use tokio_rustls::TlsConnector;
+
+            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("TCP connect");
+            let connector = TlsConnector::from(client_cfg);
+            let sn = ServerName::try_from("localhost".to_string()).expect("sn");
+            let mut stream = connector.connect(sn, tcp).await.expect("client handshake");
+            let _ = stream.write_all(b"hi").await;
+            let _ = stream.shutdown().await;
+        })
+        .await
+        .expect("handshake must succeed for one-way TLS");
+
+        // Server did not request a client cert, so peer_chain is empty.
+        assert!(
+            peer_chain.is_empty(),
+            "one-way TLS: server must not see a client cert chain"
+        );
     }
 }

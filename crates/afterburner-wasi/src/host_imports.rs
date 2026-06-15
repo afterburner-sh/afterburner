@@ -575,7 +575,9 @@ fn wrap_tls(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
              _k_p: i32,
              _k_l: i32,
              _s_p: i32,
-             _s_l: i32|
+             _s_l: i32,
+             _o_p: i32,
+             _o_l: i32|
              -> i32 { E_NO_DAEMON },
         )
         .map_err(link_err)?;
@@ -4555,18 +4557,24 @@ fn wrap_net(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
 //
 // Seven host imports back the `tls` polyfill:
 //
-//   __host_tls_connect(host, port, opts_json)        -> conn_id | error
-//   __host_tls_write(conn_id, payload_b64)           -> 0 | error
-//   __host_tls_end(conn_id)                          -> 0 | error
-//   __host_tls_destroy(conn_id)                      -> 0 | error
-//   __host_tls_pending(conn_id)                      -> bytes (≥0) | 0
-//   __host_tls_listen(host, port, cert_pem, key_pem) -> server_id | error
-//   __host_tls_close_server(server_id)               -> 0 | error
+//   __host_tls_connect(host, port, opts_json)                     -> conn_id | error
+//   __host_tls_write(conn_id, payload_b64)                        -> 0 | error
+//   __host_tls_end(conn_id)                                       -> 0 | error
+//   __host_tls_destroy(conn_id)                                   -> 0 | error
+//   __host_tls_pending(conn_id)                                   -> bytes (>=0) | 0
+//   __host_tls_listen(host, port, cert_pem, key_pem, sni, opts)  -> server_id | error
+//   __host_tls_close_server(server_id)                            -> 0 | error
 //
 // The connect-options JSON carries `rejectUnauthorized`, `servername`,
-// `alpn` (string array), and `ca` (PEM blob). Schema is locked at the
-// polyfill boundary; the host treats every field as optional and
-// defensively defaults to safe values (full CA verification ON).
+// `alpn` (string array), `ca` (PEM blob), `cert` (client cert PEM),
+// and `key` (client key PEM). Schema is locked at the polyfill
+// boundary; the host treats every field as optional and defensively
+// defaults to safe values (full CA verification ON, no client cert).
+//
+// The listen-options JSON carries `requestCert` (bool) and `ca`
+// (client CA PEM). When `requestCert` is true and `ca` is non-empty
+// the server performs mutual TLS, verifying the client cert against
+// the supplied CA. Absent these fields, one-way TLS is used.
 
 #[cfg(feature = "daemon")]
 fn wrap_tls(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
@@ -4705,7 +4713,9 @@ fn wrap_tls(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
              key_ptr: i32,
              key_len: i32,
              sni_ptr: i32,
-             sni_len: i32|
+             sni_len: i32,
+             listen_opts_ptr: i32,
+             listen_opts_len: i32|
              -> i32 {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return terr::E_OTHER;
@@ -4727,6 +4737,12 @@ fn wrap_tls(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     return terr::E_BAD_CERT;
                 };
                 let sni_map_json = read_str(&memory, &caller, sni_ptr, sni_len).unwrap_or_default();
+                // Parse mTLS server options: `requestCert` (bool) and
+                // `ca` (PEM string for the client CA). Both optional;
+                // when absent, one-way TLS is used (no client cert check).
+                let listen_opts_json = read_str(&memory, &caller, listen_opts_ptr, listen_opts_len)
+                    .unwrap_or_default();
+                let (client_ca_pem, request_client_cert) = parse_tls_listen_opts(&listen_opts_json);
                 let Some(tls) = caller.data().daemon_tls.clone() else {
                     record(&mut caller, "tls.createServer requires daemon mode");
                     return terr::E_NO_DAEMON;
@@ -4738,6 +4754,8 @@ fn wrap_tls(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     &cert_pem,
                     &key_pem,
                     &sni_map_json,
+                    &client_ca_pem,
+                    request_client_cert,
                     &mut last_error,
                 );
                 if !last_error.is_empty() {
@@ -4775,6 +4793,8 @@ fn parse_tls_connect_opts(json: &str) -> crate::daemon_tls::ConnectOptions {
         servername: String::new(),
         alpn: Vec::new(),
         ca_pem: String::new(),
+        cert_pem: String::new(),
+        key_pem: String::new(),
     };
     let v: serde_json::Value = match serde_json::from_str(json) {
         Ok(v) => v,
@@ -4795,7 +4815,37 @@ fn parse_tls_connect_opts(json: &str) -> crate::daemon_tls::ConnectOptions {
     if let Some(s) = v.get("ca").and_then(|x| x.as_str()) {
         out.ca_pem = s.to_string();
     }
+    // mTLS client cert + key (both required to present a client cert).
+    if let Some(s) = v.get("cert").and_then(|x| x.as_str()) {
+        out.cert_pem = s.to_string();
+    }
+    if let Some(s) = v.get("key").and_then(|x| x.as_str()) {
+        out.key_pem = s.to_string();
+    }
     out
+}
+
+/// Parse listen-side mTLS options from a JSON blob.
+///
+/// Expects `{"requestCert": bool, "ca": "<PEM>"}`. Both fields are
+/// optional; missing or malformed JSON silently falls back to the
+/// one-way TLS defaults (no client cert requested).
+#[cfg(feature = "daemon")]
+fn parse_tls_listen_opts(json: &str) -> (String, bool) {
+    let v: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return (String::new(), false),
+    };
+    let request_client_cert = v
+        .get("requestCert")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let client_ca_pem = v
+        .get("ca")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    (client_ca_pem, request_client_cert)
 }
 
 // ---- dgram (UDP) ---------------------------------------------------------

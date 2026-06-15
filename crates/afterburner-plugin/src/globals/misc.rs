@@ -797,12 +797,14 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
              port: f64,
              cert_pem: String,
              key_pem: String,
-             sni_map_json: String|
+             sni_map_json: String,
+             listen_opts_json: String|
              -> f64 {
                 let hb = host.as_bytes();
                 let cb = cert_pem.as_bytes();
                 let kb = key_pem.as_bytes();
                 let sb = sni_map_json.as_bytes();
+                let ob = listen_opts_json.as_bytes();
                 unsafe {
                     host_tls_listen(
                         hb.as_ptr(),
@@ -814,6 +816,8 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
                         kb.len() as u32,
                         sb.as_ptr(),
                         sb.len() as u32,
+                        ob.as_ptr(),
+                        ob.len() as u32,
                     ) as f64
                 }
             },
