@@ -34,6 +34,20 @@ fn host_force_gc<'js>(ctx: Ctx<'js>) {
     ctx.run_gc();
 }
 
+/// QuickJS heap bytes currently in use. A diagnostic for a long-lived Store whose
+/// WASM linear memory climbs: if this value grows the leak is JS-heap (live data
+/// the cycle collector cannot free); if it stays flat while RSS climbs the leak is
+/// outside the QuickJS heap (host allocations in the module).
+fn host_heap_used<'js>(ctx: Ctx<'js>) -> i64 {
+    use javy_plugin_api::javy::quickjs::qjs;
+    unsafe {
+        let rt = qjs::JS_GetRuntime(ctx.as_raw().as_ptr());
+        let mut stats = core::mem::MaybeUninit::<qjs::JSMemoryUsage>::uninit();
+        qjs::JS_ComputeMemoryUsage(rt, stats.as_mut_ptr());
+        stats.assume_init().memory_used_size
+    }
+}
+
 fn install_diagnostics<'js>(globals: &Object<'js>) {
     // Expose the host's `last_error` slot as a JS-callable global.
     // Useful when a host call returns a sentinel (0 handle, -N code)
@@ -63,6 +77,7 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
     // set after any transient spike and then rarely fires — so a daemon must be
     // able to collect on its own cadence. `__host_gc` exposes that pass.
     let _ = globals.set("__host_gc", Func::from(host_force_gc));
+    let _ = globals.set("__host_heap", Func::from(host_heap_used));
 
     // Per-thrust input bridges (`__AB_GET_INPUT__` /
     // `__AB_GET_INPUT_VALUE__`) live in `globals::input`.
