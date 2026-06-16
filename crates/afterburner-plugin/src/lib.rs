@@ -72,6 +72,19 @@ fn config() -> Config {
     // the inner config, not the outer one.
     c.event_loop(true);
     c.text_encoding(true).javy_stream_io(true);
+    // Javy defaults `gc_threshold` to usize::MAX — i.e. automatic GC is OFF.
+    // That is the right default for the one-shot paths: the Store is torn down
+    // after a single invoke, so per-call garbage is reclaimed wholesale on drop
+    // and a mid-call GC would be pure overhead. The long-lived daemon Store is
+    // the opposite case — it runs `daemon_step` indefinitely, and with GC
+    // disabled every event's transient garbage (envelope/reply `JSON.parse`,
+    // frame buffers, base64) accumulates in WASM linear memory, which only ever
+    // grows, until the Store traps allocating a page at the memory cap. Set a
+    // finite trigger so QuickJS collects inside the warm loop. After the first
+    // collection QuickJS retunes the threshold to ~1.5× the live set, so this
+    // value is only the floor: the heap then tracks the real working set
+    // instead of climbing without bound across millions of events.
+    c.gc_threshold(64 * 1024 * 1024);
     c
 }
 

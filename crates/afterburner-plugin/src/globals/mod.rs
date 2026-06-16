@@ -94,6 +94,10 @@ const CALLSITE_PROTO_PATCH: &str = r#"
 /// Install every `__host_*` + `__AB_GET_INPUT__` global and then eval
 /// the plenum polyfill bundle. Called from `modify_runtime`.
 pub fn install(ctx: Ctx<'_>) {
+    // Stash the context so the daemon-event path can CALL the persistent
+    // dispatcher instead of re-loading it as a module per event (a heap leak in
+    // a warm Store). Harmless for one-shot Stores: they never take that path.
+    crate::modes::daemon_event::stash_daemon_ctx(&ctx);
     let globals = ctx.globals();
     fs::install(&globals);
     crypto::install(&globals);

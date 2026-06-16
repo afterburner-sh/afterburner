@@ -42,7 +42,7 @@ rust-version = "1.90"
 authors = ["Theo Bulut <info@afterburner.sh>"]
 # Engine crates are source-available under BSL 1.1 (each version converts to
 # Apache-2.0 four years after its release). Apache-2.0 crates (afterburner-afb,
-# burndb, burn/*) set `license = "Apache-2.0"` explicitly in their [package].
+# burn/*) set `license = "Apache-2.0"` explicitly in their [package].
 license = "BUSL-1.1"
 repository = "https://github.com/afterburner-sh/afterburner"
 homepage = "https://github.com/afterburner-sh/afterburner"

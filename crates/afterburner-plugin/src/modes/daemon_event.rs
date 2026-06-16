@@ -28,6 +28,8 @@ use alloc::format;
 use alloc::vec::Vec;
 use core::cell::OnceCell;
 
+use javy_plugin_api::javy::quickjs::Ctx;
+
 use crate::stdio::write_stderr;
 
 // `OnceCell` is `!Sync`, but the daemon-event path is single-threaded
@@ -59,13 +61,29 @@ fn dispatch_bytecode() -> Result<&'static [u8], &'static str> {
     }
 }
 
+// The persistent daemon `JSContext` pointer, stashed once from `globals::install`
+// (same serialisation invariant as DISPATCH_BYTECODE: one daemon_step at a time).
+// Lets the per-event path CALL the installed dispatcher function directly instead
+// of re-loading it as a module. 0 = not yet stashed.
+static mut DAEMON_CTX: usize = 0;
+// Whether the dispatcher function has been installed on globalThis yet.
+static mut INSTALLED: bool = false;
+
+/// Stash the daemon's persistent context pointer. Called once from
+/// `globals::install`, which runs on the daemon Store's long-lived context.
+pub fn stash_daemon_ctx(ctx: &Ctx<'_>) {
+    unsafe { DAEMON_CTX = ctx.as_raw().as_ptr() as usize };
+}
+
 /// JS-side dispatch wrapper. Keeps the Rust dispatcher lean - the JS
 /// already has the handler table on globalThis; we just decode the
-/// envelope and delegate. The wrapper is compiled fresh on each
-/// daemon-event because it's trivial and cache-invalidation across
-/// Store state would be error-prone.
+/// envelope and delegate. This source INSTALLS a persistent
+/// `globalThis.__ab_dispatch_event` function ONCE; the per-event path then CALLS
+/// that function instead of re-evaluating it. (Evaluating it as a module per
+/// event leaks: QuickJS retains evaluated modules as GC roots, so a warm daemon
+/// accumulated ~one module per event until it exhausted WASM linear memory.)
 const DISPATCH_SOURCE: &str = r#"
-(async function() {
+globalThis.__ab_dispatch_event = (async function() {
     const env = JSON.parse(__AB_GET_ENVELOPE__());
     const ev = env.event || {};
     const kind = ev.kind || '';
@@ -383,14 +401,23 @@ const DISPATCH_SOURCE: &str = r#"
         // Unknown event kind - surface on stderr for diagnosis.
         try { console.error('daemon-event: unknown kind=' + kind); } catch (_) {}
     }
-})();
+});
 "#;
 
 pub fn run(_envelope: &serde_json::Value) {
-    // Note: we ignore the Rust-side envelope we already parsed -
-    // the JS dispatcher re-parses the envelope via __AB_GET_ENVELOPE__()
-    // which gives it the authoritative bytes. That keeps the host→JS
-    // boundary on exactly one serialization path.
+    // Note: we ignore the Rust-side envelope we already parsed - the JS
+    // dispatcher re-parses it via __AB_GET_ENVELOPE__() which gives it the
+    // authoritative bytes, keeping the host->JS boundary on one serialization path.
+    ensure_installed();
+    invoke_dispatcher();
+}
+
+/// Evaluate the installer ONCE, setting `globalThis.__ab_dispatch_event`. This is
+/// the one and only module load on this path; everything after is a direct call.
+fn ensure_installed() {
+    if unsafe { INSTALLED } {
+        return;
+    }
     let bytecode = match dispatch_bytecode() {
         Ok(bc) => bc,
         Err(e) => {
@@ -400,8 +427,52 @@ pub fn run(_envelope: &serde_json::Value) {
         }
     };
     if let Err(e) = javy_plugin_api::invoke(bytecode, None) {
-        let msg = format!("invoke (daemon-event): {e}\n");
+        let msg = format!("install (daemon-event dispatch): {e}\n");
         write_stderr(msg.as_bytes());
         core::arch::wasm32::unreachable()
+    }
+    unsafe { INSTALLED = true };
+}
+
+/// Call the persistent `globalThis.__ab_dispatch_event` for this event and drive
+/// the async result to completion. Reconstructs the daemon `Ctx` from the stashed
+/// pointer (single-threaded Store, serialised by the host - the `from_raw` safety
+/// condition); `from_raw` dups the context refcount and the `Ctx` Drop frees it.
+fn invoke_dispatcher() {
+    use core::ptr::NonNull;
+    use javy_plugin_api::javy::quickjs::{Error as QjsError, Function, Value, qjs};
+
+    let Some(raw) = NonNull::new(unsafe { DAEMON_CTX } as *mut qjs::JSContext) else {
+        write_stderr(b"daemon-event: daemon context not stashed\n");
+        core::arch::wasm32::unreachable()
+    };
+    let ctx = unsafe { Ctx::from_raw(raw) };
+    let dispatch: Function = match ctx.globals().get("__ab_dispatch_event") {
+        Ok(f) => f,
+        Err(e) => {
+            let msg = format!("daemon-event: __ab_dispatch_event missing: {e}\n");
+            write_stderr(msg.as_bytes());
+            core::arch::wasm32::unreachable()
+        }
+    };
+    let result: Value = match dispatch.call(()) {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("daemon-event dispatch call: {e}\n");
+            write_stderr(msg.as_bytes());
+            core::arch::wasm32::unreachable()
+        }
+    };
+    // The dispatcher is async; drive the event loop until its jobs drain. Javy's
+    // `Promise::finish` returns WouldBlock once every pending job has run (the
+    // normal "done" signal); a real error is logged.
+    if let Some(promise) = result.as_promise() {
+        match promise.finish::<Value>() {
+            Ok(_) | Err(QjsError::WouldBlock) => {}
+            Err(e) => {
+                let msg = format!("daemon-event dispatch await: {e}\n");
+                write_stderr(msg.as_bytes());
+            }
+        }
     }
 }

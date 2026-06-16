@@ -902,6 +902,8 @@ unsafe extern "C" {
         key_len: u32,
         sni_map_json_ptr: *const u8,
         sni_map_json_len: u32,
+        listen_opts_ptr: *const u8,
+        listen_opts_len: u32,
     ) -> i32;
     pub fn host_tls_close_server(server_id: i32) -> i32;
 

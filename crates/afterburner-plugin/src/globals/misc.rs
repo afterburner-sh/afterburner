@@ -12,7 +12,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use javy_plugin_api::javy::quickjs::{Object, prelude::Func};
+use javy_plugin_api::javy::quickjs::{Ctx, Object, prelude::Func};
 
 use super::call_read;
 use crate::host_api::*;
@@ -25,6 +25,27 @@ pub fn install<'js>(globals: &Object<'js>) {
     install_zlib(globals);
     install_hostctx(globals);
     install_state(globals);
+}
+
+/// Force a QuickJS cycle-collection pass. Refcounting frees acyclic garbage
+/// immediately, but reference cycles survive until the collector runs; a
+/// long-lived daemon that never tears its Store down must trigger this itself.
+fn host_force_gc<'js>(ctx: Ctx<'js>) {
+    ctx.run_gc();
+}
+
+/// QuickJS heap bytes currently in use. A diagnostic for a long-lived Store whose
+/// WASM linear memory climbs: if this value grows the leak is JS-heap (live data
+/// the cycle collector cannot free); if it stays flat while RSS climbs the leak is
+/// outside the QuickJS heap (host allocations in the module).
+fn host_heap_used<'js>(ctx: Ctx<'js>) -> i64 {
+    use javy_plugin_api::javy::quickjs::qjs;
+    unsafe {
+        let rt = qjs::JS_GetRuntime(ctx.as_raw().as_ptr());
+        let mut stats = core::mem::MaybeUninit::<qjs::JSMemoryUsage>::uninit();
+        qjs::JS_ComputeMemoryUsage(rt, stats.as_mut_ptr());
+        stats.assume_init().memory_used_size
+    }
 }
 
 fn install_diagnostics<'js>(globals: &Object<'js>) {
@@ -46,6 +67,17 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
             }
         }),
     );
+
+    // Long-lived-daemon heap control. A one-shot Store reclaims everything on
+    // drop, so it never needs to collect. A warm Store re-entered millions of
+    // times is the opposite: reference CYCLES (promise chains, mutually-
+    // referencing closures) that the refcount path can never free accumulate
+    // until the cycle collector runs. The allocation-threshold collector does
+    // not bound them reliably — QuickJS retunes the threshold to ~1.5x the live
+    // set after any transient spike and then rarely fires — so a daemon must be
+    // able to collect on its own cadence. `__host_gc` exposes that pass.
+    let _ = globals.set("__host_gc", Func::from(host_force_gc));
+    let _ = globals.set("__host_heap", Func::from(host_heap_used));
 
     // Per-thrust input bridges (`__AB_GET_INPUT__` /
     // `__AB_GET_INPUT_VALUE__`) live in `globals::input`.
@@ -780,12 +812,14 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
              port: f64,
              cert_pem: String,
              key_pem: String,
-             sni_map_json: String|
+             sni_map_json: String,
+             listen_opts_json: String|
              -> f64 {
                 let hb = host.as_bytes();
                 let cb = cert_pem.as_bytes();
                 let kb = key_pem.as_bytes();
                 let sb = sni_map_json.as_bytes();
+                let ob = listen_opts_json.as_bytes();
                 unsafe {
                     host_tls_listen(
                         hb.as_ptr(),
@@ -797,6 +831,8 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
                         kb.len() as u32,
                         sb.as_ptr(),
                         sb.len() as u32,
+                        ob.as_ptr(),
+                        ob.len() as u32,
                     ) as f64
                 }
             },

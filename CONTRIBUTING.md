@@ -30,7 +30,7 @@ New code goes in the appropriate crate's license tier:
   `afterburner-node-compat`, `afterburner-thrust`, `afterburner-plugin`) are
   **BSL 1.1** — new `.rs` files must carry the SPDX header used across those
   crates.
-- `afterburner-afb`, `burn/*`, and `examples/*` are **Apache-2.0**. (`burndb` is BSL 1.1, licensed separately in its own repo.)
+- `afterburner-afb`, `burn/*`, and `examples/*` are **Apache-2.0**.
 
 ## Development
 

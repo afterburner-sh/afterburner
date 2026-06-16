@@ -113,6 +113,11 @@ native = ["dep:afterburner-ignite"]
 adaptive = ["dep:afterburner-adaptive", "wasm", "native"]
 thrust = ["dep:afterburner-thrust", "wasm"]
 flow = ["dep:afterburner-flow", "wasm"]
+# Daemon-mode runtime (DaemonShardPool / DaemonRuntime / DaemonNet / DaemonTls +
+# net/tls/http listeners) for EMBEDDERS that host a long-lived daemon in-process
+# without the `bin` CLI deps. Forwards the wasi `daemon` feature (axum + tokio +
+# rustls); `bin` already implies it.
+daemon = ["wasm", "afterburner-wasi/daemon"]
 # host-http propagates to afterburner-wasi only today; node-compat compiles
 # all host backends unconditionally (no feature block there).
 host-http = ["afterburner-wasi?/host-http"]

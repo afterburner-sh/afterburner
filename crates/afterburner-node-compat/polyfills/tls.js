@@ -21,7 +21,7 @@
 //           'close'|'error')}
 //
 // Deferred (will throw a clear error if used):
-//   - PSK / client certificate auth
+//   - PSK
 //   - tls.checkServerIdentity hook (rustls handles standard hostname
 //     verification automatically when rejectUnauthorized is true)
 //   - DTLS / OpenSSL-specific knobs (secureProtocol, ciphers list,
@@ -200,7 +200,12 @@ __register_module('tls', function(module, exports, require) {
                 ? opts.ALPNProtocols.map(function(p) { return String(p); })
                 : [],
             ca: typeof opts.ca === 'string' ? opts.ca :
-                Buffer.isBuffer(opts.ca) ? opts.ca.toString('utf8') : ''
+                Buffer.isBuffer(opts.ca) ? opts.ca.toString('utf8') : '',
+            // mTLS: pass client cert + key when the caller supplies them.
+            cert: typeof opts.cert === 'string' ? opts.cert :
+                  Buffer.isBuffer(opts.cert) ? opts.cert.toString('utf8') : '',
+            key: typeof opts.key === 'string' ? opts.key :
+                 Buffer.isBuffer(opts.key) ? opts.key.toString('utf8') : ''
         };
         this._connecting = true;
         this.readyState = 'opening';
@@ -455,6 +460,12 @@ __register_module('tls', function(module, exports, require) {
         if (!this._cert || !this._key) {
             throw new Error('tls.createServer: `cert` and `key` (PEM) are required');
         }
+        // mTLS server options: request + verify the client cert when
+        // `requestCert` is true. `ca` supplies the PEM of the CA used
+        // to verify the client cert; defaults to empty (no client auth).
+        this._requestCert = opts.requestCert === true;
+        this._clientCaPem = typeof opts.ca === 'string' ? opts.ca :
+                            Buffer.isBuffer(opts.ca) ? opts.ca.toString('utf8') : '';
         this._sniContexts = Object.create(null);
         if (opts.serverContexts && typeof opts.serverContexts === 'object') {
             for (var sn in opts.serverContexts) {
@@ -528,8 +539,13 @@ __register_module('tls', function(module, exports, require) {
             }
         }
         var sniJson = sniArr.length ? JSON.stringify(sniArr) : '';
+        // mTLS listen options: requestCert + client CA PEM.
+        var listenOpts = JSON.stringify({
+            requestCert: this._requestCert,
+            ca: this._clientCaPem
+        });
         var rc = globalThis.__host_tls_listen(
-            String(host), port, this._cert, this._key, sniJson
+            String(host), port, this._cert, this._key, sniJson, listenOpts
         );
         if (rc < 0) {
             var err = makeError(rc, 'tls.listen');
@@ -606,7 +622,11 @@ __register_module('tls', function(module, exports, require) {
         sock._protocol = protocol || null;
         sock._cipher = cipher || null;
         sock._peerCertChainB64 = Array.isArray(certChainB64) ? certChainB64 : [];
-        sock.authorized = false; // server side never verifies client by default
+        // When the server requested a client cert (mTLS) and the chain
+        // is non-empty, the handshake succeeded: the client is authorized.
+        // Without requestCert (one-way TLS) the chain is empty and
+        // authorized stays false (Node's default for server-side sockets).
+        sock.authorized = sock._peerCertChainB64.length > 0;
         var self = this;
         this._connections.add(sock);
         sock.once('close', function() { self._connections.delete(sock); });
