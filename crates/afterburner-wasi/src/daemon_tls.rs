@@ -371,6 +371,11 @@ impl DaemonTls {
         0
     }
 
+    // The TLS listen params mirror the host-import ABI one-to-one (host/port +
+    // the cert/key/SNI/client-CA/verify config + the error out-param); grouping
+    // them into a struct would just be repacked at the wasm boundary. Same
+    // convention as the other daemon host imports.
+    #[allow(clippy::too_many_arguments)]
     pub fn listen(
         self: &Arc<Self>,
         host: &str,

@@ -120,10 +120,14 @@ mod tests {
     use crate::manifest::{Format, Manifest, Package, Runtime};
     use std::collections::HashMap;
 
+    /// One published version of a package in the mock index:
+    /// (version, content digest, that version's manifest deps).
+    type MockVersion = (semver::Version, [u8; 32], BTreeMap<String, String>);
+
     /// Minimal in-memory package index for tests.
     struct MockIndex {
-        /// coord -> Vec<(version_str, digest_bytes, manifest_deps)>
-        entries: HashMap<String, Vec<(semver::Version, [u8; 32], BTreeMap<String, String>)>>,
+        /// coord -> the versions published under it.
+        entries: HashMap<String, Vec<MockVersion>>,
     }
 
     impl MockIndex {
@@ -295,7 +299,7 @@ mod tests {
     #[test]
     fn pin_missing_from_index_is_an_error() {
         let pin = "sha256:".to_string() + &"ab".repeat(32);
-        let mut idx = MockIndex::new();
+        let idx = MockIndex::new();
         // nothing in the index for this coord
         let mut deps = BTreeMap::new();
         deps.insert("burn/absent".into(), pin);
