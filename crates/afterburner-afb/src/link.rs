@@ -38,6 +38,7 @@
 //!   to its `sha256:…` pin, or composition fails. Substituting a
 //!   different build of a dependency is structurally impossible.
 
+use crate::manifest::{DepReq, parse_dep_req};
 use crate::{Afb, AfbError, Result, hex};
 use std::collections::BTreeMap;
 
@@ -144,9 +145,13 @@ fn add_tree(files: &mut BTreeMap<String, String>, base: &str, afb: &Afb) {
     }
 }
 
-/// Every pinned coordinate must be present with the exact pinned digest.
+/// Every declared dependency coordinate must be present and, for pin-type
+/// dependencies, the stored digest must match exactly. Range-type dependencies
+/// (`^0.1.0`, `>=1.0.0`) are version-checked by the caller (resolve_dep_closure
+/// or pack_dir) before the linked source is composed; here we only verify
+/// presence.
 fn validate_pins(pins: &BTreeMap<String, String>, by_coord: &BTreeMap<&str, &Afb>) -> Result<()> {
-    for (coord, pin) in pins {
+    for (coord, value) in pins {
         let dep = by_coord
             .get(coord.as_str())
             .ok_or_else(|| AfbError::Dependency {
@@ -155,12 +160,23 @@ fn validate_pins(pins: &BTreeMap<String, String>, by_coord: &BTreeMap<&str, &Afb
                      transitive closure must be supplied)"
                     .into(),
             })?;
-        let actual = format!("sha256:{}", hex(&dep.digest));
-        if &actual != pin {
-            return Err(AfbError::Dependency {
-                coord: coord.clone(),
-                detail: format!("digest pin mismatch: manifest pins {pin}, got {actual}"),
-            });
+        let req = parse_dep_req(value).map_err(|e| AfbError::Dependency {
+            coord: coord.clone(),
+            detail: format!("invalid dependency value {value:?}: {e}"),
+        })?;
+        match req {
+            DepReq::Pin(ref pin) => {
+                let actual = format!("sha256:{}", hex(&dep.digest));
+                if &actual != pin {
+                    return Err(AfbError::Dependency {
+                        coord: coord.clone(),
+                        detail: format!("digest pin mismatch: manifest pins {pin}, got {actual}"),
+                    });
+                }
+            }
+            DepReq::Range(_) => {
+                // Version already checked by the resolver; presence verified above.
+            }
         }
     }
     Ok(())

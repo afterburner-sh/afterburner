@@ -12,11 +12,52 @@
 //! suspicious and must not be silently tolerated. The capability set itself
 //! lives in `afterburner_core::Manifold` (parsed in `unpack`), whose
 //! strictness is that crate's responsibility - see `FORMAT.md`.
+//!
+//! ## `[dependencies]` values (FORMAT_MINOR >= 1)
+//!
+//! Each value is either a semver range (e.g. `"^0.1.0"`) or an exact
+//! `"sha256:<64-char-hex>"` pin. [`parse_dep_req`] distinguishes the two.
+//! A built `.afb` always carries resolved `sha256:` pins (produced by `pack`);
+//! a source `afb.toml` may use ranges for convenience.
 
 use crate::error::{AfbError, Result};
 use crate::{FORMAT_MAJOR, FORMAT_MINOR};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// A parsed `[dependencies]` value: either a semver range or an exact digest
+/// pin. See [`parse_dep_req`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum DepReq {
+    /// An exact `sha256:<64-char-lowercase-hex>` content pin.
+    Pin(String),
+    /// A semver version requirement, e.g. `"^0.1.0"` or `">=0.2.0, <1.0.0"`.
+    Range(semver::VersionReq),
+}
+
+/// Parse a single `[dependencies]` value into a [`DepReq`].
+///
+/// A value starting with `"sha256:"` is a pin; the remainder must be exactly
+/// 64 lowercase hex characters. Any other value is parsed as a
+/// [`semver::VersionReq`]. Returns [`AfbError::ManifestParse`] if the value
+/// is neither a valid pin nor a valid semver range.
+pub fn parse_dep_req(value: &str) -> Result<DepReq> {
+    if let Some(hex) = value.strip_prefix("sha256:") {
+        if hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Ok(DepReq::Pin(value.to_string()));
+        }
+        return Err(AfbError::ManifestParse(format!(
+            "dependency pin {value:?}: expected \"sha256:\" followed by 64 lowercase hex digits"
+        )));
+    }
+    semver::VersionReq::parse(value)
+        .map(DepReq::Range)
+        .map_err(|e| {
+            AfbError::ManifestParse(format!(
+                "dependency value {value:?} is neither a sha256 pin nor a valid semver range: {e}"
+            ))
+        })
+}
 
 /// Parsed `afb.toml`.
 ///
@@ -190,6 +231,16 @@ impl Manifest {
                 "package.entry {entry:?} must be a relative path under source/"
             )));
         }
+        // Validate every [dependencies] value: must be either a sha256 pin or a
+        // semver range. Coordinate names are free-form; only values are validated.
+        for (coord, value) in &m.dependencies {
+            parse_dep_req(value).map_err(|_| {
+                AfbError::ManifestParse(format!(
+                    "dependency {coord:?} has an invalid value {value:?}: \
+                     must be \"sha256:<64hex>\" or a semver range like \"^0.1.0\""
+                ))
+            })?;
+        }
         Ok(m)
     }
 
@@ -360,14 +411,65 @@ min = "0.1.0"
         assert_eq!(m, back);
     }
 
+    /// A valid 64-char lowercase hex digest, used across dep tests.
+    const PIN64: &str = "sha256:aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233";
+
     #[test]
     fn dependencies_roundtrip() {
         let src = format!(
-            "{good}\n[dependencies]\n\"burn/http-helpers\" = \"sha256:aabb\"\n",
-            good = good()
+            "{good}\n[dependencies]\n\"burn/http-helpers\" = \"{PIN64}\"\n",
+            good = good(),
+            PIN64 = PIN64,
         );
         let m = Manifest::parse(&src).unwrap();
-        assert_eq!(m.dependencies["burn/http-helpers"], "sha256:aabb");
+        assert_eq!(m.dependencies["burn/http-helpers"], PIN64);
         assert_eq!(Manifest::parse(&m.to_toml_string().unwrap()).unwrap(), m);
+    }
+
+    #[test]
+    fn dep_req_range_is_accepted() {
+        let src = format!(
+            "{good}\n[dependencies]\n\"burn/geo\" = \"^0.1.0\"\n",
+            good = good()
+        );
+        let m = Manifest::parse(&src).expect("semver range should parse");
+        let req = parse_dep_req(&m.dependencies["burn/geo"]).unwrap();
+        assert!(matches!(req, DepReq::Range(_)));
+    }
+
+    #[test]
+    fn dep_req_pin_is_accepted() {
+        let req = parse_dep_req(PIN64).unwrap();
+        assert!(matches!(req, DepReq::Pin(_)));
+    }
+
+    #[test]
+    fn dep_req_garbage_is_rejected() {
+        // Neither a sha256 pin nor a semver range.
+        assert!(matches!(
+            parse_dep_req("not-a-version-or-pin"),
+            Err(AfbError::ManifestParse(_))
+        ));
+    }
+
+    #[test]
+    fn dep_req_short_sha256_is_rejected() {
+        // "sha256:" prefix but only 4 hex chars.
+        assert!(matches!(
+            parse_dep_req("sha256:aabb"),
+            Err(AfbError::ManifestParse(_))
+        ));
+    }
+
+    #[test]
+    fn manifest_parse_rejects_invalid_dep_value() {
+        let src = format!(
+            "{good}\n[dependencies]\n\"burn/bad\" = \"definitely-not-valid\"\n",
+            good = good()
+        );
+        assert!(
+            matches!(Manifest::parse(&src), Err(AfbError::ManifestParse(_))),
+            "a garbage dep value must be rejected by Manifest::parse"
+        );
     }
 }

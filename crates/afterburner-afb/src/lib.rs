@@ -13,16 +13,20 @@
 pub mod digest;
 pub mod error;
 pub mod link;
+pub mod lock;
 pub mod manifest;
 pub mod native;
 pub mod pack;
+pub mod resolve;
 pub mod unpack;
 pub mod version;
 
 pub use afterburner_core::Manifold;
 pub use digest::{digest, hex};
 pub use error::{AfbError, Result};
-pub use manifest::Manifest;
+pub use lock::{Lock, parse_lock, render_lock};
+pub use manifest::{DepReq, Manifest, parse_dep_req};
+pub use resolve::Resolved;
 
 use std::collections::BTreeMap;
 
@@ -43,7 +47,14 @@ pub const FORMAT_MAJOR: u32 = 1;
 /// Highest minor this reader knows. A package may declare a higher minor;
 /// it is accepted (additive contract), this reader simply ignores anything
 /// it postdates.
-pub const FORMAT_MINOR: u32 = 0;
+///
+/// Changed from 0 to 1: additive - `[dependencies]` values may now be semver
+/// range strings (e.g. `"^0.1.0"`) in addition to the existing `"sha256:<hex>"`
+/// pins. Old readers tolerate the change because the field is descriptive and
+/// never processed until `resolve_dep_closure`; `min_reader` is NOT bumped
+/// (an old reader that cannot resolve ranges simply skips validation and the
+/// built `.afb` always carries resolved `sha256:` pins).
+pub const FORMAT_MINOR: u32 = 1;
 
 /// This reader's `"MAJOR.MINOR"`.
 pub fn reader_format_version() -> String {

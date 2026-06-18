@@ -10,15 +10,17 @@
 //! for the multi-threaded path. The caller sees one shape; dispatch is
 //! compiled away when only one backend feature is enabled.
 
+#[cfg(any(feature = "flow", feature = "thrust", test))]
+use afterburner_core::AfterburnerError;
 use afterburner_core::{
-    AfterburnerError, BurnCache, BurnCacheBackend, Combustor, FuelGauge, HostContext,
-    InMemoryStateStore, Manifold, OutputValue, Result, ScriptId, ScriptInvocation, ScriptOutcome,
-    SharedStateStore,
+    BurnCache, BurnCacheBackend, Combustor, FuelGauge, HostContext, InMemoryStateStore, Manifold,
+    OutputValue, Result, ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore,
 };
 use serde_json::Value;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(feature = "thrust")]
 use std::time::Duration;
 
 /// Which backend `AfterburnerBuilder::build` should construct.
