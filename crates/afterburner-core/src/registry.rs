@@ -354,6 +354,23 @@ impl BurnCache {
         self.engine.thrust_columnar_bytes(id, encoded, limits)
     }
 
+    /// Register a pre-compiled self-contained (SEALED) WASM module and return
+    /// a [`ScriptId`] that [`execute`](Self::execute) dispatches through the
+    /// sealed execution path (stdin/stdout JSON, no plugin envelope). Delegates
+    /// to [`Combustor::register_precompiled`]; non-WASM backends return an
+    /// `AfterburnerError::Engine` error.
+    ///
+    /// The returned `ScriptId` is keyed by the SHA-256 of the raw `wasm` bytes
+    /// (content-addressed, same contract as source registration). Calling this
+    /// twice with identical bytes returns the same `ScriptId` without
+    /// re-compiling.
+    ///
+    /// Only `"wasm32-wasip1"` (sealed, self-contained WASI module) is accepted;
+    /// `"wasm32-wasip1-dyn"` is explicitly rejected with a clear error.
+    pub fn register_precompiled(&self, wasm: &[u8], target: &str) -> Result<ScriptId> {
+        self.engine.register_precompiled(wasm, target)
+    }
+
     /// Remove a compiled script from the cache. The engine's `extinguish`
     /// is also called so backend-owned resources (wasmtime modules,
     /// rquickjs source buffers) are released.

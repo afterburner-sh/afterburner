@@ -43,6 +43,23 @@ impl Builder {
         self
     }
 
+    /// Add a pre-compiled WASM artifact at an archive-relative path (must be
+    /// under `precompiled/`). The path is inserted into the same sorted
+    /// `files` map as source entries, so the reproducible-digest invariant
+    /// (zstd-19, entries in sorted order, mtime=0) holds automatically.
+    ///
+    /// Convention for `rel_path`:
+    /// - `"precompiled/wasm32-wasip1/main.wasm"` for a self-contained module.
+    /// - `"precompiled/wasm32-wasip1-dyn/main.wasm"` for a dynamically-linked
+    ///   module (requires the shared plugin host at instantiation time).
+    ///
+    /// Set `manifest.runtime.target` to the target string so readers know
+    /// which `precompiled/` sub-directory to look in.
+    pub fn precompiled(mut self, rel_path: impl Into<String>, bytes: Vec<u8>) -> Self {
+        self.files.insert(rel_path.into(), bytes);
+        self
+    }
+
     /// Serialize, tar (reproducibly), zstd-compress, and digest.
     ///
     /// Returns `(compressed_bytes, sha256(compressed_bytes))`.

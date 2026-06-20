@@ -167,4 +167,27 @@ pub trait Combustor: Send + Sync {
             "script mode not supported by this backend".into(),
         ))
     }
+
+    /// Register a pre-compiled self-contained (SEALED) WASM module and
+    /// return a [`ScriptId`] that [`thrust`](Self::thrust) dispatches
+    /// through the sealed execution path. The module must read JSON from
+    /// stdin and write JSON to stdout (the WASI command pattern).
+    ///
+    /// `target` is the `[runtime] target` string from the `.afb` manifest.
+    /// Only `"wasm32-wasip1"` (sealed, self-contained) is accepted.
+    /// `"wasm32-wasip1-dyn"` is explicitly rejected with a clear
+    /// not-yet-supported error - there is no silent bypass of capability
+    /// gating.
+    ///
+    /// Registration is content-addressed: calling this twice with identical
+    /// `wasm` bytes returns the same `ScriptId` and skips re-compilation.
+    ///
+    /// Default impl returns an error - only `WasmCombustor` supports this
+    /// path. Native and adaptive combustors inherit this default.
+    fn register_precompiled(&self, wasm: &[u8], target: &str) -> Result<ScriptId> {
+        let _ = (wasm, target);
+        Err(AfterburnerError::Engine(
+            "register_precompiled not supported by this backend (wasm feature required)".into(),
+        ))
+    }
 }

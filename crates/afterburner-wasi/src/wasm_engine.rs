@@ -191,6 +191,21 @@ pub(crate) struct CompiledScript {
     pub columnar_invoke_envelope_bytes: Vec<u8>,
 }
 
+/// A pre-compiled, self-contained (SEALED) WASM module registered via
+/// [`WasmCombustor::register_precompiled`]. The module imports only
+/// `wasi_snapshot_preview1` (no `afterburner:host`); it is instantiated
+/// with a WASI-only linker and fed JSON input on stdin, producing JSON
+/// output on stdout. No plugin envelope, no bytecode compile step.
+pub(crate) struct SealedModule {
+    pub instance_pre: InstancePre<HostState>,
+}
+
+/// The WASM target string for a dynamically-linked module that requires the
+/// Afterburner plugin host. `register_precompiled` rejects this target with a
+/// clear "not yet supported" error rather than silently skipping capability
+/// gating (which the sealed path does not perform).
+const DYN_TARGET: &str = "wasm32-wasip1-dyn";
+
 pub struct WasmCombustor {
     engine: Engine,
     /// Source store keyed by SHA-256 of the user-facing source. `ignite`
@@ -208,6 +223,11 @@ pub struct WasmCombustor {
     /// bytecode + the entire `{"mode":"invoke",...}` JSON envelope, so
     /// per-thrust work is just a slice borrow - no encode, no serde.
     bytecode_cache: HopscotchMap<[u8; 32], Arc<CompiledScript>>,
+    /// Pre-compiled self-contained (SEALED) modules registered via
+    /// [`register_precompiled`]. Keyed by SHA-256 of the raw wasm bytes.
+    /// Thrust path: fresh `Store` + WASI only, JSON on stdin, stdout parsed
+    /// by [`nozzle::parse_output`]. No plugin envelope, no `afterburner:host`.
+    sealed_cache: HopscotchMap<[u8; 32], Arc<SealedModule>>,
     /// Counter incremented every time `compile_to_bytecode` actually
     /// invokes the plugin's compile mode. Used by tests to assert the
     /// hot path is genuinely cached (register-once → N thrusts → 1
@@ -271,6 +291,7 @@ impl WasmCombustor {
             engine,
             source_store: HopscotchMap::new(),
             bytecode_cache: HopscotchMap::new(),
+            sealed_cache: HopscotchMap::new(),
             compile_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             instance_pre: Arc::new(instance_pre),
             state_store,
@@ -343,6 +364,111 @@ impl WasmCombustor {
     /// pre-populate it from outside the script.
     pub fn state_store(&self) -> &SharedStateStore {
         &self.state_store
+    }
+
+    /// Register a pre-compiled self-contained (SEALED) WASM module and
+    /// return a [`ScriptId`] that [`thrust`] dispatches through the sealed
+    /// path. The module must import only `wasi_snapshot_preview1`; it reads
+    /// JSON from stdin and writes JSON to stdout (the Javy self-contained
+    /// command pattern).
+    ///
+    /// `target` is the `[runtime] target` string from the `.afb` manifest.
+    /// Only `"wasm32-wasip1"` (sealed) is accepted here; `"wasm32-wasip1-dyn"`
+    /// (dynamically-linked, requires `afterburner:host`) is explicitly rejected
+    /// with a clear not-yet-supported error - there is no silent bypass of
+    /// capability gating.
+    ///
+    /// Registration is content-addressed: calling this twice with identical
+    /// `wasm` bytes returns the same `ScriptId` and skips re-compilation of
+    /// the module's native code. `wasm` may be a raw `.wasm` binary or a WAT
+    /// text module (wasmtime accepts both).
+    pub fn register_precompiled(&self, wasm: &[u8], target: &str) -> Result<ScriptId> {
+        if target == DYN_TARGET {
+            return Err(AfterburnerError::Engine(format!(
+                "precompiled target \"{DYN_TARGET}\" is not yet supported; \
+                 only \"wasm32-wasip1\" sealed modules are accepted on this path"
+            )));
+        }
+
+        let hash = sha256(wasm);
+
+        if self.sealed_cache.get(&hash).is_some() {
+            ab_event!(Level::Debug, "wasm.sealed.cache_hit", "hash" => hex8(&hash));
+            return Ok(ScriptId {
+                hash,
+                mode: EngineMode::Wasm,
+            });
+        }
+
+        // Compile the module native code once (cached by wasmtime's on-disk
+        // cache when `compile_cache_dir` is set). A WASI-only linker is used
+        // at `InstancePre` build time so the sealed module cannot resolve
+        // `afterburner:host` imports - hard structural separation.
+        let module = Module::new(&self.engine, wasm)
+            .map_err(|e| AfterburnerError::CompileFailed(format!("sealed module compile: {e}")))?;
+
+        let mut wasi_linker: Linker<HostState> = Linker::new(&self.engine);
+        add_to_linker_sync(&mut wasi_linker, |s: &mut HostState| &mut s.wasi)
+            .map_err(|e| AfterburnerError::Engine(format!("sealed wasi linker: {e}")))?;
+
+        let instance_pre = wasi_linker
+            .instantiate_pre(&module)
+            .map_err(|e| AfterburnerError::Engine(format!("sealed instantiate_pre: {e}")))?;
+
+        self.sealed_cache
+            .insert(hash, Arc::new(SealedModule { instance_pre }));
+        ab_event!(
+            Level::Info,
+            "wasm.sealed.registered",
+            "hash" => hex8(&hash),
+            "wasm_bytes" => wasm.len(),
+        );
+
+        Ok(ScriptId {
+            hash,
+            mode: EngineMode::Wasm,
+        })
+    }
+
+    /// Execute a sealed (pre-compiled self-contained) module. Instantiates
+    /// the module in a fresh `Store` with WASI only, feeds `input` as JSON on
+    /// stdin, runs `_start`, and drains stdout through [`parse_output`]. Fuel,
+    /// epoch deadline, and the memory limiter are applied identically to the
+    /// plugin path.
+    ///
+    /// No `afterburner:host` wiring, no plugin envelope. The module must have
+    /// been registered via [`register_precompiled`].
+    fn thrust_sealed(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value> {
+        let sealed = self
+            .sealed_cache
+            .get(&id.hash)
+            .ok_or(AfterburnerError::ScriptNotFound)?;
+
+        let input_bytes = serde_json::to_vec(input)?;
+
+        // The sealed module reads JSON from stdin directly; no plugin envelope.
+        let state = HostState::new(
+            &input_bytes,
+            limits.memory_bytes,
+            limits.output_ceiling(),
+            // Sealed modules have no capability gates - they cannot call
+            // afterburner:host, so the Manifold is unused. Pass sealed() for
+            // hygiene; it has no effect on execution.
+            Manifold::sealed(),
+            self.state_store.clone(),
+            None,
+        );
+
+        let mut store = chamber::fire(
+            &self.engine,
+            &sealed.instance_pre,
+            state,
+            limits,
+            "wasm.sealed_thrust",
+        )?;
+
+        let stdout_bytes = chamber::drain_stdout(&mut store);
+        parse_output(&stdout_bytes)
     }
 
     /// Compile a daemon-init source to QuickJS bytecode by spinning up
@@ -854,6 +980,11 @@ impl Combustor for WasmCombustor {
 
     #[fastrace::trace(name = "WasmCombustor::thrust")]
     fn thrust(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value> {
+        // Sealed path: id was registered via `register_precompiled`. No plugin
+        // envelope, no `afterburner:host` wiring.
+        if self.sealed_cache.get(&id.hash).is_some() {
+            return self.thrust_sealed(id, input, limits);
+        }
         // Input serializes per-call because it changes per-call; it
         // goes via `HostState::pending_input` (read by the
         // `host_get_input` linker import) - not via the envelope.
@@ -889,7 +1020,19 @@ impl Combustor for WasmCombustor {
     fn extinguish(&self, id: &ScriptId) {
         self.source_store.remove(&id.hash);
         self.bytecode_cache.remove(&id.hash);
+        // Also remove from sealed_cache in case this id was registered via
+        // register_precompiled - extinguish is content-addressed and must
+        // cover both paths.
+        self.sealed_cache.remove(&id.hash);
         ab_event!(Level::Info, "wasm.extinguish", "hash" => hex8(&id.hash));
+    }
+
+    /// Combustor-trait override: delegates to the inherent
+    /// [`Self::register_precompiled`], wiring the sealed-module path
+    /// through `Box<dyn Combustor>` so `BurnCache` and the `Afterburner`
+    /// facade can call it without knowing the concrete combustor type.
+    fn register_precompiled(&self, wasm: &[u8], target: &str) -> Result<ScriptId> {
+        WasmCombustor::register_precompiled(self, wasm, target)
     }
 
     /// Combustor-trait override that delegates to the inherent

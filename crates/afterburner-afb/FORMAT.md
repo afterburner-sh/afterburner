@@ -64,8 +64,33 @@ sanctioned way to make a minor-level addition mandatory.
 ## Required members (absence = a breaking, refused package)
 
 `afb.toml`, `manifold.json`, and the `source/` file named by
-`package.entry`. Anything else (e.g. `precompiled/*`) is optional and ignored
-by v1.
+`package.entry`.
+
+## Optional members (FORMAT_MINOR >= 2)
+
+### `precompiled/<target>/main.wasm`
+
+An `.afb` may include one or more pre-compiled WASM modules under the
+`precompiled/` directory. Each module lives at
+`precompiled/<target>/main.wasm`, where `<target>` is the WASM target triple.
+Two target conventions:
+
+| Path | Meaning |
+|---|---|
+| `precompiled/wasm32-wasip1/main.wasm` | Self-contained WASI module (Javy output). Loaded directly without dynamic linking. |
+| `precompiled/wasm32-wasip1-dyn/main.wasm` | Dynamically-linked module. Requires the shared Afterburner plugin host at instantiation time. |
+
+The companion manifest field `[runtime] target` names the target of the
+bundled module so a runtime that supports pre-compiled execution knows which
+sub-directory to look in without scanning the archive.
+
+### Back-compat contract
+
+`precompiled/` members are **safe for old readers to ignore** - a reader that
+predates FORMAT_MINOR 2 skips them and falls back to the `source/` JS without
+error. `min_reader` is NOT raised because falling back to source is always
+correct. The bytes still flow through the capped decoder so zip-bomb
+protection is unaffected regardless of reader version.
 
 ## Changing this format
 

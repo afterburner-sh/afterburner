@@ -19,6 +19,7 @@ mod banner;
 mod bench;
 mod build;
 mod check;
+mod compile;
 mod daemon;
 mod manifold;
 mod passthrough;
@@ -212,6 +213,7 @@ fn dispatch(mut cli: Cli) -> Result<()> {
         Cmd::New { spec, opts } => registry::new_package(&cli, &spec, &opts),
         Cmd::Init { path, opts } => registry::init_package(&cli, path.as_deref(), &opts),
         Cmd::Package { dir, out } => registry::package(dir.as_deref(), out.as_deref()),
+        Cmd::Compile { dir, out } => compile::compile(dir.as_deref(), out.as_deref()),
         Cmd::Test { dir } => registry::test(&cli, dir.as_deref()),
         Cmd::Clean { dir, cache } => registry::clean(dir.as_deref(), cache),
         Cmd::Publish {

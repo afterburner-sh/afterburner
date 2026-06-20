@@ -181,6 +181,27 @@ impl Afterburner {
         ))
     }
 
+    /// Register a pre-compiled self-contained (SEALED) WASM module. The
+    /// returned [`ScriptId`] can be used with [`run`](Self::run) exactly
+    /// like a source-registered id; internally [`thrust`](Combustor::thrust)
+    /// dispatches to the sealed stdin/stdout path without a plugin envelope.
+    ///
+    /// Only `"wasm32-wasip1"` (Javy self-contained WASI module) is accepted.
+    /// `"wasm32-wasip1-dyn"` is rejected with a clear not-yet-supported error
+    /// so capability gating is never silently bypassed.
+    ///
+    /// Returns an error on non-WASM engines (native, adaptive before wasm
+    /// compile). Requires the `wasm` feature.
+    pub fn register_precompiled(&self, wasm: &[u8], target: &str) -> Result<ScriptId> {
+        match &self.engine {
+            EngineHolder::Cache(c) => c.register_precompiled(wasm, target),
+            #[cfg(feature = "thrust")]
+            EngineHolder::Thrust(_) => Err(afterburner_core::AfterburnerError::Engine(
+                "register_precompiled is not supported on the threaded engine".into(),
+            )),
+        }
+    }
+
     /// Compile + cache a multi-file ES-module bundle. Flow mode only;
     /// other modes return a typed error.
     ///

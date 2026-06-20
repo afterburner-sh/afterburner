@@ -131,8 +131,21 @@ pub struct Package {
 pub struct Runtime {
     /// Minimum `afterburner-core` version, semver.
     pub min: String,
-    /// Precompiled-artifact target; only meaningful with `precompiled/`,
-    /// which v0.1 ignores.
+    /// Target of the bundled pre-compiled WASM module (FORMAT_MINOR >= 2).
+    ///
+    /// When `Some`, the archive contains a member at
+    /// `precompiled/<target>/main.wasm` that a capable runtime may load
+    /// instead of interpreting the `source/` JS. Two target conventions:
+    ///
+    /// - `"wasm32-wasip1"` - a self-contained WASI module produced by Javy;
+    ///   the runtime loads it directly without any dynamic linking.
+    /// - `"wasm32-wasip1-dyn"` - a dynamically-linked module that requires
+    ///   the shared Afterburner plugin host; the runtime must provide the
+    ///   import namespace before instantiation.
+    ///
+    /// When `None` (or the reader predates FORMAT_MINOR 2), there is no
+    /// pre-compiled module and the runtime falls back to the `source/` JS.
+    /// Old readers that do not understand this field silently ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }

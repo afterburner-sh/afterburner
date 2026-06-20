@@ -54,7 +54,16 @@ pub const FORMAT_MAJOR: u32 = 1;
 /// never processed until `resolve_dep_closure`; `min_reader` is NOT bumped
 /// (an old reader that cannot resolve ranges simply skips validation and the
 /// built `.afb` always carries resolved `sha256:` pins).
-pub const FORMAT_MINOR: u32 = 1;
+///
+/// Changed from 1 to 2: additive - an `.afb` may now include members under
+/// `precompiled/<target>/main.wasm` (optional pre-compiled WASM modules), and
+/// `[runtime] target` names the bundled target. Old readers silently skip
+/// `precompiled/*` entries (they were already documented-ignorable); the entry
+/// bytes still flow through the capped decoder so zip-bomb protection holds.
+/// `min_reader` is NOT bumped: a package that ships only a `precompiled/`
+/// member still requires source, and an old reader that ignores the module
+/// simply runs the source as before.
+pub const FORMAT_MINOR: u32 = 2;
 
 /// This reader's `"MAJOR.MINOR"`.
 pub fn reader_format_version() -> String {
@@ -98,6 +107,12 @@ pub struct Afb {
     /// (e.g. `source/main.js`), sorted for reproducible iteration. Stored
     /// **byte-exact** so binary bundled assets (images, fonts, …) survive.
     pub source: BTreeMap<String, Vec<u8>>,
+    /// Pre-compiled WASM modules (FORMAT_MINOR >= 2), keyed by their
+    /// archive-relative path (e.g. `"precompiled/wasm32-wasip1/main.wasm"`).
+    /// Empty for packages that carry no pre-compiled artifact. An `.afb` built
+    /// without any `precompiled/` member unpacks to an empty map so callers
+    /// need not branch on the minor version.
+    pub precompiled: BTreeMap<String, Vec<u8>>,
 }
 
 impl Afb {

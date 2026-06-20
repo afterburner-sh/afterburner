@@ -308,6 +308,21 @@ pub enum Cmd {
         #[arg(short = 'o', long = "out", value_name = "FILE")]
         out: Option<PathBuf>,
     },
+    /// Build a pre-compiled `.afb`: ahead-of-time compiles `source/` to a
+    /// self-contained WASM module (via `javy`) and bundles it alongside the
+    /// source. Sealed packages only - capability-bearing packages still ship
+    /// source and a clear note is printed to stderr.
+    ///
+    /// Requires `javy` 8.1.1 on PATH (build-time only; the engine never
+    /// shells to javy at runtime).
+    Compile {
+        /// Package directory (default: current).
+        #[arg(value_name = "DIR")]
+        dir: Option<PathBuf>,
+        /// Output path (default: `./<ns>-<name>-<ver>.afb`).
+        #[arg(short = 'o', long = "out", value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
     /// Run the package's tests (every file under `tests/`).
     Test {
         /// Package directory (default: current).

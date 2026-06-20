@@ -201,10 +201,10 @@ pub fn package(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
 }
 
 /// Transpile any TypeScript sources in `local` to JavaScript in place,
-/// rewriting their archive keys (`.ts` → `.js`) and the package entry.
+/// rewriting their archive keys (`.ts` -> `.js`) and the package entry.
 /// No-op without the `ts` feature (TS sources would already have been
 /// rejected at unpack-time by readers that can't transpile).
-fn transpile_ts_sources(local: &mut pkg::LocalPackage) -> Result<()> {
+pub(super) fn transpile_ts_sources(local: &mut pkg::LocalPackage) -> Result<()> {
     #[cfg(feature = "ts")]
     {
         use std::collections::BTreeMap;
@@ -1000,14 +1000,14 @@ fn forwarded_flags(cli: &Cli) -> Vec<String> {
     a
 }
 
-fn coord_str(p: &pkg::LocalPackage) -> String {
+pub(super) fn coord_str(p: &pkg::LocalPackage) -> String {
     format!(
         "{}/{}@{}",
         p.manifest.package.namespace, p.manifest.package.name, p.manifest.package.version
     )
 }
 
-fn print_digest(size: u64, digest_hex: &str) {
+pub(super) fn print_digest(size: u64, digest_hex: &str) {
     println!(
         "  {} {}  {}",
         style::muted("digest"),

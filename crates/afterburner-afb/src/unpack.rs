@@ -105,6 +105,7 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
     let mut manifest_toml: Option<String> = None;
     let mut manifold_json: Option<String> = None;
     let mut source: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut precompiled: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
     let to_afb_err = |e: io::Error| {
         if tripped.get() {
@@ -147,11 +148,14 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
             });
         }
 
-        // Only materialize what v0.1 consumes. Other regular files (e.g.
-        // precompiled/*) are skipped - but their bytes still flow through
-        // the capped decoder as the iterator advances, so a bomb hidden in
-        // an ignored entry is still caught.
-        let wanted = rel == "afb.toml" || rel == "manifold.json" || rel.starts_with("source/");
+        // Materialize required members plus precompiled/ (FORMAT_MINOR >= 2).
+        // Any other regular file is skipped, but its bytes still flow through
+        // the capped decoder as the iterator advances, so a bomb hidden in an
+        // ignored entry is still caught.
+        let wanted = rel == "afb.toml"
+            || rel == "manifold.json"
+            || rel.starts_with("source/")
+            || rel.starts_with("precompiled/");
         if !wanted {
             continue;
         }
@@ -171,6 +175,10 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
                     Some(String::from_utf8(buf).map_err(|_| {
                         AfbError::ManifoldParse("manifold.json is not UTF-8".into())
                     })?);
+            }
+            // precompiled/* stored byte-exact (binary WASM).
+            _ if rel.starts_with("precompiled/") => {
+                precompiled.insert(rel, buf);
             }
             // source/* files are stored byte-exact, so binary assets are allowed.
             _ => {
@@ -197,5 +205,6 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
         manifest,
         manifold,
         source,
+        precompiled,
     })
 }

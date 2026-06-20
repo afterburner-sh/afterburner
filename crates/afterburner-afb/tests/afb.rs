@@ -269,6 +269,92 @@ fn entry_not_in_archive_rejected() {
     ));
 }
 
+// ---- precompiled/ (FORMAT_MINOR 2) ----------------------------------------
+
+fn wasm_manifest_with_target(target: &str) -> Manifest {
+    Manifest::parse(&format!(
+        r#"
+[format]
+version = "1.0"
+
+[package]
+name = "hello"
+namespace = "burn"
+version = "0.1.0"
+language = "js"
+entry = "source/main.js"
+
+[runtime]
+min = "0.1.0"
+target = "{target}"
+"#,
+    ))
+    .expect("manifest with target parses")
+}
+
+#[test]
+fn precompiled_roundtrip() {
+    // Fake WASM bytes - just needs to be non-trivial binary content.
+    let wasm: Vec<u8> = (0u8..=255).chain(0u8..=127).collect();
+    let target = "wasm32-wasip1";
+    let rel = format!("precompiled/{target}/main.wasm");
+
+    let (bytes, _) = Builder::new(wasm_manifest_with_target(target), Manifold::sealed())
+        .source("source/main.js", HELLO_SOURCE)
+        .precompiled(rel.clone(), wasm.clone())
+        .build()
+        .expect("packs with precompiled member");
+
+    let afb = Afb::from_bytes(&bytes).expect("unpacks");
+
+    // The WASM bytes come back byte-identical.
+    assert_eq!(
+        afb.precompiled.get(&rel).map(Vec::as_slice),
+        Some(wasm.as_slice()),
+        "precompiled bytes must survive the round trip"
+    );
+    // source/ is still intact.
+    assert_eq!(afb.entry_source().unwrap(), HELLO_SOURCE);
+    // runtime.target survives.
+    assert_eq!(afb.manifest.runtime.target.as_deref(), Some(target));
+}
+
+#[test]
+fn precompiled_back_compat_old_afb() {
+    // An old-style .afb (no precompiled member) must unpack to an empty map.
+    let (bytes, _) = build_hello();
+    let afb = Afb::from_bytes(&bytes).expect("unpacks");
+    assert!(
+        afb.precompiled.is_empty(),
+        "no precompiled/ in a v0.1 package: map must be empty"
+    );
+}
+
+#[test]
+fn precompiled_reproducibility() {
+    let wasm: Vec<u8> = (0u8..=255).collect();
+    let rel = "precompiled/wasm32-wasip1/main.wasm";
+
+    let build = || {
+        Builder::new(
+            wasm_manifest_with_target("wasm32-wasip1"),
+            Manifold::sealed(),
+        )
+        .source("source/main.js", HELLO_SOURCE)
+        .precompiled(rel, wasm.clone())
+        .build()
+        .expect("packs")
+    };
+
+    let (a, da) = build();
+    let (b, db) = build();
+    assert_eq!(
+        a, b,
+        "identical inputs including precompiled member must yield byte-identical .afb"
+    );
+    assert_eq!(da, db);
+}
+
 // ---- helpers --------------------------------------------------------------
 
 fn append(ar: &mut tar::Builder<Vec<u8>>, path: &str, data: &[u8]) {
