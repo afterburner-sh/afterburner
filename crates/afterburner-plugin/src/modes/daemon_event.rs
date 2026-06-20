@@ -463,9 +463,9 @@ fn invoke_dispatcher() {
             core::arch::wasm32::unreachable()
         }
     };
-    // The dispatcher is async; drive the event loop until its jobs drain. Javy's
-    // `Promise::finish` returns WouldBlock once every pending job has run (the
-    // normal "done" signal); a real error is logged.
+    // The dispatcher is async; settle its own promise first. `Promise::finish`
+    // pumps the job queue only until THIS promise resolves or rejects, then
+    // returns (WouldBlock once it can make no more progress on this chain).
     if let Some(promise) = result.as_promise() {
         match promise.finish::<Value>() {
             Ok(_) | Err(QjsError::WouldBlock) => {}
@@ -475,4 +475,17 @@ fn invoke_dispatcher() {
             }
         }
     }
+    // Then drain EVERY remaining pending job. `finish` stops the instant the
+    // dispatcher's own promise settles, so microtask jobs belonging to other
+    // promise chains (a consumer's `for await (... of events.on(...))`, a
+    // `Promise.resolve().then(...)` scheduled by the handler) can be left
+    // queued. Node's contract is that a macrotask runs to completion AND the
+    // whole microtask queue empties before the loop advances - leaving jobs
+    // stranded silently drops events (e.g. the third of three synchronous
+    // emits never reaches its awaiting iterator). This mirrors what
+    // `javy_plugin_api::invoke` does via `Runtime::resolve_pending_jobs` after
+    // its own `finish`; the daemon-event path reconstructs a bare `Ctx`, so we
+    // drain at the context level directly. `execute_pending_job` returns false
+    // once the queue is empty.
+    while ctx.execute_pending_job() {}
 }
