@@ -5,14 +5,25 @@
 
 //! Sealed precompiled-WASM path.
 //!
-//! Correctness proof: `register_precompiled(fixture)` + thrust produces the
-//! same `serde_json::Value` as `ignite(source)` + thrust for the same inputs.
+//! Correctness proofs:
+//!   1. Single-invoke: `register_precompiled(fixture)` + thrust produces the
+//!      same `serde_json::Value` as `ignite(source)` + thrust for the same inputs.
+//!   2. Batch: `register_precompiled(batch_fixture)` + `thrust_sealed_raw_bytes`
+//!      with a JSON array produces the same output as the source batch path.
+//!   3. Columnar: `register_precompiled(columnar_fixture)` +
+//!      `thrust_sealed_raw_bytes` with an encoded batch produces the same
+//!      decoded output as the source columnar path.
 //!
 //! Safety proof: `"wasm32-wasip1-dyn"` target is rejected with a clear
 //! not-yet-supported error and never silently bypasses capability gating.
 //!
 //! The fixture (`fixtures/sealed_probe.{js,wasm}`) is a small, self-contained
 //! sealed package; regenerate the wasm with `fixtures/build.sh`.
+//! The batch fixture (`fixtures/sealed_probe_batch.wasm`) is the same source
+//! wrapped in the array-in/array-out harness.
+//! The columnar fixture (`fixtures/sealed_probe_columnar.wasm`) is the Int32 sum
+//! source (`fixtures/sealed_probe_columnar_src.js`) wrapped in the binary-frame
+//! harness.
 
 use afterburner_core::{Combustor, FuelGauge};
 use afterburner_wasi::{WasmCombustor, WasmConfig};
@@ -26,6 +37,18 @@ const PROBE_SEALED_WASM: &[u8] = include_bytes!("fixtures/sealed_probe.wasm");
 /// two paths can be compared on identical inputs. Byte-identical to the source
 /// the wasm fixture was built from.
 const PROBE_SOURCE: &str = include_str!("fixtures/sealed_probe.js");
+
+/// The batch fixture: the same probe source wrapped in the array-in/array-out
+/// harness (`build_wrapped_source_batch`). Used to prove batch precompiled
+/// output equals batch source output.
+const PROBE_BATCH_WASM: &[u8] = include_bytes!("fixtures/sealed_probe_batch.wasm");
+
+/// The columnar fixture: a simple Int32 sum UDF (c0[i] + c1[i] -> sum[i])
+/// wrapped in the binary-frame harness (`build_wrapped_source_columnar`).
+const PROBE_COLUMNAR_WASM: &[u8] = include_bytes!("fixtures/sealed_probe_columnar.wasm");
+
+/// JS source for the columnar fixture UDF.
+const PROBE_COLUMNAR_SOURCE: &str = include_str!("fixtures/sealed_probe_columnar_src.js");
 
 fn make_combustor() -> WasmCombustor {
     WasmCombustor::new(WasmConfig::default()).unwrap()
@@ -158,5 +181,170 @@ fn sealed_thrust_unknown_id_returns_script_not_found() {
     assert!(
         matches!(err, AfterburnerError::ScriptNotFound),
         "expected ScriptNotFound for unregistered id, got {err:?}"
+    );
+}
+
+// ---- PROOF: batch precompiled output == batch source output ---------------
+//
+// The batch precompiled WASM uses the array-in/array-out harness produced by
+// `build_wrapped_source_batch`. This test proves that running the batch
+// fixture through `thrust_sealed_raw_bytes` with a JSON array input produces
+// the same output as the source batch path (`ignite` + per-element `thrust`).
+
+#[test]
+fn batch_precompiled_output_equals_source_output() {
+    use afterburner_core::Combustor;
+
+    let c = make_combustor();
+    let limits = FuelGauge::unlimited();
+
+    // Register the batch fixture WASM via the sealed path.
+    let batch_id = c
+        .register_precompiled(PROBE_BATCH_WASM, "wasm32-wasip1")
+        .unwrap();
+
+    // Source batch path: ignite the same probe source, invoke per-element.
+    let src_id = c.ignite(PROBE_SOURCE).unwrap();
+
+    let inputs: Vec<Value> = vec![
+        json!({ "op": "sum", "values": [1, 2, 3] }),
+        json!({ "op": "bytelen", "text": "hello" }),
+        json!({ "op": "unknown" }),
+        json!(null),
+    ];
+    let input_arr = Value::Array(inputs.clone());
+
+    // Precompiled batch path: single boundary crossing.
+    let input_bytes = serde_json::to_vec(&input_arr).unwrap();
+    let reply_bytes = c
+        .thrust_sealed_raw_bytes(&batch_id, input_bytes, &limits)
+        .unwrap();
+    let batch_out: Value = serde_json::from_slice(&reply_bytes).unwrap();
+    assert!(
+        batch_out.is_array(),
+        "batch precompiled must return an array"
+    );
+    let batch_arr = batch_out.as_array().unwrap();
+
+    // Source path: per-element.
+    let mut src_arr: Vec<Value> = Vec::with_capacity(inputs.len());
+    for elem in &inputs {
+        if elem.is_null() {
+            src_arr.push(Value::Null);
+        } else {
+            src_arr.push(c.thrust(&src_id, elem, &limits).unwrap());
+        }
+    }
+
+    assert_eq!(
+        batch_arr.len(),
+        src_arr.len(),
+        "batch precompiled and source must return same number of elements"
+    );
+    for (i, (pc, src)) in batch_arr.iter().zip(src_arr.iter()).enumerate() {
+        assert_eq!(
+            pc, src,
+            "batch precompiled element {i} differs from source output\n  precompiled: {pc}\n  source: {src}"
+        );
+    }
+}
+
+// ---- PROOF: columnar precompiled output == columnar source output ----------
+//
+// The columnar precompiled WASM uses the binary-frame harness produced by
+// `build_wrapped_source_columnar`. This test proves that encoding a batch,
+// running through the columnar fixture's `thrust_sealed_raw_bytes`, and
+// decoding produces the same columns as the source columnar path
+// (`ignite` + `thrust_columnar`).
+
+#[test]
+fn columnar_precompiled_output_equals_source_output() {
+    use afterburner_wasi::columnar::{
+        ColumnDtype, ColumnRef, ColumnarBatch, decode_batch, encode_batch,
+    };
+
+    let c = make_combustor();
+    let limits = FuelGauge::unlimited();
+
+    // Register the columnar fixture WASM.
+    let col_id = c
+        .register_precompiled(PROBE_COLUMNAR_WASM, "wasm32-wasip1")
+        .unwrap();
+
+    // Source path via thrust_columnar (ignite the same source).
+    let src_id = c.ignite(PROBE_COLUMNAR_SOURCE).unwrap();
+
+    // Build a typed Int32 batch: 5 rows, c0 = [1,2,3,4,5], c1 = [10,20,30,40,50].
+    let c0_data: Vec<u8> = [1i32, 2, 3, 4, 5]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let c1_data: Vec<u8> = [10i32, 20, 30, 40, 50]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let mut batch = ColumnarBatch::new(5);
+    batch.push(ColumnRef {
+        name: "c0",
+        dtype: ColumnDtype::Int32,
+        data: &c0_data,
+        heap: None,
+        validity: None,
+    });
+    batch.push(ColumnRef {
+        name: "c1",
+        dtype: ColumnDtype::Int32,
+        data: &c1_data,
+        heap: None,
+        validity: None,
+    });
+
+    // Precompiled columnar path: encode -> thrust_sealed_raw_bytes -> decode.
+    let encoded = encode_batch(&batch).unwrap();
+    let reply_bytes = c
+        .thrust_sealed_raw_bytes(&col_id, encoded.bytes, &limits)
+        .unwrap();
+    let pc_out = decode_batch(&reply_bytes).unwrap();
+
+    // Source columnar path.
+    let src_out = c.thrust_columnar(&src_id, &batch, &limits).unwrap();
+
+    assert_eq!(
+        pc_out.row_count, src_out.row_count,
+        "columnar precompiled and source must agree on row_count"
+    );
+    assert_eq!(
+        pc_out.columns.len(),
+        src_out.columns.len(),
+        "columnar precompiled and source must return same number of columns"
+    );
+    for (i, (pc_col, src_col)) in pc_out
+        .columns
+        .iter()
+        .zip(src_out.columns.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            pc_col.name, src_col.name,
+            "column {i} name mismatch: precompiled={}, source={}",
+            pc_col.name, src_col.name
+        );
+        assert_eq!(pc_col.dtype, src_col.dtype, "column {i} dtype mismatch");
+        assert_eq!(
+            pc_col.data, src_col.data,
+            "column {i} '{}' data mismatch\n  precompiled: {:?}\n  source: {:?}",
+            pc_col.name, pc_col.data, src_col.data
+        );
+    }
+    // Verify the actual sum values (1+10=11, 2+20=22, ...).
+    let sums: Vec<i32> = pc_out.columns[0]
+        .data
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(
+        sums,
+        vec![11, 22, 33, 44, 55],
+        "columnar sum values must be correct"
     );
 }

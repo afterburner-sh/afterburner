@@ -354,6 +354,21 @@ impl BurnCache {
         self.engine.thrust_columnar_bytes(id, encoded, limits)
     }
 
+    /// Raw-bytes in / raw-bytes out entry point for sealed precompiled modules.
+    /// Feeds `input` to the module's stdin verbatim and returns the raw stdout
+    /// bytes. Used by the batch and columnar precompiled paths in burndb:
+    /// batch encodes its own JSON array wire; columnar encodes the binary
+    /// columnar frame and expects the same shape back.
+    #[fastrace::trace(name = "BurnCache::execute_sealed_raw_bytes")]
+    pub fn execute_sealed_raw_bytes(
+        &self,
+        id: &ScriptId,
+        input: Vec<u8>,
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        self.engine.thrust_sealed_raw_bytes(id, input, limits)
+    }
+
     /// Register a pre-compiled self-contained (SEALED) WASM module and return
     /// a [`ScriptId`] that [`execute`](Self::execute) dispatches through the
     /// sealed execution path (stdin/stdout JSON, no plugin envelope). Delegates

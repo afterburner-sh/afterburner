@@ -499,14 +499,30 @@ impl WasmCombustor {
     /// No `afterburner:host` wiring, no plugin envelope. The module must have
     /// been registered via [`register_precompiled`].
     fn thrust_sealed(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value> {
+        let input_bytes = serde_json::to_vec(input)?;
+        let stdout_bytes = self.thrust_sealed_raw_bytes_inner(id, input_bytes, limits)?;
+        parse_output(&stdout_bytes)
+    }
+
+    /// Raw-bytes-in / raw-bytes-out path for sealed precompiled modules.
+    /// Feeds `input_bytes` verbatim to the module's stdin and returns the
+    /// raw stdout bytes without parsing. Used by the batch precompiled path
+    /// (JSON array wire) and the columnar precompiled path (binary frame).
+    ///
+    /// The module must have been registered via [`register_precompiled`] with
+    /// target `"wasm32-wasip1"`.
+    fn thrust_sealed_raw_bytes_inner(
+        &self,
+        id: &ScriptId,
+        input_bytes: Vec<u8>,
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
         let sealed = self
             .sealed_cache
             .get(&id.hash)
             .ok_or(AfterburnerError::ScriptNotFound)?;
 
-        let input_bytes = serde_json::to_vec(input)?;
-
-        // The sealed module reads JSON from stdin directly; no plugin envelope.
+        // The sealed module reads its input from stdin directly; no plugin envelope.
         let state = HostState::new(
             &input_bytes,
             limits.memory_bytes,
@@ -527,8 +543,7 @@ impl WasmCombustor {
             "wasm.sealed_thrust",
         )?;
 
-        let stdout_bytes = chamber::drain_stdout(&mut store);
-        parse_output(&stdout_bytes)
+        Ok(chamber::drain_stdout(&mut store))
     }
 
     /// Execute a dynamically-linked precompiled module.
@@ -1394,6 +1409,18 @@ impl Combustor for WasmCombustor {
         limits: &FuelGauge,
     ) -> Result<OutputValue> {
         WasmCombustor::thrust_raw_out(self, id, input, limits)
+    }
+
+    /// Combustor-trait override: raw-bytes-in / raw-bytes-out for sealed
+    /// precompiled modules. Delegates to the inherent
+    /// [`Self::thrust_sealed_raw_bytes_inner`].
+    fn thrust_sealed_raw_bytes(
+        &self,
+        id: &ScriptId,
+        input: Vec<u8>,
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        self.thrust_sealed_raw_bytes_inner(id, input, limits)
     }
 
     fn extinguish(&self, id: &ScriptId) {

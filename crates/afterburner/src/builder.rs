@@ -334,6 +334,30 @@ impl Afterburner {
         }
     }
 
+    /// Raw-bytes-in / raw-bytes-out for sealed precompiled modules.
+    /// Feeds `input` verbatim to the module's stdin and returns raw
+    /// stdout bytes without parsing. The `id` must refer to a module
+    /// registered via `register_precompiled` with target
+    /// `"wasm32-wasip1"`.
+    ///
+    /// Used by the batch and columnar precompiled paths in burndb:
+    /// batch sends a JSON array and reads the JSON array reply; columnar
+    /// sends the binary columnar frame and reads the binary reply.
+    pub fn run_sealed_raw_bytes_with(
+        &self,
+        id: &ScriptId,
+        input: Vec<u8>,
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        match &self.engine {
+            EngineHolder::Cache(c) => c.execute_sealed_raw_bytes(id, input, limits),
+            #[cfg(feature = "thrust")]
+            EngineHolder::Thrust(_) => Err(afterburner_core::AfterburnerError::Engine(
+                "run_sealed_raw_bytes_with: not supported on ThrustEngine".into(),
+            )),
+        }
+    }
+
     /// Run a registered script against a typed [`ColumnarBatch`] and
     /// receive the result columns directly - no JSON parse / stringify
     /// on either side. Phase 1 of the UDF perf push: the data path

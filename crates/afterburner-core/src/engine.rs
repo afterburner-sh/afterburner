@@ -190,4 +190,27 @@ pub trait Combustor: Send + Sync {
             "register_precompiled not supported by this backend (wasm feature required)".into(),
         ))
     }
+
+    /// Raw-bytes in / raw-bytes out path for sealed precompiled modules.
+    /// Feeds `input` directly to the module's stdin without JSON
+    /// serialization, and returns the raw stdout bytes without parsing.
+    /// Used by the batch and columnar precompiled paths, which encode
+    /// their own wire format (JSON array or binary columnar frame) and
+    /// need to read back the matching raw reply.
+    ///
+    /// Only `WasmCombustor` overrides this. The id must refer to a module
+    /// registered via `register_precompiled` with target `"wasm32-wasip1"`.
+    ///
+    /// Default impl errors - non-wasm backends inherit it.
+    fn thrust_sealed_raw_bytes(
+        &self,
+        id: &ScriptId,
+        input: Vec<u8>,
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        let _ = (id, input, limits);
+        Err(AfterburnerError::Engine(
+            "thrust_sealed_raw_bytes not implemented for this backend".into(),
+        ))
+    }
 }
