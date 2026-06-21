@@ -196,7 +196,16 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
     let manifold: Manifold =
         serde_json::from_str(&manifold_json).map_err(|e| AfbError::ManifoldParse(e.to_string()))?;
 
-    if !source.contains_key(&manifest.package.entry) {
+    // The entry-present check is waived when the package is WASM-only: a set
+    // `runtime.target` with at least one matching `precompiled/<target>/`
+    // member means the runtime will load the WASM directly, so the source/
+    // entry is legitimately absent.
+    let is_wasm_only = manifest.runtime.target.as_deref().is_some_and(|t| {
+        precompiled
+            .keys()
+            .any(|k| k.starts_with(&format!("precompiled/{t}/")))
+    });
+    if !is_wasm_only && !source.contains_key(&manifest.package.entry) {
         return Err(AfbError::EntryMissing(manifest.package.entry.clone()));
     }
 

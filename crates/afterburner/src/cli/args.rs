@@ -311,6 +311,12 @@ pub enum Cmd {
         /// Requires `javy` on PATH. Opt-in; the default remains source-only.
         #[arg(long)]
         compile: bool,
+        /// Emit a WASM-only `.afb` (precompiled members, no source).
+        /// Implies `--compile`. Requires the package to precompile successfully.
+        /// Errors instead of falling back to shipping source, so CI is safe.
+        /// In a TTY without this flag, `burn package` prompts for the mode.
+        #[arg(long = "wasm-only", conflicts_with = "compile")]
+        wasm_only: bool,
     },
     /// Build a pre-compiled `.afb`: ahead-of-time compiles `source/` to a
     /// self-contained WASM module (via `javy`) and bundles it alongside the

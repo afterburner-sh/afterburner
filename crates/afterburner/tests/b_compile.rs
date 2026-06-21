@@ -437,6 +437,120 @@ fn compile_dep_linked_falls_back_to_source_only() {
     );
 }
 
+// ---- burn package --wasm-only (STEP 2 + STEP 3 CLI coverage) ---------------
+
+/// `burn package --wasm-only` on a sealed package when javy is present:
+/// the emitted `.afb` must have NO `source/` members and DOES have the
+/// precompiled WASM member.
+#[test]
+fn package_wasm_only_sealed_no_source() {
+    if !javy_available() {
+        eprintln!(
+            "SKIP package_wasm_only_sealed_no_source: \
+             `javy` not found on PATH; install javy 8.1.1 to run this test"
+        );
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let pkg_dir = tmp.path().join("sealed_wasm_only");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    scaffold_sealed(&pkg_dir);
+
+    let out_afb = tmp.path().join("wasm_only.afb");
+
+    let result = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args([
+            "package",
+            pkg_dir.to_str().unwrap(),
+            "--wasm-only",
+            "-o",
+            out_afb.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn burn package --wasm-only");
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        result.status.success(),
+        "burn package --wasm-only failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let bytes = std::fs::read(&out_afb).expect("reading wasm-only .afb");
+    let afb = Afb::from_bytes(&bytes).expect("parsing wasm-only .afb");
+
+    // No source members.
+    assert!(
+        afb.source.is_empty(),
+        "wasm-only .afb must have no source/ members, got: {:?}",
+        afb.source.keys().collect::<Vec<_>>()
+    );
+
+    // Precompiled member must be present and non-empty.
+    let wasm_key = "precompiled/wasm32-wasip1/main.wasm";
+    let wasm_bytes = afb
+        .precompiled
+        .get(wasm_key)
+        .unwrap_or_else(|| panic!("{wasm_key} must be present in wasm-only .afb"));
+    assert!(!wasm_bytes.is_empty(), "precompiled wasm must be non-empty");
+
+    // runtime.target set.
+    assert_eq!(
+        afb.manifest.runtime.target.as_deref(),
+        Some("wasm32-wasip1"),
+    );
+}
+
+/// `burn package` (source-based, non-interactive default when stdin is not a
+/// TTY) still includes source and no precompiled member.
+#[test]
+fn package_source_based_default_includes_source() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pkg_dir = tmp.path().join("sealed_src");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    scaffold_sealed(&pkg_dir);
+
+    let out_afb = tmp.path().join("src.afb");
+
+    // Run with stdin NOT a TTY (piped from /dev/null) so no prompt fires.
+    let result = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args([
+            "package",
+            pkg_dir.to_str().unwrap(),
+            "-o",
+            out_afb.to_str().unwrap(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn burn package (source-based)");
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        result.status.success(),
+        "burn package (source-based) failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let bytes = std::fs::read(&out_afb).expect("reading source-based .afb");
+    let afb = Afb::from_bytes(&bytes).expect("parsing source-based .afb");
+
+    // Source must be present.
+    assert!(
+        afb.source.contains_key("source/main.js"),
+        "source-based .afb must include source/main.js"
+    );
+
+    // No precompiled member in the plain source-based path.
+    assert!(
+        afb.precompiled.is_empty(),
+        "source-based .afb must have no precompiled members, got: {:?}",
+        afb.precompiled.keys().collect::<Vec<_>>()
+    );
+}
+
 // ---- format-level: Builder with precompiled member round-trips ------------
 
 #[test]

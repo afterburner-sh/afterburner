@@ -250,7 +250,7 @@ fn resolve_one_dep(
     Ok(())
 }
 
-/// `burn compile [dir] -o <out>` entry point.
+/// `burn compile [dir] -o <out>` entry point. Always source-bearing (source + precompiled).
 pub fn compile(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
     let dir = dir.unwrap_or_else(|| Path::new("."));
     let mut local = pkg::LocalPackage::load(dir)?;
@@ -260,16 +260,24 @@ pub fn compile(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(local.output_filename()));
 
-    compile_with_local_package(local, &out_path)
+    compile_with_local_package(local, &out_path, false)
 }
 
 /// Compile a local package to a precompiled `.afb`, writing to `out_path`.
 /// Used by `burn compile`, `burn package --compile`, and `burn publish --compile`.
-pub fn compile_with_local_package(local: LocalPackage, out_path: &Path) -> Result<()> {
+///
+/// When `wasm_only` is true the emitted `.afb` contains no `source/*` members.
+/// In that mode any fallback path that would have shipped source instead
+/// returns an error - source leakage is never silent.
+pub fn compile_with_local_package(
+    local: LocalPackage,
+    out_path: &Path,
+    wasm_only: bool,
+) -> Result<()> {
     if local.manifold.is_sealed() {
-        compile_sealed(local, out_path)
+        compile_sealed(local, out_path, wasm_only)
     } else {
-        compile_capability(local, out_path)
+        compile_capability(local, out_path, wasm_only)
     }
 }
 
@@ -289,7 +297,7 @@ pub fn compile_with_local_package(local: LocalPackage, out_path: &Path) -> Resul
 /// If linking fails (missing dep dir or real error), we fall back to a
 /// source-only `.afb` and print a clear note so the caller is never left
 /// with a broken precompiled module.
-fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
+fn compile_sealed(local: LocalPackage, out_path: &Path, wasm_only: bool) -> Result<()> {
     let coord = coord_str(&local);
     let pkg_dir = local
         .dir
@@ -317,6 +325,13 @@ fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
         match link_result {
             Ok(src) => src,
             Err(e) => {
+                if wasm_only {
+                    // In WASM-only mode we must not fall back to shipping source.
+                    anyhow::bail!(
+                        "full-WASM packaging requires precompilation but dependency \
+                         linking failed: {e}"
+                    );
+                }
                 // Local dep resolution or linking failed: emit source-only .afb
                 // with a clear note. The caller is never left with a broken module.
                 eprintln!(
@@ -350,7 +365,7 @@ fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
         javy_compile_columnar(&effective_src)
     })?;
 
-    // Build the final .afb with source (unchanged) plus three precompiled members:
+    // Build the final .afb with (optionally) source plus three precompiled members:
     //   precompiled/wasm32-wasip1/main.wasm         - single-row JSON in/out
     //   precompiled/wasm32-wasip1-batch/main.wasm   - array-in / array-out
     //   precompiled/wasm32-wasip1-columnar/main.wasm - binary-frame in/out
@@ -359,8 +374,10 @@ fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
     manifest.runtime.target = Some("wasm32-wasip1".into());
 
     let mut b = Builder::new(manifest, afb.manifold.clone());
-    for (path, data) in &afb.source {
-        b = b.source(path.clone(), data.clone());
+    if !wasm_only {
+        for (path, data) in &afb.source {
+            b = b.source(path.clone(), data.clone());
+        }
     }
     b = b.precompiled("precompiled/wasm32-wasip1/main.wasm", wasm_bytes);
     b = b.precompiled(
@@ -372,15 +389,25 @@ fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
         columnar_wasm_bytes,
     );
 
-    let (bytes, d) = style::spin("packing", || b.build()).context("building precompiled .afb")?;
+    let (bytes, d) = if wasm_only {
+        style::spin("packing (wasm-only)", || b.build_wasm_only())
+            .context("building wasm-only .afb")?
+    } else {
+        style::spin("packing", || b.build()).context("building precompiled .afb")?
+    };
 
     std::fs::write(out_path, &bytes).with_context(|| format!("writing {}", out_path.display()))?;
 
+    let label = if wasm_only {
+        "(precompiled wasm32-wasip1, no source)"
+    } else {
+        "(precompiled wasm32-wasip1)"
+    };
     println!(
         "{} {} {}",
         style::ok("compiled"),
         style::accent(&coord),
-        style::gold("(precompiled wasm32-wasip1)")
+        style::gold(label)
     );
     print_digest(bytes.len() as u64, &hex(&d));
     println!(
@@ -398,7 +425,7 @@ fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
 /// `afterburner:host` imports carry the caller's `Manifold`.
 ///
 /// Falls back to source-only if `javy` is absent or the dyn build fails.
-fn compile_capability(local: LocalPackage, out_path: &Path) -> Result<()> {
+fn compile_capability(local: LocalPackage, out_path: &Path, wasm_only: bool) -> Result<()> {
     let coord = coord_str(&local);
     let pkg_dir = local
         .dir
@@ -422,6 +449,12 @@ fn compile_capability(local: LocalPackage, out_path: &Path) -> Result<()> {
         match link_result {
             Ok(src) => src,
             Err(e) => {
+                if wasm_only {
+                    anyhow::bail!(
+                        "full-WASM packaging requires precompilation but dependency \
+                         linking failed: {e}"
+                    );
+                }
                 eprintln!(
                     "note: precompiled dyn WASM does not support dependency-linked \
                      packages ({e}); shipping source-only .afb instead"
@@ -447,10 +480,16 @@ fn compile_capability(local: LocalPackage, out_path: &Path) -> Result<()> {
 
     // Attempt the dynamically-linked build. Fall back to source-only when javy
     // is absent or the build fails (a clear note is always emitted).
+    // In WASM-only mode, fall back is forbidden - propagate the error instead.
     let wasm_result = style::spin("compiling to dyn wasm", || javy_compile_dyn(&effective_src));
     let wasm_bytes = match wasm_result {
         Ok(b) => b,
         Err(e) => {
+            if wasm_only {
+                return Err(e.context(
+                    "full-WASM packaging requires precompilation but dyn WASM build failed",
+                ));
+            }
             eprintln!("note: dyn WASM build failed ({e}); shipping source-only .afb instead");
             std::fs::write(out_path, &source_bytes)
                 .with_context(|| format!("writing {}", out_path.display()))?;
@@ -470,20 +509,32 @@ fn compile_capability(local: LocalPackage, out_path: &Path) -> Result<()> {
     manifest.runtime.target = Some("wasm32-wasip1-dyn".into());
 
     let mut b = Builder::new(manifest, afb.manifold.clone());
-    for (path, data) in &afb.source {
-        b = b.source(path.clone(), data.clone());
+    if !wasm_only {
+        for (path, data) in &afb.source {
+            b = b.source(path.clone(), data.clone());
+        }
     }
     b = b.precompiled("precompiled/wasm32-wasip1-dyn/main.wasm", wasm_bytes);
 
-    let (bytes, d) = style::spin("packing", || b.build()).context("building dyn .afb")?;
+    let (bytes, d) = if wasm_only {
+        style::spin("packing (wasm-only)", || b.build_wasm_only())
+            .context("building wasm-only dyn .afb")?
+    } else {
+        style::spin("packing", || b.build()).context("building dyn .afb")?
+    };
 
     std::fs::write(out_path, &bytes).with_context(|| format!("writing {}", out_path.display()))?;
 
+    let label = if wasm_only {
+        "(precompiled wasm32-wasip1-dyn, no source)"
+    } else {
+        "(precompiled wasm32-wasip1-dyn)"
+    };
     println!(
         "{} {} {}",
         style::ok("compiled"),
         style::accent(&coord),
-        style::gold("(precompiled wasm32-wasip1-dyn)")
+        style::gold(label)
     );
     print_digest(bytes.len() as u64, &hex(&d));
     println!(

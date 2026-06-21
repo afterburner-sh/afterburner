@@ -173,7 +173,22 @@ fn report_scaffold(s: &Scaffolded) {
     println!("  {} burn publish", style::bullet());
 }
 
-pub fn package(dir: Option<&Path>, out: Option<&Path>, do_compile: bool) -> Result<()> {
+/// Packaging mode for `burn package`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageMode {
+    /// Ship JS source (and precompiled WASM when `--compile` is also given).
+    SourceBased,
+    /// Ship precompiled WASM only - no `source/*` members. Requires successful
+    /// precompilation; never silently falls back to shipping source.
+    FullWasm,
+}
+
+pub fn package(
+    dir: Option<&Path>,
+    out: Option<&Path>,
+    do_compile: bool,
+    wasm_only: bool,
+) -> Result<()> {
     let dir = dir.unwrap_or_else(|| Path::new("."));
     let mut local = pkg::LocalPackage::load(dir)?;
     // TypeScript is build-time only: transpile every `.ts/.mts/.cts`
@@ -185,20 +200,75 @@ pub fn package(dir: Option<&Path>, out: Option<&Path>, do_compile: bool) -> Resu
     let out_path = out
         .map(Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from(local.output_filename()));
-    if do_compile {
-        super::compile::compile_with_local_package(local, &out_path)
+
+    // Resolve the packaging mode. Priority:
+    //   --wasm-only flag          -> FullWasm (no prompt)
+    //   --compile flag            -> SourceBased with compile (no prompt, existing behavior)
+    //   stdin is a TTY            -> prompt the user
+    //   stdin is not a TTY (CI)   -> SourceBased (non-interactive default)
+    let mode = if wasm_only {
+        PackageMode::FullWasm
+    } else if do_compile {
+        PackageMode::SourceBased
     } else {
-        let (bytes, digest) = style::spin("packing", || local.build())?;
-        std::fs::write(&out_path, &bytes)
-            .with_context(|| format!("writing {}", out_path.display()))?;
-        println!("{} {}", style::ok("packaged"), style::accent(&coord));
-        print_digest(bytes.len() as u64, &hex(&digest));
-        println!(
-            "  {} {}",
-            style::muted("->"),
-            style::value(&out_path.display().to_string())
-        );
-        Ok(())
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            prompt_package_mode()?
+        } else {
+            PackageMode::SourceBased
+        }
+    };
+
+    match mode {
+        PackageMode::FullWasm => super::compile::compile_with_local_package(local, &out_path, true),
+        PackageMode::SourceBased if do_compile || wasm_only => {
+            // wasm_only is handled above; do_compile -> compile+source.
+            super::compile::compile_with_local_package(local, &out_path, false)
+        }
+        PackageMode::SourceBased => {
+            let (bytes, digest) = style::spin("packing", || local.build())?;
+            std::fs::write(&out_path, &bytes)
+                .with_context(|| format!("writing {}", out_path.display()))?;
+            println!("{} {}", style::ok("packaged"), style::accent(&coord));
+            print_digest(bytes.len() as u64, &hex(&digest));
+            println!(
+                "  {} {}",
+                style::muted("->"),
+                style::value(&out_path.display().to_string())
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Prompt the user for the packaging mode when stdin is a TTY.
+///
+/// Prints the choice on stderr so the selection is visible even when
+/// stdout is piped. Empty input defaults to option 1 (source-based).
+fn prompt_package_mode() -> Result<PackageMode> {
+    use std::io::{BufRead, Write};
+    eprintln!();
+    eprintln!("{}", style::muted("Packaging mode:"));
+    eprintln!(
+        "  {}  source-based  (ships JS source{}precompiled WASM)",
+        style::accent("[1]"),
+        style::muted(" + "),
+    );
+    eprintln!(
+        "  {}  full WASM     (compiled only, no source)",
+        style::accent("[2]"),
+    );
+    eprint!("{}", style::muted("choice [1]: "));
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let trimmed = line.trim();
+    match trimmed {
+        "" | "1" => Ok(PackageMode::SourceBased),
+        "2" => Ok(PackageMode::FullWasm),
+        other => anyhow::bail!(
+            "invalid packaging mode {other:?}; enter 1 (source-based) or 2 (full WASM)"
+        ),
     }
 }
 
@@ -266,7 +336,7 @@ pub fn publish(
                     std::env::temp_dir().join(format!("burn-publish-{}.afb", std::process::id()));
                 let mut local = pkg::LocalPackage::load(dir)?;
                 transpile_ts_sources(&mut local)?;
-                super::compile::compile_with_local_package(local, &tmp_path)?;
+                super::compile::compile_with_local_package(local, &tmp_path, false)?;
                 let b = std::fs::read(&tmp_path)
                     .with_context(|| format!("reading compiled {}", tmp_path.display()))?;
                 let _ = std::fs::remove_file(&tmp_path);

@@ -25,6 +25,10 @@ pub struct Builder {
     manifold: Manifold,
     /// Archive-relative path → file contents. `BTreeMap` = deterministic order.
     files: BTreeMap<String, Vec<u8>>,
+    /// When true, `build_wasm_only` drops every `source/*` entry so the emitted
+    /// `.afb` contains only `afb.toml`, `manifold.json`, and `precompiled/*`
+    /// members. Not used by `build()`, which preserves all entries.
+    omit_source: bool,
 }
 
 impl Builder {
@@ -34,7 +38,17 @@ impl Builder {
             manifest,
             manifold,
             files: BTreeMap::new(),
+            omit_source: false,
         }
+    }
+
+    /// Configure the builder to drop all `source/*` entries when
+    /// [`build_wasm_only`](Builder::build_wasm_only) is called.
+    ///
+    /// Has no effect on [`build`](Builder::build).
+    pub fn omit_source(mut self, yes: bool) -> Self {
+        self.omit_source = yes;
+        self
     }
 
     /// Add a source file at an archive path (must be under `source/`).
@@ -60,10 +74,43 @@ impl Builder {
         self
     }
 
-    /// Serialize, tar (reproducibly), zstd-compress, and digest.
+    /// Build a WASM-only `.afb`: identical to [`build`](Builder::build) except
+    /// that every `source/*` entry is dropped.
+    ///
+    /// The resulting archive contains only `afb.toml`, `manifold.json`, and any
+    /// `precompiled/*` members added via [`precompiled`](Builder::precompiled).
+    ///
+    /// Errors when no `precompiled/*` member has been added, because shipping
+    /// an `.afb` with neither source nor a precompiled WASM is not useful.
     ///
     /// Returns `(compressed_bytes, sha256(compressed_bytes))`.
-    pub fn build(self) -> Result<(Vec<u8>, [u8; 32])> {
+    pub fn build_wasm_only(mut self) -> Result<(Vec<u8>, [u8; 32])> {
+        let has_precompiled = self.files.keys().any(|k| k.starts_with("precompiled/"));
+        if !has_precompiled {
+            return Err(AfbError::Corrupt(
+                "build_wasm_only requires at least one precompiled/ member; \
+                 none were added via Builder::precompiled"
+                    .into(),
+            ));
+        }
+        self.omit_source = true;
+        self.build_inner()
+    }
+
+    /// Serialize, tar (reproducibly), zstd-compress, and digest.
+    ///
+    /// The `omit_source` flag (set via [`omit_source`](Builder::omit_source))
+    /// has no effect here - `build()` always includes all entries.
+    ///
+    /// Returns `(compressed_bytes, sha256(compressed_bytes))`.
+    pub fn build(mut self) -> Result<(Vec<u8>, [u8; 32])> {
+        // `omit_source` only applies to `build_wasm_only`; always include
+        // source here regardless of what the caller set.
+        self.omit_source = false;
+        self.build_inner()
+    }
+
+    fn build_inner(self) -> Result<(Vec<u8>, [u8; 32])> {
         // Validate the manifest the same way the unpacker will, so a
         // Builder can't emit a package that fails its own `from_bytes`.
         let manifest_toml = self.manifest.to_toml_string()?;
@@ -82,6 +129,9 @@ impl Builder {
         entries.insert("afb.toml".into(), manifest_toml.into_bytes());
         entries.insert("manifold.json".into(), manifold_json);
         for (path, data) in self.files {
+            if self.omit_source && path.starts_with("source/") {
+                continue;
+            }
             entries.insert(path, data);
         }
 
