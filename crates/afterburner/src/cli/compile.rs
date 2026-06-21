@@ -24,19 +24,109 @@
 //! `javy` is required only here - the runtime never shells to it.
 //! Required version: 8.1.1.
 
-use afterburner_cloud::afterburner_afb::Afb;
 use afterburner_cloud::afterburner_afb::digest::{digest, hex};
 use afterburner_cloud::afterburner_afb::pack::Builder;
+use afterburner_cloud::afterburner_afb::{Afb, DepReq, parse_dep_req};
 use afterburner_cloud::pkg::{self, LocalPackage};
 use afterburner_node_compat::PLENUM_BUNDLE;
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::registry::{coord_str, print_digest, transpile_ts_sources};
 use super::style;
 
+/// Resolve the transitive closure of local filesystem dependencies for a package.
+///
+/// For each `"ns/name" = range_or_pin` entry in `deps`, this function loads the
+/// sibling package from `packages_dir/<name>/`, builds a source `.afb`, validates
+/// the version or digest against the declared requirement, and recurses into that
+/// dep's own `[dependencies]`. Returns the full closure in deps-before-dependents
+/// order (leaves first), deduped by coordinate. Mirrors `resolve_dep_closure` in
+/// the burndb runtime.
+///
+/// Returns an error if any sibling directory is absent or the version check fails,
+/// so the caller's source-only fallback fires with a clear message.
+fn resolve_local_deps(
+    deps: &BTreeMap<String, String>,
+    packages_dir: &Path,
+) -> Result<Vec<(String, Afb)>> {
+    let mut resolved: BTreeMap<String, Afb> = BTreeMap::new();
+    let mut order: Vec<String> = Vec::new();
+    for (coord, value) in deps {
+        resolve_one(coord, value, packages_dir, &mut resolved, &mut order)?;
+    }
+    Ok(order
+        .into_iter()
+        .map(|c| {
+            let a = resolved.remove(&c).unwrap();
+            (c, a)
+        })
+        .collect())
+}
+
+/// Recursively resolve a single dependency and its transitive closure, appending
+/// to `resolved`/`order` in topological order (leaves before dependents).
+fn resolve_one(
+    coord: &str,
+    value: &str,
+    packages_dir: &Path,
+    resolved: &mut BTreeMap<String, Afb>,
+    order: &mut Vec<String>,
+) -> Result<()> {
+    if resolved.contains_key(coord) {
+        return Ok(()); // diamond dep - resolve each coordinate once
+    }
+    // Derive local dir name from "ns/name" -> "name".
+    let local_name = coord.rsplit_once('/').map(|(_, n)| n).unwrap_or(coord);
+    let dep_dir = packages_dir.join(local_name);
+    let mut dep_local = pkg::LocalPackage::load(&dep_dir)
+        .with_context(|| format!("loading local dep {coord:?} from {}", dep_dir.display()))?;
+    super::registry::transpile_ts_sources(&mut dep_local)?;
+    let (dep_bytes, _) = dep_local
+        .build()
+        .with_context(|| format!("building dep {coord:?}"))?;
+    let dep_afb =
+        Afb::from_bytes(&dep_bytes).with_context(|| format!("parsing built dep {coord:?}"))?;
+
+    // Validate the declared requirement against the local dep's version/digest.
+    let req = parse_dep_req(value)
+        .with_context(|| format!("dep {coord:?}: invalid requirement {value:?}"))?;
+    match &req {
+        DepReq::Pin(pin) => {
+            let actual = format!("sha256:{}", hex(&dep_afb.digest));
+            if &actual != pin {
+                anyhow::bail!("local dep {coord:?} digest {actual} does not match pinned {pin}");
+            }
+        }
+        DepReq::Range(vreq) => {
+            let dep_ver =
+                semver::Version::parse(&dep_afb.manifest.package.version).with_context(|| {
+                    format!(
+                        "local dep {coord:?} has invalid version {:?}",
+                        dep_afb.manifest.package.version
+                    )
+                })?;
+            if !vreq.matches(&dep_ver) {
+                anyhow::bail!("local dep {coord:?} version {dep_ver} does not satisfy {vreq}");
+            }
+        }
+    }
+
+    // Insert before recursing: guards against cycles in the dep graph.
+    let child_deps = dep_afb.manifest.dependencies.clone();
+    resolved.insert(coord.to_string(), dep_afb);
+
+    // Recurse into transitive deps first (topological: leaves before roots).
+    for (child_coord, child_val) in &child_deps {
+        resolve_one(child_coord, child_val, packages_dir, resolved, order)?;
+    }
+    order.push(coord.to_string());
+    Ok(())
+}
+
 /// `burn compile [dir] -o <out>` entry point.
-pub fn compile(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
+pub fn compile(dir: Option<&Path>, out: Option<&Path>, packages_dir: Option<&Path>) -> Result<()> {
     let dir = dir.unwrap_or_else(|| Path::new("."));
     let mut local = pkg::LocalPackage::load(dir)?;
     transpile_ts_sources(&mut local)?;
@@ -45,10 +135,30 @@ pub fn compile(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(local.output_filename()));
 
+    // Default packages_dir: parent of the package dir (monorepo siblings layout).
+    let default_packages_dir: PathBuf;
+    let packages_dir: &Path = match packages_dir {
+        Some(p) => p,
+        None => {
+            default_packages_dir = dir.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+            &default_packages_dir
+        }
+    };
+
+    compile_with_local_package(local, packages_dir, &out_path)
+}
+
+/// Compile a local package to a precompiled `.afb`, writing to `out_path`.
+/// Used by `burn compile`, `burn package --compile`, and `burn publish --compile`.
+pub fn compile_with_local_package(
+    local: LocalPackage,
+    packages_dir: &Path,
+    out_path: &Path,
+) -> Result<()> {
     if local.manifold.is_sealed() {
-        compile_sealed(local, &out_path)
+        compile_sealed(local, out_path, packages_dir)
     } else {
-        compile_capability(local, &out_path)
+        compile_capability(local, out_path, packages_dir)
     }
 }
 
@@ -60,11 +170,11 @@ pub fn compile(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
 /// same source the runtime's warm path uses. For single-file packages it is
 /// the bare entry, as before.
 ///
-/// If linking fails because the package declares external afb dependencies
-/// that cannot be resolved at compile time, we fall back to a source-only
-/// `.afb` and print a clear note so the caller is never left with a broken
-/// precompiled module.
-fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
+/// Local dep resolution via `--packages-dir` is attempted first. If linking
+/// fails (missing dep dir or real error), we fall back to a source-only `.afb`
+/// and print a clear note so the caller is never left with a broken precompiled
+/// module.
+fn compile_sealed(local: LocalPackage, out_path: &Path, packages_dir: &Path) -> Result<()> {
     let coord = coord_str(&local);
 
     // Build a source-only .afb first so we can reparse it and call the
@@ -79,21 +189,26 @@ fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
     // virtual filesystem. Javy's QuickJS environment has no built-in
     // require(), so prepend the plenum bundle which installs it globally.
     let effective_src: String = if afb.needs_linking() {
-        match afb.linked_source(&[], &[]) {
-            Ok(src) => format!("{PLENUM_BUNDLE}\n{src}"),
+        let link_result = (|| -> Result<String> {
+            let deps = resolve_local_deps(&afb.manifest.dependencies, packages_dir)?;
+            let refs: Vec<(&str, &Afb)> = deps.iter().map(|(c, a)| (c.as_str(), a)).collect();
+            let src = afb.linked_source(&refs, &[]).context("linking source")?;
+            Ok(format!("{PLENUM_BUNDLE}\n{src}"))
+        })();
+        match link_result {
+            Ok(src) => src,
             Err(e) => {
-                // The package declares external afb dependencies that we
-                // cannot resolve at compile time. Emit a source-only .afb
-                // and a clear note rather than a broken precompiled module.
+                // Local dep resolution or linking failed: emit source-only .afb
+                // with a clear note. The caller is never left with a broken module.
                 eprintln!(
                     "note: precompiled WASM does not yet support dependency-linked \
                      packages ({e}); shipping source-only .afb instead"
                 );
                 std::fs::write(out_path, &source_bytes)
                     .with_context(|| format!("writing {}", out_path.display()))?;
-                let digest = digest(&source_bytes);
+                let d = digest(&source_bytes);
                 println!("{} {}", style::ok("packaged"), style::accent(&coord));
-                print_digest(source_bytes.len() as u64, &hex(&digest));
+                print_digest(source_bytes.len() as u64, &hex(&d));
                 println!(
                     "  {} {}",
                     style::muted("->"),
@@ -138,8 +253,7 @@ fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
         columnar_wasm_bytes,
     );
 
-    let (bytes, digest) =
-        style::spin("packing", || b.build()).context("building precompiled .afb")?;
+    let (bytes, d) = style::spin("packing", || b.build()).context("building precompiled .afb")?;
 
     std::fs::write(out_path, &bytes).with_context(|| format!("writing {}", out_path.display()))?;
 
@@ -149,7 +263,7 @@ fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
         style::accent(&coord),
         style::gold("(precompiled wasm32-wasip1)")
     );
-    print_digest(bytes.len() as u64, &hex(&digest));
+    print_digest(bytes.len() as u64, &hex(&d));
     println!(
         "  {} {}",
         style::muted("->"),
@@ -165,7 +279,7 @@ fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
 /// `afterburner:host` imports carry the caller's `Manifold`.
 ///
 /// Falls back to source-only if `javy` is absent or the dyn build fails.
-fn compile_capability(local: LocalPackage, out_path: &Path) -> Result<()> {
+fn compile_capability(local: LocalPackage, out_path: &Path, packages_dir: &Path) -> Result<()> {
     let coord = coord_str(&local);
 
     // Build a source-only .afb first so we can reparse and use the linker.
@@ -176,8 +290,14 @@ fn compile_capability(local: LocalPackage, out_path: &Path) -> Result<()> {
 
     // Compute the effective JS source the engine would compile.
     let effective_src: String = if afb.needs_linking() {
-        match afb.linked_source(&[], &[]) {
-            Ok(src) => format!("{PLENUM_BUNDLE}\n{src}"),
+        let link_result = (|| -> Result<String> {
+            let deps = resolve_local_deps(&afb.manifest.dependencies, packages_dir)?;
+            let refs: Vec<(&str, &Afb)> = deps.iter().map(|(c, a)| (c.as_str(), a)).collect();
+            let src = afb.linked_source(&refs, &[]).context("linking source")?;
+            Ok(format!("{PLENUM_BUNDLE}\n{src}"))
+        })();
+        match link_result {
+            Ok(src) => src,
             Err(e) => {
                 eprintln!(
                     "note: precompiled dyn WASM does not support dependency-linked \
@@ -185,9 +305,9 @@ fn compile_capability(local: LocalPackage, out_path: &Path) -> Result<()> {
                 );
                 std::fs::write(out_path, &source_bytes)
                     .with_context(|| format!("writing {}", out_path.display()))?;
-                let digest = digest(&source_bytes);
+                let d = digest(&source_bytes);
                 println!("{} {}", style::ok("packaged"), style::accent(&coord));
-                print_digest(source_bytes.len() as u64, &hex(&digest));
+                print_digest(source_bytes.len() as u64, &hex(&d));
                 println!(
                     "  {} {}",
                     style::muted("->"),
@@ -211,9 +331,9 @@ fn compile_capability(local: LocalPackage, out_path: &Path) -> Result<()> {
             eprintln!("note: dyn WASM build failed ({e}); shipping source-only .afb instead");
             std::fs::write(out_path, &source_bytes)
                 .with_context(|| format!("writing {}", out_path.display()))?;
-            let digest = digest(&source_bytes);
+            let d = digest(&source_bytes);
             println!("{} {}", style::ok("packaged"), style::accent(&coord));
-            print_digest(source_bytes.len() as u64, &hex(&digest));
+            print_digest(source_bytes.len() as u64, &hex(&d));
             println!(
                 "  {} {}",
                 style::muted("->"),
@@ -232,7 +352,7 @@ fn compile_capability(local: LocalPackage, out_path: &Path) -> Result<()> {
     }
     b = b.precompiled("precompiled/wasm32-wasip1-dyn/main.wasm", wasm_bytes);
 
-    let (bytes, digest) = style::spin("packing", || b.build()).context("building dyn .afb")?;
+    let (bytes, d) = style::spin("packing", || b.build()).context("building dyn .afb")?;
 
     std::fs::write(out_path, &bytes).with_context(|| format!("writing {}", out_path.display()))?;
 
@@ -242,7 +362,7 @@ fn compile_capability(local: LocalPackage, out_path: &Path) -> Result<()> {
         style::accent(&coord),
         style::gold("(precompiled wasm32-wasip1-dyn)")
     );
-    print_digest(bytes.len() as u64, &hex(&digest));
+    print_digest(bytes.len() as u64, &hex(&d));
     println!(
         "  {} {}",
         style::muted("->"),

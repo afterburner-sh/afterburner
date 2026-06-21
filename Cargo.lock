@@ -95,6 +95,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "rustyline",
+ "semver",
  "serde_json",
  "serial_test",
  "sha1 0.10.6",

@@ -396,10 +396,9 @@ impl WasmCombustor {
     /// command pattern).
     ///
     /// `target` is the `[runtime] target` string from the `.afb` manifest.
-    /// Only `"wasm32-wasip1"` (sealed) is accepted here; `"wasm32-wasip1-dyn"`
-    /// (dynamically-linked, requires `afterburner:host`) is explicitly rejected
-    /// with a clear not-yet-supported error - there is no silent bypass of
-    /// capability gating.
+    /// Accepts `"wasm32-wasip1"` (sealed, self-contained) and
+    /// `"wasm32-wasip1-dyn"` (dynamically-linked, two-instance model; routes to
+    /// `register_dyn` which carries the caller's `Manifold` through the plugin).
     ///
     /// Registration is content-addressed: calling this twice with identical
     /// `wasm` bytes returns the same `ScriptId` and skips re-compilation of

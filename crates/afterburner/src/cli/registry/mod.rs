@@ -173,7 +173,12 @@ fn report_scaffold(s: &Scaffolded) {
     println!("  {} burn publish", style::bullet());
 }
 
-pub fn package(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
+pub fn package(
+    dir: Option<&Path>,
+    out: Option<&Path>,
+    do_compile: bool,
+    packages_dir: Option<&Path>,
+) -> Result<()> {
     let dir = dir.unwrap_or_else(|| Path::new("."));
     let mut local = pkg::LocalPackage::load(dir)?;
     // TypeScript is build-time only: transpile every `.ts/.mts/.cts`
@@ -181,23 +186,33 @@ pub fn package(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
     // the runtime sandbox never needs a transpiler. The package entry is
     // rewritten to the `.js` path. (Pure-JS packages are untouched.)
     transpile_ts_sources(&mut local)?;
-    let (bytes, digest) = style::spin("packing", || local.build())?;
-    let out = out
+    let coord = coord_str(&local);
+    let out_path = out
         .map(Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from(local.output_filename()));
-    std::fs::write(&out, &bytes).with_context(|| format!("writing {}", out.display()))?;
-    println!(
-        "{} {}",
-        style::ok("packaged"),
-        style::accent(&coord_str(&local))
-    );
-    print_digest(bytes.len() as u64, &hex(&digest));
-    println!(
-        "  {} {}",
-        style::muted("→"),
-        style::value(&out.display().to_string())
-    );
-    Ok(())
+    if do_compile {
+        let default_packages_dir: PathBuf;
+        let pkgs_dir: &Path = match packages_dir {
+            Some(p) => p,
+            None => {
+                default_packages_dir = dir.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+                default_packages_dir.as_path()
+            }
+        };
+        super::compile::compile_with_local_package(local, pkgs_dir, &out_path)
+    } else {
+        let (bytes, digest) = style::spin("packing", || local.build())?;
+        std::fs::write(&out_path, &bytes)
+            .with_context(|| format!("writing {}", out_path.display()))?;
+        println!("{} {}", style::ok("packaged"), style::accent(&coord));
+        print_digest(bytes.len() as u64, &hex(&digest));
+        println!(
+            "  {} {}",
+            style::muted("->"),
+            style::value(&out_path.display().to_string())
+        );
+        Ok(())
+    }
 }
 
 /// Transpile any TypeScript sources in `local` to JavaScript in place,
@@ -251,13 +266,38 @@ pub fn publish(
     dir: Option<&Path>,
     registry: Option<&str>,
     token: Option<&str>,
+    do_compile: bool,
+    no_compile: bool,
+    packages_dir: Option<&Path>,
 ) -> Result<()> {
     let bytes = match afb {
         Some(p) => std::fs::read(p).with_context(|| format!("reading {}", p.display()))?,
         None => {
             let dir = dir.unwrap_or_else(|| Path::new("."));
-            let local = pkg::LocalPackage::load(dir)?;
-            style::spin("packing", || local.build())?.0
+            if do_compile && !no_compile {
+                // Compile to a temp .afb, read bytes, then remove the temp file.
+                let tmp_path =
+                    std::env::temp_dir().join(format!("burn-publish-{}.afb", std::process::id()));
+                let mut local = pkg::LocalPackage::load(dir)?;
+                transpile_ts_sources(&mut local)?;
+                let default_packages_dir: PathBuf;
+                let pkgs_dir: &Path = match packages_dir {
+                    Some(p) => p,
+                    None => {
+                        default_packages_dir =
+                            dir.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+                        default_packages_dir.as_path()
+                    }
+                };
+                super::compile::compile_with_local_package(local, pkgs_dir, &tmp_path)?;
+                let b = std::fs::read(&tmp_path)
+                    .with_context(|| format!("reading compiled {}", tmp_path.display()))?;
+                let _ = std::fs::remove_file(&tmp_path);
+                b
+            } else {
+                let local = pkg::LocalPackage::load(dir)?;
+                style::spin("packing", || local.build())?.0
+            }
         }
     };
     let max = afterburner_cloud::afterburner_afb::MAX_AFB_BYTES;

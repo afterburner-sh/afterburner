@@ -186,9 +186,8 @@ impl Afterburner {
     /// like a source-registered id; internally [`thrust`](Combustor::thrust)
     /// dispatches to the sealed stdin/stdout path without a plugin envelope.
     ///
-    /// Only `"wasm32-wasip1"` (Javy self-contained WASI module) is accepted.
-    /// `"wasm32-wasip1-dyn"` is rejected with a clear not-yet-supported error
-    /// so capability gating is never silently bypassed.
+    /// Accepts `"wasm32-wasip1"` (Javy self-contained WASI module) and
+    /// `"wasm32-wasip1-dyn"` (dynamically-linked module, two-instance model).
     ///
     /// Returns an error on non-WASM engines (native, adaptive before wasm
     /// compile). Requires the `wasm` feature.
