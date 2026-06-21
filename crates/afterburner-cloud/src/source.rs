@@ -6,7 +6,7 @@
 //! A resolver [`Source`] backed by the live registry HTTP API. It turns
 //! `GET /packages/{ns}/{name}` (the version list) plus the per-version metadata
 //! (which carries the pinned dependency map) into the [`Candidate`] set the
-//! [`crate::resolve`] solver consumes.
+//! [`crate::resolve()`] solver consumes.
 
 use crate::client::RegistryClient;
 use crate::error::{CloudError, Result};
