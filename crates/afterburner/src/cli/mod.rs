@@ -19,6 +19,7 @@ mod banner;
 mod bench;
 mod build;
 mod check;
+mod compile;
 mod daemon;
 mod manifold;
 mod passthrough;
@@ -211,7 +212,13 @@ fn dispatch(mut cli: Cli) -> Result<()> {
         Cmd::Whoami { registry } => registry::whoami(registry.as_deref()),
         Cmd::New { spec, opts } => registry::new_package(&cli, &spec, &opts),
         Cmd::Init { path, opts } => registry::init_package(&cli, path.as_deref(), &opts),
-        Cmd::Package { dir, out } => registry::package(dir.as_deref(), out.as_deref()),
+        Cmd::Package {
+            dir,
+            out,
+            compile,
+            wasm_only,
+        } => registry::package(dir.as_deref(), out.as_deref(), compile, wasm_only),
+        Cmd::Compile { dir, out } => compile::compile(dir.as_deref(), out.as_deref()),
         Cmd::Test { dir } => registry::test(&cli, dir.as_deref()),
         Cmd::Clean { dir, cache } => registry::clean(dir.as_deref(), cache),
         Cmd::Publish {
@@ -219,11 +226,15 @@ fn dispatch(mut cli: Cli) -> Result<()> {
             dir,
             registry: reg,
             token,
+            compile,
+            no_compile,
         } => registry::publish(
             afb.as_deref(),
             dir.as_deref(),
             reg.as_deref(),
             token.as_deref(),
+            compile,
+            no_compile,
         ),
         Cmd::Yank {
             pkg,

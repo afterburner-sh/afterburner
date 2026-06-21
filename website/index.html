@@ -2881,6 +2881,16 @@
             <code>get_env</code>.
           </p>
         </div>
+        <div class="feat reveal">
+          <div class="feat__num">10</div>
+          <h3>Cargo-style dependencies</h3>
+          <p>Declare registry packages, local paths, or git repos in <code>afb.toml [dependencies]</code>. <code>burn compile</code> resolves the transitive closure per source, digest-pins every entry, and links them into one self-contained module. No copy-paste, no manual fetch.</p>
+        </div>
+        <div class="feat reveal">
+          <div class="feat__num">11</div>
+          <h3>Precompiled, source-optional packaging</h3>
+          <p><code>burn compile</code> ahead-of-time compiles your package to <code>precompiled/wasm32-wasip1/main.wasm</code>: no per-call JS compile, cold starts stay sub-millisecond. <code>burn package --wasm-only</code> ships the WASM without source; the default interactive mode asks which you want.</p>
+        </div>
       </div>
     </div>
   </section>
@@ -3375,7 +3385,7 @@
           title: '<code>(x) =&gt; x * 2</code> over 1 billion <code>Float64</code> rows',
           sub: 'Single-column compute-light transform · 1B rows · per CPU core.',
           bars: [
-            { name: 'Afterburner',                value: 936000, brand: true, note: '~3× over PL/V8' },
+            { name: 'Afterburner',                value: 1453000, brand: true, note: '~5x over PL/V8' },
             { name: 'PL/V8',                      value: 300000,              hint: 'Postgres in-process V8' },
             { name: 'Snowflake JS UDF',           value:  30000,              hint: 'V8 subprocess, per-row' },
             { name: 'BigQuery JS UDF (per-row)',  value:  25000,              hint: 'V8 subprocess, per-row' },
@@ -3386,7 +3396,7 @@
           title: '<code>(s) =&gt; s.length</code> over 1 billion Utf8 rows',
           sub: 'String length · ~99% short strings, ~1% long URLs · per CPU core.',
           bars: [
-            { name: 'Afterburner',                value: 167000, brand: true, note: '~5× over PL/V8' },
+            { name: 'Afterburner',                value: 167000, brand: true, note: '~5x over PL/V8' },
             { name: 'PL/V8',                      value:  35000,              hint: 'Postgres in-process V8' },
             { name: 'Snowflake JS UDF',           value:  18000,              hint: 'V8 subprocess, per-row' },
             { name: 'BigQuery JS UDF (per-row)',  value:  14000,              hint: 'V8 subprocess, per-row' },
@@ -3397,7 +3407,7 @@
           title: '32-column <code>Float64</code> sum-of-columns',
           sub: '32 column reads + 32 adds per row · 1B rows · per CPU core. Interpreter-bound - per-row dispatch in the peer tier dominates.',
           bars: [
-            { name: 'Afterburner',                value: 48000, brand: true, note: '~6× over PL/V8' },
+            { name: 'Afterburner',                value: 48000, brand: true, note: '~6x over PL/V8' },
             { name: 'PL/V8',                      value:  8000,              hint: 'Postgres in-process V8' },
             { name: 'Snowflake JS UDF',           value:  3500,              hint: 'V8 subprocess, per-row' },
             { name: 'BigQuery JS UDF (per-row)',  value:  2500,              hint: 'V8 subprocess, per-row' },

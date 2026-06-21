@@ -43,15 +43,27 @@ use afterburner_core::Manifold;
 use kovan_channel::flavors::bounded::{
     Receiver as BoundedRx, Sender as BoundedTx, channel as bounded_channel,
 };
-use kovan_channel::flavors::unbounded::{
-    Receiver as UnboundedRx, Sender as UnboundedTx, channel as unbounded_channel,
-};
 use kovan_map::HopscotchMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+// The byte-frame IPC pipes (parent->child stdin, child->parent stdout) use
+// `std::sync::mpsc`, not the lock-free kovan unbounded channel. Their writer
+// thread does one blocking `recv()` and then sleeps until the *next* frame -
+// the classic "send one frame, pause, send another later" pattern. kovan's
+// unbounded `recv` parks on a fresh per-iteration `Signal` but never removes a
+// signal it registered on a non-parking iteration, so the queue accrues stale
+// signals; a later `send` can `pop_front()` a stale one and notify nobody,
+// stranding the parked writer (a `cluster.disconnect()` terminate frame that
+// the worker then never sees -> the worker never exits). `std::sync::mpsc`'s
+// blocking `recv` has no such lost-wakeup, and these single-consumer command
+// queues gain nothing from a lock-free structure: one dedicated thread does
+// blocking pipe I/O, so the std channel is both correct and the right tool.
+use std::sync::mpsc::{
+    Receiver as UnboundedRx, Sender as UnboundedTx, channel as unbounded_channel,
+};
 use std::thread;
 use std::time::Duration;
 
@@ -132,8 +144,9 @@ pub enum WorkerEvent {
 /// Parent-side per-worker handle. Both fields are `Clone`, so this
 /// satisfies `HopscotchMap<WorkerId, WorkerHandle>`'s `V: Clone` bound:
 /// the lock-free map returns owned clones from `get`/`remove`,
-/// which is fine because both `kovan_channel::Sender` and `Arc` are
-/// cheap to clone (one atomic increment).
+/// which is fine because both `mpsc::Sender` and `Arc` are cheap to
+/// clone (an atomic increment plus, for the sender, an extra channel
+/// reference).
 ///
 /// The actual `Child` lives inside the waiter thread so it can call
 /// `wait()` without contending with the spawn path. Threads are
@@ -497,9 +510,10 @@ impl DaemonWorkers {
             "thread_id": id,
             "worker_data": worker_data_json,
         });
-        // Unbounded `send` is non-blocking and infallible (the writer
-        // thread we just spawned is still holding the Receiver).
-        stdin_tx.send(serde_json::to_vec(&init_frame).unwrap_or_default());
+        // `send` is non-blocking; it only fails if the writer thread we
+        // just spawned has already exited (it has not), so the error is
+        // unreachable here and ignored.
+        let _ = stdin_tx.send(serde_json::to_vec(&init_frame).unwrap_or_default());
 
         // HopscotchMap insert is lock-free.
         parent.active.insert(id, WorkerHandle { stdin_tx, kill });
@@ -532,7 +546,7 @@ impl DaemonWorkers {
             return errors::E_BAD_ID;
         };
         let env = serde_json::json!({"type": frame::MSG, "payload_json": payload_json});
-        handle
+        let _ = handle
             .stdin_tx
             .send(serde_json::to_vec(&env).unwrap_or_default());
         0
@@ -548,7 +562,7 @@ impl DaemonWorkers {
             return errors::E_BAD_ID;
         };
         let frame = serde_json::json!({"type": frame::TERMINATE});
-        handle
+        let _ = handle
             .stdin_tx
             .send(serde_json::to_vec(&frame).unwrap_or_default());
         if force {
@@ -569,7 +583,7 @@ impl DaemonWorkers {
             return errors::E_FRAME_TOO_LARGE;
         }
         let env = serde_json::json!({"type": frame::MSG, "payload_json": payload_json});
-        child
+        let _ = child
             .stdout_tx
             .send(serde_json::to_vec(&env).unwrap_or_default());
         0
@@ -580,7 +594,7 @@ impl DaemonWorkers {
             return errors::E_NO_PARENT;
         };
         let env = serde_json::json!({"type": frame::ONLINE});
-        child
+        let _ = child
             .stdout_tx
             .send(serde_json::to_vec(&env).unwrap_or_default());
         0
@@ -600,7 +614,7 @@ impl DaemonWorkers {
             "message": message,
             "stack": stack,
         });
-        child
+        let _ = child
             .stdout_tx
             .send(serde_json::to_vec(&env).unwrap_or_default());
         0
@@ -620,7 +634,7 @@ impl Drop for DaemonWorkers {
             for id in ids {
                 if let Some(handle) = parent.active.remove(&id) {
                     let term = serde_json::json!({"type": frame::TERMINATE});
-                    handle
+                    let _ = handle
                         .stdin_tx
                         .send(serde_json::to_vec(&term).unwrap_or_default());
                     handle.kill.force_kill();
@@ -758,7 +772,9 @@ fn write_frame<W: Write>(w: &mut W, payload: &[u8]) -> std::io::Result<()> {
 }
 
 fn parent_writer_pump(mut stdin: std::process::ChildStdin, rx: UnboundedRx<Vec<u8>>) {
-    while let Some(bytes) = rx.recv() {
+    // `recv()` returns `Err` only once every `Sender` clone has dropped,
+    // i.e. the worker handle is gone and no more frames can arrive.
+    while let Ok(bytes) = rx.recv() {
         if write_frame(&mut stdin, &bytes).is_err() {
             break;
         }
@@ -766,11 +782,11 @@ fn parent_writer_pump(mut stdin: std::process::ChildStdin, rx: UnboundedRx<Vec<u
     let _ = stdin.flush();
 }
 
-/// Child-side stdout writer thread. Exits when the unbounded queue's
-/// senders all drop (i.e. the worker is shutting down).
+/// Child-side stdout writer thread. Exits when the queue's senders all
+/// drop (i.e. the worker is shutting down).
 fn child_stdout_writer(rx: UnboundedRx<Vec<u8>>) {
     let mut out = std::io::stdout().lock();
-    while let Some(bytes) = rx.recv() {
+    while let Ok(bytes) = rx.recv() {
         if write_frame(&mut out, &bytes).is_err() {
             break;
         }

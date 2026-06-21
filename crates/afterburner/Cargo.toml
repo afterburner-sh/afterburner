@@ -46,6 +46,8 @@ base64 = { workspace = true }
 # oxc graph adds ~3 MiB of binary size and non-TS users never pay it.
 oxc = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
+# bin-only — version matching in `resolve_local_deps` (`burn compile --packages-dir`).
+semver = { workspace = true, optional = true }
 # bin-only — hidden password entry for interactive `burn login` (termios on unix).
 libc = { workspace = true, optional = true }
 # bin-only — colored, animated CLI output (brand palette + spinners).
@@ -133,6 +135,7 @@ bin = [
     "dep:anyhow",
     "dep:tokio",
     "dep:afterburner-cloud",
+    "dep:semver",
     "dep:libc",
     "dep:crossterm",
     "dep:dialoguer",

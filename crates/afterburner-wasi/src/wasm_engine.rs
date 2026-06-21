@@ -191,6 +191,38 @@ pub(crate) struct CompiledScript {
     pub columnar_invoke_envelope_bytes: Vec<u8>,
 }
 
+/// A pre-compiled, self-contained (SEALED) WASM module registered via
+/// [`WasmCombustor::register_precompiled`]. The module imports only
+/// `wasi_snapshot_preview1` (no `afterburner:host`); it is instantiated
+/// with a WASI-only linker and fed JSON input on stdin, producing JSON
+/// output on stdout. No plugin envelope, no bytecode compile step.
+pub(crate) struct SealedModule {
+    pub instance_pre: InstancePre<HostState>,
+}
+
+/// A dynamically-linked module registered via
+/// [`WasmCombustor::register_precompiled`] with target
+/// `"wasm32-wasip1-dyn"`. The module imports `afterburner-plugin-v1`
+/// exports (`cabi_realloc`, `invoke`, `memory`) from the shared
+/// Afterburner Javy plugin. At thrust time the plugin is instantiated
+/// first (wiring WASI + `afterburner:host` including the caller's
+/// `Manifold`), then the package module is instantiated against those
+/// exports. Capability gating is fully preserved: a crypto call is
+/// denied under a sealed Manifold and granted under an open one,
+/// identical to the source path.
+pub(crate) struct DynModule {
+    pub module: Module,
+}
+
+/// Import namespace the dynamically-linked package module uses for the
+/// Afterburner Javy plugin exports. Produced by `javy build -C dynamic
+/// -C plugin=<afterburner_plugin.wasm>`.
+const DYN_PLUGIN_NS: &str = "afterburner-plugin-v1";
+
+/// The WASM target string for a dynamically-linked module that requires the
+/// Afterburner plugin host.
+const DYN_TARGET: &str = "wasm32-wasip1-dyn";
+
 pub struct WasmCombustor {
     engine: Engine,
     /// Source store keyed by SHA-256 of the user-facing source. `ignite`
@@ -208,6 +240,17 @@ pub struct WasmCombustor {
     /// bytecode + the entire `{"mode":"invoke",...}` JSON envelope, so
     /// per-thrust work is just a slice borrow - no encode, no serde.
     bytecode_cache: HopscotchMap<[u8; 32], Arc<CompiledScript>>,
+    /// Pre-compiled self-contained (SEALED) modules registered via
+    /// [`register_precompiled`]. Keyed by SHA-256 of the raw wasm bytes.
+    /// Thrust path: fresh `Store` + WASI only, JSON on stdin, stdout parsed
+    /// by [`nozzle::parse_output`]. No plugin envelope, no `afterburner:host`.
+    sealed_cache: HopscotchMap<[u8; 32], Arc<SealedModule>>,
+    /// Dynamically-linked modules registered via [`register_precompiled`]
+    /// with target `"wasm32-wasip1-dyn"`. Keyed by SHA-256 of the raw wasm
+    /// bytes. Thrust path: instantiate plugin (full WASI, `afterburner:host`,
+    /// and caller's `Manifold`), then instantiate the package module linking
+    /// its `afterburner-plugin-v1` imports to the plugin's exports.
+    dyn_cache: HopscotchMap<[u8; 32], Arc<DynModule>>,
     /// Counter incremented every time `compile_to_bytecode` actually
     /// invokes the plugin's compile mode. Used by tests to assert the
     /// hot path is genuinely cached (register-once → N thrusts → 1
@@ -234,8 +277,7 @@ pub struct WasmCombustor {
 impl WasmCombustor {
     pub fn new(config: WasmConfig) -> Result<Self> {
         let engine = build_engine(config.compile_cache_dir.as_deref())?;
-        let plugin_module = Module::new(&engine, PLUGIN_BYTES)
-            .map_err(|e| AfterburnerError::Engine(format!("plugin module: {e}")))?;
+        let plugin_module = build_plugin_module(&engine)?;
 
         // Build the linker once with every host import resolved, then
         // pre-instantiate so the per-call path is just `Store::new` +
@@ -271,6 +313,8 @@ impl WasmCombustor {
             engine,
             source_store: HopscotchMap::new(),
             bytecode_cache: HopscotchMap::new(),
+            sealed_cache: HopscotchMap::new(),
+            dyn_cache: HopscotchMap::new(),
             compile_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             instance_pre: Arc::new(instance_pre),
             state_store,
@@ -343,6 +387,278 @@ impl WasmCombustor {
     /// pre-populate it from outside the script.
     pub fn state_store(&self) -> &SharedStateStore {
         &self.state_store
+    }
+
+    /// Register a pre-compiled self-contained (SEALED) WASM module and
+    /// return a [`ScriptId`] that [`thrust`] dispatches through the sealed
+    /// path. The module must import only `wasi_snapshot_preview1`; it reads
+    /// JSON from stdin and writes JSON to stdout (the Javy self-contained
+    /// command pattern).
+    ///
+    /// `target` is the `[runtime] target` string from the `.afb` manifest.
+    /// Accepts `"wasm32-wasip1"` (sealed, self-contained) and
+    /// `"wasm32-wasip1-dyn"` (dynamically-linked, two-instance model; routes to
+    /// `register_dyn` which carries the caller's `Manifold` through the plugin).
+    ///
+    /// Registration is content-addressed: calling this twice with identical
+    /// `wasm` bytes returns the same `ScriptId` and skips re-compilation of
+    /// the module's native code. `wasm` may be a raw `.wasm` binary or a WAT
+    /// text module (wasmtime accepts both).
+    pub fn register_precompiled(&self, wasm: &[u8], target: &str) -> Result<ScriptId> {
+        if target == DYN_TARGET {
+            return self.register_dyn(wasm);
+        }
+
+        let hash = sha256(wasm);
+
+        if self.sealed_cache.get(&hash).is_some() {
+            ab_event!(Level::Debug, "wasm.sealed.cache_hit", "hash" => hex8(&hash));
+            return Ok(ScriptId {
+                hash,
+                mode: EngineMode::Wasm,
+            });
+        }
+
+        // Compile the module native code once (cached by wasmtime's on-disk
+        // cache when `compile_cache_dir` is set). A WASI-only linker is used
+        // at `InstancePre` build time so the sealed module cannot resolve
+        // `afterburner:host` imports - hard structural separation.
+        let module = Module::new(&self.engine, wasm)
+            .map_err(|e| AfterburnerError::CompileFailed(format!("sealed module compile: {e}")))?;
+
+        let mut wasi_linker: Linker<HostState> = Linker::new(&self.engine);
+        add_to_linker_sync(&mut wasi_linker, |s: &mut HostState| &mut s.wasi)
+            .map_err(|e| AfterburnerError::Engine(format!("sealed wasi linker: {e}")))?;
+
+        let instance_pre = wasi_linker
+            .instantiate_pre(&module)
+            .map_err(|e| AfterburnerError::Engine(format!("sealed instantiate_pre: {e}")))?;
+
+        self.sealed_cache
+            .insert(hash, Arc::new(SealedModule { instance_pre }));
+        ab_event!(
+            Level::Info,
+            "wasm.sealed.registered",
+            "hash" => hex8(&hash),
+            "wasm_bytes" => wasm.len(),
+        );
+
+        Ok(ScriptId {
+            hash,
+            mode: EngineMode::Wasm,
+        })
+    }
+
+    /// Register a dynamically-linked module (`"wasm32-wasip1-dyn"` target).
+    ///
+    /// The module imports `afterburner-plugin-v1::{cabi_realloc, invoke,
+    /// memory}` from the shared Afterburner Javy plugin. Only the compiled
+    /// `Module` is stored here; the per-call linking to a live plugin
+    /// instance happens in [`Self::thrust_dyn`] so the caller's `Manifold`
+    /// is in scope when `afterburner:host` imports resolve.
+    fn register_dyn(&self, wasm: &[u8]) -> Result<ScriptId> {
+        let hash = sha256(wasm);
+
+        if self.dyn_cache.get(&hash).is_some() {
+            ab_event!(Level::Debug, "wasm.dyn.cache_hit", "hash" => hex8(&hash));
+            return Ok(ScriptId {
+                hash,
+                mode: EngineMode::Wasm,
+            });
+        }
+
+        // Compile the package module native code once. The module imports
+        // only from `afterburner-plugin-v1`; we do not pre-link it because
+        // the plugin instance (which provides those exports) is live only
+        // inside a per-call Store. Per-call linking costs three Linker::define
+        // calls (three export slots) - negligible compared to plugin startup.
+        let module = Module::new(&self.engine, wasm)
+            .map_err(|e| AfterburnerError::CompileFailed(format!("dyn module compile: {e}")))?;
+
+        self.dyn_cache.insert(hash, Arc::new(DynModule { module }));
+        ab_event!(
+            Level::Info,
+            "wasm.dyn.registered",
+            "hash" => hex8(&hash),
+            "wasm_bytes" => wasm.len(),
+        );
+
+        Ok(ScriptId {
+            hash,
+            mode: EngineMode::Wasm,
+        })
+    }
+
+    /// Execute a sealed (pre-compiled self-contained) module. Instantiates
+    /// the module in a fresh `Store` with WASI only, feeds `input` as JSON on
+    /// stdin, runs `_start`, and drains stdout through [`parse_output`]. Fuel,
+    /// epoch deadline, and the memory limiter are applied identically to the
+    /// plugin path.
+    ///
+    /// No `afterburner:host` wiring, no plugin envelope. The module must have
+    /// been registered via [`register_precompiled`].
+    fn thrust_sealed(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value> {
+        let input_bytes = serde_json::to_vec(input)?;
+        let stdout_bytes = self.thrust_sealed_raw_bytes_inner(id, input_bytes, limits)?;
+        parse_output(&stdout_bytes)
+    }
+
+    /// Raw-bytes-in / raw-bytes-out path for sealed precompiled modules.
+    /// Feeds `input_bytes` verbatim to the module's stdin and returns the
+    /// raw stdout bytes without parsing. Used by the batch precompiled path
+    /// (JSON array wire) and the columnar precompiled path (binary frame).
+    ///
+    /// The module must have been registered via [`register_precompiled`] with
+    /// target `"wasm32-wasip1"`.
+    fn thrust_sealed_raw_bytes_inner(
+        &self,
+        id: &ScriptId,
+        input_bytes: Vec<u8>,
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        let sealed = self
+            .sealed_cache
+            .get(&id.hash)
+            .ok_or(AfterburnerError::ScriptNotFound)?;
+
+        // The sealed module reads its input from stdin directly; no plugin envelope.
+        let state = HostState::new(
+            &input_bytes,
+            limits.memory_bytes,
+            limits.output_ceiling(),
+            // Sealed modules have no capability gates - they cannot call
+            // afterburner:host, so the Manifold is unused. Pass sealed() for
+            // hygiene; it has no effect on execution.
+            Manifold::sealed(),
+            self.state_store.clone(),
+            None,
+        );
+
+        let mut store = chamber::fire(
+            &self.engine,
+            &sealed.instance_pre,
+            state,
+            limits,
+            "wasm.sealed_thrust",
+        )?;
+
+        Ok(chamber::drain_stdout(&mut store))
+    }
+
+    /// Execute a dynamically-linked precompiled module.
+    ///
+    /// Two-instance model:
+    ///
+    /// 1. The shared plugin (`self.instance_pre`) is instantiated inside a
+    ///    fresh `Store`. Its `afterburner:host` imports resolve through the
+    ///    host_imports linker built at `WasmCombustor::new`, carrying the
+    ///    caller's `Manifold` in `HostState` - the same gating the source
+    ///    path enforces.
+    /// 2. A minimal per-call linker exposes the plugin instance's exports
+    ///    under the `afterburner-plugin-v1` namespace. The package module is
+    ///    then instantiated against those exports via `Linker::instantiate`.
+    /// 3. `_start` is called on the package instance; stdin carries the JSON
+    ///    input and stdout is drained through [`nozzle::parse_output`].
+    ///
+    /// No `initialize-runtime` call: the plugin instance comes from the
+    /// Wizer-preinitialized `InstancePre` and starts with QuickJS already
+    /// warmed up. The per-call cost is two `instantiate` calls + three
+    /// `Linker::define` entries (plugin exports), not a re-eval of the
+    /// plenum bundle.
+    fn thrust_dyn(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value> {
+        let dyn_mod = self
+            .dyn_cache
+            .get(&id.hash)
+            .ok_or(AfterburnerError::ScriptNotFound)?;
+
+        let input_bytes = serde_json::to_vec(input)?;
+
+        // HostState carries the caller's Manifold so every `afterburner:host`
+        // import is gated by it when the plugin resolves a JS host call.
+        let state = HostState::new(
+            &input_bytes,
+            limits.memory_bytes,
+            limits.output_ceiling(),
+            limits.manifold.clone(),
+            self.state_store.clone(),
+            self.host_context.clone(),
+        );
+
+        let mut store = chamber::prepare_store(&self.engine, state, limits)?;
+
+        // Instance 1: the shared plugin. Its `afterburner:host` imports were
+        // resolved at `WasmCombustor::new` and are part of `self.instance_pre`.
+        let plugin_instance = self
+            .instance_pre
+            .instantiate(&mut store)
+            .map_err(|e| AfterburnerError::Engine(format!("dyn plugin instantiate: {e}")))?;
+
+        // Instance 2: the package module. Build a minimal linker that exposes
+        // the plugin instance's exports under `afterburner-plugin-v1`.
+        let mut pkg_linker: Linker<HostState> = Linker::new(&self.engine);
+        pkg_linker
+            .instance(&mut store, DYN_PLUGIN_NS, plugin_instance)
+            .map_err(|e| AfterburnerError::Engine(format!("dyn pkg linker: {e}")))?;
+
+        let pkg_instance = pkg_linker
+            .instantiate(&mut store, &dyn_mod.module)
+            .map_err(|e| AfterburnerError::Engine(format!("dyn pkg instantiate: {e}")))?;
+
+        let start = pkg_instance
+            .get_typed_func::<(), ()>(&mut store, "_start")
+            .map_err(|e| AfterburnerError::Engine(format!("dyn _start lookup: {e}")))?;
+
+        let call_result = start.call(&mut store, ());
+
+        // Output-ceiling overflow supersedes the trap diagnosis.
+        if store.data().output_overflowed() {
+            let limit = store.data().output_ceiling;
+            ab_event!(Level::Warn, "wasm.dyn_thrust.output_too_large", "limit" => limit);
+            return Err(AfterburnerError::OutputTooLarge { limit });
+        }
+
+        if let Err(trap) = call_result {
+            if let Some(exit) = trap.downcast_ref::<I32Exit>() {
+                if exit.0 == 0 {
+                    // Clean WASI proc_exit(0) - fall through to result extraction.
+                } else {
+                    ab_event!(Level::Warn, "wasm.dyn_thrust.nonzero_exit", "code" => exit.0);
+                    let stderr = chamber::format_trap_with_stderr(
+                        &format!("dyn module exited with code {}", exit.0),
+                        &mut store,
+                    );
+                    return Err(AfterburnerError::WasmTrap(stderr));
+                }
+            } else if let Some(t) = trap.downcast_ref::<Trap>() {
+                return Err(match t {
+                    Trap::Interrupt => {
+                        ab_event!(Level::Warn, "wasm.dyn_thrust.timeout");
+                        AfterburnerError::Timeout
+                    }
+                    Trap::OutOfFuel => {
+                        ab_event!(Level::Warn, "wasm.dyn_thrust.fuel_exhausted");
+                        AfterburnerError::FuelExhausted
+                    }
+                    other => {
+                        let msg = chamber::format_trap_with_stderr(&format!("{other}"), &mut store);
+                        ab_event!(Level::Warn, "wasm.dyn_thrust.trap", "kind" => other);
+                        AfterburnerError::WasmTrap(msg)
+                    }
+                });
+            } else {
+                let chain: Vec<String> = trap.chain().map(|e| format!("{e}")).collect();
+                let full = chain.join(" => ");
+                if full.contains("memory minimum size") || full.contains("memory size") {
+                    ab_event!(Level::Warn, "wasm.dyn_thrust.memory_limit");
+                    return Err(AfterburnerError::MemoryLimit);
+                }
+                let msg = chamber::format_trap_with_stderr(&full, &mut store);
+                return Err(AfterburnerError::WasmTrap(msg));
+            }
+        }
+
+        let stdout_bytes = chamber::drain_stdout(&mut store);
+        parse_output(&stdout_bytes)
     }
 
     /// Compile a daemon-init source to QuickJS bytecode by spinning up
@@ -789,6 +1105,204 @@ fn build_engine(compile_cache_dir: Option<&std::path::Path>) -> Result<Engine> {
     Engine::new(&config).map_err(|e| AfterburnerError::Engine(format!("engine init: {e}")))
 }
 
+/// Cranelift-compiling the 8.5 MiB plugin module from scratch costs
+/// multiple seconds. The CLI's parent shard pays it once at startup,
+/// but every `cluster.fork()` / `new Worker()` spawns a *fresh* `burn`
+/// process whose [`WasmCombustor::new`] would re-pay the full compile.
+/// Under `cluster` with N workers that is N concurrent multi-second
+/// cranelift runs fighting for the same handful of CPUs - on a
+/// constrained CI runner the contention stretches a single worker's
+/// compile past the cluster test's 60 s safety timeout, so the worker
+/// never reaches `app.listen()` / posts its `online` frame and the
+/// primary hangs.
+///
+/// Fix: cache the *native-compiled* plugin on disk, content-addressed
+/// by the plugin bytes + the engine's own compatibility key, and have
+/// every process after the first `Module::deserialize` it (which skips
+/// cranelift entirely - microseconds, not seconds). The producer writes
+/// to a unique temp file and atomically `rename`s it into place, so a
+/// concurrent reader never observes a partial file; the content-address
+/// in the name means an engine / plugin upgrade lands on a new path and
+/// stale files are simply ignored, never reused.
+///
+/// We deserialize from an in-memory copy of the bytes (not a live mmap
+/// of the file) so an already-loaded module is immune to any later
+/// change to the on-disk file. `Module::deserialize` validates the
+/// blob and returns a clean `Err` for any version / config mismatch or
+/// corruption, so a bad cache entry falls back to a cold compile rather
+/// than misbehaving.
+fn build_plugin_module(engine: &Engine) -> Result<Module> {
+    let cache_path = plugin_cwasm_cache_path(engine);
+
+    // Fast path: a previously-written cache entry. Read the whole file
+    // into owned memory, then deserialize the copy - never mmap the
+    // live file (its pages must not change under a loaded module).
+    if let Some(path) = &cache_path
+        && let Ok(bytes) = std::fs::read(path)
+    {
+        // Safety: the bytes were produced by `Module::serialize` from a
+        // wasmtime build of this same `burn` binary. `deserialize`
+        // additionally validates the embedded compatibility header and
+        // returns `Err` (never UB) for any mismatch or corruption, so a
+        // stale or partial file degrades to the cold-compile path below.
+        match unsafe { Module::deserialize(engine, &bytes) } {
+            Ok(module) => return Ok(module),
+            Err(e) => ab_event!(
+                Level::Debug,
+                "wasm.plugin.cwasm_cache_miss",
+                "path" => path.display().to_string(),
+                "error" => e.to_string(),
+            ),
+        }
+    }
+
+    // Cold path: cranelift-compile the plugin, then best-effort publish
+    // the native artifact for sibling / future processes (typically the
+    // cluster workers this parent is about to fork).
+    let module = Module::new(engine, PLUGIN_BYTES)
+        .map_err(|e| AfterburnerError::Engine(format!("plugin module: {e}")))?;
+    if let Some(path) = &cache_path
+        && let Ok(serialized) = module.serialize()
+    {
+        publish_cwasm_cache(path, &serialized);
+    }
+    Ok(module)
+}
+
+/// Content-addressed path for the cached native plugin module, or
+/// `None` if no usable private cache directory exists (then we always
+/// cold-compile).
+///
+/// `Module::deserialize` trusts the bytes for native code execution, so
+/// the cache must not be plantable by another user. We therefore root it
+/// in a **per-uid** directory created `0700` and owned by us (see
+/// [`private_cache_dir`]); a different user can neither write a poisoned
+/// entry into it nor read ours. Same-uid processes - crucially the
+/// cluster / worker children this parent forks, which run as the same
+/// user - share it freely.
+///
+/// The file name folds in the plugin bytes (so a plugin rebuild relocates
+/// the cache) and `Engine::precompile_compatibility_hash` (so any change
+/// to the engine `Config` or wasmtime version relocates it too), making
+/// every entry self-validating by name; an incompatible entry is never
+/// even read.
+fn plugin_cwasm_cache_path(engine: &Engine) -> Option<std::path::PathBuf> {
+    let dir = private_cache_dir()?;
+    let plugin_hash = sha256(PLUGIN_BYTES);
+    let compat = engine.precompile_compatibility_hash();
+    // 16 hex chars of plugin hash + the engine compat token keep the
+    // name short while staying collision-free in practice.
+    let name = format!(
+        "plugin-{}-{:016x}.cwasm",
+        hex8(&plugin_hash),
+        fold_compat_hash(compat),
+    );
+    Some(dir.join(name))
+}
+
+/// A per-user cache directory under the system temp root, created with
+/// owner-only (`0700`) permissions so no other user can plant a file the
+/// `Module::deserialize` fast path would execute. Returns `None` if it
+/// cannot be created or (on Unix) is not a directory we own with the
+/// expected mode - in which case the caller cold-compiles instead of
+/// trusting a directory it cannot vouch for.
+fn private_cache_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::temp_dir();
+    if base.as_os_str().is_empty() {
+        return None;
+    }
+    #[cfg(unix)]
+    let uid = {
+        // Safe: `getuid` is a pure syscall with no preconditions.
+        unsafe { libc::getuid() }
+    };
+    #[cfg(not(unix))]
+    let uid = 0u32;
+    let dir = base.join(format!("burn-cache-{uid}"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        // create_dir with mode 0700; ignore AlreadyExists, then verify.
+        let mut b = std::fs::DirBuilder::new();
+        b.mode(0o700);
+        match b.create(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return None,
+        }
+        // Verify the existing dir is really a directory we own with no
+        // group / other access - defends against a pre-planted symlink
+        // or a loosened-permission dir from another user.
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(&dir).ok()?;
+        if !meta.is_dir() || meta.uid() != uid || (meta.mode() & 0o077) != 0 {
+            return None;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(&dir).ok()?;
+    }
+    Some(dir)
+}
+
+/// Reduce wasmtime's compatibility hash (a `Hash`-able opaque token) to
+/// a `u64` we can stamp into the cache file name.
+fn fold_compat_hash(compat: impl core::hash::Hash) -> u64 {
+    use core::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    compat.hash(&mut h);
+    h.finish()
+}
+
+/// Atomically install `bytes` at `path`: write to a unique sibling temp
+/// file, then `rename` (atomic on the same filesystem) into place. A
+/// reader therefore only ever sees a complete file. All failures are
+/// swallowed - the cache is an optimisation, and a missing entry just
+/// means the next process cold-compiles.
+fn publish_cwasm_cache(path: &std::path::Path, bytes: &[u8]) {
+    let Some(parent) = path.parent() else { return };
+    // Unique temp name (pid + a monotonic counter) so concurrent
+    // producers never collide on the staging file.
+    use std::sync::atomic::AtomicU64;
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("plugin"),
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed),
+    ));
+    if write_private(&tmp, bytes).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    // rename onto the final path. If a sibling won the race the content
+    // is byte-identical, so last-writer-wins is harmless.
+    if std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Write `bytes` to `path`, owner-read/write only on Unix (`0600`).
+/// Belt-and-braces alongside the `0700` cache dir: the file itself is
+/// never group / world readable even if the dir mode were ever relaxed.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(bytes)?;
+    f.flush()
+}
+
 impl Combustor for WasmCombustor {
     #[fastrace::trace(name = "WasmCombustor::ignite")]
     fn ignite(&self, source: &str) -> Result<ScriptId> {
@@ -854,6 +1368,16 @@ impl Combustor for WasmCombustor {
 
     #[fastrace::trace(name = "WasmCombustor::thrust")]
     fn thrust(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value> {
+        // Sealed path: id was registered via `register_precompiled`. No plugin
+        // envelope, no `afterburner:host` wiring.
+        if self.sealed_cache.get(&id.hash).is_some() {
+            return self.thrust_sealed(id, input, limits);
+        }
+        // Dyn path: id was registered via `register_precompiled` with target
+        // `"wasm32-wasip1-dyn"`. Two-instance model with full manifold gating.
+        if self.dyn_cache.get(&id.hash).is_some() {
+            return self.thrust_dyn(id, input, limits);
+        }
         // Input serializes per-call because it changes per-call; it
         // goes via `HostState::pending_input` (read by the
         // `host_get_input` linker import) - not via the envelope.
@@ -886,10 +1410,35 @@ impl Combustor for WasmCombustor {
         WasmCombustor::thrust_raw_out(self, id, input, limits)
     }
 
+    /// Combustor-trait override: raw-bytes-in / raw-bytes-out for sealed
+    /// precompiled modules. Delegates to the inherent
+    /// [`Self::thrust_sealed_raw_bytes_inner`].
+    fn thrust_sealed_raw_bytes(
+        &self,
+        id: &ScriptId,
+        input: Vec<u8>,
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        self.thrust_sealed_raw_bytes_inner(id, input, limits)
+    }
+
     fn extinguish(&self, id: &ScriptId) {
         self.source_store.remove(&id.hash);
         self.bytecode_cache.remove(&id.hash);
+        // Also remove from sealed_cache and dyn_cache in case this id was
+        // registered via register_precompiled - extinguish is content-addressed
+        // and must cover all paths.
+        self.sealed_cache.remove(&id.hash);
+        self.dyn_cache.remove(&id.hash);
         ab_event!(Level::Info, "wasm.extinguish", "hash" => hex8(&id.hash));
+    }
+
+    /// Combustor-trait override: delegates to the inherent
+    /// [`Self::register_precompiled`], wiring the sealed-module path
+    /// through `Box<dyn Combustor>` so `BurnCache` and the `Afterburner`
+    /// facade can call it without knowing the concrete combustor type.
+    fn register_precompiled(&self, wasm: &[u8], target: &str) -> Result<ScriptId> {
+        WasmCombustor::register_precompiled(self, wasm, target)
     }
 
     /// Combustor-trait override that delegates to the inherent

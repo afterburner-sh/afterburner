@@ -11,7 +11,7 @@
 //!   conflict-driven, backtracking solver used by uv, Dart pub, Poetry and
 //!   Bundler, and the designated replacement for cargo's resolver. It is
 //!   complete (it backtracks) and explains conflicts clearly, unlike a greedy
-//!   walk. We model packages as [`Pkg`], versions as [`semver::Version`], and
+//!   walk. We model packages as `Pkg`, versions as [`semver::Version`], and
 //!   version sets as `pubgrub::Ranges<Version>` (semver requirements converted
 //!   by [`req_to_ranges`]).
 //! * **Ordering + cycle detection** uses **Kahn's algorithm** over the selected

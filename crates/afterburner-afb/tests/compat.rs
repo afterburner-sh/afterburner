@@ -187,12 +187,17 @@ fn backward_minimal_required_only_package() {
 }
 
 #[test]
-fn backward_reader_baseline_is_1_0() {
+fn backward_reader_baseline_is_1_2() {
+    // FORMAT_MINOR 1: semver-range deps (additive).
+    // FORMAT_MINOR 2: precompiled/ members + runtime.target (additive).
     assert_eq!(FORMAT_MAJOR, 1);
-    assert_eq!(FORMAT_MINOR, 0);
-    assert_eq!(reader_format_version(), "1.0");
-    // The exact-reader-version package is the trivial backward case.
+    assert_eq!(FORMAT_MINOR, 2);
+    assert_eq!(reader_format_version(), "1.2");
+    // A package at the exact reader version is the trivial backward case.
     Afb::from_bytes(&raw_pkg(&body(&reader_format_version(), "", "", ""))).unwrap();
+    // Packages at older minors (1.1, 1.0) must still parse successfully.
+    Afb::from_bytes(&raw_pkg(&body("1.1", "", "", ""))).unwrap();
+    Afb::from_bytes(&raw_pkg(&body("1.0", "", "", ""))).unwrap();
 }
 
 #[test]
@@ -243,16 +248,16 @@ fn malformed_format_version_is_rejected() {
 
 #[test]
 fn min_reader_gate_is_enforced() {
-    // Newer than this reader (1.0) → hard refuse.
-    for mr in ["1.1", "1.2", "2.0", "9.9"] {
+    // Newer than this reader (1.2, FORMAT_MINOR=2) - hard refuse.
+    for mr in ["1.3", "1.99", "2.0", "9.9"] {
         let afb = raw_pkg(&body("1.0", &format!("min_reader = \"{mr}\""), "", ""));
         assert!(
             matches!(Afb::from_bytes(&afb), Err(AfbError::ReaderTooOld { .. })),
             "min_reader {mr} must trip ReaderTooOld"
         );
     }
-    // Satisfied → OK.
-    for mr in ["1.0", "0.9", "0.0"] {
+    // Satisfied: exactly the reader version (1.2) or older.
+    for mr in ["1.2", "1.1", "1.0", "0.9", "0.0"] {
         let afb = raw_pkg(&body("1.0", &format!("min_reader = \"{mr}\""), "", ""));
         assert!(
             Afb::from_bytes(&afb).is_ok(),

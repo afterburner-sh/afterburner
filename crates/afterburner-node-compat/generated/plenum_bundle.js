@@ -20265,12 +20265,22 @@ __register_module('wasi', function(module, exports, require) {
             }
         }
         TolerantTextDecoder.prototype.decode = function (input, opts) {
+            // UTF-8 fast path: delegate straight to the native decoder with no
+            // argument normalization, branching, or try/catch. This is the hot
+            // path - the columnar string UDF decodes every row through here
+            // (~500K calls per batch), and the per-call wrapper overhead the
+            // multi-encoding support introduced regressed UTF-8 decode ~26%
+            // (docs/BENCH_2026-06-16_BLOG_NOTE.md). `_native` is non-null ONLY
+            // for utf-8 (set in the constructor), so this branch is exactly the
+            // pre-wrapper native call. The native decoder accepts a BufferSource
+            // directly, so passing `input` through avoids the `toBytes` copy/checks.
+            var nat = this._native;
+            if (nat !== null) return nat.decode(input, opts);
             if (input === undefined) return '';
             var bytes = toBytes(input);
-            if (this._enc === 'utf-8') {
-                if (this._native) { try { return this._native.decode(bytes, opts); } catch (_) { /* fall through */ } }
-                return decodeUtf8Js(bytes);
-            }
+            // Native unavailable: pure-JS utf-8 (rare - the plugin ships javy's
+            // native decoder), plus the multi-encoding paths.
+            if (this._enc === 'utf-8') return decodeUtf8Js(bytes);
             if (this._enc === 'utf-16le') return decodeUtf16(bytes, true);
             if (this._enc === 'utf-16be') return decodeUtf16(bytes, false);
             return decodeLatin1(bytes);

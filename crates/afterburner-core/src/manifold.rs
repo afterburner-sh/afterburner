@@ -138,6 +138,24 @@ impl Manifold {
         }
     }
 
+    /// Returns `true` when every capability axis is at its sealed (no-grant)
+    /// default: `fs None`, `net None`, `crypto false`, `child_process false`,
+    /// `env None`, `allow_exit false`, `listen None`, and `http_timeout_ms`
+    /// is `None`. This is the exact profile the self-contained WASM flavor
+    /// (`wasm32-wasip1`) targets, so `burn compile` uses this predicate to
+    /// decide whether ahead-of-time compilation is applicable.
+    #[must_use]
+    pub fn is_sealed(&self) -> bool {
+        matches!(self.fs, FsAccess::None)
+            && matches!(self.net, NetAccess::None)
+            && !self.crypto
+            && !self.child_process
+            && matches!(self.env, EnvAccess::None)
+            && !self.allow_exit
+            && self.http_timeout_ms.is_none()
+            && matches!(self.listen, ListenAccess::None)
+    }
+
     /// Full capabilities - every flap open. Only appropriate for
     /// admin/trusted contexts; never expose to untrusted user JS.
     pub fn open() -> Self {
@@ -161,6 +179,52 @@ mod tests {
     #[test]
     fn sealed_is_the_default() {
         assert_eq!(Manifold::default(), Manifold::sealed());
+    }
+
+    #[test]
+    fn is_sealed_true_for_sealed_default() {
+        assert!(Manifold::sealed().is_sealed());
+        assert!(Manifold::default().is_sealed());
+    }
+
+    #[test]
+    fn is_sealed_false_for_open() {
+        assert!(!Manifold::open().is_sealed());
+    }
+
+    #[test]
+    fn is_sealed_false_for_any_single_grant() {
+        let mut m = Manifold::sealed();
+        m.crypto = true;
+        assert!(!m.is_sealed(), "crypto grant should unseal");
+
+        let mut m = Manifold::sealed();
+        m.child_process = true;
+        assert!(!m.is_sealed(), "child_process grant should unseal");
+
+        let mut m = Manifold::sealed();
+        m.allow_exit = true;
+        assert!(!m.is_sealed(), "allow_exit should unseal");
+
+        let mut m = Manifold::sealed();
+        m.fs = FsAccess::ReadOnly(vec!["/tmp".into()]);
+        assert!(!m.is_sealed(), "fs ReadOnly should unseal");
+
+        let mut m = Manifold::sealed();
+        m.net = NetAccess::OutboundHttp(None);
+        assert!(!m.is_sealed(), "net OutboundHttp should unseal");
+
+        let mut m = Manifold::sealed();
+        m.env = EnvAccess::AllowList(vec!["HOME".into()]);
+        assert!(!m.is_sealed(), "env AllowList should unseal");
+
+        let mut m = Manifold::sealed();
+        m.listen = ListenAccess::Ports(vec![8080]);
+        assert!(!m.is_sealed(), "listen Ports should unseal");
+
+        let mut m = Manifold::sealed();
+        m.http_timeout_ms = Some(5000);
+        assert!(!m.is_sealed(), "http_timeout_ms should unseal");
     }
 
     #[test]

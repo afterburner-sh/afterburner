@@ -10,15 +10,17 @@
 //! for the multi-threaded path. The caller sees one shape; dispatch is
 //! compiled away when only one backend feature is enabled.
 
+#[cfg(any(feature = "flow", feature = "thrust", test))]
+use afterburner_core::AfterburnerError;
 use afterburner_core::{
-    AfterburnerError, BurnCache, BurnCacheBackend, Combustor, FuelGauge, HostContext,
-    InMemoryStateStore, Manifold, OutputValue, Result, ScriptId, ScriptInvocation, ScriptOutcome,
-    SharedStateStore,
+    BurnCache, BurnCacheBackend, Combustor, FuelGauge, HostContext, InMemoryStateStore, Manifold,
+    OutputValue, Result, ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore,
 };
 use serde_json::Value;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(feature = "thrust")]
 use std::time::Duration;
 
 /// Which backend `AfterburnerBuilder::build` should construct.
@@ -179,6 +181,26 @@ impl Afterburner {
         ))
     }
 
+    /// Register a pre-compiled self-contained (SEALED) WASM module. The
+    /// returned [`ScriptId`] can be used with [`run`](Self::run) exactly
+    /// like a source-registered id; internally [`thrust`](Combustor::thrust)
+    /// dispatches to the sealed stdin/stdout path without a plugin envelope.
+    ///
+    /// Accepts `"wasm32-wasip1"` (Javy self-contained WASI module) and
+    /// `"wasm32-wasip1-dyn"` (dynamically-linked module, two-instance model).
+    ///
+    /// Returns an error on non-WASM engines (native, adaptive before wasm
+    /// compile). Requires the `wasm` feature.
+    pub fn register_precompiled(&self, wasm: &[u8], target: &str) -> Result<ScriptId> {
+        match &self.engine {
+            EngineHolder::Cache(c) => c.register_precompiled(wasm, target),
+            #[cfg(feature = "thrust")]
+            EngineHolder::Thrust(_) => Err(afterburner_core::AfterburnerError::Engine(
+                "register_precompiled is not supported on the threaded engine".into(),
+            )),
+        }
+    }
+
     /// Compile + cache a multi-file ES-module bundle. Flow mode only;
     /// other modes return a typed error.
     ///
@@ -308,6 +330,30 @@ impl Afterburner {
             EngineHolder::Cache(c) => c.execute_raw_out(id, input, limits),
             #[cfg(feature = "thrust")]
             EngineHolder::Thrust(t) => t.thrust_raw_out(id, input, limits),
+        }
+    }
+
+    /// Raw-bytes-in / raw-bytes-out for sealed precompiled modules.
+    /// Feeds `input` verbatim to the module's stdin and returns raw
+    /// stdout bytes without parsing. The `id` must refer to a module
+    /// registered via `register_precompiled` with target
+    /// `"wasm32-wasip1"`.
+    ///
+    /// Used by the batch and columnar precompiled paths in burndb:
+    /// batch sends a JSON array and reads the JSON array reply; columnar
+    /// sends the binary columnar frame and reads the binary reply.
+    pub fn run_sealed_raw_bytes_with(
+        &self,
+        id: &ScriptId,
+        input: Vec<u8>,
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        match &self.engine {
+            EngineHolder::Cache(c) => c.execute_sealed_raw_bytes(id, input, limits),
+            #[cfg(feature = "thrust")]
+            EngineHolder::Thrust(_) => Err(afterburner_core::AfterburnerError::Engine(
+                "run_sealed_raw_bytes_with: not supported on ThrustEngine".into(),
+            )),
         }
     }
 

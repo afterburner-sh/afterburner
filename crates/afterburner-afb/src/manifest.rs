@@ -12,24 +12,167 @@
 //! suspicious and must not be silently tolerated. The capability set itself
 //! lives in `afterburner_core::Manifold` (parsed in `unpack`), whose
 //! strictness is that crate's responsibility - see `FORMAT.md`.
+//!
+//! ## `[dependencies]` values (FORMAT_MINOR >= 1)
+//!
+//! Each value is one of:
+//! - A semver range string, e.g. `"^0.1.0"`.
+//! - An exact `"sha256:<64-char-hex>"` pin.
+//! - A path table: `{ path = "../sibling" }`.
+//! - A git table: `{ git = "https://...", tag = "v1" }` (or `branch`/`rev`).
+//!
+//! [`parse_dep_req`] handles string forms. The custom [`Deserialize`] on
+//! [`DepReq`] handles all four forms from TOML.
+//!
+//! A built `.afb` always carries resolved `sha256:` pins (produced by `pack`);
+//! a source `afb.toml` may use ranges, path deps, or git deps for convenience.
 
 use crate::error::{AfbError, Result};
 use crate::{FORMAT_MAJOR, FORMAT_MINOR};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// The git reference for a `{ git = "..." }` dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitRef {
+    Tag(String),
+    Branch(String),
+    Rev(String),
+}
+
+/// A parsed `[dependencies]` value.
+///
+/// String values (`"^0.1.0"` or `"sha256:..."`) are parsed by [`parse_dep_req`].
+/// Table values (`{ path = "..." }` or `{ git = "...", tag = "..." }`) are
+/// handled by the custom [`Deserialize`] implementation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DepReq {
+    /// An exact `sha256:<64-char-lowercase-hex>` content pin.
+    Pin(String),
+    /// A semver version requirement, e.g. `"^0.1.0"` or `">=0.2.0, <1.0.0"`.
+    Range(semver::VersionReq),
+    /// A local path dependency, relative to the depending package directory.
+    Path(std::path::PathBuf),
+    /// A git repository dependency.
+    Git { url: String, reference: GitRef },
+}
+
+// Helper types for DepReq deserialization.
+#[derive(Deserialize)]
+struct PathTable {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct GitTable {
+    git: String,
+    tag: Option<String>,
+    branch: Option<String>,
+    rev: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawDepReq {
+    Str(String),
+    PathDep(PathTable),
+    GitDep(GitTable),
+}
+
+impl<'de> Deserialize<'de> for DepReq {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let raw = RawDepReq::deserialize(d)?;
+        match raw {
+            RawDepReq::Str(s) => parse_dep_req(&s).map_err(serde::de::Error::custom),
+            RawDepReq::PathDep(t) => Ok(DepReq::Path(std::path::PathBuf::from(t.path))),
+            RawDepReq::GitDep(t) => {
+                if t.git.is_empty() {
+                    return Err(serde::de::Error::custom("git url must not be empty"));
+                }
+                let reference = match (t.tag, t.branch, t.rev) {
+                    (Some(tag), None, None) => GitRef::Tag(tag),
+                    (None, Some(branch), None) => GitRef::Branch(branch),
+                    (None, None, Some(rev)) => GitRef::Rev(rev),
+                    _ => {
+                        return Err(serde::de::Error::custom(
+                            "git dependency must specify exactly one of: tag, branch, rev",
+                        ));
+                    }
+                };
+                Ok(DepReq::Git {
+                    url: t.git,
+                    reference,
+                })
+            }
+        }
+    }
+}
+
+impl Serialize for DepReq {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            DepReq::Pin(p) => s.serialize_str(p),
+            DepReq::Range(r) => s.serialize_str(&r.to_string()),
+            DepReq::Path(p) => {
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("path", &p.display().to_string())?;
+                m.end()
+            }
+            DepReq::Git { url, reference } => {
+                let (key, val) = match reference {
+                    GitRef::Tag(t) => ("tag", t),
+                    GitRef::Branch(b) => ("branch", b),
+                    GitRef::Rev(r) => ("rev", r),
+                };
+                let mut m = s.serialize_map(Some(2))?;
+                m.serialize_entry("git", url)?;
+                m.serialize_entry(key, val)?;
+                m.end()
+            }
+        }
+    }
+}
+
+/// Parse a single `[dependencies]` string value into a [`DepReq`].
+///
+/// A value starting with `"sha256:"` is a pin; the remainder must be exactly
+/// 64 lowercase hex characters. Any other value is parsed as a
+/// [`semver::VersionReq`]. Returns [`AfbError::ManifestParse`] if the value
+/// is neither a valid pin nor a valid semver range.
+///
+/// Note: table-form values (`{ path = "..." }`, `{ git = "...", ... }`) are
+/// handled by the [`Deserialize`] impl on [`DepReq`], not this function.
+pub fn parse_dep_req(value: &str) -> Result<DepReq> {
+    if let Some(hex) = value.strip_prefix("sha256:") {
+        if hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Ok(DepReq::Pin(value.to_string()));
+        }
+        return Err(AfbError::ManifestParse(format!(
+            "dependency pin {value:?}: expected \"sha256:\" followed by 64 lowercase hex digits"
+        )));
+    }
+    semver::VersionReq::parse(value)
+        .map(DepReq::Range)
+        .map_err(|e| {
+            AfbError::ManifestParse(format!(
+                "dependency value {value:?} is neither a sha256 pin nor a valid semver range: {e}"
+            ))
+        })
+}
+
 /// Parsed `afb.toml`.
 ///
 /// Unknown *top-level sections* are preserved in [`Manifest::extra`] so a
-/// parse → repack round-trips a newer additive package without data loss.
+/// parse -> repack round-trips a newer additive package without data loss.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub format: Format,
     pub package: Package,
     pub runtime: Runtime,
-    /// Other `.afb` packages this one depends on, pinned by digest.
+    /// Other `.afb` packages this one depends on.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub dependencies: BTreeMap<String, String>,
+    pub dependencies: BTreeMap<String, DepReq>,
     /// npm packages this one depends on, declared `name = "semver-range"`
     /// (cargo-style). `burn install` resolves + vendors them into
     /// `source/node_modules/**`; the sandbox `require()` then serves bare
@@ -41,7 +184,7 @@ pub struct Manifest {
     /// package round-trips; v0.1 does not verify it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<Signature>,
-    /// Reserved free-form namespace (à la Cargo `[package.metadata]`): tools
+    /// Reserved free-form namespace (a la Cargo `[package.metadata]`): tools
     /// may put anything here, readers never interpret it, it round-trips.
     #[serde(default, skip_serializing_if = "toml::Table::is_empty")]
     pub metadata: toml::Table,
@@ -90,8 +233,21 @@ pub struct Package {
 pub struct Runtime {
     /// Minimum `afterburner-core` version, semver.
     pub min: String,
-    /// Precompiled-artifact target; only meaningful with `precompiled/`,
-    /// which v0.1 ignores.
+    /// Target of the bundled pre-compiled WASM module (FORMAT_MINOR >= 2).
+    ///
+    /// When `Some`, the archive contains a member at
+    /// `precompiled/<target>/main.wasm` that a capable runtime may load
+    /// instead of interpreting the `source/` JS. Two target conventions:
+    ///
+    /// - `"wasm32-wasip1"` - a self-contained WASI module produced by Javy;
+    ///   the runtime loads it directly without any dynamic linking.
+    /// - `"wasm32-wasip1-dyn"` - a dynamically-linked module that requires
+    ///   the shared Afterburner plugin host; the runtime must provide the
+    ///   import namespace before instantiation.
+    ///
+    /// When `None` (or the reader predates FORMAT_MINOR 2), there is no
+    /// pre-compiled module and the runtime falls back to the `source/` JS.
+    /// Old readers that do not understand this field silently ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
@@ -190,6 +346,17 @@ impl Manifest {
                 "package.entry {entry:?} must be a relative path under source/"
             )));
         }
+        // Validate git deps have a non-empty URL (deserialization already
+        // checked exactly one of tag/branch/rev is set).
+        for (coord, dep) in &m.dependencies {
+            if let DepReq::Git { url, .. } = dep
+                && url.is_empty()
+            {
+                return Err(AfbError::ManifestParse(format!(
+                    "dependency {coord:?}: git url must not be empty"
+                )));
+            }
+        }
         Ok(m)
     }
 
@@ -207,6 +374,20 @@ impl Manifest {
         }
         toml::to_string(&table).map_err(|e| AfbError::ManifestParse(e.to_string()))
     }
+
+    /// Returns only the registry (Pin + Range) dependencies as string values,
+    /// suitable for passing to the resolver, lockfile, and linker.
+    /// Path and Git deps are excluded (they are resolved locally).
+    pub fn registry_deps(&self) -> BTreeMap<String, String> {
+        self.dependencies
+            .iter()
+            .filter_map(|(coord, req)| match req {
+                DepReq::Pin(p) => Some((coord.clone(), p.clone())),
+                DepReq::Range(r) => Some((coord.clone(), r.to_string())),
+                DepReq::Path(_) | DepReq::Git { .. } => None,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -219,12 +400,12 @@ mod tests {
 version = "1.0"
 
 [package]
-name = "anthropic"
-namespace = "burn"
+name = "widget"
+namespace = "acme"
 version = "1.4.0"
 language = "js"
 entry = "source/main.js"
-description = "Anthropic client"
+description = "Widget client"
 
 [runtime]
 min = "0.1.0"
@@ -234,7 +415,7 @@ min = "0.1.0"
     #[test]
     fn parses_a_valid_manifest() {
         let m = Manifest::parse(good()).unwrap();
-        assert_eq!(m.package.name, "anthropic");
+        assert_eq!(m.package.name, "widget");
         assert_eq!(m.format.version, "1.0");
         assert!(m.dependencies.is_empty());
         assert!(m.signature.is_none());
@@ -308,7 +489,7 @@ min = "0.1.0"
         let src = format!("{good}\n[provenance]\nbuilt_by = \"ci\"\n", good = good());
         let m = Manifest::parse(&src).unwrap();
         assert!(m.extra.contains_key("provenance"), "extra: {:?}", m.extra);
-        // …and survives a repack.
+        // ...and survives a repack.
         let back = Manifest::parse(&m.to_toml_string().unwrap()).unwrap();
         assert_eq!(back.extra, m.extra);
     }
@@ -360,14 +541,132 @@ min = "0.1.0"
         assert_eq!(m, back);
     }
 
+    /// A valid 64-char lowercase hex digest, used across dep tests.
+    const PIN64: &str = "sha256:aabbccdd00112233aabbccdd00112233aabbccdd00112233aabbccdd00112233";
+
     #[test]
     fn dependencies_roundtrip() {
         let src = format!(
-            "{good}\n[dependencies]\n\"burn/http-helpers\" = \"sha256:aabb\"\n",
-            good = good()
+            "{good}\n[dependencies]\n\"acme/helpers\" = \"{PIN64}\"\n",
+            good = good(),
+            PIN64 = PIN64,
         );
         let m = Manifest::parse(&src).unwrap();
-        assert_eq!(m.dependencies["burn/http-helpers"], "sha256:aabb");
+        assert_eq!(
+            m.dependencies["acme/helpers"],
+            DepReq::Pin(PIN64.to_string())
+        );
         assert_eq!(Manifest::parse(&m.to_toml_string().unwrap()).unwrap(), m);
+    }
+
+    #[test]
+    fn dep_req_range_is_accepted() {
+        let src = format!(
+            "{good}\n[dependencies]\n\"acme/geo\" = \"^0.1.0\"\n",
+            good = good()
+        );
+        let m = Manifest::parse(&src).expect("semver range should parse");
+        let req = m.dependencies["acme/geo"].clone();
+        assert!(matches!(req, DepReq::Range(_)));
+    }
+
+    #[test]
+    fn dep_req_pin_is_accepted() {
+        let req = parse_dep_req(PIN64).unwrap();
+        assert!(matches!(req, DepReq::Pin(_)));
+    }
+
+    #[test]
+    fn dep_req_garbage_is_rejected() {
+        // Neither a sha256 pin nor a semver range.
+        assert!(matches!(
+            parse_dep_req("not-a-version-or-pin"),
+            Err(AfbError::ManifestParse(_))
+        ));
+    }
+
+    #[test]
+    fn dep_req_short_sha256_is_rejected() {
+        // "sha256:" prefix but only 4 hex chars.
+        assert!(matches!(
+            parse_dep_req("sha256:aabb"),
+            Err(AfbError::ManifestParse(_))
+        ));
+    }
+
+    #[test]
+    fn manifest_parse_rejects_invalid_dep_value() {
+        let src = format!(
+            "{good}\n[dependencies]\n\"acme/bad\" = \"definitely-not-valid\"\n",
+            good = good()
+        );
+        assert!(
+            matches!(Manifest::parse(&src), Err(AfbError::ManifestParse(_))),
+            "a garbage dep value must be rejected by Manifest::parse"
+        );
+    }
+
+    #[test]
+    fn dep_req_path_table_parses() {
+        let src = format!(
+            "{good}\n[dependencies]\n\"x/sib\" = {{ path = \"../sib\" }}\n",
+            good = good()
+        );
+        let m = Manifest::parse(&src).expect("path dep should parse");
+        assert!(
+            matches!(&m.dependencies["x/sib"], DepReq::Path(p) if p.to_str() == Some("../sib"))
+        );
+    }
+
+    #[test]
+    fn dep_req_git_tag_parses() {
+        let src = format!(
+            "{good}\n[dependencies]\n\"x/bar\" = {{ git = \"https://example.com/x/y\", tag = \"v1\" }}\n",
+            good = good()
+        );
+        let m = Manifest::parse(&src).expect("git dep should parse");
+        assert!(matches!(
+            &m.dependencies["x/bar"],
+            DepReq::Git { url, reference: GitRef::Tag(t) }
+            if url == "https://example.com/x/y" && t == "v1"
+        ));
+    }
+
+    #[test]
+    fn dep_req_string_range_still_parses() {
+        let src = format!(
+            "{good}\n[dependencies]\n\"x/foo\" = \"^0.1.0\"\n",
+            good = good()
+        );
+        let m = Manifest::parse(&src).expect("range dep should parse");
+        assert!(matches!(&m.dependencies["x/foo"], DepReq::Range(_)));
+    }
+
+    #[test]
+    fn dep_req_path_missing_errors_clearly() {
+        // A path dep that does not exist on the filesystem - the manifest itself should
+        // still parse fine. The error comes at compile/resolve time, not manifest parse time.
+        let src = format!(
+            "{good}\n[dependencies]\n\"x/sib\" = {{ path = \"../missing\" }}\n",
+            good = good()
+        );
+        // Manifest parses OK - path existence is checked at resolution time, not here.
+        assert!(Manifest::parse(&src).is_ok());
+    }
+
+    #[test]
+    fn registry_deps_excludes_path_and_git() {
+        let src = format!(
+            "{good}\n[dependencies]\n\
+             \"x/foo\" = \"^0.1.0\"\n\
+             \"x/sib\" = {{ path = \"../sib\" }}\n\
+             \"x/bar\" = {{ git = \"https://example.com/x/y\", tag = \"v1\" }}\n",
+            good = good()
+        );
+        let m = Manifest::parse(&src).expect("mixed deps should parse");
+        let rdeps = m.registry_deps();
+        assert!(rdeps.contains_key("x/foo"), "range dep must appear");
+        assert!(!rdeps.contains_key("x/sib"), "path dep must be excluded");
+        assert!(!rdeps.contains_key("x/bar"), "git dep must be excluded");
     }
 }

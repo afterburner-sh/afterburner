@@ -66,3 +66,9 @@ pub use daemon_tls::{DaemonTls, TlsEvent};
 pub use daemon_workers::{DaemonWorkers, WorkerConfig, WorkerEvent};
 pub use manifold_codec::manifold_to_cli_args;
 pub use wasm_engine::{WasmCombustor, WasmConfig};
+
+/// The Wizer-preinitialized Afterburner Javy plugin binary. Exposed for
+/// build-time tools that need to pass it to `javy build -C plugin=...`
+/// (e.g. `burn compile` for capability-bearing packages). The runtime
+/// uses this same binary via `include_bytes!` in `wasm_engine`.
+pub const AFTERBURNER_PLUGIN_BYTES: &[u8] = include_bytes!("../plugin/afterburner_plugin.wasm");

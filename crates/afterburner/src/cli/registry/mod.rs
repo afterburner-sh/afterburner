@@ -173,7 +173,22 @@ fn report_scaffold(s: &Scaffolded) {
     println!("  {} burn publish", style::bullet());
 }
 
-pub fn package(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
+/// Packaging mode for `burn package`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageMode {
+    /// Ship JS source (and precompiled WASM when `--compile` is also given).
+    SourceBased,
+    /// Ship precompiled WASM only - no `source/*` members. Requires successful
+    /// precompilation; never silently falls back to shipping source.
+    FullWasm,
+}
+
+pub fn package(
+    dir: Option<&Path>,
+    out: Option<&Path>,
+    do_compile: bool,
+    wasm_only: bool,
+) -> Result<()> {
     let dir = dir.unwrap_or_else(|| Path::new("."));
     let mut local = pkg::LocalPackage::load(dir)?;
     // TypeScript is build-time only: transpile every `.ts/.mts/.cts`
@@ -181,30 +196,87 @@ pub fn package(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
     // the runtime sandbox never needs a transpiler. The package entry is
     // rewritten to the `.js` path. (Pure-JS packages are untouched.)
     transpile_ts_sources(&mut local)?;
-    let (bytes, digest) = style::spin("packing", || local.build())?;
-    let out = out
+    let coord = coord_str(&local);
+    let out_path = out
         .map(Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from(local.output_filename()));
-    std::fs::write(&out, &bytes).with_context(|| format!("writing {}", out.display()))?;
-    println!(
-        "{} {}",
-        style::ok("packaged"),
-        style::accent(&coord_str(&local))
+
+    // Resolve the packaging mode. Priority:
+    //   --wasm-only flag          -> FullWasm (no prompt)
+    //   --compile flag            -> SourceBased with compile (no prompt, existing behavior)
+    //   stdin is a TTY            -> prompt the user
+    //   stdin is not a TTY (CI)   -> SourceBased (non-interactive default)
+    let mode = if wasm_only {
+        PackageMode::FullWasm
+    } else if do_compile {
+        PackageMode::SourceBased
+    } else {
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            prompt_package_mode()?
+        } else {
+            PackageMode::SourceBased
+        }
+    };
+
+    match mode {
+        PackageMode::FullWasm => super::compile::compile_with_local_package(local, &out_path, true),
+        PackageMode::SourceBased if do_compile || wasm_only => {
+            // wasm_only is handled above; do_compile -> compile+source.
+            super::compile::compile_with_local_package(local, &out_path, false)
+        }
+        PackageMode::SourceBased => {
+            let (bytes, digest) = style::spin("packing", || local.build())?;
+            std::fs::write(&out_path, &bytes)
+                .with_context(|| format!("writing {}", out_path.display()))?;
+            println!("{} {}", style::ok("packaged"), style::accent(&coord));
+            print_digest(bytes.len() as u64, &hex(&digest));
+            println!(
+                "  {} {}",
+                style::muted("->"),
+                style::value(&out_path.display().to_string())
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Prompt the user for the packaging mode when stdin is a TTY.
+///
+/// Prints the choice on stderr so the selection is visible even when
+/// stdout is piped. Empty input defaults to option 1 (source-based).
+fn prompt_package_mode() -> Result<PackageMode> {
+    use std::io::{BufRead, Write};
+    eprintln!();
+    eprintln!("{}", style::muted("Packaging mode:"));
+    eprintln!(
+        "  {}  source-based  (ships JS source{}precompiled WASM)",
+        style::accent("[1]"),
+        style::muted(" + "),
     );
-    print_digest(bytes.len() as u64, &hex(&digest));
-    println!(
-        "  {} {}",
-        style::muted("→"),
-        style::value(&out.display().to_string())
+    eprintln!(
+        "  {}  full WASM     (compiled only, no source)",
+        style::accent("[2]"),
     );
-    Ok(())
+    eprint!("{}", style::muted("choice [1]: "));
+    std::io::stderr().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let trimmed = line.trim();
+    match trimmed {
+        "" | "1" => Ok(PackageMode::SourceBased),
+        "2" => Ok(PackageMode::FullWasm),
+        other => anyhow::bail!(
+            "invalid packaging mode {other:?}; enter 1 (source-based) or 2 (full WASM)"
+        ),
+    }
 }
 
 /// Transpile any TypeScript sources in `local` to JavaScript in place,
-/// rewriting their archive keys (`.ts` → `.js`) and the package entry.
+/// rewriting their archive keys (`.ts` -> `.js`) and the package entry.
 /// No-op without the `ts` feature (TS sources would already have been
 /// rejected at unpack-time by readers that can't transpile).
-fn transpile_ts_sources(local: &mut pkg::LocalPackage) -> Result<()> {
+pub(super) fn transpile_ts_sources(local: &mut pkg::LocalPackage) -> Result<()> {
     #[cfg(feature = "ts")]
     {
         use std::collections::BTreeMap;
@@ -251,13 +323,28 @@ pub fn publish(
     dir: Option<&Path>,
     registry: Option<&str>,
     token: Option<&str>,
+    do_compile: bool,
+    no_compile: bool,
 ) -> Result<()> {
     let bytes = match afb {
         Some(p) => std::fs::read(p).with_context(|| format!("reading {}", p.display()))?,
         None => {
             let dir = dir.unwrap_or_else(|| Path::new("."));
-            let local = pkg::LocalPackage::load(dir)?;
-            style::spin("packing", || local.build())?.0
+            if do_compile && !no_compile {
+                // Compile to a temp .afb, read bytes, then remove the temp file.
+                let tmp_path =
+                    std::env::temp_dir().join(format!("burn-publish-{}.afb", std::process::id()));
+                let mut local = pkg::LocalPackage::load(dir)?;
+                transpile_ts_sources(&mut local)?;
+                super::compile::compile_with_local_package(local, &tmp_path, false)?;
+                let b = std::fs::read(&tmp_path)
+                    .with_context(|| format!("reading compiled {}", tmp_path.display()))?;
+                let _ = std::fs::remove_file(&tmp_path);
+                b
+            } else {
+                let local = pkg::LocalPackage::load(dir)?;
+                style::spin("packing", || local.build())?.0
+            }
         }
     };
     let max = afterburner_cloud::afterburner_afb::MAX_AFB_BYTES;
@@ -452,7 +539,7 @@ pub fn ensure_npm_linked(dir: &std::path::Path) -> Result<()> {
     }
     // Registry deps re-link from the lockfile when present (no network);
     // a missing lockfile resolves fresh through the normal install path.
-    if !local.manifest.dependencies.is_empty() {
+    if !local.manifest.registry_deps().is_empty() {
         let lock_path = dir.join(LOCKFILE_NAME);
         if let Ok(text) = std::fs::read_to_string(&lock_path)
             && let Ok(lock) = Lockfile::parse(&text)
@@ -530,9 +617,9 @@ fn build_install_plan(
 }
 
 fn manifest_roots(m: &Manifest) -> Result<Vec<(String, Req)>> {
-    m.dependencies
-        .iter()
-        .map(|(coord, spec)| Ok((coord.clone(), Req::parse(spec)?)))
+    m.registry_deps()
+        .into_iter()
+        .map(|(coord, spec)| Ok((coord, Req::parse(&spec)?)))
         .collect()
 }
 
@@ -1000,14 +1087,14 @@ fn forwarded_flags(cli: &Cli) -> Vec<String> {
     a
 }
 
-fn coord_str(p: &pkg::LocalPackage) -> String {
+pub(super) fn coord_str(p: &pkg::LocalPackage) -> String {
     format!(
         "{}/{}@{}",
         p.manifest.package.namespace, p.manifest.package.name, p.manifest.package.version
     )
 }
 
-fn print_digest(size: u64, digest_hex: &str) {
+pub(super) fn print_digest(size: u64, digest_hex: &str) {
     println!(
         "  {} {}  {}",
         style::muted("digest"),

@@ -307,6 +307,31 @@ pub enum Cmd {
         /// Output path (default: `./<ns>-<name>-<ver>.afb`).
         #[arg(short = 'o', long = "out", value_name = "FILE")]
         out: Option<PathBuf>,
+        /// Compile to a precompiled `.afb` instead of a source-only one.
+        /// Requires `javy` on PATH. Opt-in; the default remains source-only.
+        #[arg(long)]
+        compile: bool,
+        /// Emit a WASM-only `.afb` (precompiled members, no source).
+        /// Implies `--compile`. Requires the package to precompile successfully.
+        /// Errors instead of falling back to shipping source, so CI is safe.
+        /// In a TTY without this flag, `burn package` prompts for the mode.
+        #[arg(long = "wasm-only", conflicts_with = "compile")]
+        wasm_only: bool,
+    },
+    /// Build a pre-compiled `.afb`: ahead-of-time compiles `source/` to a
+    /// self-contained WASM module (via `javy`) and bundles it alongside the
+    /// source. Sealed packages only - capability-bearing packages still ship
+    /// source and a clear note is printed to stderr.
+    ///
+    /// Requires `javy` 8.1.1 on PATH (build-time only; the engine never
+    /// shells to javy at runtime).
+    Compile {
+        /// Package directory (default: current).
+        #[arg(value_name = "DIR")]
+        dir: Option<PathBuf>,
+        /// Output path (default: `./<ns>-<name>-<ver>.afb`).
+        #[arg(short = 'o', long = "out", value_name = "FILE")]
+        out: Option<PathBuf>,
     },
     /// Run the package's tests (every file under `tests/`).
     Test {
@@ -338,6 +363,15 @@ pub enum Cmd {
         registry: Option<String>,
         #[arg(long, value_name = "TOKEN")]
         token: Option<String>,
+        /// Compile to a precompiled `.afb` before uploading. Requires `javy` on PATH.
+        /// Opt-in; the default remains source-only. Ignored when `AFB` is given.
+        #[arg(long)]
+        compile: bool,
+        /// Override `--compile` when set (publish source-only even if `--compile` is
+        /// specified). Useful in scripts that pass `--compile` by default and need an
+        /// escape hatch.
+        #[arg(long)]
+        no_compile: bool,
     },
     /// Hide a version from resolution (or restore it with `--undo`).
     Yank {

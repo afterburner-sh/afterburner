@@ -996,6 +996,9 @@
       <a class="sb-link" href="#packages-scaffold">Scaffold</a>
       <a class="sb-link" href="#packages-deps">Declaring deps</a>
       <a class="sb-link" href="#packages-security">Dependency security</a>
+      <a class="sb-link" href="#packages-compile-deps">Dependency sources</a>
+      <a class="sb-link" href="#packages-precompiled">Precompiled WASM</a>
+      <a class="sb-link" href="#packages-package-modes">Package modes</a>
     </div>
     <div class="sb-section">
       <h4>Reference</h4>
@@ -1563,6 +1566,41 @@ $ <span class="tok-mod">burn</span> publish                    <span class="tok-
 $ <span class="tok-mod">burn</span> install --locked           <span class="tok-com"># reproducible, resolution skipped</span></pre>
       </div>
 
+      <h3 id="packages-compile-deps">Cargo-style dependency sources</h3>
+      <p>A value in <code>[dependencies]</code> can be any of three forms. <code>burn compile</code> resolves the full transitive closure across all sources and links them into one self-contained module - no runtime fetch, no missing transitive dep.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">toml</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-com"># afb.toml</span>
+[dependencies]
+<span class="tok-com"># 1. version string - resolved from the registry, digest-pinned</span>
+<span class="tok-str">"nyquist/json-tools"</span> = <span class="tok-str">"0.3"</span>
+
+<span class="tok-com"># 2. local path - sibling directory, resolved at compile time</span>
+<span class="tok-str">"nyquist/shared-utils"</span> = { path = <span class="tok-str">"../shared-utils"</span> }
+
+<span class="tok-com"># 3. git source - cloned and bundled at the given tag/rev</span>
+<span class="tok-str">"nyquist/parser"</span> = { git = <span class="tok-str">"https://github.com/example/parser"</span>, tag = <span class="tok-str">"v1.2.0"</span> }</pre>
+      </div>
+      <p>All three resolve the same way from the caller's side: <code>require('nyquist/json-tools')</code>. The source field is a compile-time detail; the published <code>.afb</code> carries the resolved bytes.</p>
+
+      <h3 id="packages-precompiled">Precompiled WASM packaging</h3>
+      <p><code>burn compile</code> extends <code>burn package</code> with an ahead-of-time compilation step. After building the <code>.afb</code> archive it compiles <code>source/</code> (and its resolved dependencies) to a WASM module stored at <code>precompiled/wasm32-wasip1/main.wasm</code> inside the archive. The runtime loads that module directly, skipping the per-call JS compile pass, so cold starts stay sub-millisecond even for large packages. The <code>.afb</code> retains <code>source/</code> as a fallback for readers that do not consume the precompiled artifact.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> compile                  <span class="tok-com"># package + AOT compile to precompiled/wasm32-wasip1/main.wasm</span>
+$ <span class="tok-mod">burn</span> compile -o ./dist/        <span class="tok-com"># write the .afb to a specific output directory</span></pre>
+      </div>
+      <p>The WASM module respects the package's Manifold: a sealed package produces a fully self-contained module; a capability-bearing one keeps the host-import boundary so every grant remains enforced at runtime.</p>
+
+      <h3 id="packages-package-modes">burn package modes</h3>
+      <p><code>burn package</code> supports two output modes: <strong>source-based</strong> (the default) ships the JS source inside the <code>.afb</code> and lets the runtime compile on first load; <strong>full-WASM</strong> includes only the precompiled WASM and no source. Run interactively for a prompt, or pass <code>--wasm-only</code> to select full-WASM non-interactively.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> package                  <span class="tok-com"># interactive: asks source-based or full-WASM</span>
+$ <span class="tok-mod">burn</span> package <span class="tok-kw">--wasm-only</span>      <span class="tok-com"># non-interactive: full-WASM, no source in the .afb</span></pre>
+      </div>
+      <p>Use source-based when reviewers or downstream users need to inspect the source. Use <code>--wasm-only</code> when you want the fastest possible cold start and do not need to distribute source.</p>
+
       <h2 id="cli"><span class="anchor">#</span>The <code>burn</code> CLI</h2>
       <p>A Deno-style command-line runtime. CLI default is <code>Manifold::open()</code> so existing Node scripts drop in without flags. Pass <code>--sandbox</code> to flip back to deny-by-default and grant with <code>--allow-*</code>.</p>
 
@@ -1612,6 +1650,7 @@ $ <span class="tok-mod">burn</span> -A runall.js                            <spa
           <tr><td><code>install [pkg]</code></td><td>Resolve + cache the dependency graph and write <code>burn.lock</code>. With no <code>pkg</code>, installs the current package's <code>[dependencies]</code> + <code>[npm]</code>. <code>--locked</code> reuses the lockfile.</td></tr>
           <tr><td><code>test [dir]</code></td><td>Run every file under <code>tests/</code> through the sandbox.</td></tr>
           <tr><td><code>package [dir]</code> · <code>-o</code></td><td>Build a deterministic, content-addressed <code>.afb</code> (transpiles TS to JS).</td></tr>
+          <tr><td><code>compile [dir]</code> · <code>-o</code></td><td>Like <code>package</code>, but also ahead-of-time compiles <code>source/</code> to a WASM module bundled under <code>precompiled/</code>, so the runtime loads it directly instead of compiling JS on every call. The flavor follows the package's <a href="#packages" style="color: var(--action);">Manifold</a>: a sealed package ships a self-contained module; a capability-bearing one ships a module that keeps the host-import boundary, so every grant stays enforced. The <code>.afb</code> still carries <code>source/</code>, so a reader that doesn't load precompiled falls back to it.</td></tr>
           <tr><td><code>publish [afb]</code></td><td>Build (or upload a prebuilt <code>.afb</code>) to the registry.</td></tr>
           <tr><td><code>clean [dir]</code></td><td>Remove build artifacts (the package's <code>.afb</code> files and <code>burn.lock</code>). <code>--cache</code> also clears the shared registry + npm caches.</td></tr>
           <tr><td><code>login</code> · <code>logout</code> · <code>whoami</code></td><td>Registry authentication.</td></tr>
@@ -1893,6 +1932,9 @@ $ ./target/release/<span class="tok-mod">burn</span> --version</pre>
       <li><a href="#packages">Packages &amp; deps</a></li>
       <li class="toc-sub"><a href="#packages-deps">Declaring deps</a></li>
       <li class="toc-sub"><a href="#packages-security">Dependency security</a></li>
+      <li class="toc-sub"><a href="#packages-compile-deps">Dependency sources</a></li>
+      <li class="toc-sub"><a href="#packages-precompiled">Precompiled WASM</a></li>
+      <li class="toc-sub"><a href="#packages-package-modes">Package modes</a></li>
       <li><a href="#cli">burn CLI</a></li>
       <li class="toc-sub"><a href="#cli-subcommands">Subcommands</a></li>
       <li class="toc-sub"><a href="#cli-flags">Flag reference</a></li>

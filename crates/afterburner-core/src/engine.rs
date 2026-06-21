@@ -167,4 +167,50 @@ pub trait Combustor: Send + Sync {
             "script mode not supported by this backend".into(),
         ))
     }
+
+    /// Register a pre-compiled self-contained (SEALED) WASM module and
+    /// return a [`ScriptId`] that [`thrust`](Self::thrust) dispatches
+    /// through the sealed execution path. The module must read JSON from
+    /// stdin and write JSON to stdout (the WASI command pattern).
+    ///
+    /// `target` is the `[runtime] target` string from the `.afb` manifest.
+    /// Only `"wasm32-wasip1"` (sealed, self-contained) is accepted.
+    /// `"wasm32-wasip1-dyn"` is explicitly rejected with a clear
+    /// not-yet-supported error - there is no silent bypass of capability
+    /// gating.
+    ///
+    /// Registration is content-addressed: calling this twice with identical
+    /// `wasm` bytes returns the same `ScriptId` and skips re-compilation.
+    ///
+    /// Default impl returns an error - only `WasmCombustor` supports this
+    /// path. Native and adaptive combustors inherit this default.
+    fn register_precompiled(&self, wasm: &[u8], target: &str) -> Result<ScriptId> {
+        let _ = (wasm, target);
+        Err(AfterburnerError::Engine(
+            "register_precompiled not supported by this backend (wasm feature required)".into(),
+        ))
+    }
+
+    /// Raw-bytes in / raw-bytes out path for sealed precompiled modules.
+    /// Feeds `input` directly to the module's stdin without JSON
+    /// serialization, and returns the raw stdout bytes without parsing.
+    /// Used by the batch and columnar precompiled paths, which encode
+    /// their own wire format (JSON array or binary columnar frame) and
+    /// need to read back the matching raw reply.
+    ///
+    /// Only `WasmCombustor` overrides this. The id must refer to a module
+    /// registered via `register_precompiled` with target `"wasm32-wasip1"`.
+    ///
+    /// Default impl errors - non-wasm backends inherit it.
+    fn thrust_sealed_raw_bytes(
+        &self,
+        id: &ScriptId,
+        input: Vec<u8>,
+        limits: &FuelGauge,
+    ) -> Result<Vec<u8>> {
+        let _ = (id, input, limits);
+        Err(AfterburnerError::Engine(
+            "thrust_sealed_raw_bytes not implemented for this backend".into(),
+        ))
+    }
 }

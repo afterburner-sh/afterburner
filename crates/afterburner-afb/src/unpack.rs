@@ -105,6 +105,7 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
     let mut manifest_toml: Option<String> = None;
     let mut manifold_json: Option<String> = None;
     let mut source: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut precompiled: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
     let to_afb_err = |e: io::Error| {
         if tripped.get() {
@@ -147,11 +148,14 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
             });
         }
 
-        // Only materialize what v0.1 consumes. Other regular files (e.g.
-        // precompiled/*) are skipped - but their bytes still flow through
-        // the capped decoder as the iterator advances, so a bomb hidden in
-        // an ignored entry is still caught.
-        let wanted = rel == "afb.toml" || rel == "manifold.json" || rel.starts_with("source/");
+        // Materialize required members plus precompiled/ (FORMAT_MINOR >= 2).
+        // Any other regular file is skipped, but its bytes still flow through
+        // the capped decoder as the iterator advances, so a bomb hidden in an
+        // ignored entry is still caught.
+        let wanted = rel == "afb.toml"
+            || rel == "manifold.json"
+            || rel.starts_with("source/")
+            || rel.starts_with("precompiled/");
         if !wanted {
             continue;
         }
@@ -172,6 +176,10 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
                         AfbError::ManifoldParse("manifold.json is not UTF-8".into())
                     })?);
             }
+            // precompiled/* stored byte-exact (binary WASM).
+            _ if rel.starts_with("precompiled/") => {
+                precompiled.insert(rel, buf);
+            }
             // source/* files are stored byte-exact, so binary assets are allowed.
             _ => {
                 source.insert(rel, buf);
@@ -188,7 +196,16 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
     let manifold: Manifold =
         serde_json::from_str(&manifold_json).map_err(|e| AfbError::ManifoldParse(e.to_string()))?;
 
-    if !source.contains_key(&manifest.package.entry) {
+    // The entry-present check is waived when the package is WASM-only: a set
+    // `runtime.target` with at least one matching `precompiled/<target>/`
+    // member means the runtime will load the WASM directly, so the source/
+    // entry is legitimately absent.
+    let is_wasm_only = manifest.runtime.target.as_deref().is_some_and(|t| {
+        precompiled
+            .keys()
+            .any(|k| k.starts_with(&format!("precompiled/{t}/")))
+    });
+    if !is_wasm_only && !source.contains_key(&manifest.package.entry) {
         return Err(AfbError::EntryMissing(manifest.package.entry.clone()));
     }
 
@@ -197,5 +214,6 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
         manifest,
         manifold,
         source,
+        precompiled,
     })
 }

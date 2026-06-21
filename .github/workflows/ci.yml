@@ -60,17 +60,22 @@ jobs:
         run: cargo clippy -p afterburner-afb -p afterburner-cloud --all-targets -- -D warnings
 
   # ---------------------------------------------------------------
-  # Workspace-wide library tests (no `bin` feature).
-  # Exercises the library API surface across every crate — the path
-  # downstream `cargo install afterburner` users compile against.
-  # Heavyweight: every wasmtime engine instantiation cold-starts the
-  # 8 MB plugin, and there are ~130 such tests in this pass. 60-min
-  # ceiling accommodates a cold GH 4-vCPU runner.
+  # Workspace-wide library tests (no `bin` feature), split into three
+  # parallel jobs to keep each under ~26m wall-clock.
+  #
+  # test-lib-wasi:   afterburner-wasi alone (wasmtime + 8 MB plugin).
+  # test-lib-compat: afterburner-node-compat, afterburner-ignite,
+  #                  afterburner-plugin (3 crates; heavy polyfill cost).
+  # test-lib-engine: the remaining 5 lib crates: afterburner,
+  #                  afterburner-core, afterburner-flow,
+  #                  afterburner-adaptive, afterburner-thrust.
+  # Together lib-compat + lib-engine = the original lib-rest 8 crates,
+  # none dropped, none doubled.
   # ---------------------------------------------------------------
-  test-lib-workspace:
-    name: test / lib-workspace
+  test-lib-wasi:
+    name: test / lib-wasi
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -80,9 +85,43 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
       - uses: Swatinem/rust-cache@v2
         with:
-          key: lib-workspace
-      - name: cargo test (workspace, default features)
-        run: cargo test --workspace --no-fail-fast -- --test-threads=1
+          key: lib-wasi
+      - name: cargo test (afterburner-wasi, default features)
+        run: cargo test -p afterburner-wasi --no-fail-fast -- --test-threads=1
+
+  test-lib-compat:
+    name: test / lib-compat
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip1
+          rustflags: ''
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lib-compat
+      - name: cargo test (node-compat + ignite + plugin, default features)
+        run: cargo test -p afterburner-node-compat -p afterburner-ignite -p afterburner-plugin --no-fail-fast -- --test-threads=1
+
+  test-lib-engine:
+    name: test / lib-engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip1
+          rustflags: ''
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lib-engine
+      - name: cargo test (afterburner + core + flow + adaptive + thrust, default features)
+        run: cargo test --workspace --exclude afterburner-wasi --exclude afterburner-afb --exclude afterburner-cloud --exclude afterburner-node-compat --exclude afterburner-ignite --exclude afterburner-plugin --no-fail-fast -- --test-threads=1
 
   # Pure host-only package crates: the `.afb` format and the registry
   # client. No wasm target, libclang, or 8 MB plugin cold-start — fast,
@@ -167,9 +206,9 @@ jobs:
               --test b5_shim
             timeout: 55
 
-          # Full network protocol stack. `http3` brings in QUIC; only
-          # this tier needs it (every other tier ignores quinn/h3).
-          - tier: cli-network
+          # Full network protocol stack split into two parallel jobs.
+          # `http3` brings in QUIC; both halves need the feature.
+          - tier: cli-network-a
             features: 'bin http3'
             tests: >-
               --test b7_dgram
@@ -181,6 +220,11 @@ jobs:
               --test b_http2_client
               --test b_http2_server
               --test b_http3_quic
+            timeout: 40
+
+          - tier: cli-network-b
+            features: 'bin http3'
+            tests: >-
               --test b_websocket
               --test b_eventsource
               --test b_tls_check_server_identity
@@ -190,11 +234,12 @@ jobs:
               --test b_dns_resolveany_execfilesync
               --test b_http_header_validators
               --test b_fetch_extras
-            timeout: 55
+            timeout: 40
 
           # Node compat I/O layer: fs / streams / buffer / events / zlib.
-          # Shared fs_host + stream polyfills — failures localize here.
-          - tier: cli-node-io
+          # Split into two parallel jobs; shared fs_host + stream
+          # polyfills -- failures in either half localize to this layer.
+          - tier: cli-node-io-a
             features: 'bin'
             tests: >-
               --test b_fs_classes
@@ -204,17 +249,25 @@ jobs:
               --test b_buffer_extras
               --test b_buffer_isutf8_test_mock
               --test b_events_add_abort_listener
+            timeout: 35
+
+          - tier: cli-node-io-b
+            features: 'bin'
+            tests: >-
               --test b_events_buffer_stream_extras
               --test b_zlib_brotli
               --test b_zlib_process_fs_extras
               --test b_zlib_streaming
               --test b_uint8array_codec
               --test b_filereader_sqlite_constants
-            timeout: 55
+            timeout: 35
 
           # Node compat runtime: globals / util / intl / iterators /
           # web globals / performance / process-level.
-          - tier: cli-node-runtime
+          # Split into three parallel jobs (was one 90-min entry).
+          # b_node_test_runner (~10m) moved to runtime-b to keep
+          # runtime-a under 26m (was killed at 35m in run 27888012472).
+          - tier: cli-node-runtime-a
             features: 'bin'
             tests: >-
               --test b_node26_extras
@@ -222,11 +275,16 @@ jobs:
               --test b_node_compat_round2
               --test b_node_compat_round3
               --test b_node_surface_round4
-              --test b_node_test_runner
               --test b_intl_and_clone
               --test b_iterator_helpers
               --test b_async_iterator_global
               --test b_scheduler_dispose_stack
+            timeout: 45
+
+          - tier: cli-node-runtime-b
+            features: 'bin'
+            tests: >-
+              --test b_node_test_runner
               --test b_symbol_dispose
               --test b_blob_url
               --test b_random_bytes_inspect_custom
@@ -237,6 +295,11 @@ jobs:
               --test b_web_streams
               --test b_performance_observer
               --test b_performance_user_timing
+            timeout: 45
+
+          - tier: cli-node-runtime-c
+            features: 'bin'
+            tests: >-
               --test b_os_dirs
               --test b_os_timers_extras
               --test b_v8_serialize_compat
@@ -246,7 +309,7 @@ jobs:
               --test b_async_hooks_await
               --test b_vm_module_records
               --test b_vm_measure_worker_untransferable
-            timeout: 90
+            timeout: 45
 
           # WASM loader + node:vm + cross-process atomics.
           # Shares the wasm-loader host code; failures here implicate

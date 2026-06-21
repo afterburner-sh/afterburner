@@ -9,6 +9,7 @@
 //! tooling, and shares the digest the registry content-addresses by.
 
 use crate::error::{CloudError, Result};
+use afterburner_afb::manifest::DepReq;
 use afterburner_afb::{Manifest, Manifold};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -97,7 +98,9 @@ pub fn add_dependency(dir: &Path, qualified: &str, digest_hex: &str) -> Result<(
         .map_err(|e| CloudError::Package(format!("reading {}: {e}", manifest_path.display())))?;
     let mut manifest = Manifest::parse(&src)?;
     let pin = format!("sha256:{}", digest_hex.trim_start_matches("sha256:"));
-    manifest.dependencies.insert(qualified.to_string(), pin);
+    manifest
+        .dependencies
+        .insert(qualified.to_string(), DepReq::Pin(pin));
     let out = manifest.to_toml_string()?;
     write_atomic_text(&manifest_path, &out)
 }

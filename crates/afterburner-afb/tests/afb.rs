@@ -269,6 +269,190 @@ fn entry_not_in_archive_rejected() {
     ));
 }
 
+// ---- precompiled/ (FORMAT_MINOR 2) ----------------------------------------
+
+fn wasm_manifest_with_target(target: &str) -> Manifest {
+    Manifest::parse(&format!(
+        r#"
+[format]
+version = "1.0"
+
+[package]
+name = "hello"
+namespace = "burn"
+version = "0.1.0"
+language = "js"
+entry = "source/main.js"
+
+[runtime]
+min = "0.1.0"
+target = "{target}"
+"#,
+    ))
+    .expect("manifest with target parses")
+}
+
+#[test]
+fn precompiled_roundtrip() {
+    // Fake WASM bytes - just needs to be non-trivial binary content.
+    let wasm: Vec<u8> = (0u8..=255).chain(0u8..=127).collect();
+    let target = "wasm32-wasip1";
+    let rel = format!("precompiled/{target}/main.wasm");
+
+    let (bytes, _) = Builder::new(wasm_manifest_with_target(target), Manifold::sealed())
+        .source("source/main.js", HELLO_SOURCE)
+        .precompiled(rel.clone(), wasm.clone())
+        .build()
+        .expect("packs with precompiled member");
+
+    let afb = Afb::from_bytes(&bytes).expect("unpacks");
+
+    // The WASM bytes come back byte-identical.
+    assert_eq!(
+        afb.precompiled.get(&rel).map(Vec::as_slice),
+        Some(wasm.as_slice()),
+        "precompiled bytes must survive the round trip"
+    );
+    // source/ is still intact.
+    assert_eq!(afb.entry_source().unwrap(), HELLO_SOURCE);
+    // runtime.target survives.
+    assert_eq!(afb.manifest.runtime.target.as_deref(), Some(target));
+}
+
+#[test]
+fn precompiled_back_compat_old_afb() {
+    // An old-style .afb (no precompiled member) must unpack to an empty map.
+    let (bytes, _) = build_hello();
+    let afb = Afb::from_bytes(&bytes).expect("unpacks");
+    assert!(
+        afb.precompiled.is_empty(),
+        "no precompiled/ in a v0.1 package: map must be empty"
+    );
+}
+
+#[test]
+fn precompiled_reproducibility() {
+    let wasm: Vec<u8> = (0u8..=255).collect();
+    let rel = "precompiled/wasm32-wasip1/main.wasm";
+
+    let build = || {
+        Builder::new(
+            wasm_manifest_with_target("wasm32-wasip1"),
+            Manifold::sealed(),
+        )
+        .source("source/main.js", HELLO_SOURCE)
+        .precompiled(rel, wasm.clone())
+        .build()
+        .expect("packs")
+    };
+
+    let (a, da) = build();
+    let (b, db) = build();
+    assert_eq!(
+        a, b,
+        "identical inputs including precompiled member must yield byte-identical .afb"
+    );
+    assert_eq!(da, db);
+}
+
+// ---- build_wasm_only (STEP 1) -----------------------------------------------
+
+/// A builder with source + precompiled, built via `build_wasm_only`, must
+/// produce an `.afb` that has NO `source/` members but DOES have all
+/// `precompiled/` members byte-identical.
+#[test]
+fn build_wasm_only_drops_source_keeps_precompiled() {
+    let wasm: Vec<u8> = (0u8..=255).chain(0u8..=127).collect();
+    let target = "wasm32-wasip1";
+    let rel = format!("precompiled/{target}/main.wasm");
+
+    let (bytes, _) = Builder::new(wasm_manifest_with_target(target), Manifold::sealed())
+        .source("source/main.js", HELLO_SOURCE)
+        .precompiled(rel.clone(), wasm.clone())
+        .build_wasm_only()
+        .expect("build_wasm_only succeeds when a precompiled member is present");
+
+    let afb = Afb::from_bytes(&bytes).expect("wasm-only .afb unpacks");
+
+    // No source/ members.
+    assert!(
+        afb.source.is_empty(),
+        "wasm-only .afb must contain no source/ members, got: {:?}",
+        afb.source.keys().collect::<Vec<_>>()
+    );
+
+    // Precompiled member is present and byte-identical.
+    let got = afb
+        .precompiled
+        .get(&rel)
+        .expect("precompiled member must be present in wasm-only .afb");
+    assert_eq!(got, &wasm, "precompiled bytes must survive build_wasm_only");
+
+    // runtime.target is preserved.
+    assert_eq!(afb.manifest.runtime.target.as_deref(), Some(target));
+}
+
+/// `build_wasm_only` without a precompiled member must error, never produce an
+/// empty `.afb`.
+#[test]
+fn build_wasm_only_errors_without_precompiled_member() {
+    let result = Builder::new(hello_manifest(), Manifold::sealed())
+        .source("source/main.js", HELLO_SOURCE)
+        .build_wasm_only();
+
+    assert!(
+        result.is_err(),
+        "build_wasm_only must fail when no precompiled/ member is present"
+    );
+}
+
+/// `build_wasm_only` output is reproducible - same inputs yield byte-identical `.afb`.
+#[test]
+fn build_wasm_only_is_reproducible() {
+    let wasm: Vec<u8> = (0u8..=255).collect();
+    let rel = "precompiled/wasm32-wasip1/main.wasm";
+    let target = "wasm32-wasip1";
+
+    let build = || {
+        Builder::new(wasm_manifest_with_target(target), Manifold::sealed())
+            .source("source/main.js", HELLO_SOURCE)
+            .precompiled(rel, wasm.clone())
+            .build_wasm_only()
+            .expect("build_wasm_only")
+    };
+
+    let (a, da) = build();
+    let (b, db) = build();
+    assert_eq!(
+        a, b,
+        "build_wasm_only with identical inputs must produce byte-identical output"
+    );
+    assert_eq!(da, db);
+}
+
+/// `build()` on the same builder data still includes source - `build_wasm_only`
+/// does not mutate behavior visible to `build()`.
+#[test]
+fn build_still_includes_source_after_omit_source_call() {
+    let wasm: Vec<u8> = b"\x00asm\x01\x00\x00\x00".to_vec();
+    let target = "wasm32-wasip1";
+
+    let (bytes, _) = Builder::new(wasm_manifest_with_target(target), Manifold::sealed())
+        .source("source/main.js", HELLO_SOURCE)
+        .precompiled("precompiled/wasm32-wasip1/main.wasm", wasm)
+        // omit_source(true) followed by build() must NOT drop source -
+        // omit_source only takes effect through build_wasm_only().
+        .omit_source(true)
+        .build()
+        .expect("build() with omit_source flag set");
+
+    let afb = Afb::from_bytes(&bytes).expect("unpacks");
+    assert!(
+        afb.source.contains_key("source/main.js"),
+        "build() must preserve source even when omit_source(true) was called"
+    );
+}
+
 // ---- helpers --------------------------------------------------------------
 
 fn append(ar: &mut tar::Builder<Vec<u8>>, path: &str, data: &[u8]) {
