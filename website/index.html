@@ -3385,7 +3385,7 @@
           title: '<code>(x) =&gt; x * 2</code> over 1 billion <code>Float64</code> rows',
           sub: 'Single-column compute-light transform · 1B rows · per CPU core.',
           bars: [
-            { name: 'Afterburner',                value: 936000, brand: true, note: '~3× over PL/V8' },
+            { name: 'Afterburner',                value: 1453000, brand: true, note: '~5x over PL/V8' },
             { name: 'PL/V8',                      value: 300000,              hint: 'Postgres in-process V8' },
             { name: 'Snowflake JS UDF',           value:  30000,              hint: 'V8 subprocess, per-row' },
             { name: 'BigQuery JS UDF (per-row)',  value:  25000,              hint: 'V8 subprocess, per-row' },
@@ -3396,7 +3396,7 @@
           title: '<code>(s) =&gt; s.length</code> over 1 billion Utf8 rows',
           sub: 'String length · ~99% short strings, ~1% long URLs · per CPU core.',
           bars: [
-            { name: 'Afterburner',                value: 167000, brand: true, note: '~5× over PL/V8' },
+            { name: 'Afterburner',                value: 167000, brand: true, note: '~5x over PL/V8' },
             { name: 'PL/V8',                      value:  35000,              hint: 'Postgres in-process V8' },
             { name: 'Snowflake JS UDF',           value:  18000,              hint: 'V8 subprocess, per-row' },
             { name: 'BigQuery JS UDF (per-row)',  value:  14000,              hint: 'V8 subprocess, per-row' },
@@ -3407,7 +3407,7 @@
           title: '32-column <code>Float64</code> sum-of-columns',
           sub: '32 column reads + 32 adds per row · 1B rows · per CPU core. Interpreter-bound - per-row dispatch in the peer tier dominates.',
           bars: [
-            { name: 'Afterburner',                value: 48000, brand: true, note: '~6× over PL/V8' },
+            { name: 'Afterburner',                value: 48000, brand: true, note: '~6x over PL/V8' },
             { name: 'PL/V8',                      value:  8000,              hint: 'Postgres in-process V8' },
             { name: 'Snowflake JS UDF',           value:  3500,              hint: 'V8 subprocess, per-row' },
             { name: 'BigQuery JS UDF (per-row)',  value:  2500,              hint: 'V8 subprocess, per-row' },
