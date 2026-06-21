@@ -2881,6 +2881,16 @@
             <code>get_env</code>.
           </p>
         </div>
+        <div class="feat reveal">
+          <div class="feat__num">10</div>
+          <h3>Cargo-style dependencies</h3>
+          <p>Declare registry packages, local paths, or git repos in <code>afb.toml [dependencies]</code>. <code>burn compile</code> resolves the transitive closure per source, digest-pins every entry, and links them into one self-contained module. No copy-paste, no manual fetch.</p>
+        </div>
+        <div class="feat reveal">
+          <div class="feat__num">11</div>
+          <h3>Precompiled, source-optional packaging</h3>
+          <p><code>burn compile</code> ahead-of-time compiles your package to <code>precompiled/wasm32-wasip1/main.wasm</code>: no per-call JS compile, cold starts stay sub-millisecond. <code>burn package --wasm-only</code> ships the WASM without source; the default interactive mode asks which you want.</p>
+        </div>
       </div>
     </div>
   </section>
