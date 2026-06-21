@@ -61,6 +61,16 @@ pub fn resolve_closure(
         }
         let req = parse_dep_req(&value)?;
         let r = match req {
+            // Path and Git deps are not resolved through the registry index.
+            // `resolve_closure` is only called with registry-style string maps,
+            // so `parse_dep_req` will never produce these variants here.
+            // The transitive-dep queue is seeded exclusively from `registry_deps()`.
+            DepReq::Path(_) | DepReq::Git { .. } => {
+                return Err(AfbError::Dependency {
+                    coord: coord.clone(),
+                    detail: "path/git dep reached registry resolver (this is a bug)".into(),
+                });
+            }
             DepReq::Pin(ref pin) => {
                 let hex_part = pin.strip_prefix("sha256:").unwrap_or("");
                 // Find the index entry whose digest matches the pin.
@@ -102,8 +112,10 @@ pub fn resolve_closure(
         };
 
         // Enqueue transitive deps from the resolved package's manifest.
+        // Only registry deps (Pin + Range) participate in registry resolution;
+        // Path and Git deps are skipped here (resolved locally at compile time).
         if let Some(manifest) = index.manifest(&coord, &r.version) {
-            for (tc, tv) in manifest.dependencies {
+            for (tc, tv) in manifest.registry_deps() {
                 if !resolved.contains_key(&tc) {
                     queue.push((tc, tv));
                 }
@@ -121,7 +133,7 @@ mod tests {
     use std::collections::HashMap;
 
     /// One published version of a package in the mock index:
-    /// (version, content digest, that version's manifest deps).
+    /// (version, content digest, that version's manifest deps as raw strings).
     type MockVersion = (semver::Version, [u8; 32], BTreeMap<String, String>);
 
     /// Minimal in-memory package index for tests.
@@ -164,8 +176,12 @@ mod tests {
             let entries = self.entries.get(coord)?;
             let (_, _, deps) = entries.iter().find(|(v, _, _)| v == version)?;
             // Build a minimal valid manifest carrying the recorded deps.
+            // Convert raw string values to DepReq (all are registry-style strings in tests).
             let mut m = minimal_manifest(coord, &version.to_string());
-            m.dependencies = deps.clone();
+            m.dependencies = deps
+                .iter()
+                .map(|(k, v)| (k.clone(), parse_dep_req(v).unwrap()))
+                .collect();
             Some(m)
         }
     }

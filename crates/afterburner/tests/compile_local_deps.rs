@@ -3,17 +3,17 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Integration test: `burn compile --packages-dir` resolves transitive local
-//! dependencies so external-dep packages get a precompiled WASM member.
+//! Integration test: `burn compile` resolves transitive path dependencies
+//! declared as `{ path = "../..." }` in `afb.toml`.
 //!
 //! Two-package fixture:
 //!   leaf - no deps, exports a pure function
-//!   root - depends on leaf (`[dependencies] "x/leaf" = ">=0.1.0"`), calls it
+//!   root - depends on leaf via `{ path = "../leaf" }`, calls it
 //!
-//! With `--packages-dir` pointing at the fixture root, `burn compile root`
-//! must produce an `.afb` with `precompiled/wasm32-wasip1/main.wasm` present
-//! AND invoking it must return the value computed through leaf's code (proving
-//! the closure was linked, not just that a wasm member exists).
+//! `burn compile root` must produce an `.afb` with
+//! `precompiled/wasm32-wasip1/main.wasm` present AND invoking it must return
+//! the value computed through leaf's code (proving the closure was linked,
+//! not just that a wasm member exists).
 //!
 //! Skips cleanly when `javy` is absent.
 
@@ -59,7 +59,7 @@ fn scaffold_leaf(packages_dir: &Path) {
     write_file(&dir, "source/main.js", "module.exports = (x) => x * 7;\n");
 }
 
-/// Write the `root` package: depends on leaf and calls it.
+/// Write the `root` package: depends on leaf via a path dep and calls it.
 fn scaffold_root(packages_dir: &Path) {
     let dir = packages_dir.join("root");
     write_file(
@@ -69,7 +69,7 @@ fn scaffold_root(packages_dir: &Path) {
          [package]\nname = \"root\"\nnamespace = \"x\"\n\
          version = \"0.1.0\"\nlanguage = \"javascript\"\nentry = \"source/main.js\"\n\
          [runtime]\nmin = \"0.1.0\"\n\
-         [dependencies]\n\"x/leaf\" = \">=0.1.0\"\n",
+         [dependencies]\n\"x/leaf\" = { path = \"../leaf\" }\n",
     );
     write_file(
         &dir,
@@ -85,10 +85,10 @@ fn scaffold_root(packages_dir: &Path) {
 }
 
 #[test]
-fn compile_with_local_dep_produces_precompiled_member() {
+fn compile_with_path_dep_produces_precompiled_member() {
     if !javy_available() {
         eprintln!(
-            "SKIP compile_with_local_dep_produces_precompiled_member: \
+            "SKIP compile_with_path_dep_produces_precompiled_member: \
              `javy` not found on PATH; install javy 8.1.1 to run this test"
         );
         return;
@@ -104,6 +104,7 @@ fn compile_with_local_dep_produces_precompiled_member() {
     let root_dir = packages_dir.join("root");
     let out_afb = tmp.path().join("root.afb");
 
+    // No --packages-dir flag: leaf is found via { path = "../leaf" } in afb.toml.
     let result = Command::new(BURN)
         .env("BURN_QUIET", "1")
         .args([
@@ -111,8 +112,6 @@ fn compile_with_local_dep_produces_precompiled_member() {
             root_dir.to_str().unwrap(),
             "-o",
             out_afb.to_str().unwrap(),
-            "--packages-dir",
-            packages_dir.to_str().unwrap(),
         ])
         .output()
         .expect("spawn burn compile");
@@ -121,7 +120,7 @@ fn compile_with_local_dep_produces_precompiled_member() {
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(
         result.status.success(),
-        "burn compile with --packages-dir failed\nstdout: {stdout}\nstderr: {stderr}"
+        "burn compile with path dep failed\nstdout: {stdout}\nstderr: {stderr}"
     );
 
     // Must NOT fall back to source-only (that note would appear on stderr).
@@ -138,7 +137,7 @@ fn compile_with_local_dep_produces_precompiled_member() {
     let wasm_bytes = afb
         .precompiled
         .get(wasm_key)
-        .unwrap_or_else(|| panic!("{wasm_key} must be present when local deps are resolved"));
+        .unwrap_or_else(|| panic!("{wasm_key} must be present when path deps are resolved"));
     assert!(!wasm_bytes.is_empty(), "precompiled wasm must be non-empty");
 
     // runtime.target must be set.
@@ -169,5 +168,56 @@ fn compile_with_local_dep_produces_precompiled_member() {
         out["result"],
         json!(42),
         "precompiled output must use leaf's multiply-by-7 logic: got {out}"
+    );
+}
+
+#[test]
+fn path_dep_missing_dir_errors_clearly() {
+    // Root declares a path dep to a missing directory; burn compile must fail
+    // with a clear error (not a panic or unhelpful message).
+    let tmp = tempfile::tempdir().unwrap();
+    let packages_dir = tmp.path().join("packages");
+    std::fs::create_dir_all(&packages_dir).unwrap();
+
+    let dir = packages_dir.join("root_missing");
+    write_file(
+        &dir,
+        "afb.toml",
+        "[format]\nversion = \"1.0\"\n\
+         [package]\nname = \"root_missing\"\nnamespace = \"x\"\n\
+         version = \"0.1.0\"\nlanguage = \"javascript\"\nentry = \"source/main.js\"\n\
+         [runtime]\nmin = \"0.1.0\"\n\
+         [dependencies]\n\"x/absent\" = { path = \"../absent\" }\n",
+    );
+    write_file(
+        &dir,
+        "manifold.json",
+        r#"{"fs":"None","net":"None","crypto":false,"child_process":false,"env":"None","allow_exit":false,"http_timeout_ms":null,"listen":"None"}"#,
+    );
+    write_file(
+        &dir,
+        "source/main.js",
+        "const dep = require('x/absent');\nmodule.exports = () => dep();\n",
+    );
+
+    let out_afb = tmp.path().join("root_missing.afb");
+    let result = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args([
+            "compile",
+            dir.to_str().unwrap(),
+            "-o",
+            out_afb.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn burn compile");
+
+    // Either the compile falls back to source-only (exit 0, note on stderr)
+    // or exits non-zero - either is acceptable. The important thing is that
+    // stderr contains a descriptive message mentioning the missing path dep.
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("absent") || stderr.contains("missing") || stderr.contains("path"),
+        "error message should mention the missing path dep: {stderr}"
     );
 }

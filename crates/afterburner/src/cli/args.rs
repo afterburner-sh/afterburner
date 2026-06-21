@@ -311,10 +311,6 @@ pub enum Cmd {
         /// Requires `javy` on PATH. Opt-in; the default remains source-only.
         #[arg(long)]
         compile: bool,
-        /// Directory containing sibling packages for local dep resolution
-        /// (default: parent of the package dir). Only relevant with `--compile`.
-        #[arg(long = "packages-dir", value_name = "PATH")]
-        packages_dir: Option<PathBuf>,
     },
     /// Build a pre-compiled `.afb`: ahead-of-time compiles `source/` to a
     /// self-contained WASM module (via `javy`) and bundles it alongside the
@@ -330,11 +326,6 @@ pub enum Cmd {
         /// Output path (default: `./<ns>-<name>-<ver>.afb`).
         #[arg(short = 'o', long = "out", value_name = "FILE")]
         out: Option<PathBuf>,
-        /// Directory containing sibling packages for local dep resolution
-        /// (default: parent of the package dir). Overrides the monorepo layout
-        /// assumption when packages live outside the standard location.
-        #[arg(long = "packages-dir", value_name = "PATH")]
-        packages_dir: Option<PathBuf>,
     },
     /// Run the package's tests (every file under `tests/`).
     Test {
@@ -375,10 +366,6 @@ pub enum Cmd {
         /// escape hatch.
         #[arg(long)]
         no_compile: bool,
-        /// Directory containing sibling packages for local dep resolution.
-        /// Only relevant with `--compile`.
-        #[arg(long = "packages-dir", value_name = "PATH")]
-        packages_dir: Option<PathBuf>,
     },
     /// Hide a version from resolution (or restore it with `--undo`).
     Yank {

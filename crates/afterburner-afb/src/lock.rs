@@ -92,6 +92,8 @@ impl Lock {
                     Ok(v) => vreq.matches(&v),
                     Err(_) => false,
                 },
+                // Path and Git deps are not tracked in the registry lockfile.
+                DepReq::Path(_) | DepReq::Git { .. } => true,
             };
             if !ok {
                 return false;

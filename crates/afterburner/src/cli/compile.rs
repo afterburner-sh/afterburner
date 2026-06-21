@@ -24,9 +24,11 @@
 //! `javy` is required only here - the runtime never shells to it.
 //! Required version: 8.1.1.
 
+use afterburner_cloud::afterburner_afb::Afb;
 use afterburner_cloud::afterburner_afb::digest::{digest, hex};
+use afterburner_cloud::afterburner_afb::manifest::{DepReq, GitRef};
 use afterburner_cloud::afterburner_afb::pack::Builder;
-use afterburner_cloud::afterburner_afb::{Afb, DepReq, parse_dep_req};
+use afterburner_cloud::lock::{LOCKFILE_NAME, Lockfile};
 use afterburner_cloud::pkg::{self, LocalPackage};
 use afterburner_node_compat::PLENUM_BUNDLE;
 use anyhow::{Context, Result};
@@ -36,25 +38,27 @@ use std::path::{Path, PathBuf};
 use super::registry::{coord_str, print_digest, transpile_ts_sources};
 use super::style;
 
-/// Resolve the transitive closure of local filesystem dependencies for a package.
+/// Resolve the transitive closure of dependencies for a package.
 ///
-/// For each `"ns/name" = range_or_pin` entry in `deps`, this function loads the
-/// sibling package from `packages_dir/<name>/`, builds a source `.afb`, validates
-/// the version or digest against the declared requirement, and recurses into that
-/// dep's own `[dependencies]`. Returns the full closure in deps-before-dependents
-/// order (leaves first), deduped by coordinate. Mirrors `resolve_dep_closure` in
-/// the burndb runtime.
+/// Dispatches on each [`DepReq`] variant:
+/// - `Path`: loads the sibling from the path relative to `depending_dir`,
+///   builds a source `.afb`, and recurses into its transitive deps.
+/// - `Pin`/`Range`: looks up the content-addressed cache (populated by
+///   `burn install`). For `Range`, reads `burn.lock` in `depending_dir` to
+///   find the resolved digest. Fails clearly when the cache is empty.
+/// - `Git`: clones the repo into a stable temp dir keyed by url+ref,
+///   builds a source `.afb`, and recurses.
 ///
-/// Returns an error if any sibling directory is absent or the version check fails,
-/// so the caller's source-only fallback fires with a clear message.
-fn resolve_local_deps(
-    deps: &BTreeMap<String, String>,
-    packages_dir: &Path,
+/// Returns the full closure in deps-before-dependents order (leaves first),
+/// deduped by coordinate.
+fn resolve_deps(
+    deps: &BTreeMap<String, DepReq>,
+    depending_dir: &Path,
 ) -> Result<Vec<(String, Afb)>> {
     let mut resolved: BTreeMap<String, Afb> = BTreeMap::new();
     let mut order: Vec<String> = Vec::new();
-    for (coord, value) in deps {
-        resolve_one(coord, value, packages_dir, &mut resolved, &mut order)?;
+    for (coord, req) in deps {
+        resolve_one_dep(coord, req, depending_dir, &mut resolved, &mut order)?;
     }
     Ok(order
         .into_iter()
@@ -65,68 +69,189 @@ fn resolve_local_deps(
         .collect())
 }
 
-/// Recursively resolve a single dependency and its transitive closure, appending
-/// to `resolved`/`order` in topological order (leaves before dependents).
-fn resolve_one(
+/// Recursively resolve a single dependency and its transitive closure,
+/// appending to `resolved`/`order` in topological order (leaves before
+/// dependents).
+fn resolve_one_dep(
     coord: &str,
-    value: &str,
-    packages_dir: &Path,
+    req: &DepReq,
+    depending_dir: &Path,
     resolved: &mut BTreeMap<String, Afb>,
     order: &mut Vec<String>,
 ) -> Result<()> {
     if resolved.contains_key(coord) {
         return Ok(()); // diamond dep - resolve each coordinate once
     }
-    // Derive local dir name from "ns/name" -> "name".
-    let local_name = coord.rsplit_once('/').map(|(_, n)| n).unwrap_or(coord);
-    let dep_dir = packages_dir.join(local_name);
-    let mut dep_local = pkg::LocalPackage::load(&dep_dir)
-        .with_context(|| format!("loading local dep {coord:?} from {}", dep_dir.display()))?;
-    super::registry::transpile_ts_sources(&mut dep_local)?;
-    let (dep_bytes, _) = dep_local
-        .build()
-        .with_context(|| format!("building dep {coord:?}"))?;
-    let dep_afb =
-        Afb::from_bytes(&dep_bytes).with_context(|| format!("parsing built dep {coord:?}"))?;
 
-    // Validate the declared requirement against the local dep's version/digest.
-    let req = parse_dep_req(value)
-        .with_context(|| format!("dep {coord:?}: invalid requirement {value:?}"))?;
-    match &req {
-        DepReq::Pin(pin) => {
-            let actual = format!("sha256:{}", hex(&dep_afb.digest));
-            if &actual != pin {
-                anyhow::bail!("local dep {coord:?} digest {actual} does not match pinned {pin}");
+    match req {
+        DepReq::Path(p) => {
+            let dep_dir = depending_dir.join(p);
+            let mut dep_local = pkg::LocalPackage::load(&dep_dir).with_context(|| {
+                format!(
+                    "loading path dep {coord:?} from {} (relative to {})",
+                    dep_dir.display(),
+                    depending_dir.display()
+                )
+            })?;
+            super::registry::transpile_ts_sources(&mut dep_local)?;
+            let (dep_bytes, _) = dep_local
+                .build()
+                .with_context(|| format!("building path dep {coord:?}"))?;
+            let dep_afb = Afb::from_bytes(&dep_bytes)
+                .with_context(|| format!("parsing built path dep {coord:?}"))?;
+
+            // The dep's own path deps are relative to its own directory.
+            let dep_pkg_dir = dep_dir.canonicalize().unwrap_or_else(|_| dep_dir.clone());
+            let child_deps = dep_afb.manifest.dependencies.clone();
+            resolved.insert(coord.to_string(), dep_afb);
+            for (child_coord, child_req) in &child_deps {
+                resolve_one_dep(child_coord, child_req, &dep_pkg_dir, resolved, order)?;
             }
+            order.push(coord.to_string());
         }
-        DepReq::Range(vreq) => {
-            let dep_ver =
-                semver::Version::parse(&dep_afb.manifest.package.version).with_context(|| {
-                    format!(
-                        "local dep {coord:?} has invalid version {:?}",
-                        dep_afb.manifest.package.version
+
+        DepReq::Pin(pin) => {
+            let hex_str = pin.trim_start_matches("sha256:").to_string();
+            let cache_path = afterburner_cloud::cache::path_for(&hex_str)
+                .with_context(|| format!("cache path for dep {coord:?}"))?;
+            if !cache_path.exists() {
+                anyhow::bail!(
+                    "registry dep {coord:?} (pin {pin}) is not in the local cache; \
+                     run `burn install` first"
+                );
+            }
+            let bytes = std::fs::read(&cache_path)
+                .with_context(|| format!("reading cached dep {coord:?}"))?;
+            let dep_afb =
+                Afb::from_bytes(&bytes).with_context(|| format!("parsing cached dep {coord:?}"))?;
+            let child_deps = dep_afb.manifest.dependencies.clone();
+            resolved.insert(coord.to_string(), dep_afb);
+            for (child_coord, child_req) in &child_deps {
+                resolve_one_dep(child_coord, child_req, depending_dir, resolved, order)?;
+            }
+            order.push(coord.to_string());
+        }
+
+        DepReq::Range(_) => {
+            // Range dep: look up the resolved digest in burn.lock.
+            let lock_path = depending_dir.join(LOCKFILE_NAME);
+            let lock_text = std::fs::read_to_string(&lock_path).with_context(|| {
+                format!(
+                    "registry dep {coord:?} is a range but no {LOCKFILE_NAME} found in {}; \
+                     run `burn install` first",
+                    depending_dir.display()
+                )
+            })?;
+            let lock = Lockfile::parse(&lock_text)
+                .with_context(|| format!("parsing {LOCKFILE_NAME} for dep {coord:?}"))?;
+            let hex_str = lock
+                .packages
+                .iter()
+                .find(|p| p.name == coord)
+                .map(|p| p.digest.trim_start_matches("sha256:").to_string())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "registry dep {coord:?} not found in {LOCKFILE_NAME}; \
+                         run `burn install` first"
                     )
                 })?;
-            if !vreq.matches(&dep_ver) {
-                anyhow::bail!("local dep {coord:?} version {dep_ver} does not satisfy {vreq}");
+            let cache_path = afterburner_cloud::cache::path_for(&hex_str)
+                .with_context(|| format!("cache path for dep {coord:?}"))?;
+            if !cache_path.exists() {
+                anyhow::bail!(
+                    "registry dep {coord:?} is not in the local cache \
+                     (expected sha256:{hex_str}); run `burn install` first"
+                );
             }
+            let bytes = std::fs::read(&cache_path)
+                .with_context(|| format!("reading cached dep {coord:?}"))?;
+            let dep_afb =
+                Afb::from_bytes(&bytes).with_context(|| format!("parsing cached dep {coord:?}"))?;
+            let child_deps = dep_afb.manifest.dependencies.clone();
+            resolved.insert(coord.to_string(), dep_afb);
+            for (child_coord, child_req) in &child_deps {
+                resolve_one_dep(child_coord, child_req, depending_dir, resolved, order)?;
+            }
+            order.push(coord.to_string());
+        }
+
+        DepReq::Git { url, reference } => {
+            let ref_str = match reference {
+                GitRef::Tag(t) => t.clone(),
+                GitRef::Branch(b) => b.clone(),
+                GitRef::Rev(r) => r.clone(),
+            };
+            // Stable temp dir keyed by url+ref so repeated builds skip re-cloning.
+            let cache_key = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                url.hash(&mut h);
+                ref_str.hash(&mut h);
+                format!("{:x}", h.finish())
+            };
+            let git_cache = std::env::temp_dir().join("burn-git-deps").join(&cache_key);
+
+            if !git_cache.join("afb.toml").exists() {
+                if git_cache.exists() {
+                    std::fs::remove_dir_all(&git_cache).ok();
+                }
+                std::fs::create_dir_all(&git_cache)
+                    .with_context(|| format!("creating git cache dir for {coord:?}"))?;
+
+                let clone_status = match reference {
+                    GitRef::Tag(_) | GitRef::Branch(_) => std::process::Command::new("git")
+                        .args(["clone", "--depth", "1", "--branch", &ref_str, url, "."])
+                        .current_dir(&git_cache)
+                        .status()
+                        .with_context(|| format!("spawning git clone for {coord:?}"))?,
+                    GitRef::Rev(_) => {
+                        let s = std::process::Command::new("git")
+                            .args(["clone", url, "."])
+                            .current_dir(&git_cache)
+                            .status()
+                            .with_context(|| format!("spawning git clone for {coord:?}"))?;
+                        if s.success() {
+                            std::process::Command::new("git")
+                                .args(["checkout", &ref_str])
+                                .current_dir(&git_cache)
+                                .status()
+                                .with_context(|| {
+                                    format!("git checkout {ref_str:?} for {coord:?}")
+                                })?
+                        } else {
+                            s
+                        }
+                    }
+                };
+                if !clone_status.success() {
+                    anyhow::bail!(
+                        "git clone of {url:?} (ref: {ref_str:?}) for dep {coord:?} failed"
+                    );
+                }
+            }
+
+            let mut dep_local = pkg::LocalPackage::load(&git_cache).with_context(|| {
+                format!("loading git dep {coord:?} from {}", git_cache.display())
+            })?;
+            super::registry::transpile_ts_sources(&mut dep_local)?;
+            let (dep_bytes, _) = dep_local
+                .build()
+                .with_context(|| format!("building git dep {coord:?}"))?;
+            let dep_afb = Afb::from_bytes(&dep_bytes)
+                .with_context(|| format!("parsing built git dep {coord:?}"))?;
+            let child_deps = dep_afb.manifest.dependencies.clone();
+            resolved.insert(coord.to_string(), dep_afb);
+            for (child_coord, child_req) in &child_deps {
+                resolve_one_dep(child_coord, child_req, &git_cache, resolved, order)?;
+            }
+            order.push(coord.to_string());
         }
     }
-
-    // Insert before recursing: guards against cycles in the dep graph.
-    let child_deps = dep_afb.manifest.dependencies.clone();
-    resolved.insert(coord.to_string(), dep_afb);
-
-    // Recurse into transitive deps first (topological: leaves before roots).
-    for (child_coord, child_val) in &child_deps {
-        resolve_one(child_coord, child_val, packages_dir, resolved, order)?;
-    }
-    order.push(coord.to_string());
     Ok(())
 }
 
 /// `burn compile [dir] -o <out>` entry point.
-pub fn compile(dir: Option<&Path>, out: Option<&Path>, packages_dir: Option<&Path>) -> Result<()> {
+pub fn compile(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
     let dir = dir.unwrap_or_else(|| Path::new("."));
     let mut local = pkg::LocalPackage::load(dir)?;
     transpile_ts_sources(&mut local)?;
@@ -135,30 +260,16 @@ pub fn compile(dir: Option<&Path>, out: Option<&Path>, packages_dir: Option<&Pat
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(local.output_filename()));
 
-    // Default packages_dir: parent of the package dir (monorepo siblings layout).
-    let default_packages_dir: PathBuf;
-    let packages_dir: &Path = match packages_dir {
-        Some(p) => p,
-        None => {
-            default_packages_dir = dir.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-            &default_packages_dir
-        }
-    };
-
-    compile_with_local_package(local, packages_dir, &out_path)
+    compile_with_local_package(local, &out_path)
 }
 
 /// Compile a local package to a precompiled `.afb`, writing to `out_path`.
 /// Used by `burn compile`, `burn package --compile`, and `burn publish --compile`.
-pub fn compile_with_local_package(
-    local: LocalPackage,
-    packages_dir: &Path,
-    out_path: &Path,
-) -> Result<()> {
+pub fn compile_with_local_package(local: LocalPackage, out_path: &Path) -> Result<()> {
     if local.manifold.is_sealed() {
-        compile_sealed(local, out_path, packages_dir)
+        compile_sealed(local, out_path)
     } else {
-        compile_capability(local, out_path, packages_dir)
+        compile_capability(local, out_path)
     }
 }
 
@@ -170,12 +281,20 @@ pub fn compile_with_local_package(
 /// same source the runtime's warm path uses. For single-file packages it is
 /// the bare entry, as before.
 ///
-/// Local dep resolution via `--packages-dir` is attempted first. If linking
-/// fails (missing dep dir or real error), we fall back to a source-only `.afb`
-/// and print a clear note so the caller is never left with a broken precompiled
-/// module.
-fn compile_sealed(local: LocalPackage, out_path: &Path, packages_dir: &Path) -> Result<()> {
+/// Dep resolution uses the dependency type declared in afb.toml:
+/// - Path deps: resolved relative to the package directory.
+/// - Registry deps (Pin/Range): loaded from the content-addressed cache.
+/// - Git deps: cloned into a temp dir.
+///
+/// If linking fails (missing dep dir or real error), we fall back to a
+/// source-only `.afb` and print a clear note so the caller is never left
+/// with a broken precompiled module.
+fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
     let coord = coord_str(&local);
+    let pkg_dir = local
+        .dir
+        .canonicalize()
+        .unwrap_or_else(|_| local.dir.clone());
 
     // Build a source-only .afb first so we can reparse it and call the
     // standard linker. This reuses the same code path as `burn package`.
@@ -190,7 +309,7 @@ fn compile_sealed(local: LocalPackage, out_path: &Path, packages_dir: &Path) -> 
     // require(), so prepend the plenum bundle which installs it globally.
     let effective_src: String = if afb.needs_linking() {
         let link_result = (|| -> Result<String> {
-            let deps = resolve_local_deps(&afb.manifest.dependencies, packages_dir)?;
+            let deps = resolve_deps(&afb.manifest.dependencies, &pkg_dir)?;
             let refs: Vec<(&str, &Afb)> = deps.iter().map(|(c, a)| (c.as_str(), a)).collect();
             let src = afb.linked_source(&refs, &[]).context("linking source")?;
             Ok(format!("{PLENUM_BUNDLE}\n{src}"))
@@ -279,8 +398,12 @@ fn compile_sealed(local: LocalPackage, out_path: &Path, packages_dir: &Path) -> 
 /// `afterburner:host` imports carry the caller's `Manifold`.
 ///
 /// Falls back to source-only if `javy` is absent or the dyn build fails.
-fn compile_capability(local: LocalPackage, out_path: &Path, packages_dir: &Path) -> Result<()> {
+fn compile_capability(local: LocalPackage, out_path: &Path) -> Result<()> {
     let coord = coord_str(&local);
+    let pkg_dir = local
+        .dir
+        .canonicalize()
+        .unwrap_or_else(|_| local.dir.clone());
 
     // Build a source-only .afb first so we can reparse and use the linker.
     let (source_bytes, _) =
@@ -291,7 +414,7 @@ fn compile_capability(local: LocalPackage, out_path: &Path, packages_dir: &Path)
     // Compute the effective JS source the engine would compile.
     let effective_src: String = if afb.needs_linking() {
         let link_result = (|| -> Result<String> {
-            let deps = resolve_local_deps(&afb.manifest.dependencies, packages_dir)?;
+            let deps = resolve_deps(&afb.manifest.dependencies, &pkg_dir)?;
             let refs: Vec<(&str, &Afb)> = deps.iter().map(|(c, a)| (c.as_str(), a)).collect();
             let src = afb.linked_source(&refs, &[]).context("linking source")?;
             Ok(format!("{PLENUM_BUNDLE}\n{src}"))

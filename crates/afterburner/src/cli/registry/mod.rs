@@ -173,12 +173,7 @@ fn report_scaffold(s: &Scaffolded) {
     println!("  {} burn publish", style::bullet());
 }
 
-pub fn package(
-    dir: Option<&Path>,
-    out: Option<&Path>,
-    do_compile: bool,
-    packages_dir: Option<&Path>,
-) -> Result<()> {
+pub fn package(dir: Option<&Path>, out: Option<&Path>, do_compile: bool) -> Result<()> {
     let dir = dir.unwrap_or_else(|| Path::new("."));
     let mut local = pkg::LocalPackage::load(dir)?;
     // TypeScript is build-time only: transpile every `.ts/.mts/.cts`
@@ -191,15 +186,7 @@ pub fn package(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from(local.output_filename()));
     if do_compile {
-        let default_packages_dir: PathBuf;
-        let pkgs_dir: &Path = match packages_dir {
-            Some(p) => p,
-            None => {
-                default_packages_dir = dir.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-                default_packages_dir.as_path()
-            }
-        };
-        super::compile::compile_with_local_package(local, pkgs_dir, &out_path)
+        super::compile::compile_with_local_package(local, &out_path)
     } else {
         let (bytes, digest) = style::spin("packing", || local.build())?;
         std::fs::write(&out_path, &bytes)
@@ -268,7 +255,6 @@ pub fn publish(
     token: Option<&str>,
     do_compile: bool,
     no_compile: bool,
-    packages_dir: Option<&Path>,
 ) -> Result<()> {
     let bytes = match afb {
         Some(p) => std::fs::read(p).with_context(|| format!("reading {}", p.display()))?,
@@ -280,16 +266,7 @@ pub fn publish(
                     std::env::temp_dir().join(format!("burn-publish-{}.afb", std::process::id()));
                 let mut local = pkg::LocalPackage::load(dir)?;
                 transpile_ts_sources(&mut local)?;
-                let default_packages_dir: PathBuf;
-                let pkgs_dir: &Path = match packages_dir {
-                    Some(p) => p,
-                    None => {
-                        default_packages_dir =
-                            dir.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-                        default_packages_dir.as_path()
-                    }
-                };
-                super::compile::compile_with_local_package(local, pkgs_dir, &tmp_path)?;
+                super::compile::compile_with_local_package(local, &tmp_path)?;
                 let b = std::fs::read(&tmp_path)
                     .with_context(|| format!("reading compiled {}", tmp_path.display()))?;
                 let _ = std::fs::remove_file(&tmp_path);
@@ -492,7 +469,7 @@ pub fn ensure_npm_linked(dir: &std::path::Path) -> Result<()> {
     }
     // Registry deps re-link from the lockfile when present (no network);
     // a missing lockfile resolves fresh through the normal install path.
-    if !local.manifest.dependencies.is_empty() {
+    if !local.manifest.registry_deps().is_empty() {
         let lock_path = dir.join(LOCKFILE_NAME);
         if let Ok(text) = std::fs::read_to_string(&lock_path)
             && let Ok(lock) = Lockfile::parse(&text)
@@ -570,9 +547,9 @@ fn build_install_plan(
 }
 
 fn manifest_roots(m: &Manifest) -> Result<Vec<(String, Req)>> {
-    m.dependencies
-        .iter()
-        .map(|(coord, spec)| Ok((coord.clone(), Req::parse(spec)?)))
+    m.registry_deps()
+        .into_iter()
+        .map(|(coord, spec)| Ok((coord, Req::parse(&spec)?)))
         .collect()
 }
 
