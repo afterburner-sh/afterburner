@@ -254,8 +254,7 @@ pub struct WasmCombustor {
 impl WasmCombustor {
     pub fn new(config: WasmConfig) -> Result<Self> {
         let engine = build_engine(config.compile_cache_dir.as_deref())?;
-        let plugin_module = Module::new(&engine, PLUGIN_BYTES)
-            .map_err(|e| AfterburnerError::Engine(format!("plugin module: {e}")))?;
+        let plugin_module = build_plugin_module(&engine)?;
 
         // Build the linker once with every host import resolved, then
         // pre-instantiate so the per-call path is just `Store::new` +
@@ -913,6 +912,204 @@ fn build_engine(compile_cache_dir: Option<&std::path::Path>) -> Result<Engine> {
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
     Engine::new(&config).map_err(|e| AfterburnerError::Engine(format!("engine init: {e}")))
+}
+
+/// Cranelift-compiling the 8.5 MiB plugin module from scratch costs
+/// multiple seconds. The CLI's parent shard pays it once at startup,
+/// but every `cluster.fork()` / `new Worker()` spawns a *fresh* `burn`
+/// process whose [`WasmCombustor::new`] would re-pay the full compile.
+/// Under `cluster` with N workers that is N concurrent multi-second
+/// cranelift runs fighting for the same handful of CPUs - on a
+/// constrained CI runner the contention stretches a single worker's
+/// compile past the cluster test's 60 s safety timeout, so the worker
+/// never reaches `app.listen()` / posts its `online` frame and the
+/// primary hangs.
+///
+/// Fix: cache the *native-compiled* plugin on disk, content-addressed
+/// by the plugin bytes + the engine's own compatibility key, and have
+/// every process after the first `Module::deserialize` it (which skips
+/// cranelift entirely - microseconds, not seconds). The producer writes
+/// to a unique temp file and atomically `rename`s it into place, so a
+/// concurrent reader never observes a partial file; the content-address
+/// in the name means an engine / plugin upgrade lands on a new path and
+/// stale files are simply ignored, never reused.
+///
+/// We deserialize from an in-memory copy of the bytes (not a live mmap
+/// of the file) so an already-loaded module is immune to any later
+/// change to the on-disk file. `Module::deserialize` validates the
+/// blob and returns a clean `Err` for any version / config mismatch or
+/// corruption, so a bad cache entry falls back to a cold compile rather
+/// than misbehaving.
+fn build_plugin_module(engine: &Engine) -> Result<Module> {
+    let cache_path = plugin_cwasm_cache_path(engine);
+
+    // Fast path: a previously-written cache entry. Read the whole file
+    // into owned memory, then deserialize the copy - never mmap the
+    // live file (its pages must not change under a loaded module).
+    if let Some(path) = &cache_path
+        && let Ok(bytes) = std::fs::read(path)
+    {
+        // Safety: the bytes were produced by `Module::serialize` from a
+        // wasmtime build of this same `burn` binary. `deserialize`
+        // additionally validates the embedded compatibility header and
+        // returns `Err` (never UB) for any mismatch or corruption, so a
+        // stale or partial file degrades to the cold-compile path below.
+        match unsafe { Module::deserialize(engine, &bytes) } {
+            Ok(module) => return Ok(module),
+            Err(e) => ab_event!(
+                Level::Debug,
+                "wasm.plugin.cwasm_cache_miss",
+                "path" => path.display().to_string(),
+                "error" => e.to_string(),
+            ),
+        }
+    }
+
+    // Cold path: cranelift-compile the plugin, then best-effort publish
+    // the native artifact for sibling / future processes (typically the
+    // cluster workers this parent is about to fork).
+    let module = Module::new(engine, PLUGIN_BYTES)
+        .map_err(|e| AfterburnerError::Engine(format!("plugin module: {e}")))?;
+    if let Some(path) = &cache_path
+        && let Ok(serialized) = module.serialize()
+    {
+        publish_cwasm_cache(path, &serialized);
+    }
+    Ok(module)
+}
+
+/// Content-addressed path for the cached native plugin module, or
+/// `None` if no usable private cache directory exists (then we always
+/// cold-compile).
+///
+/// `Module::deserialize` trusts the bytes for native code execution, so
+/// the cache must not be plantable by another user. We therefore root it
+/// in a **per-uid** directory created `0700` and owned by us (see
+/// [`private_cache_dir`]); a different user can neither write a poisoned
+/// entry into it nor read ours. Same-uid processes - crucially the
+/// cluster / worker children this parent forks, which run as the same
+/// user - share it freely.
+///
+/// The file name folds in the plugin bytes (so a plugin rebuild relocates
+/// the cache) and `Engine::precompile_compatibility_hash` (so any change
+/// to the engine `Config` or wasmtime version relocates it too), making
+/// every entry self-validating by name; an incompatible entry is never
+/// even read.
+fn plugin_cwasm_cache_path(engine: &Engine) -> Option<std::path::PathBuf> {
+    let dir = private_cache_dir()?;
+    let plugin_hash = sha256(PLUGIN_BYTES);
+    let compat = engine.precompile_compatibility_hash();
+    // 16 hex chars of plugin hash + the engine compat token keep the
+    // name short while staying collision-free in practice.
+    let name = format!(
+        "plugin-{}-{:016x}.cwasm",
+        hex8(&plugin_hash),
+        fold_compat_hash(compat),
+    );
+    Some(dir.join(name))
+}
+
+/// A per-user cache directory under the system temp root, created with
+/// owner-only (`0700`) permissions so no other user can plant a file the
+/// `Module::deserialize` fast path would execute. Returns `None` if it
+/// cannot be created or (on Unix) is not a directory we own with the
+/// expected mode - in which case the caller cold-compiles instead of
+/// trusting a directory it cannot vouch for.
+fn private_cache_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::temp_dir();
+    if base.as_os_str().is_empty() {
+        return None;
+    }
+    #[cfg(unix)]
+    let uid = {
+        // Safe: `getuid` is a pure syscall with no preconditions.
+        unsafe { libc::getuid() }
+    };
+    #[cfg(not(unix))]
+    let uid = 0u32;
+    let dir = base.join(format!("burn-cache-{uid}"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        // create_dir with mode 0700; ignore AlreadyExists, then verify.
+        let mut b = std::fs::DirBuilder::new();
+        b.mode(0o700);
+        match b.create(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return None,
+        }
+        // Verify the existing dir is really a directory we own with no
+        // group / other access - defends against a pre-planted symlink
+        // or a loosened-permission dir from another user.
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(&dir).ok()?;
+        if !meta.is_dir() || meta.uid() != uid || (meta.mode() & 0o077) != 0 {
+            return None;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(&dir).ok()?;
+    }
+    Some(dir)
+}
+
+/// Reduce wasmtime's compatibility hash (a `Hash`-able opaque token) to
+/// a `u64` we can stamp into the cache file name.
+fn fold_compat_hash(compat: impl core::hash::Hash) -> u64 {
+    use core::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    compat.hash(&mut h);
+    h.finish()
+}
+
+/// Atomically install `bytes` at `path`: write to a unique sibling temp
+/// file, then `rename` (atomic on the same filesystem) into place. A
+/// reader therefore only ever sees a complete file. All failures are
+/// swallowed - the cache is an optimisation, and a missing entry just
+/// means the next process cold-compiles.
+fn publish_cwasm_cache(path: &std::path::Path, bytes: &[u8]) {
+    let Some(parent) = path.parent() else { return };
+    // Unique temp name (pid + a monotonic counter) so concurrent
+    // producers never collide on the staging file.
+    use std::sync::atomic::AtomicU64;
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("plugin"),
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed),
+    ));
+    if write_private(&tmp, bytes).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    // rename onto the final path. If a sibling won the race the content
+    // is byte-identical, so last-writer-wins is harmless.
+    if std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Write `bytes` to `path`, owner-read/write only on Unix (`0600`).
+/// Belt-and-braces alongside the `0700` cache dir: the file itself is
+/// never group / world readable even if the dir mode were ever relaxed.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(bytes)?;
+    f.flush()
 }
 
 impl Combustor for WasmCombustor {
