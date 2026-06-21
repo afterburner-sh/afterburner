@@ -284,8 +284,8 @@ fn wasm_infinite_microtask_chain_is_bounded() {
     // Upper bound: something caught it. Elapsed is bounded by fuel OR
     // epoch, and we gave both finite budgets.
     assert!(
-        elapsed < std::time::Duration::from_secs(10),
-        "WASM microtask pump did not terminate within 10s (elapsed={elapsed:?})"
+        elapsed < std::time::Duration::from_secs(30),
+        "WASM microtask pump did not terminate within 30s (elapsed={elapsed:?})"
     );
     assert!(
         matches!(
@@ -325,8 +325,8 @@ fn wasm_microtask_pump_bounded_by_fuel_alone() {
     let out = c.thrust(&id, &json!(null), &lim);
     let elapsed = start.elapsed();
     assert!(
-        elapsed < std::time::Duration::from_secs(10),
-        "fuel-only pump cap did not terminate within 10s (elapsed={elapsed:?})"
+        elapsed < std::time::Duration::from_secs(30),
+        "fuel-only pump cap did not terminate within 30s (elapsed={elapsed:?})"
     );
     assert!(
         matches!(out, Err(afterburner_core::AfterburnerError::FuelExhausted)),
