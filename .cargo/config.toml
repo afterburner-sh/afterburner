@@ -9,3 +9,15 @@
 # `RUST_TEST_THREADS=N cargo test` if you really need parallelism.
 [env]
 RUST_TEST_THREADS = "1"
+
+# Network resilience for crates.io downloads. cargo's libcurl uses HTTP/2
+# multiplexing by default, which intermittently drops with
+# `SSL_read: SSL_ERROR_SYSCALL` against the crates.io CDN on CI runners.
+# HTTP/1.1 plus extra retries make a cold dependency re-fetch robust to the
+# flake (it surfaces when a Cargo.lock change invalidates the rust-cache and
+# forces a full re-download).
+[http]
+multiplexing = false
+
+[net]
+retry = 10
