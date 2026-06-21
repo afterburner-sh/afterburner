@@ -12,9 +12,14 @@
 //! engine's `register_precompiled` path then loads the module directly
 //! instead of compiling JS per call.
 //!
-//! Capability-bearing packages build a normal source-only `.afb` (the
-//! same as `burn package`) and print one informational note to stderr.
-//! No error, no silent gap.
+//! For capability-bearing packages (non-sealed manifold), this command
+//! produces a dynamically-linked `wasm32-wasip1-dyn` module via
+//! `javy build -C dynamic -C plugin=...`. The dyn module imports from the
+//! shared Afterburner Javy plugin at runtime, so capability gating is
+//! enforced by the engine's two-instance linking model: the plugin's
+//! `afterburner:host` imports carry the caller's `Manifold`, and a
+//! `crypto.createHash` call is denied under a sealed Manifold and granted
+//! under one with `crypto: true`.
 //!
 //! `javy` is required only here - the runtime never shells to it.
 //! Required version: 8.1.1.
@@ -43,7 +48,7 @@ pub fn compile(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
     if local.manifold.is_sealed() {
         compile_sealed(local, &out_path)
     } else {
-        compile_source_only(local, &out_path)
+        compile_capability(local, &out_path)
     }
 }
 
@@ -136,22 +141,89 @@ fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Capability-bearing package: build source-only .afb and note the limitation.
-fn compile_source_only(local: LocalPackage, out_path: &Path) -> Result<()> {
-    eprintln!(
-        "note: precompiled WASM is sealed-only for now; \
-         this package has capability grants so it ships source (same as `burn package`)"
-    );
+/// Capability-bearing package: build a dynamically-linked `.afb`.
+///
+/// The dyn module imports from the shared Afterburner Javy plugin at runtime
+/// (two-instance linking model). Capability gating is preserved: the plugin's
+/// `afterburner:host` imports carry the caller's `Manifold`.
+///
+/// Falls back to source-only if `javy` is absent or the dyn build fails.
+fn compile_capability(local: LocalPackage, out_path: &Path) -> Result<()> {
+    let coord = coord_str(&local);
 
-    let (bytes, digest) =
-        style::spin("packing", || local.build()).context("building source-only .afb")?;
+    // Build a source-only .afb first so we can reparse and use the linker.
+    let (source_bytes, _) =
+        style::spin("packing source", || local.build()).context("building source .afb")?;
+
+    let afb = Afb::from_bytes(&source_bytes).context("reparsing source .afb (this is a bug)")?;
+
+    // Compute the effective JS source the engine would compile.
+    let effective_src: String = if afb.needs_linking() {
+        match afb.linked_source(&[], &[]) {
+            Ok(src) => format!("{PLENUM_BUNDLE}\n{src}"),
+            Err(e) => {
+                eprintln!(
+                    "note: precompiled dyn WASM does not support dependency-linked \
+                     packages ({e}); shipping source-only .afb instead"
+                );
+                std::fs::write(out_path, &source_bytes)
+                    .with_context(|| format!("writing {}", out_path.display()))?;
+                let digest = digest(&source_bytes);
+                println!("{} {}", style::ok("packaged"), style::accent(&coord));
+                print_digest(source_bytes.len() as u64, &hex(&digest));
+                println!(
+                    "  {} {}",
+                    style::muted("->"),
+                    style::value(&out_path.display().to_string())
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        afb.entry_source()
+            .context("reading entry source")?
+            .to_owned()
+    };
+
+    // Attempt the dynamically-linked build. Fall back to source-only when javy
+    // is absent or the build fails (a clear note is always emitted).
+    let wasm_result = style::spin("compiling to dyn wasm", || javy_compile_dyn(&effective_src));
+    let wasm_bytes = match wasm_result {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("note: dyn WASM build failed ({e}); shipping source-only .afb instead");
+            std::fs::write(out_path, &source_bytes)
+                .with_context(|| format!("writing {}", out_path.display()))?;
+            let digest = digest(&source_bytes);
+            println!("{} {}", style::ok("packaged"), style::accent(&coord));
+            print_digest(source_bytes.len() as u64, &hex(&digest));
+            println!(
+                "  {} {}",
+                style::muted("->"),
+                style::value(&out_path.display().to_string())
+            );
+            return Ok(());
+        }
+    };
+
+    let mut manifest = afb.manifest.clone();
+    manifest.runtime.target = Some("wasm32-wasip1-dyn".into());
+
+    let mut b = Builder::new(manifest, afb.manifold.clone());
+    for (path, data) in &afb.source {
+        b = b.source(path.clone(), data.clone());
+    }
+    b = b.precompiled("precompiled/wasm32-wasip1-dyn/main.wasm", wasm_bytes);
+
+    let (bytes, digest) = style::spin("packing", || b.build()).context("building dyn .afb")?;
 
     std::fs::write(out_path, &bytes).with_context(|| format!("writing {}", out_path.display()))?;
 
     println!(
-        "{} {}",
-        style::ok("packaged"),
-        style::accent(&coord_str(&local))
+        "{} {} {}",
+        style::ok("compiled"),
+        style::accent(&coord),
+        style::gold("(precompiled wasm32-wasip1-dyn)")
     );
     print_digest(bytes.len() as u64, &hex(&digest));
     println!(
@@ -189,13 +261,49 @@ fn javy_compile(source_js: &str) -> Result<Vec<u8>> {
     std::fs::write(&src_path, wrapped.as_bytes()).context("writing wrapped source")?;
 
     // Invoke javy; capture the outcome so we can clean up regardless.
-    let invoke_result = run_javy(&javy, &src_path, &wasm_path);
+    let invoke_result = run_javy_sealed(&javy, &src_path, &wasm_path);
 
     // Read the wasm bytes before cleaning up the work directory.
     let wasm_result = invoke_result
         .and_then(|()| std::fs::read(&wasm_path).with_context(|| "reading compiled wasm"));
 
     // Best-effort cleanup; do not propagate cleanup errors over the real result.
+    let _ = std::fs::remove_dir_all(&work_dir);
+
+    wasm_result
+}
+
+/// Wrap `source_js` in the stdin/stdout harness, invoke `javy build -C dynamic`
+/// against the embedded Afterburner plugin, and return the compiled WASM bytes.
+///
+/// The dyn module imports `afterburner-plugin-v1::{cabi_realloc, invoke, memory}`
+/// from the shared plugin at runtime instead of bundling QuickJS inline.
+/// `-J` flags (event-loop, stream-io) are NOT passed when `-C plugin=...` is in
+/// use; those options are only valid for the built-in plugin.
+fn javy_compile_dyn(source_js: &str) -> Result<Vec<u8>> {
+    use afterburner_wasi::AFTERBURNER_PLUGIN_BYTES;
+
+    let javy = std::env::var("JAVY").unwrap_or_else(|_| "javy".into());
+
+    let work_dir = std::env::temp_dir().join(format!("burn-compile-dyn-{}", std::process::id()));
+    std::fs::create_dir_all(&work_dir).context("creating dyn work directory")?;
+
+    let src_path = work_dir.join("wrapped.js");
+    let wasm_path = work_dir.join("main.wasm");
+    let plugin_path = work_dir.join("afterburner_plugin.wasm");
+
+    // Write the plugin bytes so javy can reference them by path.
+    std::fs::write(&plugin_path, AFTERBURNER_PLUGIN_BYTES)
+        .context("writing plugin wasm for dyn build")?;
+
+    let wrapped = build_wrapped_source(source_js);
+    std::fs::write(&src_path, wrapped.as_bytes()).context("writing wrapped source")?;
+
+    let invoke_result = run_javy_dyn(&javy, &src_path, &wasm_path, &plugin_path);
+
+    let wasm_result = invoke_result
+        .and_then(|()| std::fs::read(&wasm_path).with_context(|| "reading compiled dyn wasm"));
+
     let _ = std::fs::remove_dir_all(&work_dir);
 
     wasm_result
@@ -221,9 +329,9 @@ fn build_wrapped_source(source_js: &str) -> String {
     )
 }
 
-/// Invoke `javy build` to compile `src_path` to `wasm_path`.
+/// Invoke `javy build` for a sealed (self-contained) module.
 /// Returns a clear, actionable error when `javy` is absent.
-fn run_javy(javy: &str, src_path: &Path, wasm_path: &Path) -> Result<()> {
+fn run_javy_sealed(javy: &str, src_path: &Path, wasm_path: &Path) -> Result<()> {
     let status = std::process::Command::new(javy)
         .args([
             "build",
@@ -238,20 +346,51 @@ fn run_javy(javy: &str, src_path: &Path, wasm_path: &Path) -> Result<()> {
             wasm_path.to_str().unwrap_or(""),
         ])
         .status()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                anyhow::anyhow!(
-                    "`javy` was not found on PATH. Install javy 8.1.1 to use `burn compile`.\n\
-                     Download from: https://github.com/bytecodealliance/javy/releases/tag/v8.1.1"
-                )
-            } else {
-                anyhow::anyhow!("spawning `{javy}`: {e}")
-            }
-        })?;
+        .map_err(|e| javy_not_found_or(javy, e))?;
 
     if !status.success() {
         let code = status.code().map_or(-1, |c| c);
-        anyhow::bail!("`javy build` exited with code {code}");
+        anyhow::bail!("`javy build` (sealed) exited with code {code}");
     }
     Ok(())
+}
+
+/// Invoke `javy build -C dynamic` for a dynamically-linked module.
+/// The `-J` options are not compatible with `-C plugin=...` and are omitted.
+fn run_javy_dyn(javy: &str, src_path: &Path, wasm_path: &Path, plugin_path: &Path) -> Result<()> {
+    let plugin_arg = format!("plugin={}", plugin_path.to_str().unwrap_or(""));
+    let status = std::process::Command::new(javy)
+        .args([
+            "build",
+            "-C",
+            "dynamic",
+            "-C",
+            &plugin_arg,
+            "-C",
+            "deterministic=y",
+            src_path.to_str().unwrap_or(""),
+            "-o",
+            wasm_path.to_str().unwrap_or(""),
+        ])
+        .status()
+        .map_err(|e| javy_not_found_or(javy, e))?;
+
+    if !status.success() {
+        let code = status.code().map_or(-1, |c| c);
+        anyhow::bail!("`javy build` (dyn) exited with code {code}");
+    }
+    Ok(())
+}
+
+/// Map a spawn error to a helpful "javy not found" message or a generic
+/// spawn error.
+fn javy_not_found_or(javy: &str, e: std::io::Error) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        anyhow::anyhow!(
+            "`javy` was not found on PATH. Install javy 8.1.1 to use `burn compile`.\n\
+             Download from: https://github.com/bytecodealliance/javy/releases/tag/v8.1.1"
+        )
+    } else {
+        anyhow::anyhow!("spawning `{javy}`: {e}")
+    }
 }

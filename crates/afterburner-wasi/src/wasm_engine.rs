@@ -200,10 +200,27 @@ pub(crate) struct SealedModule {
     pub instance_pre: InstancePre<HostState>,
 }
 
+/// A dynamically-linked module registered via
+/// [`WasmCombustor::register_precompiled`] with target
+/// `"wasm32-wasip1-dyn"`. The module imports `afterburner-plugin-v1`
+/// exports (`cabi_realloc`, `invoke`, `memory`) from the shared
+/// Afterburner Javy plugin. At thrust time the plugin is instantiated
+/// first (wiring WASI + `afterburner:host` including the caller's
+/// `Manifold`), then the package module is instantiated against those
+/// exports. Capability gating is fully preserved: a crypto call is
+/// denied under a sealed Manifold and granted under an open one,
+/// identical to the source path.
+pub(crate) struct DynModule {
+    pub module: Module,
+}
+
+/// Import namespace the dynamically-linked package module uses for the
+/// Afterburner Javy plugin exports. Produced by `javy build -C dynamic
+/// -C plugin=<afterburner_plugin.wasm>`.
+const DYN_PLUGIN_NS: &str = "afterburner-plugin-v1";
+
 /// The WASM target string for a dynamically-linked module that requires the
-/// Afterburner plugin host. `register_precompiled` rejects this target with a
-/// clear "not yet supported" error rather than silently skipping capability
-/// gating (which the sealed path does not perform).
+/// Afterburner plugin host.
 const DYN_TARGET: &str = "wasm32-wasip1-dyn";
 
 pub struct WasmCombustor {
@@ -228,6 +245,12 @@ pub struct WasmCombustor {
     /// Thrust path: fresh `Store` + WASI only, JSON on stdin, stdout parsed
     /// by [`nozzle::parse_output`]. No plugin envelope, no `afterburner:host`.
     sealed_cache: HopscotchMap<[u8; 32], Arc<SealedModule>>,
+    /// Dynamically-linked modules registered via [`register_precompiled`]
+    /// with target `"wasm32-wasip1-dyn"`. Keyed by SHA-256 of the raw wasm
+    /// bytes. Thrust path: instantiate plugin (full WASI, `afterburner:host`,
+    /// and caller's `Manifold`), then instantiate the package module linking
+    /// its `afterburner-plugin-v1` imports to the plugin's exports.
+    dyn_cache: HopscotchMap<[u8; 32], Arc<DynModule>>,
     /// Counter incremented every time `compile_to_bytecode` actually
     /// invokes the plugin's compile mode. Used by tests to assert the
     /// hot path is genuinely cached (register-once → N thrusts → 1
@@ -291,6 +314,7 @@ impl WasmCombustor {
             source_store: HopscotchMap::new(),
             bytecode_cache: HopscotchMap::new(),
             sealed_cache: HopscotchMap::new(),
+            dyn_cache: HopscotchMap::new(),
             compile_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             instance_pre: Arc::new(instance_pre),
             state_store,
@@ -383,10 +407,7 @@ impl WasmCombustor {
     /// text module (wasmtime accepts both).
     pub fn register_precompiled(&self, wasm: &[u8], target: &str) -> Result<ScriptId> {
         if target == DYN_TARGET {
-            return Err(AfterburnerError::Engine(format!(
-                "precompiled target \"{DYN_TARGET}\" is not yet supported; \
-                 only \"wasm32-wasip1\" sealed modules are accepted on this path"
-            )));
+            return self.register_dyn(wasm);
         }
 
         let hash = sha256(wasm);
@@ -419,6 +440,46 @@ impl WasmCombustor {
         ab_event!(
             Level::Info,
             "wasm.sealed.registered",
+            "hash" => hex8(&hash),
+            "wasm_bytes" => wasm.len(),
+        );
+
+        Ok(ScriptId {
+            hash,
+            mode: EngineMode::Wasm,
+        })
+    }
+
+    /// Register a dynamically-linked module (`"wasm32-wasip1-dyn"` target).
+    ///
+    /// The module imports `afterburner-plugin-v1::{cabi_realloc, invoke,
+    /// memory}` from the shared Afterburner Javy plugin. Only the compiled
+    /// `Module` is stored here; the per-call linking to a live plugin
+    /// instance happens in [`Self::thrust_dyn`] so the caller's `Manifold`
+    /// is in scope when `afterburner:host` imports resolve.
+    fn register_dyn(&self, wasm: &[u8]) -> Result<ScriptId> {
+        let hash = sha256(wasm);
+
+        if self.dyn_cache.get(&hash).is_some() {
+            ab_event!(Level::Debug, "wasm.dyn.cache_hit", "hash" => hex8(&hash));
+            return Ok(ScriptId {
+                hash,
+                mode: EngineMode::Wasm,
+            });
+        }
+
+        // Compile the package module native code once. The module imports
+        // only from `afterburner-plugin-v1`; we do not pre-link it because
+        // the plugin instance (which provides those exports) is live only
+        // inside a per-call Store. Per-call linking costs three Linker::define
+        // calls (three export slots) - negligible compared to plugin startup.
+        let module = Module::new(&self.engine, wasm)
+            .map_err(|e| AfterburnerError::CompileFailed(format!("dyn module compile: {e}")))?;
+
+        self.dyn_cache.insert(hash, Arc::new(DynModule { module }));
+        ab_event!(
+            Level::Info,
+            "wasm.dyn.registered",
             "hash" => hex8(&hash),
             "wasm_bytes" => wasm.len(),
         );
@@ -465,6 +526,122 @@ impl WasmCombustor {
             limits,
             "wasm.sealed_thrust",
         )?;
+
+        let stdout_bytes = chamber::drain_stdout(&mut store);
+        parse_output(&stdout_bytes)
+    }
+
+    /// Execute a dynamically-linked precompiled module.
+    ///
+    /// Two-instance model:
+    ///
+    /// 1. The shared plugin (`self.instance_pre`) is instantiated inside a
+    ///    fresh `Store`. Its `afterburner:host` imports resolve through the
+    ///    host_imports linker built at `WasmCombustor::new`, carrying the
+    ///    caller's `Manifold` in `HostState` - the same gating the source
+    ///    path enforces.
+    /// 2. A minimal per-call linker exposes the plugin instance's exports
+    ///    under the `afterburner-plugin-v1` namespace. The package module is
+    ///    then instantiated against those exports via `Linker::instantiate`.
+    /// 3. `_start` is called on the package instance; stdin carries the JSON
+    ///    input and stdout is drained through [`nozzle::parse_output`].
+    ///
+    /// No `initialize-runtime` call: the plugin instance comes from the
+    /// Wizer-preinitialized `InstancePre` and starts with QuickJS already
+    /// warmed up. The per-call cost is two `instantiate` calls + three
+    /// `Linker::define` entries (plugin exports), not a re-eval of the
+    /// plenum bundle.
+    fn thrust_dyn(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value> {
+        let dyn_mod = self
+            .dyn_cache
+            .get(&id.hash)
+            .ok_or(AfterburnerError::ScriptNotFound)?;
+
+        let input_bytes = serde_json::to_vec(input)?;
+
+        // HostState carries the caller's Manifold so every `afterburner:host`
+        // import is gated by it when the plugin resolves a JS host call.
+        let state = HostState::new(
+            &input_bytes,
+            limits.memory_bytes,
+            limits.output_ceiling(),
+            limits.manifold.clone(),
+            self.state_store.clone(),
+            self.host_context.clone(),
+        );
+
+        let mut store = chamber::prepare_store(&self.engine, state, limits)?;
+
+        // Instance 1: the shared plugin. Its `afterburner:host` imports were
+        // resolved at `WasmCombustor::new` and are part of `self.instance_pre`.
+        let plugin_instance = self
+            .instance_pre
+            .instantiate(&mut store)
+            .map_err(|e| AfterburnerError::Engine(format!("dyn plugin instantiate: {e}")))?;
+
+        // Instance 2: the package module. Build a minimal linker that exposes
+        // the plugin instance's exports under `afterburner-plugin-v1`.
+        let mut pkg_linker: Linker<HostState> = Linker::new(&self.engine);
+        pkg_linker
+            .instance(&mut store, DYN_PLUGIN_NS, plugin_instance)
+            .map_err(|e| AfterburnerError::Engine(format!("dyn pkg linker: {e}")))?;
+
+        let pkg_instance = pkg_linker
+            .instantiate(&mut store, &dyn_mod.module)
+            .map_err(|e| AfterburnerError::Engine(format!("dyn pkg instantiate: {e}")))?;
+
+        let start = pkg_instance
+            .get_typed_func::<(), ()>(&mut store, "_start")
+            .map_err(|e| AfterburnerError::Engine(format!("dyn _start lookup: {e}")))?;
+
+        let call_result = start.call(&mut store, ());
+
+        // Output-ceiling overflow supersedes the trap diagnosis.
+        if store.data().output_overflowed() {
+            let limit = store.data().output_ceiling;
+            ab_event!(Level::Warn, "wasm.dyn_thrust.output_too_large", "limit" => limit);
+            return Err(AfterburnerError::OutputTooLarge { limit });
+        }
+
+        if let Err(trap) = call_result {
+            if let Some(exit) = trap.downcast_ref::<I32Exit>() {
+                if exit.0 == 0 {
+                    // Clean WASI proc_exit(0) - fall through to result extraction.
+                } else {
+                    ab_event!(Level::Warn, "wasm.dyn_thrust.nonzero_exit", "code" => exit.0);
+                    let stderr = chamber::format_trap_with_stderr(
+                        &format!("dyn module exited with code {}", exit.0),
+                        &mut store,
+                    );
+                    return Err(AfterburnerError::WasmTrap(stderr));
+                }
+            } else if let Some(t) = trap.downcast_ref::<Trap>() {
+                return Err(match t {
+                    Trap::Interrupt => {
+                        ab_event!(Level::Warn, "wasm.dyn_thrust.timeout");
+                        AfterburnerError::Timeout
+                    }
+                    Trap::OutOfFuel => {
+                        ab_event!(Level::Warn, "wasm.dyn_thrust.fuel_exhausted");
+                        AfterburnerError::FuelExhausted
+                    }
+                    other => {
+                        let msg = chamber::format_trap_with_stderr(&format!("{other}"), &mut store);
+                        ab_event!(Level::Warn, "wasm.dyn_thrust.trap", "kind" => other);
+                        AfterburnerError::WasmTrap(msg)
+                    }
+                });
+            } else {
+                let chain: Vec<String> = trap.chain().map(|e| format!("{e}")).collect();
+                let full = chain.join(" => ");
+                if full.contains("memory minimum size") || full.contains("memory size") {
+                    ab_event!(Level::Warn, "wasm.dyn_thrust.memory_limit");
+                    return Err(AfterburnerError::MemoryLimit);
+                }
+                let msg = chamber::format_trap_with_stderr(&full, &mut store);
+                return Err(AfterburnerError::WasmTrap(msg));
+            }
+        }
 
         let stdout_bytes = chamber::drain_stdout(&mut store);
         parse_output(&stdout_bytes)
@@ -1182,6 +1359,11 @@ impl Combustor for WasmCombustor {
         if self.sealed_cache.get(&id.hash).is_some() {
             return self.thrust_sealed(id, input, limits);
         }
+        // Dyn path: id was registered via `register_precompiled` with target
+        // `"wasm32-wasip1-dyn"`. Two-instance model with full manifold gating.
+        if self.dyn_cache.get(&id.hash).is_some() {
+            return self.thrust_dyn(id, input, limits);
+        }
         // Input serializes per-call because it changes per-call; it
         // goes via `HostState::pending_input` (read by the
         // `host_get_input` linker import) - not via the envelope.
@@ -1217,10 +1399,11 @@ impl Combustor for WasmCombustor {
     fn extinguish(&self, id: &ScriptId) {
         self.source_store.remove(&id.hash);
         self.bytecode_cache.remove(&id.hash);
-        // Also remove from sealed_cache in case this id was registered via
-        // register_precompiled - extinguish is content-addressed and must
-        // cover both paths.
+        // Also remove from sealed_cache and dyn_cache in case this id was
+        // registered via register_precompiled - extinguish is content-addressed
+        // and must cover all paths.
         self.sealed_cache.remove(&id.hash);
+        self.dyn_cache.remove(&id.hash);
         ab_event!(Level::Info, "wasm.extinguish", "hash" => hex8(&id.hash));
     }
 

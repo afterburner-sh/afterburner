@@ -154,10 +154,10 @@ fn compile_sealed_package_bundles_wasm() {
     );
 }
 
-// ---- capability package: source-only, stderr note -------------------------
+// ---- capability package: dyn precompiled (javy present) or source-only ----
 
 #[test]
-fn compile_capability_package_produces_source_only_afb() {
+fn compile_capability_package_produces_dyn_afb_or_source_only() {
     let tmp = tempfile::tempdir().unwrap();
     let pkg_dir = tmp.path().join("cap");
     std::fs::create_dir_all(&pkg_dir).unwrap();
@@ -183,34 +183,41 @@ fn compile_capability_package_produces_source_only_afb() {
         "burn compile on capability package failed\nstdout: {stdout}\nstderr: {stderr}"
     );
 
-    // The stderr note must mention the limitation.
-    assert!(
-        stderr.contains("sealed-only") || stderr.contains("capability grants"),
-        "expected a note on stderr about sealed-only precompilation, got: {stderr}"
-    );
-
     // The output .afb must exist and be parseable.
     let bytes = std::fs::read(&out_afb).expect("reading output .afb");
     let afb = Afb::from_bytes(&bytes).expect("parsing output .afb");
 
-    // Source must be present.
+    // Source must always be present.
     assert!(
         afb.source.contains_key("source/main.js"),
         "source/main.js must be present"
     );
 
-    // No precompiled member for a capability package.
-    assert!(
-        afb.precompiled.is_empty(),
-        "precompiled must be empty for a capability package, got: {:?}",
-        afb.precompiled.keys().collect::<Vec<_>>()
-    );
-
-    // runtime.target must NOT be set.
-    assert_eq!(
-        afb.manifest.runtime.target, None,
-        "runtime.target must be absent for a source-only .afb"
-    );
+    if javy_available() {
+        // When javy is present the capability package is compiled to a dyn module.
+        let wasm_key = "precompiled/wasm32-wasip1-dyn/main.wasm";
+        let wasm_bytes = afb
+            .precompiled
+            .get(wasm_key)
+            .unwrap_or_else(|| panic!("{wasm_key} must be present in dyn .afb"));
+        assert!(!wasm_bytes.is_empty(), "dyn wasm must be non-empty");
+        assert_eq!(
+            afb.manifest.runtime.target.as_deref(),
+            Some("wasm32-wasip1-dyn"),
+            "runtime.target must be wasm32-wasip1-dyn"
+        );
+    } else {
+        // Without javy, fall back to source-only with a note.
+        assert!(
+            afb.precompiled.is_empty(),
+            "precompiled must be empty for a source-only fallback, got: {:?}",
+            afb.precompiled.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            afb.manifest.runtime.target, None,
+            "runtime.target must be absent for a source-only fallback"
+        );
+    }
 }
 
 // ---- multi-file sealed package: sibling linked into precompiled wasm ------
