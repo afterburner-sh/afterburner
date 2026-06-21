@@ -19,9 +19,11 @@
 //! `javy` is required only here - the runtime never shells to it.
 //! Required version: 8.1.1.
 
-use afterburner_cloud::afterburner_afb::digest::hex;
+use afterburner_cloud::afterburner_afb::Afb;
+use afterburner_cloud::afterburner_afb::digest::{digest, hex};
 use afterburner_cloud::afterburner_afb::pack::Builder;
 use afterburner_cloud::pkg::{self, LocalPackage};
+use afterburner_node_compat::PLENUM_BUNDLE;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -45,30 +47,71 @@ pub fn compile(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
     }
 }
 
-/// Sealed package: run javy, bundle the wasm, set runtime.target.
+/// Sealed package: run javy on the EFFECTIVE source, bundle the wasm, set
+/// runtime.target.
+///
+/// For multi-file packages the effective source is the linked composition
+/// (virtual FS + require bootstrap) produced by `Afb::linked_source` - the
+/// same source the runtime's warm path uses. For single-file packages it is
+/// the bare entry, as before.
+///
+/// If linking fails because the package declares external afb dependencies
+/// that cannot be resolved at compile time, we fall back to a source-only
+/// `.afb` and print a clear note so the caller is never left with a broken
+/// precompiled module.
 fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
-    // Locate the entry source. Entry is always under `source/` (validated by
-    // LocalPackage::load), and the key in `local.sources` is the archive-
-    // relative path, e.g. `"source/main.js"`.
-    let entry_key = &local.manifest.package.entry;
-    let entry_bytes = local.sources.get(entry_key).ok_or_else(|| {
-        anyhow::anyhow!(
-            "entry {:?} not found in loaded sources (this is a bug)",
-            entry_key
-        )
-    })?;
-    let entry_src = std::str::from_utf8(entry_bytes)
-        .with_context(|| format!("entry {entry_key:?} is not UTF-8"))?;
+    let coord = coord_str(&local);
 
-    let wasm_bytes = style::spin("compiling to wasm", || javy_compile(entry_src))?;
+    // Build a source-only .afb first so we can reparse it and call the
+    // standard linker. This reuses the same code path as `burn package`.
+    let (source_bytes, _) =
+        style::spin("packing source", || local.build()).context("building source .afb")?;
 
-    // Build the .afb with both source (unchanged) and the precompiled member.
-    // Set runtime.target so the engine knows to look under precompiled/.
-    let mut manifest = local.manifest.clone();
+    let afb = Afb::from_bytes(&source_bytes).context("reparsing source .afb (this is a bug)")?;
+
+    // Compute the effective JS source the engine would compile.
+    // For multi-file packages, the linked source uses require() on the
+    // virtual filesystem. Javy's QuickJS environment has no built-in
+    // require(), so prepend the plenum bundle which installs it globally.
+    let effective_src: String = if afb.needs_linking() {
+        match afb.linked_source(&[], &[]) {
+            Ok(src) => format!("{PLENUM_BUNDLE}\n{src}"),
+            Err(e) => {
+                // The package declares external afb dependencies that we
+                // cannot resolve at compile time. Emit a source-only .afb
+                // and a clear note rather than a broken precompiled module.
+                eprintln!(
+                    "note: precompiled WASM does not yet support dependency-linked \
+                     packages ({e}); shipping source-only .afb instead"
+                );
+                std::fs::write(out_path, &source_bytes)
+                    .with_context(|| format!("writing {}", out_path.display()))?;
+                let digest = digest(&source_bytes);
+                println!("{} {}", style::ok("packaged"), style::accent(&coord));
+                print_digest(source_bytes.len() as u64, &hex(&digest));
+                println!(
+                    "  {} {}",
+                    style::muted("->"),
+                    style::value(&out_path.display().to_string())
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        afb.entry_source()
+            .context("reading entry source")?
+            .to_owned()
+    };
+
+    let wasm_bytes = style::spin("compiling to wasm", || javy_compile(&effective_src))?;
+
+    // Build the final .afb with both source (unchanged) and the precompiled
+    // member. Set runtime.target so the engine knows to look under precompiled/.
+    let mut manifest = afb.manifest.clone();
     manifest.runtime.target = Some("wasm32-wasip1".into());
 
-    let mut b = Builder::new(manifest, local.manifold.clone());
-    for (path, data) in &local.sources {
+    let mut b = Builder::new(manifest, afb.manifold.clone());
+    for (path, data) in &afb.source {
         b = b.source(path.clone(), data.clone());
     }
     b = b.precompiled("precompiled/wasm32-wasip1/main.wasm", wasm_bytes);
@@ -81,7 +124,7 @@ fn compile_sealed(local: LocalPackage, out_path: &Path) -> Result<()> {
     println!(
         "{} {} {}",
         style::ok("compiled"),
-        style::accent(&coord_str(&local)),
+        style::accent(&coord),
         style::gold("(precompiled wasm32-wasip1)")
     );
     print_digest(bytes.len() as u64, &hex(&digest));

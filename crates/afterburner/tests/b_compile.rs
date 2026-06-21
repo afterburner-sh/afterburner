@@ -213,6 +213,223 @@ fn compile_capability_package_produces_source_only_afb() {
     );
 }
 
+// ---- multi-file sealed package: sibling linked into precompiled wasm ------
+
+/// Scaffold a multi-file sealed package.
+/// entry: `source/main.js` requires `./util` which exports the real value.
+fn scaffold_multifile_sealed(dir: &Path) {
+    write(
+        dir,
+        "afb.toml",
+        "[format]\nversion = \"1.0\"\n\
+         [package]\nname = \"multiprobe\"\nnamespace = \"example\"\n\
+         version = \"0.1.0\"\nlanguage = \"javascript\"\nentry = \"source/main.js\"\n\
+         [runtime]\nmin = \"0.1.0\"\n",
+    );
+    write(
+        dir,
+        "manifold.json",
+        r#"{"fs":"None","net":"None","crypto":false,"child_process":false,"env":"None","allow_exit":false,"http_timeout_ms":null,"listen":"None"}"#,
+    );
+    // entry delegates to a sibling so both files must be linked for the WASM to work
+    write(
+        dir,
+        "source/main.js",
+        "const util = require('./util');\nmodule.exports = (input) => util.run(input);\n",
+    );
+    write(
+        dir,
+        "source/util.js",
+        "module.exports = { run: (input) => ({ ok: true, doubled: (input.n || 0) * 2 }) };\n",
+    );
+}
+
+#[test]
+fn compile_multifile_sealed_sibling_linked() {
+    if !javy_available() {
+        eprintln!(
+            "SKIP compile_multifile_sealed_sibling_linked: \
+             `javy` not found on PATH; install javy 8.1.1 to run this test"
+        );
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let pkg_dir = tmp.path().join("multifile");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    scaffold_multifile_sealed(&pkg_dir);
+
+    let out_afb = tmp.path().join("multi.afb");
+
+    let result = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args([
+            "compile",
+            pkg_dir.to_str().unwrap(),
+            "-o",
+            out_afb.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn burn compile");
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        result.status.success(),
+        "burn compile (multi-file) failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let bytes = std::fs::read(&out_afb).expect("reading output .afb");
+    let afb = Afb::from_bytes(&bytes).expect("parsing output .afb");
+
+    // Both source files must be present.
+    assert!(
+        afb.source.contains_key("source/main.js"),
+        "main.js must be in output .afb"
+    );
+    assert!(
+        afb.source.contains_key("source/util.js"),
+        "util.js must be in output .afb"
+    );
+
+    // Precompiled member must be present and non-empty.
+    let wasm_key = "precompiled/wasm32-wasip1/main.wasm";
+    let wasm_bytes = afb
+        .precompiled
+        .get(wasm_key)
+        .unwrap_or_else(|| panic!("{wasm_key} must be present in compiled multi-file .afb"));
+    assert!(!wasm_bytes.is_empty(), "precompiled wasm must be non-empty");
+
+    // runtime.target must be set.
+    assert_eq!(
+        afb.manifest.runtime.target.as_deref(),
+        Some("wasm32-wasip1"),
+        "runtime.target must be wasm32-wasip1"
+    );
+
+    // Correctness: the precompiled path must produce the same value as the
+    // source (linked) path. This proves the sibling was linked into the wasm.
+    use afterburner_core::{Combustor, FuelGauge};
+    use afterburner_wasi::{WasmCombustor, WasmConfig};
+    use serde_json::json;
+
+    let engine = WasmCombustor::new(WasmConfig::default()).expect("WasmCombustor::new");
+    let limits = FuelGauge::unlimited();
+    let input = json!({ "n": 21 });
+
+    // Source path: linked source through ignite.
+    let linked_src = afb
+        .linked_source(&[], &[])
+        .expect("linked_source on compiled .afb");
+    let src_id = engine.ignite(&linked_src).expect("ignite linked source");
+    let src_out = engine
+        .thrust(&src_id, &input, &limits)
+        .expect("thrust source");
+
+    // Precompiled path: register the wasm and thrust it.
+    let pre_id = engine
+        .register_precompiled(wasm_bytes, "wasm32-wasip1")
+        .expect("register_precompiled");
+    let pre_out = engine
+        .thrust(&pre_id, &input, &limits)
+        .expect("thrust precompiled");
+
+    assert_eq!(
+        pre_out, src_out,
+        "precompiled output must equal source output for multi-file package\n  \
+         precompiled: {pre_out}\n  source: {src_out}"
+    );
+}
+
+// ---- dep-linked package: falls back to source-only, no precompiled member --
+
+/// Scaffold a sealed package that declares an external afb dependency so that
+/// `linked_source(&[], &[])` fails at compile time.
+fn scaffold_dep_linked(dir: &Path) {
+    // Use a fake digest: it only needs to look like a sha256 pin for the
+    // manifest to parse. The dependency will never be resolved.
+    let fake_pin = "sha256:".to_string() + &"a".repeat(64);
+    write(
+        dir,
+        "afb.toml",
+        &format!(
+            "[format]\nversion = \"1.0\"\n\
+             [package]\nname = \"depprobe\"\nnamespace = \"example\"\n\
+             version = \"0.1.0\"\nlanguage = \"javascript\"\nentry = \"source/main.js\"\n\
+             [runtime]\nmin = \"0.1.0\"\n\
+             [dependencies]\n\"example/helper\" = \"{fake_pin}\"\n"
+        ),
+    );
+    write(
+        dir,
+        "manifold.json",
+        r#"{"fs":"None","net":"None","crypto":false,"child_process":false,"env":"None","allow_exit":false,"http_timeout_ms":null,"listen":"None"}"#,
+    );
+    write(
+        dir,
+        "source/main.js",
+        "const h = require('example/helper');\nmodule.exports = (input) => h(input);\n",
+    );
+}
+
+#[test]
+fn compile_dep_linked_falls_back_to_source_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pkg_dir = tmp.path().join("deplinked");
+    std::fs::create_dir_all(&pkg_dir).unwrap();
+    scaffold_dep_linked(&pkg_dir);
+
+    let out_afb = tmp.path().join("dep.afb");
+
+    let result = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args([
+            "compile",
+            pkg_dir.to_str().unwrap(),
+            "-o",
+            out_afb.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn burn compile");
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        result.status.success(),
+        "burn compile (dep-linked) must succeed with source-only fallback\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Stderr must carry the note about skipping precompiled.
+    assert!(
+        stderr.contains("dependency-linked") || stderr.contains("source-only"),
+        "expected a note about dependency-linked fallback on stderr, got: {stderr}"
+    );
+
+    // The output .afb must be present and valid.
+    let bytes = std::fs::read(&out_afb).expect("reading output .afb");
+    let afb = Afb::from_bytes(&bytes).expect("parsing output .afb");
+
+    // Source must be present.
+    assert!(
+        afb.source.contains_key("source/main.js"),
+        "source/main.js must be present in source-only .afb"
+    );
+
+    // No precompiled member - a dep-linked package ships source only.
+    assert!(
+        afb.precompiled.is_empty(),
+        "precompiled must be empty for a dep-linked fallback, got: {:?}",
+        afb.precompiled.keys().collect::<Vec<_>>()
+    );
+
+    // runtime.target must NOT be set (no precompiled wasm).
+    assert_eq!(
+        afb.manifest.runtime.target, None,
+        "runtime.target must be absent for a source-only dep-linked .afb"
+    );
+}
+
 // ---- format-level: Builder with precompiled member round-trips ------------
 
 #[test]
