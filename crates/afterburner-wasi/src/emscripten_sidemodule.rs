@@ -46,7 +46,7 @@ use wasmtime::{
 };
 
 use crate::embedder_vm::EmbedderState;
-use crate::emscripten_dylink::parse_got_name_to_slot;
+use crate::emscripten_dylink::{parse_got_name_to_slot, resolve_got_mem};
 
 /// Memory requirements declared in a SIDE_MODULE's `dylink.0` custom section.
 #[derive(Debug, Clone, Copy)]
@@ -362,16 +362,13 @@ pub fn pre_load_side_module(
 
     // Wire GOT.func and GOT.mem globals for the SIDE_MODULE.
     //
-    // GOT.func.<sym>: zero-initialised; function table slot resolution is
-    //   handled by the side module's element segment at instantiation time.
-    //
-    // GOT.mem.<sym>: must hold the runtime LINEAR MEMORY address of the data
-    //   symbol <sym>. The main pyodide module exports every Python C API data
-    //   object (PyExc_ValueError, _Py_NoneStruct, PyType_Type, ...) as an
-    //   IMMUTABLE global whose value IS the data address (memory_base for the
-    //   main module is 0, so no adjustment needed). Mirrors Emscripten's
-    //   relocateExports + updateGOT semantics: for each immutable global export
-    //   from the main instance, write that value into the matching GOT.mem slot.
+    // All GOT globals are created with init 0. GOT.mem entries are then resolved
+    // via resolve_got_mem (shared with the main-module path) which reads the
+    // main instance's immutable-global exports - each immutable export IS the
+    // data address (memory_base=0 for the main module, so no adjustment needed).
+    // This mirrors Emscripten's relocateExports + updateGOT semantics.
+    // GOT.func slot resolution happens via the side module's element segment
+    // at instantiation time.
     let got_ty = GlobalType::new(ValType::I32, Mutability::Var);
     // Collect GOT imports first to avoid repeated borrow conflicts.
     let got_imports: Vec<(String, String)> = module
@@ -385,51 +382,31 @@ pub fn pre_load_side_module(
         })
         .collect();
 
-    let mut got_mem_resolved = 0u32;
-    let mut got_mem_zero = 0u32;
-
+    // Build all GOT globals (init 0), separating GOT.mem for later resolution.
+    let mut got_mem_globals: Vec<(String, Global)> = Vec::new();
     for (m, name) in &got_imports {
         if linker.get(&mut *store, m.as_str(), name.as_str()).is_ok() {
             continue;
         }
-        // For GOT.mem, source the data address from the main instance's export
-        // when that export is an immutable global (= a data address symbol).
-        // This is updateGOT semantics: immutable-global exports are data addresses.
-        let init_val = if m == "GOT.mem" {
-            if let Some(g) = main_instance.get_global(&mut *store, name.as_str()) {
-                if g.ty(&*store).mutability() == Mutability::Const {
-                    // Immutable export: its value is the data address.
-                    let addr = match g.get(&mut *store) {
-                        Val::I32(v) => v,
-                        // i64 globals in wasm64 would need a different path, but
-                        // pyodide/wasm32 only emits i32 data globals.
-                        _ => 0i32,
-                    };
-                    got_mem_resolved += 1;
-                    addr
-                } else {
-                    // Mutable global (e.g. __stack_pointer): not a data address.
-                    got_mem_zero += 1;
-                    0i32
-                }
-            } else {
-                // Symbol not exported by main module: leave zero.
-                got_mem_zero += 1;
-                0i32
-            }
-        } else {
-            // GOT.func: zero; slot filled by the element segment.
-            0i32
-        };
-        let g = Global::new(&mut *store, got_ty.clone(), Val::I32(init_val)).map_err(|e| {
+        let g = Global::new(&mut *store, got_ty.clone(), Val::I32(0)).map_err(|e| {
             AfterburnerError::Engine(format!("GOT stub for sidemodule {m}.{name}: {e}"))
         })?;
+        if m == "GOT.mem" {
+            got_mem_globals.push((name.clone(), g));
+        }
         linker
             .define(&mut *store, m.as_str(), name.as_str(), g)
             .map_err(|e| {
                 AfterburnerError::Engine(format!("define sidemodule GOT {m}.{name}: {e}"))
             })?;
     }
+
+    // Apply updateGOT to GOT.mem entries using the shared resolve_got_mem.
+    let got_mem_pairs: Vec<(&str, Global)> = got_mem_globals
+        .iter()
+        .map(|(s, g)| (s.as_str(), *g))
+        .collect();
+    let (got_mem_resolved, got_mem_zero) = resolve_got_mem(store, main_instance, &got_mem_pairs);
     eprintln!(
         "[sidemodule] {path}: GOT.mem resolved={got_mem_resolved} zero={got_mem_zero}"
     );

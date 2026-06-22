@@ -55,7 +55,9 @@ use std::collections::HashMap;
 
 use afterburner_core::{AfterburnerError, Result};
 use wasmparser::{ElementItems, ElementKind, Name, Operator, Parser, Payload};
-use wasmtime::{ExternType, Func, FuncType, Global, Instance, Linker, Module, Ref, Store, Val};
+use wasmtime::{
+    ExternType, Func, FuncType, Global, Instance, Linker, Module, Mutability, Ref, Store, Val,
+};
 
 use crate::embedder_vm::EmbedderState;
 use crate::emscripten_runtime::PYODIDE_TABLE_INITIAL_SIZE;
@@ -139,6 +141,52 @@ pub fn prefill_got_mem_globals(
         }
     }
     Ok(())
+}
+
+// ---- updateGOT: resolve GOT.mem entries from an instance's immutable exports ---
+
+/// Resolve `GOT.mem.<sym>` globals from a WASM instance's immutable-global exports.
+///
+/// Mirrors Emscripten's `updateGOT` / `relocateExports` semantics: every
+/// immutable global export from `instance` whose name matches a `GOT.mem.<sym>`
+/// entry is treated as a data-address symbol. Its i32 value (the linear-memory
+/// address, already accounting for the module's `memory_base`) is written into
+/// the corresponding `Global` handle in `entries`.
+///
+/// `entries` is a slice of `(symbol_name, Global)` pairs - one per `GOT.mem.*`
+/// import that should be resolved. Pass the pairs for both main-module and
+/// side-module GOT.mem imports; the logic is identical for both.
+///
+/// Returns `(resolved, zero)` where `resolved` is the count of entries whose
+/// value was set to a non-zero address and `zero` is all others (symbol not
+/// exported, mutable global export, or zero address).
+pub fn resolve_got_mem(
+    store: &mut Store<EmbedderState>,
+    instance: &Instance,
+    entries: &[(&str, Global)],
+) -> (u32, u32) {
+    let mut resolved = 0u32;
+    let mut zero = 0u32;
+    for (name, g) in entries {
+        let addr = instance
+            .get_global(&mut *store, name)
+            .filter(|eg| eg.ty(&*store).mutability() == Mutability::Const)
+            .and_then(|eg| match eg.get(&mut *store) {
+                Val::I32(v) if v != 0 => Some(v),
+                _ => None,
+            });
+        match addr {
+            Some(v) => {
+                // Ignore set errors: the global may be read-only in edge cases.
+                let _ = g.set(&mut *store, Val::I32(v));
+                resolved += 1;
+            }
+            None => {
+                zero += 1;
+            }
+        }
+    }
+    (resolved, zero)
 }
 
 // ---- parse name section + element segments to build name->table_slot ----------
@@ -535,11 +583,43 @@ pub fn fill_got_table_slots(
         funcs_stubbed += 1;
     }
 
+    // Apply updateGOT to all GOT.mem entries from the module's imports.
+    //
+    // The probe auto-fills every GOT.mem import with Val::I32(0) before
+    // instantiation, but only the 3 layout symbols (__heap_base, __stack_low,
+    // __stack_high) are in got_globals. All other GOT.mem imports (Python C API
+    // data symbols: PyExc_ValueError, _Py_NoneStruct, PyType_Type, ...) are
+    // defined in the linker but absent from got_globals.
+    //
+    // Collect all GOT.mem globals from the linker via the module's import list
+    // so that every data-symbol GOT entry is resolved from the main instance's
+    // immutable-global exports (updateGOT semantics).
+    let mem_entries: Vec<(String, Global)> = module
+        .imports()
+        .filter(|imp| imp.module() == "GOT.mem")
+        .filter_map(|imp| {
+            linker
+                .get(&mut *store, "GOT.mem", imp.name())
+                .ok()
+                .and_then(|ext| ext.into_global())
+                .map(|g| (imp.name().to_owned(), g))
+        })
+        .collect();
+    let mem_pairs: Vec<(&str, Global)> = mem_entries
+        .iter()
+        .map(|(s, g)| (s.as_str(), *g))
+        .collect();
+    let (mem_resolved, mem_zero) = resolve_got_mem(store, instance, &mem_pairs);
+    eprintln!(
+        "[GOT] main-module GOT.mem: resolved={mem_resolved} zero={mem_zero} total={}",
+        mem_entries.len()
+    );
+
     Ok(GotResolutionReport {
         funcs_from_elem,
         funcs_from_export,
         funcs_stubbed,
-        mem_resolved: 3,
+        mem_resolved,
     })
 }
 
