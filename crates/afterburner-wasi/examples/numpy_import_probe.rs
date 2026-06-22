@@ -28,7 +28,7 @@ use afterburner_wasi::emscripten_runtime::{
     JsFfiCallLog, MechCallLog, NoopCallLog, PYODIDE_STACK_BASE, fill_unknown_imports_as_noops,
     wire_env_memory_and_table_in_store, wire_wasi_only,
 };
-use afterburner_wasi::emscripten_sidemodule::pre_load_side_module;
+use afterburner_wasi::emscripten_sidemodule::{pre_load_side_module, wire_dlopen_dlsym};
 use afterburner_wasi::emscripten_syscall::wire_fs_env_funcs;
 use wasmtime::{
     Config, Engine, FuncType, Global, GlobalType, Linker, Module, Mutability, OptLevel, Store, Tag,
@@ -384,6 +384,13 @@ fn run_probe() -> String {
         Ok(n) => eprintln!("[numpy_probe] wired {n} GOT.func stubs"),
         Err(e) => return format!("GOT STUB WIRING FAILED: {e}"),
     }
+
+    // Wire _dlopen_js / _dlsym_js before auto-filling noops so that Python's
+    // dlopen dispatch reaches the SideModuleRegistry rather than returning 0.
+    if let Err(e) = wire_dlopen_dlsym(&mut linker) {
+        return format!("DLOPEN WIRING FAILED: {e}");
+    }
+
     let auto_filled =
         fill_unknown_imports_as_noops(&mut store, &mut linker, &module, noop_log.clone());
     eprintln!("[numpy_probe] {} imports auto-filled", auto_filled.len());
@@ -422,20 +429,14 @@ fn run_probe() -> String {
     // Pre-load the numpy SIDE_MODULE now that the main instance exists.
     // This must happen BEFORE __wasm_call_ctors so the dlopen shim can find it.
     //
-    // The initial table and memory bases for side modules start after the main
-    // module's regions. We use conservative offsets derived from the main module.
-    // vertexia: exact dylink.0 bounds; upgrade path is parsing them.
-    let side_memory_base: u32 = 1 << 26; // 64 MiB offset into shared memory
-    let side_table_base: u32 = 16384; // beyond pyodide's initial table
-
+    // memory_base is derived from the module's dylink.0 mem_size via malloc on
+    // the main instance. table_base is the current table size before growing.
     let (handle, _next_mem, _next_tbl) = match pre_load_side_module(
         &engine,
         &mut store,
         &instance,
         &numpy_so_bytes,
         NUMPY_CORE_SO,
-        side_memory_base,
-        side_table_base,
     ) {
         Ok(r) => r,
         Err(e) => return format!("SIDE_MODULE LOAD FAILED for {NUMPY_CORE_SO}: {e}"),

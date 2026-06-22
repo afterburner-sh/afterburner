@@ -39,12 +39,108 @@
 use std::collections::HashMap;
 
 use afterburner_core::{AfterburnerError, Result};
+use wasmparser::{KnownCustom, Parser, Payload};
 use wasmtime::{
     Caller, Engine, ExternType, FuncType, Global, GlobalType, Instance, Linker, Module, Mutability,
     Store, Val, ValType,
 };
 
 use crate::embedder_vm::EmbedderState;
+
+/// Memory requirements declared in a SIDE_MODULE's `dylink.0` custom section.
+#[derive(Debug, Clone, Copy)]
+pub struct Dylink0MemInfo {
+    /// Bytes the loader must reserve starting at `__memory_base`.
+    pub mem_size: u32,
+    /// Required alignment of the region, in bytes (already expanded from log2).
+    pub mem_align: u32,
+    /// Number of table slots the module needs starting at `__table_base`.
+    pub table_size: u32,
+}
+
+impl Default for Dylink0MemInfo {
+    fn default() -> Self {
+        // Conservative fallback when the section is absent or unparseable.
+        Self {
+            mem_size: 1024 * 1024,
+            mem_align: 16,
+            table_size: 512,
+        }
+    }
+}
+
+/// Parse the `dylink.0` custom section of an Emscripten SIDE_MODULE and return
+/// the `MEM_INFO` subsection fields.
+///
+/// Uses wasmparser's `Dylink0SectionReader` (via `CustomSectionReader::as_known`).
+/// Falls back to a 1 MiB / 512-slot default if the section is missing or malformed.
+pub fn parse_dylink0_mem_info(wasm_bytes: &[u8]) -> Dylink0MemInfo {
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        let Ok(payload) = payload else { break };
+        if let Payload::CustomSection(cs) = payload
+            && let KnownCustom::Dylink0(reader) = cs.as_known()
+        {
+            for sub in reader.into_iter().flatten() {
+                if let wasmparser::Dylink0Subsection::MemInfo(info) = sub {
+                    return Dylink0MemInfo {
+                        mem_size: info.memory_size,
+                        // memory_alignment is log2 in the spec; expand to bytes.
+                        mem_align: 1u32.checked_shl(info.memory_alignment).unwrap_or(1),
+                        table_size: info.table_size,
+                    };
+                }
+            }
+        }
+    }
+    Dylink0MemInfo::default()
+}
+
+/// Allocate `size` bytes from the main Emscripten module's `malloc`, aligned to
+/// `align` bytes.
+///
+/// Calls the main instance's exported `malloc(size)` and rounds the result up to
+/// the required alignment. Returns the aligned guest pointer.
+fn malloc_in_main(
+    store: &mut Store<EmbedderState>,
+    main_instance: &Instance,
+    size: u32,
+    align: u32,
+    path: &str,
+) -> Result<u32> {
+    // Allocate with enough padding to guarantee alignment: size + (align - 1).
+    let alloc_size = size.saturating_add(align.saturating_sub(1));
+    let malloc_fn = main_instance
+        .get_func(&mut *store, "malloc")
+        .ok_or_else(|| {
+            AfterburnerError::Engine(format!(
+                "sidemodule {path}: main instance has no 'malloc' export"
+            ))
+        })?;
+    let mut result = [Val::I32(0)];
+    malloc_fn
+        .call(&mut *store, &[Val::I32(alloc_size as i32)], &mut result)
+        .map_err(|e| AfterburnerError::Engine(format!("malloc({alloc_size}) for {path}: {e}")))?;
+    let raw = match result[0] {
+        Val::I32(v) => v as u32,
+        _ => {
+            return Err(AfterburnerError::Engine(format!(
+                "malloc for {path}: unexpected return type"
+            )));
+        }
+    };
+    if raw == 0 {
+        return Err(AfterburnerError::Engine(format!(
+            "malloc({alloc_size}) for {path}: returned NULL"
+        )));
+    }
+    // Align up: (raw + align - 1) & !(align - 1)
+    let aligned = if align <= 1 {
+        raw
+    } else {
+        (raw.saturating_add(align - 1)) & !(align - 1)
+    };
+    Ok(aligned)
+}
 
 /// Table slot occupied by a pre-loaded SIDE_MODULE's `PyInit_*` function.
 /// Used by `_dlsym_js` to return the callable table index.
@@ -112,62 +208,76 @@ impl SideModuleRegistry {
 ///
 /// `wasm_bytes` - raw bytes of the `.so` (which is a `.wasm` SIDE_MODULE).
 /// `path` - the path the guest will pass to `dlopen`, used as the registry key.
-/// `memory_base` - where this module's static data starts in the shared linear memory.
-/// `table_base` - where this module's function table starts in the shared table.
 /// `main_instance` - the already-instantiated `pyodide.asm.wasm` instance whose
-///   exports provide all Python C API functions.
+///   exports provide all Python C API functions and the Emscripten heap allocator.
 ///
-/// Returns the handle (1-based integer) and the allocated `table_base_next` for
-/// the caller to update for the next module.
+/// Memory layout is derived from the module's `dylink.0` custom section:
+/// `__memory_base` is allocated via the main module's `malloc(mem_size)` so the
+/// data segments land in already-backed linear memory. `__table_base` is the
+/// current table size before growing by `table_size` from `dylink.0`.
 ///
-/// vertexia: grows the shared table by the module's table_size; upgrade path is
-/// tracking exact dylink.0 size + per-module GOT resolution.
+/// Returns the [`SideModuleHandle`], the next available `memory_base` (pointer
+/// after the allocated region), and the next available `table_base`.
+///
+/// vertexia: per-module GOT slot resolution; upgrade path is parsing the element
+/// segment to get exact per-export table slots.
 pub fn pre_load_side_module(
     engine: &Engine,
     store: &mut Store<EmbedderState>,
     main_instance: &Instance,
     wasm_bytes: &[u8],
     path: &str,
-    memory_base: u32,
-    table_base: u32,
 ) -> Result<(SideModuleHandle, u32, u32)> {
+    // Parse dylink.0 for exact memory and table requirements.
+    let dylink = parse_dylink0_mem_info(wasm_bytes);
     eprintln!(
-        "[sidemodule] compiling {} ({} bytes) memory_base={:#x} table_base={}",
+        "[sidemodule] {path}: dylink.0 mem_size={} mem_align={} table_size={}",
+        dylink.mem_size, dylink.mem_align, dylink.table_size
+    );
+
+    // Allocate memory for the side module's data segments in the main module's
+    // heap via malloc so the backing pages exist before data relocation.
+    let memory_base = malloc_in_main(
+        store,
+        main_instance,
+        dylink.mem_size,
+        dylink.mem_align,
+        path,
+    )?;
+    eprintln!(
+        "[sidemodule] {path}: malloc({}) -> memory_base={:#x}",
+        dylink.mem_size, memory_base
+    );
+
+    eprintln!(
+        "[sidemodule] compiling {} ({} bytes) memory_base={:#x}",
         path,
         wasm_bytes.len(),
         memory_base,
-        table_base
     );
 
     let module = Module::new(engine, wasm_bytes)
         .map_err(|e| AfterburnerError::Engine(format!("side module compile {path}: {e}")))?;
 
-    // Before wiring, grow the shared table so the active element segment can
-    // place funcrefs at [table_base .. table_base + element_count).
-    // Without growth, instantiation traps with "undefined element: out of bounds
-    // table access" when the element segment index exceeds the current table size.
-    let table_size_needed = table_base.saturating_add(estimate_table_size(wasm_bytes));
-    {
+    // table_base = current table size; grow by dylink.0 table_size to reserve slots.
+    let table_base = {
         let Some(tbl) = store.data().pyodide_table else {
             return Err(AfterburnerError::Engine(
                 "pre_load_side_module: pyodide_table not set in store".into(),
             ));
         };
         let current = tbl.size(&*store) as u32;
-        if current < table_size_needed {
-            let delta = table_size_needed - current;
-            tbl.grow(&mut *store, delta as u64, wasmtime::Ref::Func(None))
-                .map_err(|e| {
-                    AfterburnerError::Engine(format!(
-                        "sidemodule table grow by {delta}: {e}"
-                    ))
-                })?;
-            eprintln!(
-                "[sidemodule] {path}: grew table {current} -> {} (delta {delta})",
-                tbl.size(&*store)
-            );
-        }
-    }
+        let table_size = dylink.table_size.max(1);
+        tbl.grow(&mut *store, table_size as u64, wasmtime::Ref::Func(None))
+            .map_err(|e| {
+                AfterburnerError::Engine(format!("sidemodule table grow by {table_size}: {e}"))
+            })?;
+        eprintln!(
+            "[sidemodule] {path}: grew table {current} -> {} (table_base={current}, delta={table_size})",
+            tbl.size(&*store)
+        );
+        current
+    };
 
     // Build a linker for the SIDE_MODULE.
     let mut linker: Linker<EmbedderState> = Linker::new(engine);
@@ -354,14 +464,10 @@ pub fn pre_load_side_module(
         eprintln!("[sidemodule] {path}: __wasm_call_ctors OK");
     }
 
-    // Estimate the next memory_base and table_base using the module's element count.
-    // vertexia: dylink.0 size fields for exact bounds; upgrade path is parsing them.
-    let table_size_estimate = estimate_table_size(wasm_bytes);
-    let mem_size_estimate = estimate_mem_size(wasm_bytes);
-    let next_memory_base = memory_base
-        .saturating_add(mem_size_estimate)
-        .next_power_of_two();
-    let next_table_base = table_base.saturating_add(table_size_estimate);
+    // Next bases: memory_base advances past this module's allocation;
+    // table_base advances past this module's table slots.
+    let next_memory_base = memory_base.saturating_add(dylink.mem_size);
+    let next_table_base = table_base.saturating_add(dylink.table_size);
 
     Ok((
         SideModuleHandle {
@@ -398,52 +504,6 @@ fn collect_export_table_slots(
         slot = slot.saturating_add(1);
     }
     out
-}
-
-/// Estimate the table size from the element section of a SIDE_MODULE.
-///
-/// Returns the number of function slots this module places in the table.
-/// Falls back to 512 if parsing fails.
-fn estimate_table_size(wasm_bytes: &[u8]) -> u32 {
-    use wasmparser::{ElementItems, ElementKind, Parser, Payload};
-    let mut total = 0u32;
-    for payload in Parser::new(0).parse_all(wasm_bytes) {
-        let Ok(payload) = payload else { break };
-        if let Payload::ElementSection(reader) = payload {
-            for elem in reader.into_iter().flatten() {
-                if matches!(elem.kind, ElementKind::Active { .. }) {
-                    match elem.items {
-                        ElementItems::Functions(fs) => {
-                            total += fs.into_iter().count() as u32;
-                        }
-                        ElementItems::Expressions(_, exprs) => {
-                            total += exprs.into_iter().count() as u32;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if total == 0 { 512 } else { total }
-}
-
-/// Estimate the memory footprint of a SIDE_MODULE from its data segments.
-///
-/// Sums the uncompressed sizes of all data segments. Falls back to 1 MiB.
-fn estimate_mem_size(wasm_bytes: &[u8]) -> u32 {
-    use wasmparser::{DataKind, Parser, Payload};
-    let mut total = 0u32;
-    for payload in Parser::new(0).parse_all(wasm_bytes) {
-        let Ok(payload) = payload else { break };
-        if let Payload::DataSection(reader) = payload {
-            for data in reader.into_iter().flatten() {
-                if matches!(data.kind, DataKind::Active { .. }) {
-                    total += data.data.len() as u32;
-                }
-            }
-        }
-    }
-    if total == 0 { 1024 * 1024 } else { total }
 }
 
 /// Wire `env._dlopen_js`, `env._dlsym_js`, and `env._emscripten_dlopen_js`
