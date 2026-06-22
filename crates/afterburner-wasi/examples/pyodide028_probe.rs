@@ -506,7 +506,71 @@ fn step1_succeeded(
     )
 }
 
-const SCRATCH_OFFSET: u32 = 32 * 1024 * 1024;
+/// Python code run via `python -c <CODE>`.
+const PYTHON_CODE: &[u8] =
+    b"print('hello from cpython on afterburner')\nimport sys\nprint('pyver', sys.version.split()[0])\nprint('sum', sum(range(100)))\n\0";
+
+/// Grow wasm memory by one page (64 KiB) and write argv strings + the i32
+/// pointer array into the new page. Returns the wasm guest address of the i32
+/// argv array.
+///
+/// Growing by one page guarantees the scratch region does not overlap anything
+/// CPython or the stdlib placed during `__wasm_call_ctors`.
+///
+/// Layout in the new page (all offsets relative to `new_page_base`):
+///   +0                 : "python\0"          (7 bytes)
+///   +7                 : "-c\0"              (3 bytes)
+///   +10                : PYTHON_CODE         (len bytes)
+///   +10+len (4-aligned): i32[3] argv array   (12 bytes)
+///
+/// Returns `Err(String)` on memory-grow failure.
+fn write_argv(store: &mut Store<EmbedderState>) -> Result<i32, String> {
+    let arg0: &[u8] = b"python\0";
+    let arg1: &[u8] = b"-c\0";
+    let arg2: &[u8] = PYTHON_CODE;
+
+    let mem = match store.data().pyodide_memory {
+        Some(m) => m,
+        None => return Err("pyodide_memory not set".to_owned()),
+    };
+
+    // Grow by 1 page (65536 bytes). `grow` returns the previous page count.
+    let prev_pages = mem
+        .grow(&mut *store, 1)
+        .map_err(|e| format!("memory.grow failed: {e}"))?;
+    let base = (prev_pages as usize) * 65536;
+
+    let off0 = base;
+    let off1 = off0 + arg0.len();
+    let off2 = off1 + arg1.len();
+    // align the argv array to 4 bytes
+    let arr_off = (off2 + arg2.len() + 3) & !3;
+    let total = arr_off + 12; // 3 * 4 bytes
+
+    let mem_len = mem.data_size(&*store);
+    if total > mem_len {
+        return Err(format!(
+            "scratch region [{base:#x}..{total:#x}) exceeds memory size {mem_len:#x} after grow"
+        ));
+    }
+
+    let data = mem.data_mut(&mut *store);
+    data[off0..off0 + arg0.len()].copy_from_slice(arg0);
+    data[off1..off1 + arg1.len()].copy_from_slice(arg1);
+    data[off2..off2 + arg2.len()].copy_from_slice(arg2);
+
+    // argv pointer array: [&"python\0", &"-c\0", &CODE\0] as little-endian i32
+    let ptrs: [u32; 3] = [off0 as u32, off1 as u32, off2 as u32];
+    for (i, ptr) in ptrs.iter().enumerate() {
+        let slot = arr_off + i * 4;
+        data[slot..slot + 4].copy_from_slice(&ptr.to_le_bytes());
+    }
+
+    eprintln!(
+        "[probe P5] argv at {base:#x}: arg0={off0:#x} arg1={off1:#x} arg2={off2:#x} arr={arr_off:#x}"
+    );
+    Ok(arr_off as i32)
+}
 
 fn run_python_phase(
     instance: &wasmtime::Instance,
@@ -519,11 +583,23 @@ fn run_python_phase(
     store.data_mut().wasi_stdout.clear();
 
     if let Some(func) = instance.get_func(&mut *store, "__main_argc_argv") {
-        eprintln!("[probe P5] calling __main_argc_argv(0, 0)...");
+        // Write argv = ["python", "-c", CODE] into scratch memory and call
+        // __main_argc_argv(3, argv_array_ptr) so CPython runs the -c code.
+        let argv_ptr = match write_argv(store) {
+            Ok(p) => p,
+            Err(e) => {
+                return format!(
+                    "{ctors_summary}\n\
+                     --- phase 5: __main_argc_argv(3, argv) ---\n\
+                     ARGV WRITE FAILED: {e}"
+                );
+            }
+        };
+        eprintln!("[probe P5] calling __main_argc_argv(3, {argv_ptr:#x})...");
         let mut results = [wasmtime::Val::I32(0)];
         match func.call(
             &mut *store,
-            &[wasmtime::Val::I32(0), wasmtime::Val::I32(0)],
+            &[wasmtime::Val::I32(3), wasmtime::Val::I32(argv_ptr)],
             &mut results,
         ) {
             Ok(_) => {
@@ -535,14 +611,29 @@ fn run_python_phase(
                 let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
                 let fuel_remaining = store.get_fuel().unwrap_or(0);
                 let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
+                let noop_calls = noop_log.snapshot();
+                let mech_tail = mech_log.tail(MECH_TRACE_TAIL);
+                let mut mech_trace = String::new();
+                for (i, entry) in mech_tail.iter().enumerate() {
+                    mech_trace.push_str(&format!(
+                        "  [{:>3}] {} (arg0={}, arg1={})\n",
+                        i + 1,
+                        entry.name,
+                        entry.arg0,
+                        entry.arg1
+                    ));
+                }
                 return format!(
                     "{ctors_summary}\n\
-                     --- phase 5: __main_argc_argv(0,0) ---\n\
+                     --- phase 5: __main_argc_argv(3, argv) ---\n\
                      Return: {ret}\n\
                      Fuel consumed: {total_fuel}\n\
                      JS-FFI calls: {}\n\
-                     WASI stdout ({} bytes): {wasi_text:?}",
+                     Noop stubs called ({} unique): {noop_calls:?}\n\
+                     Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
+                     WASI stdout ({} bytes):\n{wasi_text}",
                     log.total_calls(),
+                    noop_calls.len(),
                     wasi_out.len()
                 );
             }
@@ -569,13 +660,13 @@ fn run_python_phase(
                 let noop_calls = noop_log.snapshot();
                 return format!(
                     "{ctors_summary}\n\
-                     --- phase 5: __main_argc_argv(0,0) ---\n\
+                     --- phase 5: __main_argc_argv(3, argv) ---\n\
                      TRAPPED: {e}\n\
                      Fuel consumed: {total_fuel}\n\
                      JS-FFI calls: {}\n\
                      C++ throws: {throw_count}\n\
                      Last 12 FS paths: {fs_paths:?}\n\
-                     WASI stdout ({} bytes): {wasi_text:?}\n\
+                     WASI stdout ({} bytes):\n{wasi_text}\n\
                      Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
                      Noop stubs called ({} unique): {noop_calls:?}\n\
                      Finding: {finding}",
@@ -614,7 +705,7 @@ fn run_python_phase(
              TRAPPED at Py_InitializeEx(0): {e}\n\
              Fuel consumed: {total_fuel}\n\
              JS-FFI calls: {}\n\
-             WASI stdout ({} bytes): {wasi_text:?}\n\
+             WASI stdout ({} bytes):\n{wasi_text}\n\
              Finding: {finding}",
             log.total_calls(),
             wasi_out.len()
@@ -631,33 +722,46 @@ fn run_python_phase(
                  --- phase 5: C API path ---\n\
                  Py_InitializeEx(0) succeeded\n\
                  Finding: PyRun_SimpleString not exported\n\
-                 WASI stdout ({} bytes): {wasi_text:?}",
+                 WASI stdout ({} bytes):\n{wasi_text}",
                 wasi_out.len()
             );
         }
     };
 
-    let src = b"print('hello from cpython 3.13 on afterburner')\n\0";
-    let maybe_mem = store.data().pyodide_memory;
-    let scratch_ptr = match maybe_mem {
-        Some(mem) => {
-            let offset = SCRATCH_OFFSET as usize;
-            let mem_len = mem.data_size(&*store);
-            if offset + src.len() > mem_len {
-                return format!(
-                    "{ctors_summary}\n\
-                     --- phase 5: C API path ---\n\
-                     Finding: memory too small for scratch write"
-                );
-            }
-            mem.data_mut(&mut *store)[offset..offset + src.len()].copy_from_slice(src);
-            offset as i32
-        }
+    // Reuse the same Python code as the __main_argc_argv path.
+    // Grow memory by one page to get a clean scratch region.
+    let src = PYTHON_CODE;
+    let mem = match store.data().pyodide_memory {
+        Some(m) => m,
         None => {
             return format!(
                 "{ctors_summary}\n\
                  --- phase 5: C API path ---\n\
                  Finding: pyodide_memory not set"
+            );
+        }
+    };
+    let scratch_ptr = match mem.grow(&mut *store, 1) {
+        Ok(prev_pages) => {
+            let offset = (prev_pages as usize) * 65536;
+            let mem_len = mem.data_size(&*store);
+            if offset + src.len() > mem_len {
+                return format!(
+                    "{ctors_summary}\n\
+                     --- phase 5: C API path ---\n\
+                     Finding: memory too small after grow: need {}, have {}",
+                    offset + src.len(),
+                    mem_len
+                );
+            }
+            mem.data_mut(&mut *store)[offset..offset + src.len()].copy_from_slice(src);
+            offset as i32
+        }
+        Err(e) => {
+            return format!(
+                "{ctors_summary}\n\
+                 --- phase 5: C API path ---\n\
+                 Finding: memory.grow failed: {e}"
             );
         }
     };
@@ -682,7 +786,7 @@ fn run_python_phase(
              PyRun_SimpleString returned (no trap)\n\
              Fuel consumed: {total_fuel}\n\
              JS-FFI calls: {}\n\
-             WASI stdout ({} bytes): {wasi_text:?}",
+             WASI stdout ({} bytes):\n{wasi_text}",
             log.total_calls(),
             wasi_out.len()
         ),
@@ -695,7 +799,7 @@ fn run_python_phase(
                  TRAPPED at PyRun_SimpleString: {e}\n\
                  Fuel consumed: {total_fuel}\n\
                  JS-FFI calls: {}\n\
-                 WASI stdout ({} bytes): {wasi_text:?}\n\
+                 WASI stdout ({} bytes):\n{wasi_text}\n\
                  Finding: {finding}",
                 log.total_calls(),
                 wasi_out.len()

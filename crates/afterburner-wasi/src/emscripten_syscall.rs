@@ -6,9 +6,9 @@
 //! Filesystem and POSIX syscall implementations for the Emscripten env.* layer.
 //!
 //! Wires the real in-memory FS-backed `__syscall_*` imports (getcwd, openat,
-//! read, pread64, close, lseek, fstat64, stat64, lstat64, newfstatat, ioctl,
-//! getdents64, faccessat, fcntl64, readlinkat) plus the returning-(-1) stubs
-//! for syscalls that are not needed in a sealed environment.
+//! read, writev, pread64, close, lseek, fstat64, stat64, lstat64, newfstatat,
+//! ioctl, getdents64, faccessat, fcntl64, readlinkat) plus the returning-(-1)
+//! stubs for syscalls that are not needed in a sealed environment.
 
 use std::sync::Arc;
 
@@ -37,9 +37,9 @@ fn log_stat(tag: &str, abs: &str, rc: i32, mode_size: Option<(u32, u64)>) {
 /// Wire all `__syscall_*` filesystem and POSIX imports into `linker`.
 ///
 /// Real in-memory FS implementations are provided for the syscalls that CPython
-/// needs to initialize (getcwd, openat, read, pread64, close, lseek, fstat64,
-/// stat64, lstat64, newfstatat, ioctl, getdents64, faccessat, fcntl64,
-/// readlinkat). All other syscalls return -1 (ENOSYS).
+/// needs to initialize and run (getcwd, openat, read, writev, pread64, close,
+/// lseek, fstat64, stat64, lstat64, newfstatat, ioctl, getdents64, faccessat,
+/// fcntl64, readlinkat). All other syscalls return -1 (ENOSYS).
 pub fn wire_fs_env_funcs(
     linker: &mut Linker<EmbedderState>,
     mech_log: Arc<MechCallLog>,
@@ -267,6 +267,66 @@ pub fn wire_fs_env_funcs(
                 },
             )
             .map_err(|e| AfterburnerError::Engine(format!("__syscall_read: {e}")))?;
+    }
+
+    // __syscall_writev(fd: i32, iov: i32, iovcnt: i32) -> i32
+    //
+    // Linux iovec layout (wasm32, little-endian):
+    //   offset +0: u32 iov_base
+    //   offset +4: u32 iov_len
+    // Each iovec is 8 bytes. For fd 1/2, bytes are appended to wasi_stdout
+    // (which is the same capture buffer the WASI fd_write shim uses).
+    {
+        let _log = mech_log.clone();
+        linker
+            .func_wrap(
+                "env",
+                "__syscall_writev",
+                move |mut caller: Caller<'_, EmbedderState>,
+                      fd: i32,
+                      iov: i32,
+                      iovcnt: i32|
+                      -> i32 {
+                    _log.push("__syscall_writev", fd, iov);
+                    let iovcnt = iovcnt as u32 as usize;
+                    let Some(memory) = caller.data().pyodide_memory else {
+                        return EBADF;
+                    };
+                    let iov_array_len = iovcnt * 8;
+                    let iov_start = iov as u32 as usize;
+                    let mem_len = memory.data_size(&caller);
+                    if iov_start + iov_array_len > mem_len {
+                        return EINVAL;
+                    }
+                    // Read the entire iovec array first (avoids borrow overlap with data_mut).
+                    let iov_bytes: Vec<u8> =
+                        memory.data(&caller)[iov_start..iov_start + iov_array_len].to_vec();
+                    let mut total: i32 = 0;
+                    for i in 0..iovcnt {
+                        let base = i * 8;
+                        let buf_ptr =
+                            u32::from_le_bytes(iov_bytes[base..base + 4].try_into().unwrap())
+                                as usize;
+                        let buf_len =
+                            u32::from_le_bytes(iov_bytes[base + 4..base + 8].try_into().unwrap())
+                                as usize;
+                        if buf_len == 0 {
+                            continue;
+                        }
+                        if buf_ptr + buf_len > mem_len {
+                            return EINVAL;
+                        }
+                        let chunk: Vec<u8> =
+                            memory.data(&caller)[buf_ptr..buf_ptr + buf_len].to_vec();
+                        if fd == 1 || fd == 2 {
+                            caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
+                        }
+                        total += buf_len as i32;
+                    }
+                    total
+                },
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("__syscall_writev: {e}")))?;
     }
 
     // __syscall_pread64(fd: i32, buf: i32, count: i32, offset: i64) -> i32
