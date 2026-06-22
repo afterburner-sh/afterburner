@@ -34,19 +34,20 @@ pub(crate) fn wire_jsffi_stubs(
         ($name:expr, $func_type:expr) => {{
             let log2 = Arc::clone(&log);
             let name: &'static str = $name;
+            // Pre-compute the correct default Val for each declared result type.
+            // wasmtime pre-fills result slots with `Val::FuncRef(None)`
+            // (`(ref null nofunc)`); matching on that would return the wrong type
+            // for externref-typed results. Key off the declared FuncType instead.
+            let ft: FuncType = $func_type;
+            let defaults: Vec<Val> = ft
+                .results()
+                .map(|vt| crate::emscripten_runtime::default_val_for(&vt))
+                .collect();
             linker
-                .func_new("env", name, $func_type, move |_caller, _params, results| {
+                .func_new("env", name, ft, move |_caller, _params, results| {
                     log2.record(name);
-                    for r in results.iter_mut() {
-                        *r = match r {
-                            Val::I32(_) => Val::I32(0),
-                            Val::I64(_) => Val::I64(0),
-                            Val::F32(_) => Val::F32(0),
-                            Val::F64(_) => Val::F64(0),
-                            Val::ExternRef(_) => Val::ExternRef(None),
-                            Val::FuncRef(_) => Val::FuncRef(None),
-                            _ => Val::I32(0),
-                        };
+                    for (r, d) in results.iter_mut().zip(defaults.iter()) {
+                        *r = *d;
                     }
                     Ok(())
                 })

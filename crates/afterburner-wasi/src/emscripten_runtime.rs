@@ -64,6 +64,25 @@ use wasmtime::{
     Engine, Global, GlobalType, Linker, MemoryType, Mutability, Table, TableType, Val, ValType,
 };
 
+// ---- ref-type-safe value default --------------------------------------------
+
+/// Return the correct zero/null [`Val`] for a declared [`ValType`].
+///
+/// wasmtime pre-initializes every result slot in a `func_new` closure with
+/// `Val::null_func_ref()` (i.e. `Val::FuncRef(None)`, which has type
+/// `(ref null nofunc)`). Matching on the pre-initialized value is therefore
+/// wrong for externref-typed slots: the match arm `Val::FuncRef(_)` fires and
+/// leaves the slot as `(ref null nofunc)`, but the module expects
+/// `(ref null extern)`. Keying off the declared type avoids the mismatch.
+pub(crate) fn default_val_for(vt: &ValType) -> Val {
+    // `ValType::default_value()` returns `Some` for all nullable refs and all
+    // primitives. Non-nullable ref types return `None` (they have no default),
+    // but import stubs must always have a return value, so fall back to the
+    // null funcref (the wasmtime pre-fill) - those won't appear in practice
+    // for Pyodide's externref-bearing imports.
+    vt.default_value().unwrap_or(Val::FuncRef(None))
+}
+
 // ---- mechanical env.* call trace --------------------------------------------
 
 /// Capacity of the mechanical-call ring buffer (power of two).
@@ -552,17 +571,15 @@ pub fn fill_unknown_imports_as_noops(
         if let wasmtime::ExternType::Func(ft) = import.ty() {
             let m = import.module().to_owned();
             let n = import.name().to_owned();
-            let _ = linker.func_new(&m, &n, ft, |_, _, results| {
-                for r in results.iter_mut() {
-                    *r = match r {
-                        Val::I32(_) => Val::I32(0),
-                        Val::I64(_) => Val::I64(0),
-                        Val::F32(_) => Val::F32(0),
-                        Val::F64(_) => Val::F64(0),
-                        Val::ExternRef(_) => Val::ExternRef(None),
-                        Val::FuncRef(_) => Val::FuncRef(None),
-                        _ => Val::I32(0),
-                    };
+            // Pre-compute the correct default for each result type from the
+            // declared FuncType. wasmtime pre-fills every result slot with
+            // `Val::FuncRef(None)` (`(ref null nofunc)`), so matching on the
+            // slot's current value would return the wrong type for externref
+            // results. Keying off the declared type is correct.
+            let defaults: Vec<Val> = ft.results().map(|vt| default_val_for(&vt)).collect();
+            let _ = linker.func_new(&m, &n, ft, move |_, _, results| {
+                for (r, d) in results.iter_mut().zip(defaults.iter()) {
+                    *r = *d;
                 }
                 Ok(())
             });
