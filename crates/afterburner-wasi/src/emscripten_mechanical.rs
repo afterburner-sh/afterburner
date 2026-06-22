@@ -716,32 +716,28 @@ pub(crate) fn wire_mechanical_env_funcs(
             0
         });
     }
+    // ---- Pyodide PyCFunction trampolines ------------------------------------
+    //
+    // Pyodide routes all PyCFunction calls through two JS trampolines to satisfy
+    // wasm function-signature strictness. Semantics: params[0] is the funcref
+    // table index, params[1..] are forwarded to the callee. This is identical
+    // to how the invoke_* trampolines work, so we reuse invoke_dispatch.
+    //
+    // Wasm signatures (read from the module's import section):
+    //   _PyEM_TrampolineCall_JS            (i32, i32, i32, i32) -> i32
+    //   _PyImport_InitFunc_TrampolineCall  (i32)                -> i32
     {
-        let _log = mech_log.clone();
-        def!("_PyEM_TrampolineCall_JS", move |_: Caller<
-            '_,
-            EmbedderState,
-        >,
-                                              f: i32,
-                                              a: i32,
-                                              _b: i32,
-                                              _c: i32|
-              -> i32 {
-            _log.push("_PyEM_TrampolineCall_JS", f, a);
-            0
-        });
-    }
-    {
-        let _log = mech_log.clone();
-        def!("_PyImport_InitFunc_TrampolineCall", move |_: Caller<
-            '_,
-            EmbedderState,
-        >,
-                                                        f: i32|
-              -> i32 {
-            _log.push("_PyImport_InitFunc_TrampolineCall", f, 0);
-            0
-        });
+        use ValType::I32;
+        let trampoline_sigs: &[(&str, &[ValType], &[ValType])] = &[
+            ("_PyEM_TrampolineCall_JS", &[I32, I32, I32, I32], &[I32]),
+            ("_PyImport_InitFunc_TrampolineCall", &[I32], &[I32]),
+        ];
+        for &(name, params, results) in trampoline_sigs {
+            let ft = FuncType::new(engine, params.iter().cloned(), results.iter().cloned());
+            linker
+                .func_new("env", name, ft, invoke_dispatch)
+                .map_err(|e| AfterburnerError::Engine(format!("{name}: {e}")))?;
+        }
     }
 
     // ---- test helpers -------------------------------------------------------
