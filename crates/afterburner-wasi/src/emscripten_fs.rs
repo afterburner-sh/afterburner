@@ -137,6 +137,8 @@ impl Default for InMemFs {
 
 impl InMemFs {
     /// Create an empty filesystem with just the root directory.
+    ///
+    /// fd 0/1/2 are reserved (stdin/stdout/stderr). No preopened dirs.
     pub fn new() -> Self {
         let mut nodes = HashMap::new();
         nodes.insert("/".to_owned(), FsNode::Dir);
@@ -145,6 +147,63 @@ impl InMemFs {
             fds: vec![None, None, None], // reserve 0/1/2
             next_ino: 1,
         }
+    }
+
+    /// Create a filesystem with `/` preopened at fd 3.
+    ///
+    /// WASI host implementations expose preopened directories so the guest can
+    /// call `fd_prestat_get`/`path_open`. Preopening `/` at fd 3 means CPython
+    /// can discover and open stdlib files via `path_open(base=3, path=...)`.
+    /// After the preopen, the next file opened via `InMemFs::open` gets fd 4+.
+    pub fn new_with_root_preopen() -> Self {
+        let mut nodes = HashMap::new();
+        nodes.insert("/".to_owned(), FsNode::Dir);
+        // fd 3 = preopened root "/".
+        let fds = vec![
+            None,
+            None,
+            None,
+            Some(FdEntry {
+                path: "/".to_owned(),
+                offset: 0,
+            }),
+        ];
+        Self {
+            nodes,
+            fds,
+            next_ino: 1,
+        }
+    }
+
+    /// Return the path and name of the preopened directory at `fd`, or `None`
+    /// if the fd is not a preopened directory (for `fd_prestat_get`).
+    ///
+    /// In our implementation fd 3 is always the preopened root `/`.
+    pub fn preopen_name(&self, fd: i32) -> Option<&str> {
+        if fd == 3 {
+            // fd 3 is always the preopened root.
+            if let Some(Some(entry)) = self.fds.get(3)
+                && entry.path == "/"
+            {
+                return Some("/");
+            }
+        }
+        None
+    }
+
+    /// Node metadata for WASI `path_filestat_get`.
+    pub fn node_info(&mut self, abs_path: &str) -> Option<NodeInfo> {
+        let node = self.nodes.get(abs_path)?;
+        let (filetype, size) = match node {
+            FsNode::Dir => (3u8, 0u64),
+            FsNode::File(data) => (4u8, data.len() as u64),
+        };
+        let ino = self.alloc_ino();
+        Some(NodeInfo {
+            ino,
+            filetype,
+            size,
+        })
     }
 
     // ---- internal helpers ---------------------------------------------------
@@ -376,6 +435,51 @@ impl InMemFs {
             .and_then(|e| e.as_ref())
             .map(|e| e.path.as_str())
     }
+
+    /// Read up to `len` bytes at `offset` from fd into `dst`, WITHOUT advancing
+    /// the fd's current offset (positional read, like pread(2)).
+    /// Returns bytes read, or a negative errno.
+    pub fn pread(&mut self, fd: i32, dst: &mut [u8], offset: u64) -> i32 {
+        let fd_usize = fd as usize;
+        if fd_usize >= self.fds.len() {
+            return EBADF;
+        }
+        let path = match &self.fds[fd_usize] {
+            None => return EBADF,
+            Some(e) => e.path.clone(),
+        };
+        match self.nodes.get(&path) {
+            None => ENOENT,
+            Some(FsNode::Dir) => EISDIR,
+            Some(FsNode::File(data)) => {
+                let start = offset.min(data.len() as u64) as usize;
+                let available = data.len() - start;
+                let n = dst.len().min(available);
+                dst[..n].copy_from_slice(&data[start..start + n]);
+                n as i32
+            }
+        }
+    }
+
+    /// Return true if `fd` is a valid open fd referencing a filesystem node
+    /// (i.e. fd >= 3 and has an entry). Used by WASI shims to decide whether
+    /// to delegate to the MEMFS or handle as stdin/stdout/stderr.
+    pub fn is_fs_fd(&self, fd: i32) -> bool {
+        let fd_usize = fd as usize;
+        fd_usize >= 3 && fd_usize < self.fds.len() && self.fds[fd_usize].is_some()
+    }
+}
+
+// ---- node info (WASI path_filestat_get) ------------------------------------
+
+/// Metadata returned by [`InMemFs::node_info`] for WASI `path_filestat_get`.
+pub struct NodeInfo {
+    /// Inode number (monotonically increasing, non-persistent).
+    pub ino: u64,
+    /// WASI filetype: 3 = directory, 4 = regular file.
+    pub filetype: u8,
+    /// File size in bytes (0 for directories).
+    pub size: u64,
 }
 
 // ---- path canonicalization -------------------------------------------------

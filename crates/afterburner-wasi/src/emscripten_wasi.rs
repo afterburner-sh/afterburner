@@ -25,9 +25,13 @@
 //! - `environ_sizes_get` / `environ_get` - empty environment (0 vars).
 //! - `fd_write` - iovec-based write to fd 1/2; bytes appended to
 //!   `EmbedderState::wasi_stdout`.
-//! - `fd_read` / `fd_pread` - return 0 bytes read (stdin is empty).
-//! - `fd_seek` / `fd_close` / `fd_fdstat_get` / `fd_pwrite` - minimal
-//!   valid returns (0 / EBADF as appropriate).
+//! - `fd_read` - for fds 0/1/2 returns 0 (EOF/stdin empty); for MEMFS fds
+//!   reads via iovec from `EmbedderState::fs` and advances the fd offset.
+//! - `fd_pread` - positional read from MEMFS fds without advancing offset.
+//! - `fd_seek` - for MEMFS fds: seek via `InMemFs::lseek`; for 0/1/2: no-op.
+//! - `fd_close` - for MEMFS fds: closes via `InMemFs::close`.
+//! - `fd_fdstat_get` - returns regular-file fdstat for MEMFS fds; zero-fill
+//!   for 0/1/2 (character device type is acceptable for those).
 //! - `clock_time_get` - deterministic constant (virtual epoch).
 //! - `proc_exit` - traps with an exit-coded error.
 //! - `args_sizes_get` / `args_get` - no arguments.
@@ -45,9 +49,14 @@ use wasmtime::{Caller, Linker};
 use crate::{embedder_vm::EmbedderState, emscripten_abi::VIRTUAL_EPOCH_NS};
 
 // ---- WASI errno constants (wasi_snapshot_preview1 values) -------------------
+//
+// WASI errno values are POSITIVE integers (unlike Linux -errno).
+// These match the wasi_snapshot_preview1 specification.
 
 /// WASI errno: bad file descriptor.
 const EBADF: i32 = 8;
+/// WASI errno: invalid argument.
+const EINVAL: i32 = 28;
 
 // ---- memory helper ----------------------------------------------------------
 
@@ -210,28 +219,111 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
     // ---- fd_read ------------------------------------------------------------
 
     // fd_read(fd: i32, iovs_ptr: i32, iovs_len: i32, nread_ptr: i32) -> i32
-    // Stdin is empty - write 0 bytes read and return 0.
+    //
+    // For fds 0/1/2: stdin is empty (EOF), return 0 bytes read.
+    // For MEMFS fds (>=3): scatter-read via iovecs from EmbedderState::fs,
+    // advancing the fd offset after each iovec.
     def!("fd_read", |mut caller: Caller<'_, EmbedderState>,
-                     _fd: i32,
-                     _iovs_ptr: i32,
-                     _iovs_len: i32,
+                     fd: i32,
+                     iovs_ptr: i32,
+                     iovs_len: i32,
                      nread_ptr: i32|
      -> i32 {
-        if !write_u32(&mut caller, nread_ptr, 0) {
+        // stdin/stdout/stderr: return EOF (0 bytes).
+        if fd < 3 {
+            if !write_u32(&mut caller, nread_ptr, 0) {
+                return EBADF;
+            }
+            return 0;
+        }
+        if !caller.data().fs.is_fs_fd(fd) {
+            return EBADF;
+        }
+        let iovs_len = iovs_len as u32 as usize;
+        let iov_bytes = match read_bytes(&caller, iovs_ptr, iovs_len * 8) {
+            Some(b) => b,
+            None => return EBADF,
+        };
+        let mut total: u32 = 0;
+        for i in 0..iovs_len {
+            let base = i * 8;
+            let buf_ptr = u32::from_le_bytes(iov_bytes[base..base + 4].try_into().unwrap()) as i32;
+            let buf_len =
+                u32::from_le_bytes(iov_bytes[base + 4..base + 8].try_into().unwrap()) as usize;
+            if buf_len == 0 {
+                continue;
+            }
+            // Read into a host-side temp buffer, then copy into guest memory.
+            let mut tmp = vec![0u8; buf_len];
+            let n = caller.data_mut().fs.read(fd, &mut tmp);
+            if n < 0 {
+                // Translate negative errno to WASI positive errno.
+                return EBADF;
+            }
+            if n == 0 {
+                break; // EOF
+            }
+            if !write_bytes(&mut caller, buf_ptr, &tmp[..n as usize]) {
+                return EBADF;
+            }
+            total += n as u32;
+        }
+        if !write_u32(&mut caller, nread_ptr, total) {
             return EBADF;
         }
         0
     });
 
     // fd_pread(fd, iovs_ptr, iovs_len, offset, nread_ptr) -> i32
+    //
+    // Positional read: read at `offset` without advancing the fd offset.
+    // For fds 0/1/2: return 0 bytes (no stdin data).
     def!("fd_pread", |mut caller: Caller<'_, EmbedderState>,
-                      _fd: i32,
-                      _iovs_ptr: i32,
-                      _iovs_len: i32,
-                      _offset: i64,
+                      fd: i32,
+                      iovs_ptr: i32,
+                      iovs_len: i32,
+                      offset: i64,
                       nread_ptr: i32|
      -> i32 {
-        if !write_u32(&mut caller, nread_ptr, 0) {
+        if fd < 3 {
+            if !write_u32(&mut caller, nread_ptr, 0) {
+                return EBADF;
+            }
+            return 0;
+        }
+        if !caller.data().fs.is_fs_fd(fd) {
+            return EBADF;
+        }
+        let iovs_len = iovs_len as u32 as usize;
+        let iov_bytes = match read_bytes(&caller, iovs_ptr, iovs_len * 8) {
+            Some(b) => b,
+            None => return EBADF,
+        };
+        let mut total: u32 = 0;
+        let mut cur_offset = offset as u64;
+        for i in 0..iovs_len {
+            let base = i * 8;
+            let buf_ptr = u32::from_le_bytes(iov_bytes[base..base + 4].try_into().unwrap()) as i32;
+            let buf_len =
+                u32::from_le_bytes(iov_bytes[base + 4..base + 8].try_into().unwrap()) as usize;
+            if buf_len == 0 {
+                continue;
+            }
+            let mut tmp = vec![0u8; buf_len];
+            let n = caller.data_mut().fs.pread(fd, &mut tmp, cur_offset);
+            if n < 0 {
+                return EBADF;
+            }
+            if n == 0 {
+                break;
+            }
+            if !write_bytes(&mut caller, buf_ptr, &tmp[..n as usize]) {
+                return EBADF;
+            }
+            total += n as u32;
+            cur_offset += n as u64;
+        }
+        if !write_u32(&mut caller, nread_ptr, total) {
             return EBADF;
         }
         0
@@ -254,43 +346,256 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
     // ---- fd_seek / fd_close / fd_fdstat_get ---------------------------------
 
     // fd_seek(fd, offset, whence, newoffset_ptr) -> i32
+    //
+    // For MEMFS fds: delegate to InMemFs::lseek, write new offset.
+    // For 0/1/2: stdin/stdout/stderr at position 0; whence SET/CUR/END all map
+    // to 0 so callers that seek to tell() still see a consistent 0.
     def!("fd_seek", |mut caller: Caller<'_, EmbedderState>,
-                     _fd: i32,
-                     _offset: i64,
-                     _whence: i32,
+                     fd: i32,
+                     offset: i64,
+                     whence: i32,
                      newoffset_ptr: i32|
      -> i32 {
-        if !write_u64(&mut caller, newoffset_ptr, 0) {
+        let new_off: i64 = if fd >= 3 && caller.data().fs.is_fs_fd(fd) {
+            let r = caller.data_mut().fs.lseek(fd, offset, whence);
+            if r < 0 {
+                // Translate to WASI EINVAL for invalid argument errors.
+                return EINVAL;
+            }
+            r
+        } else if fd < 3 {
+            0i64
+        } else {
+            return EBADF;
+        };
+        if !write_u64(&mut caller, newoffset_ptr, new_off as u64) {
             return EBADF;
         }
         0
     });
 
     // fd_close(fd) -> i32
-    def!("fd_close", |_: Caller<'_, EmbedderState>,
-                      _fd: i32|
-     -> i32 { 0 });
+    //
+    // For MEMFS fds: close via InMemFs. For 0/1/2: no-op (success).
+    def!("fd_close", |mut caller: Caller<'_, EmbedderState>,
+                      fd: i32|
+     -> i32 {
+        if fd >= 3 {
+            let rc = caller.data_mut().fs.close(fd);
+            if rc < 0 {
+                return EBADF;
+            }
+        }
+        0
+    });
 
     // fd_fdstat_get(fd, stat_ptr) -> i32
-    // Write a zeroed fdstat (24 bytes) so callers see a valid struct.
+    //
+    // WASI fdstat layout (24 bytes):
+    //   offset 0  u8  fs_filetype (0=unknown, 1=block, 2=char, 3=dir, 4=regular, 5=socket_dgram, 6=socket_stream, 7=symbolic_link)
+    //   offset 1  u8  padding
+    //   offset 2  u16 fs_flags
+    //   offset 4  u32 padding
+    //   offset 8  u64 fs_rights_base
+    //   offset 16 u64 fs_rights_inheriting
+    //
+    // For MEMFS fds: return filetype=4 (regular file) with no flags and all rights.
+    // For 0/1/2: return filetype=2 (character device) - acceptable for stdio.
     def!("fd_fdstat_get", |mut caller: Caller<'_, EmbedderState>,
-                           _fd: i32,
+                           fd: i32,
                            stat_ptr: i32|
      -> i32 {
-        // wasi fdstat is 24 bytes; zero-fill for a minimal valid response.
-        let zeros = [0u8; 24];
-        if !write_bytes(&mut caller, stat_ptr, &zeros) {
+        let filetype: u8 = if fd >= 3 {
+            if !caller.data().fs.is_fs_fd(fd) {
+                return EBADF;
+            }
+            4 // regular file
+        } else {
+            2 // character device (stdio)
+        };
+        let mut buf = [0u8; 24];
+        buf[0] = filetype;
+        // fs_rights_base and fs_rights_inheriting: all bits set (no restrictions).
+        buf[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+        buf[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
+        if !write_bytes(&mut caller, stat_ptr, &buf) {
             return EBADF;
         }
         0
     });
 
     // fd_prestat_get(fd, buf_ptr) -> i32
-    // No preopened directories - return EBADF so callers stop iterating.
-    def!("fd_prestat_get", |_: Caller<'_, EmbedderState>,
-                            _fd: i32,
-                            _buf_ptr: i32|
-     -> i32 { EBADF });
+    //
+    // Returns a preopened-directory descriptor for fd 3 (root "/").
+    // For any fd > 3 (or one that is not a preopen) returns EBADF so the
+    // guest stops iterating preopens.
+    //
+    // WASI prestat layout (8 bytes):
+    //   offset 0  u8  tag: 0 = preopen_dir
+    //   offset 1  u8  padding[3]
+    //   offset 4  u32 pr_name_len (length of the dir name, without NUL)
+    def!("fd_prestat_get", |mut caller: Caller<'_, EmbedderState>,
+                            fd: i32,
+                            buf_ptr: i32|
+     -> i32 {
+        match caller.data().fs.preopen_name(fd) {
+            None => EBADF,
+            Some(name) => {
+                let name_len = name.len() as u32;
+                let mut buf = [0u8; 8];
+                // tag = 0 (preopen_dir), 3 bytes padding
+                buf[0] = 0;
+                // pr_name_len at offset 4
+                buf[4..8].copy_from_slice(&name_len.to_le_bytes());
+                if !write_bytes(&mut caller, buf_ptr, &buf) {
+                    return EBADF;
+                }
+                0
+            }
+        }
+    });
+
+    // fd_prestat_dir_name(fd, path_ptr, path_len) -> i32
+    //
+    // Write the preopened directory name into guest memory at path_ptr.
+    // Called after fd_prestat_get to get the actual name string.
+    def!("fd_prestat_dir_name", |mut caller: Caller<
+        '_,
+        EmbedderState,
+    >,
+                                 fd: i32,
+                                 path_ptr: i32,
+                                 path_len: i32|
+     -> i32 {
+        let name = match caller.data().fs.preopen_name(fd) {
+            None => return EBADF,
+            Some(n) => n.to_owned(),
+        };
+        let len = name.len().min(path_len as u32 as usize);
+        if !write_bytes(&mut caller, path_ptr, &name.as_bytes()[..len]) {
+            return EBADF;
+        }
+        0
+    });
+
+    // path_open(dirfd, dirflags, path_ptr, path_len, oflags, fs_rights_base,
+    //           fs_rights_inheriting, fdflags, opened_fd_ptr) -> i32
+    //
+    // Open a path relative to preopened dir `dirfd` (fd 3 = "/").
+    // Returns 0 on success with the new fd written to opened_fd_ptr.
+    // Returns EBADF/ENOENT on failure.
+    def!("path_open", |mut caller: Caller<'_, EmbedderState>,
+                       dirfd: i32,
+                       _dirflags: i32,
+                       path_ptr: i32,
+                       path_len: i32,
+                       _oflags: i32,
+                       _fs_rights_base: i64,
+                       _fs_rights_inheriting: i64,
+                       _fdflags: i32,
+                       opened_fd_ptr: i32|
+     -> i32 {
+        // Read the path bytes from guest memory.
+        let len = path_len as u32 as usize;
+        let path_bytes = match read_bytes(&caller, path_ptr, len) {
+            Some(b) => b,
+            None => return EBADF,
+        };
+        let path_str = match std::str::from_utf8(&path_bytes) {
+            Ok(s) => s.to_owned(),
+            Err(_) => return EBADF,
+        };
+        // Resolve relative to the base dir (dirfd 3 = "/").
+        let base = match caller.data().fs.preopen_name(dirfd) {
+            Some(b) => b.to_owned(),
+            None => {
+                if caller.data().fs.is_fs_fd(dirfd) {
+                    // Opened regular dir fd - get its path.
+                    match caller.data().fs.fd_path(dirfd) {
+                        Some(p) => p.to_owned(),
+                        None => return EBADF,
+                    }
+                } else {
+                    return EBADF;
+                }
+            }
+        };
+        let abs = caller.data().fs.resolve(&base, &path_str);
+        // Open with flags=0 (read-only). Negative return = error.
+        let new_fd = caller.data_mut().fs.open(abs.clone(), 0);
+        eprintln!("[path_open] dirfd={dirfd} {:?} -> new_fd={new_fd}", abs);
+        if new_fd < 0 {
+            // Translate to WASI ENOENT (errno 44) or EBADF (8).
+            return if new_fd == -2 { 44 } else { EBADF };
+        }
+        if !write_u32(&mut caller, opened_fd_ptr, new_fd as u32) {
+            // Close the just-opened fd to avoid leaking it.
+            let _ = caller.data_mut().fs.close(new_fd);
+            return EBADF;
+        }
+        0
+    });
+
+    // path_filestat_get(fd, flags, path_ptr, path_len, filestat_ptr) -> i32
+    //
+    // WASI equivalent of stat(). Returns an 8-field 64-byte filestat struct.
+    // WASI wasi_filestat layout (64 bytes, all u64/i64 LE):
+    //   0   dev u64
+    //   8   ino u64
+    //   16  filetype u8 (0=unknown,1=block,2=char,3=dir,4=regular,...)
+    //   17  padding[7]
+    //   24  nlink u64
+    //   32  size u64
+    //   40  atim u64 (ns)
+    //   48  mtim u64 (ns)
+    //   56  ctim u64 (ns)
+    def!("path_filestat_get", |mut caller: Caller<
+        '_,
+        EmbedderState,
+    >,
+                               dirfd: i32,
+                               _flags: i32,
+                               path_ptr: i32,
+                               path_len: i32,
+                               filestat_ptr: i32|
+     -> i32 {
+        let len = path_len as u32 as usize;
+        let path_bytes = match read_bytes(&caller, path_ptr, len) {
+            Some(b) => b,
+            None => return EBADF,
+        };
+        let path_str = match std::str::from_utf8(&path_bytes) {
+            Ok(s) => s.to_owned(),
+            Err(_) => return EBADF,
+        };
+        let base = if path_str.starts_with('/') {
+            "/".to_owned()
+        } else {
+            match caller.data().fs.preopen_name(dirfd) {
+                Some(b) => b.to_owned(),
+                None => match caller.data().fs.fd_path(dirfd) {
+                    Some(p) => p.to_owned(),
+                    None => return EBADF,
+                },
+            }
+        };
+        let abs = caller.data().fs.resolve(&base, &path_str);
+        // Use the emscripten_fs stat path to get size info.
+        let node_info = match caller.data_mut().fs.node_info(&abs) {
+            None => return 44, // WASI ENOENT=44
+            Some(info) => info,
+        };
+        let mut buf = [0u8; 64];
+        buf[0..8].copy_from_slice(&1u64.to_le_bytes()); // dev=1
+        buf[8..16].copy_from_slice(&node_info.ino.to_le_bytes()); // ino
+        buf[16] = node_info.filetype; // filetype (3=dir, 4=regular)
+        buf[24..32].copy_from_slice(&1u64.to_le_bytes()); // nlink=1
+        buf[32..40].copy_from_slice(&node_info.size.to_le_bytes()); // size
+        if !write_bytes(&mut caller, filestat_ptr, &buf) {
+            return EBADF;
+        }
+        0
+    });
 
     // fd_fdstat_set_flags(fd, flags) -> i32
     def!("fd_fdstat_set_flags", |_: Caller<'_, EmbedderState>,

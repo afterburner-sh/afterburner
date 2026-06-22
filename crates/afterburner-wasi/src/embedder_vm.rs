@@ -203,7 +203,9 @@ impl EmbedderState {
     /// guest memory via the `env.memory` import handle stored in
     /// [`EmbedderState::pyodide_memory`].
     ///
-    /// Call `store.data_mut().pyodide_memory = Some(mem)` immediately after
+    /// The in-memory filesystem is pre-opened with `/` at fd 3 so that WASI
+    /// `fd_prestat_get`/`path_open` work for CPython's module loader. Call
+    /// `store.data_mut().pyodide_memory = Some(mem)` immediately after
     /// `wire_env_memory_and_table_in_store` to activate the shims. Call
     /// `mount_zip_into_fs` to populate `store.data_mut().fs` with the Python
     /// stdlib before calling `__wasm_call_ctors`.
@@ -213,7 +215,7 @@ impl EmbedderState {
             pyodide_memory: None,
             pyodide_table: None,
             wasi_stdout: Vec::new(),
-            fs: InMemFs::new(),
+            fs: InMemFs::new_with_root_preopen(),
             last_invoke_idx: u64::MAX,
         }
     }
