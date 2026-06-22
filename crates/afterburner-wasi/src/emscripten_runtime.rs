@@ -436,7 +436,63 @@ pub(crate) fn invoke_dispatch(
     } else {
         forwarded
     };
-    func.call(&mut caller, call_params, results)
+
+    // Emscripten legacy JS EH semantics (invoke_<sig> contract):
+    //
+    //   var sp = stackSave();
+    //   try { return callee(args); }
+    //   catch(e) { stackRestore(sp); if (e !== e+0) throw e; setThrew(1,0); }
+    //
+    // Step 1: save the stack pointer via the module export.
+    let saved_sp: i32 = if let Some(wasmtime::Extern::Func(f)) =
+        caller.get_export("emscripten_stack_get_current")
+    {
+        let mut sp_out = [Val::I32(0)];
+        if f.call(&mut caller, &[], &mut sp_out).is_ok() {
+            match sp_out[0] {
+                Val::I32(v) => v,
+                _ => 0,
+            }
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    // Step 2: call the callee; handle a trap as a caught C++ exception.
+    // vertexia: trap-based EH - destructors in intervening wasm frames do NOT
+    // run (no stack unwinding). This is correct for CPython's EH boundary
+    // (the exception is re-raised inside the interpreter loop), but C++
+    // objects allocated between the invoke_ site and the throw site may leak.
+    // Upgrade path: compile with Emscripten Wasm EH (-fwasm-exceptions) for
+    // proper zero-cost EH with destructor support.
+    let call_result = func.call(&mut caller, call_params, results);
+    if call_result.is_err() {
+        // Step 3a: restore the stack pointer.
+        if saved_sp != 0
+            && let Some(wasmtime::Extern::Func(f)) = caller.get_export("_emscripten_stack_restore")
+        {
+            let _ = f.call(&mut caller, &[Val::I32(saved_sp)], &mut []);
+        }
+        // Step 3b: call setThrew(1, 0) to signal an exception was thrown.
+        if let Some(wasmtime::Extern::Func(f)) = caller.get_export("setThrew") {
+            let _ = f.call(&mut caller, &[Val::I32(1), Val::I32(0)], &mut []);
+        }
+        // Step 3c: fill results with the default zero for each return type,
+        // then return Ok so the wasm caller (the landing pad) can run.
+        for r in results.iter_mut() {
+            *r = match &*r {
+                Val::I32(_) => Val::I32(0),
+                Val::I64(_) => Val::I64(0),
+                Val::F32(_) => Val::F32(0),
+                Val::F64(_) => Val::F64(0),
+                other => *other,
+            };
+        }
+        return Ok(());
+    }
+    Ok(())
 }
 
 /// Scan `module`'s import list and fill any remaining unsatisfied function

@@ -305,24 +305,33 @@ pub(crate) fn wire_mechanical_env_funcs(
         EmbedderState,
     >|
      -> i32 { 0 });
-    def!("__cxa_throw", |_: Caller<'_, EmbedderState>,
+    def!("__cxa_throw", |mut caller: Caller<'_, EmbedderState>,
                          _ptr: i32,
                          _tp: i32,
                          _dtor: i32|
      -> WtResult<()> {
+        // Store the exception pointer so __cxa_find_matching_catch_* can
+        // return it to the landing pad after invoke_dispatch catches the trap.
+        caller.data_mut().cxa_thrown_ptr = _ptr;
         Err(wasmtime::Trap::UnreachableCodeReached.into())
     });
-    def!("__cxa_find_matching_catch_2", |_: Caller<
+    def!("__cxa_find_matching_catch_2", |caller: Caller<
         '_,
         EmbedderState,
     >|
-     -> i32 { 0 });
-    def!("__cxa_find_matching_catch_3", |_: Caller<
+     -> i32 {
+        // Return the exception pointer that __cxa_throw stored so the landing
+        // pad can inspect the thrown object. 0 = no active exception.
+        caller.data().cxa_thrown_ptr
+    });
+    def!("__cxa_find_matching_catch_3", |caller: Caller<
         '_,
         EmbedderState,
     >,
                                          _a: i32|
-     -> i32 { 0 });
+     -> i32 {
+        caller.data().cxa_thrown_ptr
+    });
     def!("__resumeException", |_: Caller<'_, EmbedderState>,
                                _ptr: i32|
      -> WtResult<()> {

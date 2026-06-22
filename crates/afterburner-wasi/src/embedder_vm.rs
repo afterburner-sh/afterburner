@@ -179,6 +179,9 @@ pub struct EmbedderState {
     /// The last table index passed to `invoke_dispatch`. Set on every call so
     /// the probe can report which table slot was active when the trap fired.
     pub last_invoke_idx: u64,
+    /// Exception pointer set by `__cxa_throw`. Read by `__cxa_find_matching_catch_*`
+    /// to return the thrown object pointer to the C++ EH landing pad.
+    pub cxa_thrown_ptr: i32,
 }
 
 impl EmbedderState {
@@ -192,6 +195,7 @@ impl EmbedderState {
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
             last_invoke_idx: u64::MAX,
+            cxa_thrown_ptr: 0,
         }
     }
 
@@ -217,6 +221,7 @@ impl EmbedderState {
             wasi_stdout: Vec::new(),
             fs: InMemFs::new_with_root_preopen(),
             last_invoke_idx: u64::MAX,
+            cxa_thrown_ptr: 0,
         }
     }
 
@@ -236,6 +241,7 @@ impl EmbedderState {
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
             last_invoke_idx: u64::MAX,
+            cxa_thrown_ptr: 0,
         }
     }
 
@@ -471,6 +477,7 @@ impl EmbedderVm {
                 wasi_stdout: Vec::new(),
                 fs: InMemFs::new(),
                 last_invoke_idx: u64::MAX,
+                cxa_thrown_ptr: 0,
             }
         } else {
             EmbedderState {
@@ -480,6 +487,7 @@ impl EmbedderVm {
                 wasi_stdout: Vec::new(),
                 fs: InMemFs::new(),
                 last_invoke_idx: u64::MAX,
+                cxa_thrown_ptr: 0,
             }
         };
 
@@ -591,6 +599,7 @@ impl EmbedderVm {
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
             last_invoke_idx: u64::MAX,
+            cxa_thrown_ptr: 0,
         };
 
         let mut store = Store::new(&module.engine, state);
