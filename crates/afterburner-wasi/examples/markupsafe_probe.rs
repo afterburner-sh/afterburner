@@ -645,6 +645,35 @@ fn run_python_phase(
                 })
                 .unwrap_or_else(|| "WasmBacktrace: not attached to error\n".to_owned());
 
+            // Scan for the garbage pointer value in linear memory to locate
+            // which field holds it and classify the region.
+            const TRAP_ADDR: u32 = 0x7472_6176;
+            let scan_hits = scan_memory_for_u32(store, TRAP_ADDR, 64);
+            let scan_report = if scan_hits.is_empty() {
+                format!("scan for {TRAP_ADDR:#010x}: no occurrences in linear memory\n")
+            } else {
+                let mut s = format!(
+                    "scan for {TRAP_ADDR:#010x} ({} hits):\n",
+                    scan_hits.len()
+                );
+                // memory_base is the side module allocation start.
+                let mb: u32 = 0x0046_aeb0;
+                let mb_end: u32 = mb + 0x90;
+                for (addr, ctx) in &scan_hits {
+                    let region = if *addr < mb {
+                        "main-module static/heap"
+                    } else if *addr < mb_end {
+                        "markupsafe data region"
+                    } else {
+                        "CPython heap"
+                    };
+                    s.push_str(&format!(
+                        "  [{addr:#010x}] {region}  context: {ctx}\n"
+                    ));
+                }
+                s
+            };
+
             return format!(
                 "TRAPPED in run_main: {e}\n\
                  Trap kind: {trap_kind}\n\
@@ -653,6 +682,7 @@ fn run_python_phase(
                  Last FS paths: {:?}\n\
                  Noop stubs ({} unique): {noop_calls:?}\n\
                  Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
+                 {scan_report}\
                  {frame_lines}\
                  Full debug chain:\n{debug_chain}\n\
                  {PYOUT_PATH}:\n{pyout}",
@@ -686,6 +716,37 @@ fn read_pyout(store: &Store<EmbedderState>) -> String {
         .map(|b| b.to_vec())
         .unwrap_or_default();
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Scan linear memory for every occurrence of a u32 value (little-endian).
+/// Returns at most `max_hits` results as `(address, context_hex)` pairs.
+/// Context is 16 bytes centred on the hit (clamped to memory bounds).
+fn scan_memory_for_u32(
+    store: &Store<EmbedderState>,
+    needle: u32,
+    max_hits: usize,
+) -> Vec<(u32, String)> {
+    let Some(mem) = store.data().pyodide_memory else {
+        return vec![];
+    };
+    let data = mem.data(store);
+    let target = needle.to_le_bytes();
+    let mut hits = Vec::new();
+    let mut i = 0usize;
+    while i + 4 <= data.len() && hits.len() < max_hits {
+        if data[i..i + 4] == target {
+            let ctx_start = i.saturating_sub(8);
+            let ctx_end = (i + 12).min(data.len());
+            let ctx: String = data[ctx_start..ctx_end]
+                .chunks(4)
+                .map(|c| c.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                .collect::<Vec<_>>()
+                .join(" ");
+            hits.push((i as u32, ctx));
+        }
+        i += 4;
+    }
+    hits
 }
 
 fn format_mech_tail(tail: &[afterburner_wasi::emscripten_runtime::MechCallEntry]) -> String {
