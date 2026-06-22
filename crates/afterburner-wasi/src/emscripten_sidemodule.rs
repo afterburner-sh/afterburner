@@ -419,9 +419,7 @@ pub fn pre_load_side_module(
         .map(|(s, g)| (s.as_str(), *g))
         .collect();
     let (got_mem_resolved, got_mem_zero) = resolve_got_mem(store, main_instance, &got_mem_pairs);
-    eprintln!(
-        "[sidemodule] {path}: GOT.mem resolved={got_mem_resolved} zero={got_mem_zero}"
-    );
+    eprintln!("[sidemodule] {path}: GOT.mem resolved={got_mem_resolved} zero={got_mem_zero}");
 
     // GOT.func is intentionally left at 0 here. The active element segment
     // runs during instantiation and places the side module's own functions into
@@ -541,9 +539,7 @@ pub fn pre_load_side_module(
         // Path 2: side module's own exported function (not in element segment).
         if let Some(func) = instance.get_func(&mut *store, name.as_str()) {
             let slot = tbl.size(&*store) as u32;
-            if tbl
-                .grow(&mut *store, 1, wasmtime::Ref::Func(None))
-                .is_ok()
+            if tbl.grow(&mut *store, 1, wasmtime::Ref::Func(None)).is_ok()
                 && tbl
                     .set(&mut *store, slot as u64, wasmtime::Ref::Func(Some(func)))
                     .is_ok()
@@ -557,9 +553,7 @@ pub fn pre_load_side_module(
         // Path 3: main module's exported function.
         if let Some(func) = main_instance.get_func(&mut *store, name.as_str()) {
             let slot = tbl.size(&*store) as u32;
-            if tbl
-                .grow(&mut *store, 1, wasmtime::Ref::Func(None))
-                .is_ok()
+            if tbl.grow(&mut *store, 1, wasmtime::Ref::Func(None)).is_ok()
                 && tbl
                     .set(&mut *store, slot as u64, wasmtime::Ref::Func(Some(func)))
                     .is_ok()

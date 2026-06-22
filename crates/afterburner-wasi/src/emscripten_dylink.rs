@@ -235,11 +235,7 @@ pub fn resolve_got_func(
         }
         // Place the funcref at the new slot.
         if table
-            .set(
-                &mut *store,
-                slot as u64,
-                wasmtime::Ref::Func(Some(func)),
-            )
+            .set(&mut *store, slot as u64, wasmtime::Ref::Func(Some(func)))
             .is_err()
         {
             missing += 1;
@@ -668,10 +664,8 @@ pub fn fill_got_table_slots(
                 .map(|g| (imp.name().to_owned(), g))
         })
         .collect();
-    let mem_pairs: Vec<(&str, Global)> = mem_entries
-        .iter()
-        .map(|(s, g)| (s.as_str(), *g))
-        .collect();
+    let mem_pairs: Vec<(&str, Global)> =
+        mem_entries.iter().map(|(s, g)| (s.as_str(), *g)).collect();
     let (mem_resolved, mem_zero) = resolve_got_mem(store, instance, &mem_pairs);
     eprintln!(
         "[GOT] main-module GOT.mem: resolved={mem_resolved} zero={mem_zero} total={}",

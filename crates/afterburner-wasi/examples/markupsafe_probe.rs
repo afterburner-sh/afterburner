@@ -52,8 +52,7 @@ const PYTHON_STDLIB_ZIP_PATH: &str = "/tmp/python_stdlib.zip";
 const MARKUPSAFE_WHEEL_PATH: &str = "/tmp/markupsafe_check.whl";
 
 /// The .so that CPython dlopen()s to run `import markupsafe._speedups`.
-const MARKUPSAFE_SO: &str =
-    "markupsafe/_speedups.cpython-313-wasm32-emscripten.so";
+const MARKUPSAFE_SO: &str = "markupsafe/_speedups.cpython-313-wasm32-emscripten.so";
 
 /// Guest site-packages prefix where .py and .so files are mounted.
 const SITE_PACKAGES: &str = "/lib/python3.13/site-packages";
@@ -400,11 +399,8 @@ fn run_probe() -> String {
     }
 
     // Mount markupsafe .py and .so from the wheel into MEMFS site-packages.
-    let ms_files =
-        mount_wheel_into_fs(&mut store.data_mut().fs, &wheel_bytes, SITE_PACKAGES);
-    eprintln!(
-        "[markupsafe_probe] mounted {ms_files} markupsafe files at {SITE_PACKAGES}"
-    );
+    let ms_files = mount_wheel_into_fs(&mut store.data_mut().fs, &wheel_bytes, SITE_PACKAGES);
+    eprintln!("[markupsafe_probe] mounted {ms_files} markupsafe files at {SITE_PACKAGES}");
 
     match wire_got_func_stubs_from_module(&mut store, &mut linker, &module) {
         Ok(n) => eprintln!("[markupsafe_probe] wired {n} GOT.func stubs"),
@@ -457,24 +453,17 @@ fn run_probe() -> String {
 
     // Pre-load the markupsafe SIDE_MODULE before __wasm_call_ctors so the
     // dlopen shim can find it when CPython imports the extension.
-    let (handle, _next_mem, _next_tbl) = match pre_load_side_module(
-        &engine,
-        &mut store,
-        &instance,
-        &so_bytes,
-        MARKUPSAFE_SO,
-    ) {
-        Ok(r) => r,
-        Err(e) => return format!("SIDE_MODULE LOAD FAILED for {MARKUPSAFE_SO}: {e}"),
-    };
+    let (handle, _next_mem, _next_tbl) =
+        match pre_load_side_module(&engine, &mut store, &instance, &so_bytes, MARKUPSAFE_SO) {
+            Ok(r) => r,
+            Err(e) => return format!("SIDE_MODULE LOAD FAILED for {MARKUPSAFE_SO}: {e}"),
+        };
 
     let handle_int = store
         .data_mut()
         .side_modules
         .insert(MARKUPSAFE_SO.to_owned(), handle);
-    eprintln!(
-        "[markupsafe_probe] markupsafe SIDE_MODULE pre-loaded, handle={handle_int}"
-    );
+    eprintln!("[markupsafe_probe] markupsafe SIDE_MODULE pre-loaded, handle={handle_int}");
 
     // Boot CPython.
     if let Some(func) = instance.get_func(&mut store, "__wasm_call_ctors") {
@@ -482,7 +471,8 @@ fn run_probe() -> String {
         match func.call(&mut store, &[], &mut []) {
             Ok(_) => eprintln!("[markupsafe_probe] __wasm_call_ctors OK"),
             Err(e) => {
-                return format!("CTORS FAILED: {e}");
+                let diag = memory_diag(&store);
+                return format!("CTORS FAILED: {e}\n{diag}");
             }
         }
     }
@@ -555,9 +545,7 @@ fn run_python_phase(
         base as i32
     };
 
-    eprintln!(
-        "[markupsafe_probe] calling __main_argc_argv(3, {argv_ptr:#x})..."
-    );
+    eprintln!("[markupsafe_probe] calling __main_argc_argv(3, {argv_ptr:#x})...");
     let mut main_ret = [wasmtime::Val::I32(-99)];
     match main_fn.call(
         &mut *store,
@@ -571,12 +559,14 @@ fn run_python_phase(
             let noop_calls = noop_log.snapshot();
             let mech_tail = mech_log.tail(MECH_TRACE_TAIL);
             let mech_trace = format_mech_tail(&mech_tail);
+            let diag = memory_diag(store);
             return format!(
                 "TRAPPED in __main_argc_argv: {e}\n\
                  Fuel consumed: {fuel}\n\
                  C++ throws: {}\n\
                  Noop stubs ({} unique): {noop_calls:?}\n\
                  Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
+                 {diag}\
                  {PYOUT_PATH}:\n{pyout}",
                 store.data().cxa_throw_count,
                 noop_calls.len()
@@ -587,9 +577,7 @@ fn run_python_phase(
         wasmtime::Val::I32(v) => v,
         _ => -99,
     };
-    eprintln!(
-        "[markupsafe_probe] __main_argc_argv returned {main_exit}"
-    );
+    eprintln!("[markupsafe_probe] __main_argc_argv returned {main_exit}");
     if main_exit != 0 {
         let pyout = read_pyout(store);
         return format!(
@@ -645,34 +633,7 @@ fn run_python_phase(
                 })
                 .unwrap_or_else(|| "WasmBacktrace: not attached to error\n".to_owned());
 
-            // Scan for the garbage pointer value in linear memory to locate
-            // which field holds it and classify the region.
-            const TRAP_ADDR: u32 = 0x7472_6176;
-            let scan_hits = scan_memory_for_u32(store, TRAP_ADDR, 64);
-            let scan_report = if scan_hits.is_empty() {
-                format!("scan for {TRAP_ADDR:#010x}: no occurrences in linear memory\n")
-            } else {
-                let mut s = format!(
-                    "scan for {TRAP_ADDR:#010x} ({} hits):\n",
-                    scan_hits.len()
-                );
-                // memory_base is the side module allocation start.
-                let mb: u32 = 0x0046_aeb0;
-                let mb_end: u32 = mb + 0x90;
-                for (addr, ctx) in &scan_hits {
-                    let region = if *addr < mb {
-                        "main-module static/heap"
-                    } else if *addr < mb_end {
-                        "markupsafe data region"
-                    } else {
-                        "CPython heap"
-                    };
-                    s.push_str(&format!(
-                        "  [{addr:#010x}] {region}  context: {ctx}\n"
-                    ));
-                }
-                s
-            };
+            let diag = memory_diag(store);
 
             return format!(
                 "TRAPPED in run_main: {e}\n\
@@ -682,7 +643,7 @@ fn run_python_phase(
                  Last FS paths: {:?}\n\
                  Noop stubs ({} unique): {noop_calls:?}\n\
                  Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
-                 {scan_report}\
+                 {diag}\
                  {frame_lines}\
                  Full debug chain:\n{debug_chain}\n\
                  {PYOUT_PATH}:\n{pyout}",
@@ -718,35 +679,149 @@ fn read_pyout(store: &Store<EmbedderState>) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Scan linear memory for every occurrence of a u32 value (little-endian).
-/// Returns at most `max_hits` results as `(address, context_hex)` pairs.
-/// Context is 16 bytes centred on the hit (clamped to memory bounds).
-fn scan_memory_for_u32(
-    store: &Store<EmbedderState>,
-    needle: u32,
-    max_hits: usize,
-) -> Vec<(u32, String)> {
+// --- memory diagnostic helpers ---
+
+/// Side-module data region: malloc'd by pre_load_side_module for markupsafe.
+/// memory_base=0x46aeb0, size=0x7e544.
+const MEMORY_BASE: u32 = 0x0046_aeb0;
+const MEMORY_BASE_END: u32 = MEMORY_BASE + 0x7e544;
+
+/// Classify a linear-memory address into a human-readable region.
+fn classify_addr(addr: u32) -> &'static str {
+    if addr < MEMORY_BASE {
+        "main-module static/heap"
+    } else if addr < MEMORY_BASE_END {
+        "side-module data region"
+    } else {
+        "CPython heap"
+    }
+}
+
+/// Hex + printable-ASCII dump of `data[start..end]`, 16 bytes per row.
+fn hexdump(data: &[u8], base_addr: usize) -> String {
+    let mut out = String::new();
+    for (row_off, chunk) in data.chunks(16).enumerate() {
+        let row_addr = base_addr + row_off * 16;
+        let hex: String = chunk
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let ascii: String = chunk
+            .iter()
+            .map(|b| {
+                if b.is_ascii_graphic() || *b == b' ' {
+                    *b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        out.push_str(&format!("  {row_addr:#010x}  {hex:<47}  {ascii}\n"));
+    }
+    out
+}
+
+/// Scan ALL of linear memory for every 4-byte aligned occurrence of `needle`
+/// (little-endian). Returns `(address, region)` for every hit.
+/// Also returns a 64-byte hexdump centred on the first hit.
+fn scan_u32_all(store: &Store<EmbedderState>, needle: u32) -> (Vec<(u32, &'static str)>, String) {
+    let Some(mem) = store.data().pyodide_memory else {
+        return (vec![], "pyodide_memory not set\n".to_owned());
+    };
+    let data = mem.data(store);
+    let target = needle.to_le_bytes();
+    let mut hits: Vec<(u32, &'static str)> = Vec::new();
+    let mut i = 0usize;
+    while i + 4 <= data.len() {
+        if data[i..i + 4] == target {
+            hits.push((i as u32, classify_addr(i as u32)));
+        }
+        i += 4;
+    }
+    let first_dump = if let Some(&(first_addr, _)) = hits.first() {
+        let a = first_addr as usize;
+        let dump_start = a.saturating_sub(32);
+        let dump_end = (a + 32).min(data.len());
+        format!(
+            "  first hit {first_addr:#010x}: 64-byte window [{dump_start:#010x}..{dump_end:#010x}):\n{}",
+            hexdump(&data[dump_start..dump_end], dump_start)
+        )
+    } else {
+        String::new()
+    };
+    (hits, first_dump)
+}
+
+/// Read 4 bytes at `addr` from linear memory and return them as hex.
+fn read_u32_at(store: &Store<EmbedderState>, addr: u32) -> String {
+    let Some(mem) = store.data().pyodide_memory else {
+        return "pyodide_memory not set".to_owned();
+    };
+    let data = mem.data(store);
+    let a = addr as usize;
+    if a + 4 > data.len() {
+        return format!("addr {addr:#010x} out of range (mem len={:#x})", data.len());
+    }
+    let val = u32::from_le_bytes(data[a..a + 4].try_into().unwrap());
+    format!("{val:#010x}")
+}
+
+/// Scan ALL of linear memory for byte-exact occurrences of `needle` (any alignment).
+fn scan_bytes(store: &Store<EmbedderState>, needle: &[u8]) -> Vec<u32> {
     let Some(mem) = store.data().pyodide_memory else {
         return vec![];
     };
     let data = mem.data(store);
-    let target = needle.to_le_bytes();
     let mut hits = Vec::new();
-    let mut i = 0usize;
-    while i + 4 <= data.len() && hits.len() < max_hits {
-        if data[i..i + 4] == target {
-            let ctx_start = i.saturating_sub(8);
-            let ctx_end = (i + 12).min(data.len());
-            let ctx: String = data[ctx_start..ctx_end]
-                .chunks(4)
-                .map(|c| c.iter().map(|b| format!("{b:02x}")).collect::<String>())
-                .collect::<Vec<_>>()
-                .join(" ");
-            hits.push((i as u32, ctx));
+    for i in 0..data.len().saturating_sub(needle.len() - 1) {
+        if data[i..i + needle.len()] == *needle {
+            hits.push(i as u32);
         }
-        i += 4;
     }
     hits
+}
+
+/// Run all three diagnostics and format a single report block.
+fn memory_diag(store: &Store<EmbedderState>) -> String {
+    const NEEDLE: u32 = 0x7472_6176;
+    let (hits, first_dump) = scan_u32_all(store, NEEDLE);
+    let scan_report = if hits.is_empty() {
+        format!("scan for {NEEDLE:#010x}: no occurrences in linear memory\n")
+    } else {
+        let mut s = format!("scan for {NEEDLE:#010x} ({} hits):\n", hits.len());
+        for (addr, region) in &hits {
+            s.push_str(&format!("  [{addr:#010x}] {region}\n"));
+        }
+        s.push_str(&first_dump);
+        s
+    };
+
+    let slot70 = read_u32_at(store, MEMORY_BASE + 0x70);
+    let slot74 = read_u32_at(store, MEMORY_BASE + 0x74);
+    let slot_report = format!(
+        "memory_base+0x70 ({:#010x}): {slot70}  (expected: {:#010x})\n\
+         memory_base+0x74 ({:#010x}): {slot74}  (expected: 0x00001aa8 = table_base 6824)\n",
+        MEMORY_BASE + 0x70,
+        MEMORY_BASE + 21,
+        MEMORY_BASE + 0x74,
+    );
+
+    // "traverse" = 74 72 61 76 65 72 73 65
+    let trav_hits = scan_bytes(store, b"traverse");
+    let trav_report = if trav_hits.is_empty() {
+        "scan for \"traverse\": no occurrences in linear memory\n".to_owned()
+    } else {
+        // Note: first 4 bytes of "traverse" are 74 72 61 76 = 0x74726176 = NEEDLE.
+        // Any hit address means a pointer to this string == NEEDLE.
+        let mut s = format!("scan for \"traverse\" ({} hits):\n", trav_hits.len());
+        for addr in &trav_hits {
+            s.push_str(&format!("  [{addr:#010x}] {}\n", classify_addr(*addr),));
+        }
+        s
+    };
+
+    format!("{scan_report}{slot_report}{trav_report}")
 }
 
 fn format_mech_tail(tail: &[afterburner_wasi::emscripten_runtime::MechCallEntry]) -> String {
