@@ -202,7 +202,9 @@ pub(crate) fn wire_fs_env_funcs(
                         }
                     };
                     let abs = caller.data().fs.resolve(&base, &path_str);
-                    caller.data_mut().fs.open(abs, flags)
+                    let fd = caller.data_mut().fs.open(abs.clone(), flags);
+                    eprintln!("[openat] {:?} flags={flags} -> fd={fd}", abs);
+                    fd
                 },
             )
             .map_err(|e| AfterburnerError::Engine(format!("__syscall_openat: {e}")))?;
@@ -383,6 +385,9 @@ pub(crate) fn wire_fs_env_funcs(
                     let abs = caller.data().fs.resolve("/", &path_str);
                     let mut buf = [0u8; 112];
                     let rc = caller.data_mut().fs.stat_into(&abs, &mut buf);
+                    // Diagnostic: print every stat64 path + result so we can see
+                    // exactly which stdlib paths CPython probes and what we return.
+                    eprintln!("[stat64] {:?} -> rc={rc}", abs);
                     if rc != 0 {
                         return rc;
                     }
@@ -517,6 +522,7 @@ pub(crate) fn wire_fs_env_funcs(
                       count: i32|
                       -> i32 {
                     _log.push("__syscall_getdents64", fd, dirp);
+                    eprintln!("[getdents64] fd={fd}");
                     let dir_path = match caller.data().fs.fd_path(fd) {
                         Some(p) => p.to_owned(),
                         None => return EBADF,

@@ -64,9 +64,16 @@ const PYODIDE_WASM_PATH: &str = "/tmp/pyodide.asm.wasm";
 ///   curl -fsSL -o /tmp/python_stdlib.zip \
 ///       https://cdn.jsdelivr.net/pyodide/v0.26.4/full/python_stdlib.zip
 const PYTHON_STDLIB_ZIP_PATH: &str = "/tmp/python_stdlib.zip";
-/// The prefix at which Pyodide expects the stdlib. The wasm binary has
-/// "/lib/python" hardcoded as its PYTHONPATH root.
-const STDLIB_MOUNT_PREFIX: &str = "/lib/python";
+/// The prefix at which CPython 3.12 (via Pyodide 0.26.4) expects the stdlib.
+/// CPython's path-config output (captured from the probe) shows:
+///   sys.path = ['/lib/python312.zip', '/lib/python3.12', '/lib/python3.12/lib-dynload']
+///   stdlib dir = '/lib/python3.12'
+/// The stdlib zip is flat (entries like 'encodings/__init__.py', 'abc.py'),
+/// so mounting at this prefix places them at '/lib/python3.12/encodings/__init__.py', etc.
+const STDLIB_MOUNT_PREFIX: &str = "/lib/python3.12";
+/// Path CPython checks first (before the directory). Mounting the raw zip bytes
+/// here lets the zipimport bootstrap find 'encodings' even before the dir walk.
+const STDLIB_ZIP_MOUNT_PATH: &str = "/lib/python312.zip";
 
 /// Instruction budget for the boot probe. CPython static init is heavy, and
 /// `Py_InitializeEx` (phase 5) is similarly expensive.
@@ -175,13 +182,27 @@ fn run_probe() -> String {
 
     // ---- mount Python stdlib into the in-memory filesystem ------------------
     //
-    // CPython's path-config function (func 9523) calls __syscall_getcwd and
-    // then tries to stat/open /lib/python (Pyodide's compiled-in PYTHONPATH).
-    // Without the stdlib, init fails with "No module named 'encodings'".
-    // Mount the stdlib zip contents at /lib/python before instantiation so the
-    // FS is ready when __wasm_call_ctors first calls into it.
+    // CPython path-config (captured from WASI stdout) shows:
+    //   sys.path = ['/lib/python312.zip', '/lib/python3.12', '/lib/python3.12/lib-dynload']
+    //   stdlib dir = '/lib/python3.12'
+    // Two mounts are needed:
+    //   1. Extracted tree at STDLIB_MOUNT_PREFIX (/lib/python3.12/encodings/__init__.py, ...)
+    //      - covers the directory-based import path CPython walks first via stat64.
+    //   2. Raw zip bytes at STDLIB_ZIP_MOUNT_PATH (/lib/python312.zip)
+    //      - covers the zipimport bootstrap path (first sys.path entry).
     match fs::read(PYTHON_STDLIB_ZIP_PATH) {
         Ok(zip_bytes) => {
+            // Mount raw zip at /lib/python312.zip for the zipimport path.
+            store
+                .data_mut()
+                .fs
+                .insert_file(STDLIB_ZIP_MOUNT_PATH, zip_bytes.clone());
+            eprintln!(
+                "[probe] mounted raw zip ({} bytes) at {STDLIB_ZIP_MOUNT_PATH}",
+                zip_bytes.len()
+            );
+
+            // Mount extracted files at /lib/python3.12 for the directory path.
             match mount_zip_into_fs(&mut store.data_mut().fs, STDLIB_MOUNT_PREFIX, &zip_bytes) {
                 Ok(n) => eprintln!(
                     "[probe] mounted {n} stdlib files from {PYTHON_STDLIB_ZIP_PATH} at {STDLIB_MOUNT_PREFIX}"
