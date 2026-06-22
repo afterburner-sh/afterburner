@@ -514,120 +514,19 @@ fn step1_succeeded(
     )
 }
 
-/// Python code run via `python -c <CODE>`.
+/// Python code executed via `PyRun_SimpleString` on the already-live CPython
+/// interpreter (initialized by `__wasm_call_ctors`).
 ///
-/// Uses `sys.exit(42)` to probe exit-code capture. If Pyodide's keepalive path
-/// swallows the exit (returning 0), the second constant below also writes to
-/// `/out.txt` via `os` syscalls so we can confirm code execution independently.
-const PYTHON_CODE: &[u8] = b"import sys; sys.exit(42)\0";
+/// NUL-terminated UTF-8 string written into a fresh scratch page in wasm memory.
+const PYTHON_CODE: &[u8] =
+    b"print('hello from cpython on afterburner')\nimport sys\nprint('pyver', sys.version.split()[0])\nprint('sum', sum(range(100)))\n\0";
 
-/// Fallback probe run only when `PYTHON_CODE` exits with 0 (i.e., `sys.exit(42)`
-/// did not reach `proc_exit`). Writes a side-channel sentinel to `/out.txt` via
-/// raw `os` syscalls - bypasses Python stdout/stderr to confirm code execution.
-const PYTHON_CODE_SIDE_CHANNEL: &[u8] =
-    b"import sys,os\nfd=os.open('/out.txt',os.O_CREAT|os.O_WRONLY|os.O_TRUNC,0o644)\nos.write(fd,b'EXECUTED\\n')\nos.close(fd)\nsys.exit(7)\n\0";
-
-/// Dump the argv pointer array from guest memory: prints each pointer and the
-/// string it points to. Called when `sys.exit(42)` did NOT fire to diagnose
-/// whether CPython received the correct argv layout.
-fn dump_argv_from_memory(store: &Store<EmbedderState>, argc: i32, argv_ptr: i32) -> String {
-    let Some(mem) = store.data().pyodide_memory else {
-        return "  pyodide_memory not set - cannot dump argv".to_owned();
-    };
-    let data = mem.data(store);
-    let mut out = format!("  argc={argc} argv_ptr={argv_ptr:#x}\n");
-    for i in 0..argc as usize {
-        let slot = argv_ptr as u32 as usize + i * 4;
-        if slot + 4 > data.len() {
-            out.push_str(&format!("  argv[{i}]: slot {slot:#x} out of bounds\n"));
-            continue;
-        }
-        let ptr = u32::from_le_bytes(data[slot..slot + 4].try_into().unwrap_or([0; 4])) as usize;
-        if ptr == 0 || ptr >= data.len() {
-            out.push_str(&format!(
-                "  argv[{i}]: ptr={ptr:#x} null or out of bounds\n"
-            ));
-            continue;
-        }
-        let end = data[ptr..]
-            .iter()
-            .position(|&b| b == 0)
-            .map(|n| ptr + n)
-            .unwrap_or(ptr);
-        let s = String::from_utf8_lossy(&data[ptr..end]);
-        out.push_str(&format!("  argv[{i}]: ptr={ptr:#x} value={s:?}\n"));
-    }
-    out
-}
-
-/// Grow wasm memory by one page (64 KiB) and write argv strings + the i32
-/// pointer array into the new page. Returns the wasm guest address of the i32
-/// argv array.
+/// Grow wasm memory by one page (64 KiB) and write `src` (NUL-terminated) into
+/// the new page. Returns the wasm guest address of the first byte.
 ///
 /// Growing by one page guarantees the scratch region does not overlap anything
-/// CPython or the stdlib placed during `__wasm_call_ctors`.
-///
-/// Layout in the new page (all offsets relative to `new_page_base`):
-///   +0                 : "python\0"          (7 bytes)
-///   +7                 : "-c\0"              (3 bytes)
-///   +10                : PYTHON_CODE         (len bytes)
-///   +10+len (4-aligned): i32[3] argv array   (12 bytes)
-///
-/// Returns `Err(String)` on memory-grow failure.
-fn write_argv(store: &mut Store<EmbedderState>) -> Result<i32, String> {
-    let arg0: &[u8] = b"python\0";
-    let arg1: &[u8] = b"-c\0";
-    let arg2: &[u8] = PYTHON_CODE;
-
-    let mem = match store.data().pyodide_memory {
-        Some(m) => m,
-        None => return Err("pyodide_memory not set".to_owned()),
-    };
-
-    // Grow by 1 page (65536 bytes). `grow` returns the previous page count.
-    let prev_pages = mem
-        .grow(&mut *store, 1)
-        .map_err(|e| format!("memory.grow failed: {e}"))?;
-    let base = (prev_pages as usize) * 65536;
-
-    let off0 = base;
-    let off1 = off0 + arg0.len();
-    let off2 = off1 + arg1.len();
-    // align the argv array to 4 bytes
-    let arr_off = (off2 + arg2.len() + 3) & !3;
-    let total = arr_off + 12; // 3 * 4 bytes
-
-    let mem_len = mem.data_size(&*store);
-    if total > mem_len {
-        return Err(format!(
-            "scratch region [{base:#x}..{total:#x}) exceeds memory size {mem_len:#x} after grow"
-        ));
-    }
-
-    let data = mem.data_mut(&mut *store);
-    data[off0..off0 + arg0.len()].copy_from_slice(arg0);
-    data[off1..off1 + arg1.len()].copy_from_slice(arg1);
-    data[off2..off2 + arg2.len()].copy_from_slice(arg2);
-
-    // argv pointer array: [&"python\0", &"-c\0", &CODE\0] as little-endian i32
-    let ptrs: [u32; 3] = [off0 as u32, off1 as u32, off2 as u32];
-    for (i, ptr) in ptrs.iter().enumerate() {
-        let slot = arr_off + i * 4;
-        data[slot..slot + 4].copy_from_slice(&ptr.to_le_bytes());
-    }
-
-    eprintln!(
-        "[probe P5] argv at {base:#x}: arg0={off0:#x} arg1={off1:#x} arg2={off2:#x} arr={arr_off:#x}"
-    );
-    Ok(arr_off as i32)
-}
-
-/// Like `write_argv` but uses an explicit `code` slice instead of `PYTHON_CODE`.
-/// Used for the side-channel second run in the `Ok(ret=0)` path.
-/// Returns `Ok(argv_ptr)` or `Err(message)`.
-fn write_argv_code(store: &mut Store<EmbedderState>, code: &[u8]) -> Result<i32, String> {
-    let arg0: &[u8] = b"python\0";
-    let arg1: &[u8] = b"-c\0";
+/// CPython placed during `__wasm_call_ctors`.
+fn write_code_to_scratch(store: &mut Store<EmbedderState>, src: &[u8]) -> Result<i32, String> {
     let mem = match store.data().pyodide_memory {
         Some(m) => m,
         None => return Err("pyodide_memory not set".to_owned()),
@@ -635,28 +534,16 @@ fn write_argv_code(store: &mut Store<EmbedderState>, code: &[u8]) -> Result<i32,
     let prev_pages = mem
         .grow(&mut *store, 1)
         .map_err(|e| format!("memory.grow failed: {e}"))?;
-    let base = (prev_pages as usize) * 65536;
-    let off0 = base;
-    let off1 = off0 + arg0.len();
-    let off2 = off1 + arg1.len();
-    let arr_off = (off2 + code.len() + 3) & !3;
-    let total = arr_off + 12;
+    let offset = (prev_pages as usize) * 65536;
     let mem_len = mem.data_size(&*store);
-    if total > mem_len {
+    if offset + src.len() > mem_len {
         return Err(format!(
-            "scratch region [{base:#x}..{total:#x}) exceeds memory size {mem_len:#x}"
+            "scratch region [{offset:#x}..{:#x}) exceeds memory size {mem_len:#x}",
+            offset + src.len()
         ));
     }
-    let data = mem.data_mut(&mut *store);
-    data[off0..off0 + arg0.len()].copy_from_slice(arg0);
-    data[off1..off1 + arg1.len()].copy_from_slice(arg1);
-    data[off2..off2 + code.len()].copy_from_slice(code);
-    let ptrs: [u32; 3] = [off0 as u32, off1 as u32, off2 as u32];
-    for (i, ptr) in ptrs.iter().enumerate() {
-        let slot = arr_off + i * 4;
-        data[slot..slot + 4].copy_from_slice(&ptr.to_le_bytes());
-    }
-    Ok(arr_off as i32)
+    mem.data_mut(&mut *store)[offset..offset + src.len()].copy_from_slice(src);
+    Ok(offset as i32)
 }
 
 /// Call `_Py_write(1, buf, len)` (CPython's own write wrapper) directly
@@ -808,318 +695,154 @@ fn run_python_phase(
     probe_py_write(instance, store);
     store.data_mut().wasi_stdout.clear();
 
-    if let Some(func) = instance.get_func(&mut *store, "__main_argc_argv") {
-        // Write argv = ["python", "-c", CODE] into scratch memory and call
-        // __main_argc_argv(3, argv_array_ptr) so CPython runs the -c code.
-        let argv_ptr = match write_argv(store) {
-            Ok(p) => p,
-            Err(e) => {
-                return format!(
-                    "{ctors_summary}\n\
-                     --- phase 5: __main_argc_argv(3, argv) ---\n\
-                     ARGV WRITE FAILED: {e}"
-                );
-            }
-        };
-        eprintln!("[probe P5] calling __main_argc_argv(3, {argv_ptr:#x})...");
-        let mut results = [wasmtime::Val::I32(0)];
-        match func.call(
-            &mut *store,
-            &[wasmtime::Val::I32(3), wasmtime::Val::I32(argv_ptr)],
-            &mut results,
-        ) {
-            Ok(_) => {
-                let ret = match &results[0] {
-                    wasmtime::Val::I32(v) => *v,
-                    _ => -1,
-                };
-                eprintln!("[probe P5] __main_argc_argv returned {ret}");
-                let argv_dump = dump_argv_from_memory(store, 3, argv_ptr);
-                let fuel_remaining_p5 = store.get_fuel().unwrap_or(0);
-                let total_fuel_p5 = PROBE_FUEL.saturating_sub(fuel_remaining_p5);
+    // Root cause: __main_argc_argv calls Py_Initialize internally, which
+    // fatally re-initializes CPython after __wasm_call_ctors already did it
+    // ("PyImport_AppendInittab() may not be called after Py_Initialize()").
+    // Fix: skip __main_argc_argv entirely. CPython is already live. Use the
+    // C API (PyRun_SimpleString) directly on the initialized interpreter.
+    let has_main = instance.get_func(&mut *store, "__main_argc_argv").is_some();
+    eprintln!("[probe P5] __main_argc_argv exported={has_main} (SKIPPING - would re-init CPython)");
 
-                // sys.exit(42) returned 0 - Pyodide's keepalive may swallow the exit.
-                // Run a second call with PYTHON_CODE_SIDE_CHANNEL: writes to /out.txt
-                // via os syscalls and calls sys.exit(7). If /out.txt contains "EXECUTED"
-                // the -c code IS running (Pyodide handles SystemExit internally).
-                store.data_mut().wasi_stdout.clear();
-                // Reset /out.txt so the side-channel test gets a clean slate.
-                store.data_mut().fs.insert_file("/out.txt", vec![]);
-                let side_argv_ptr = write_argv_code(store, PYTHON_CODE_SIDE_CHANNEL);
-                let side_result = side_argv_ptr.map(|ap| {
-                    let mut side_res = [wasmtime::Val::I32(0)];
-                    let call_res = func.call(
-                        &mut *store,
-                        &[wasmtime::Val::I32(3), wasmtime::Val::I32(ap)],
-                        &mut side_res,
-                    );
-                    let sc_ret = match &side_res[0] {
-                        wasmtime::Val::I32(v) => *v,
-                        _ => -1,
-                    };
-                    let err_str = call_res.err().map(|e| format!("{e}")).unwrap_or_default();
-                    let sc_exit: Option<i32> = err_str
-                        .find("proc_exit(")
-                        .and_then(|pos| {
-                            let rest = &err_str[pos + "proc_exit(".len()..];
-                            rest.split(')').next()?.parse().ok()
-                        });
-                    let out_txt = store
-                        .data()
-                        .fs
-                        .read_file("/out.txt")
-                        .map(|b| String::from_utf8_lossy(b).into_owned())
-                        .unwrap_or_default();
-                    eprintln!(
-                        "[probe P5b] side-channel ret={sc_ret} proc_exit={sc_exit:?} /out.txt={out_txt:?}"
-                    );
-                    format!(
-                        "side-channel ret={sc_ret} proc_exit={sc_exit:?} /out.txt={out_txt:?}"
-                    )
-                });
-                let side_summary =
-                    side_result.unwrap_or_else(|e| format!("side-channel failed: {e}"));
+    // Discover available run entry points.
+    let has_py_run_simple = instance
+        .get_func(&mut *store, "PyRun_SimpleString")
+        .is_some();
+    let has_py_run_simple_flags = instance
+        .get_func(&mut *store, "PyRun_SimpleStringFlags")
+        .is_some();
+    let has_py_run_string = instance.get_func(&mut *store, "PyRun_String").is_some();
+    eprintln!(
+        "[probe P5] run entries: PyRun_SimpleString={has_py_run_simple} \
+         PyRun_SimpleStringFlags={has_py_run_simple_flags} \
+         PyRun_String={has_py_run_string}"
+    );
 
-                // Determine whether -c code executed: if /out.txt contains "EXECUTED"
-                // then the code ran (Pyodide swallows sys.exit via SystemExit, not proc_exit).
-                let out_txt_final = store
-                    .data()
-                    .fs
-                    .read_file("/out.txt")
-                    .map(|b| String::from_utf8_lossy(b).into_owned())
-                    .unwrap_or_default();
-                let code_verdict = if out_txt_final.contains("EXECUTED") {
-                    format!(
-                        "EXIT-CODE TEST: sys.exit(42) returned {ret} (Pyodide swallows SystemExit \
-                         internally - NOT routed to proc_exit; code IS EXECUTING).\n\
-                         SIDE-CHANNEL CONFIRMS: /out.txt='EXECUTED' - -c CODE EXECUTES."
-                    )
-                } else {
-                    format!(
-                        "EXIT-CODE TEST: sys.exit(42) returned {ret} AND side-channel /out.txt absent.\n\
-                         -c CODE NOT EXECUTING. argv layout:\n{argv_dump}"
-                    )
-                };
-                let wasi_out = store.data().wasi_stdout.clone();
-                let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
-                let fuel_remaining = store.get_fuel().unwrap_or(0);
-                let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
-                let noop_calls = noop_log.snapshot();
-                let mech_tail = mech_log.tail(MECH_TRACE_TAIL);
-                let mut mech_trace = String::new();
-                for (i, entry) in mech_tail.iter().enumerate() {
-                    mech_trace.push_str(&format!(
-                        "  [{:>3}] {} (arg0={}, arg1={})\n",
-                        i + 1,
-                        entry.name,
-                        entry.arg0,
-                        entry.arg1
-                    ));
-                }
-                return format!(
-                    "{ctors_summary}\n\
-                     --- phase 5: __main_argc_argv(3, argv) ---\n\
-                     {code_verdict}\n\
-                     Argv layout:\n{argv_dump}\
-                     Fuel at phase-5 end: {total_fuel_p5} | total: {total_fuel}\n\
-                     Side-channel: {side_summary}\n\
-                     JS-FFI calls: {}\n\
-                     Noop stubs called ({} unique): {noop_calls:?}\n\
-                     Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
-                     WASI stdout ({} bytes):\n{wasi_text}",
-                    log.total_calls(),
-                    noop_calls.len(),
-                    wasi_out.len()
-                );
-            }
-            Err(e) => {
-                let wasi_out = store.data().wasi_stdout.clone();
-                let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
-                let fuel_remaining = store.get_fuel().unwrap_or(0);
-                let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
-                let err_str = format!("{e}");
-                // Extract the exact code from proc_exit(N) - this is the decisive signal.
-                let proc_exit_code: Option<i32> = err_str.find("proc_exit(").and_then(|pos| {
-                    let rest = &err_str[pos + "proc_exit(".len()..];
-                    rest.split(')').next()?.parse().ok()
-                });
-                eprintln!(
-                    "[probe P5] __main_argc_argv TRAPPED: {err_str} | proc_exit_code={proc_exit_code:?}"
-                );
-                let finding = classify_python_error(&err_str, log.total_calls());
-                let mech_tail = mech_log.tail(MECH_TRACE_TAIL);
-                let mut mech_trace = String::new();
-                for (i, entry) in mech_tail.iter().enumerate() {
-                    mech_trace.push_str(&format!(
-                        "  [{:>3}] {} (arg0={}, arg1={})\n",
-                        i + 1,
-                        entry.name,
-                        entry.arg0,
-                        entry.arg1
-                    ));
-                }
-                let throw_count = store.data().cxa_throw_count;
-                let fs_paths: Vec<String> = store.data().fs_path_log.iter().cloned().collect();
-                let noop_calls = noop_log.snapshot();
-                let exit_verdict = match proc_exit_code {
-                    Some(42) => {
-                        "EXIT-CODE=42: -c CODE EXECUTED (CPython ran sys.exit(42))".to_owned()
-                    }
-                    Some(c) => format!(
-                        "EXIT-CODE={c}: -c CODE ran but exited with unexpected code (not 42)"
-                    ),
-                    None => {
-                        "NO proc_exit: trapped before sys.exit - argv may not have reached CPython"
-                            .to_owned()
-                    }
-                };
-                return format!(
-                    "{ctors_summary}\n\
-                     --- phase 5: __main_argc_argv(3, argv) ---\n\
-                     TRAPPED: {e}\n\
-                     proc_exit code: {proc_exit_code:?}\n\
-                     Verdict: {exit_verdict}\n\
-                     Fuel consumed: {total_fuel}\n\
-                     JS-FFI calls: {}\n\
-                     C++ throws: {throw_count}\n\
-                     Last 12 FS paths: {fs_paths:?}\n\
-                     WASI stdout ({} bytes):\n{wasi_text}\n\
-                     Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
-                     Noop stubs called ({} unique): {noop_calls:?}\n\
-                     Finding: {finding}",
-                    log.total_calls(),
-                    wasi_out.len(),
-                    noop_calls.len()
-                );
-            }
-        }
-    }
-
-    eprintln!("[probe P5] __main_argc_argv not found; using C API path");
-
-    let py_init = match instance.get_func(&mut *store, "Py_InitializeEx") {
-        Some(f) => f,
-        None => {
-            return format!(
-                "{ctors_summary}\n\
-                 --- phase 5: C API path ---\n\
-                 Finding: Py_InitializeEx not exported"
-            );
-        }
-    };
-
-    eprintln!("[probe P5] calling Py_InitializeEx(0)...");
-    if let Err(e) = py_init.call(&mut *store, &[wasmtime::Val::I32(0)], &mut []) {
-        let wasi_out = store.data().wasi_stdout.clone();
-        let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
-        let fuel_remaining = store.get_fuel().unwrap_or(0);
-        let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
-        let err_str = format!("{e}");
-        let finding = classify_python_error(&err_str, log.total_calls());
+    // Prefer PyRun_SimpleString; fall back to PyRun_SimpleStringFlags; then absent.
+    let py_run_name = if has_py_run_simple {
+        "PyRun_SimpleString"
+    } else if has_py_run_simple_flags {
+        "PyRun_SimpleStringFlags"
+    } else {
         return format!(
             "{ctors_summary}\n\
-             --- phase 5: C API path ---\n\
-             TRAPPED at Py_InitializeEx(0): {e}\n\
-             Fuel consumed: {total_fuel}\n\
-             JS-FFI calls: {}\n\
-             WASI stdout ({} bytes):\n{wasi_text}\n\
-             Finding: {finding}",
-            log.total_calls(),
-            wasi_out.len()
+             --- phase 5: PyRun_SimpleString ---\n\
+             run entries: PyRun_SimpleString={has_py_run_simple} \
+             PyRun_SimpleStringFlags={has_py_run_simple_flags} \
+             PyRun_String={has_py_run_string}\n\
+             Finding: no usable run entry exported"
         );
-    }
-
-    let py_run = match instance.get_func(&mut *store, "PyRun_SimpleString") {
-        Some(f) => f,
-        None => {
-            let wasi_out = store.data().wasi_stdout.clone();
-            let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
-            return format!(
-                "{ctors_summary}\n\
-                 --- phase 5: C API path ---\n\
-                 Py_InitializeEx(0) succeeded\n\
-                 Finding: PyRun_SimpleString not exported\n\
-                 WASI stdout ({} bytes):\n{wasi_text}",
-                wasi_out.len()
-            );
-        }
     };
+    let py_run = instance.get_func(&mut *store, py_run_name).unwrap();
 
-    // Reuse the same Python code as the __main_argc_argv path.
-    // Grow memory by one page to get a clean scratch region.
-    let src = PYTHON_CODE;
-    let mem = match store.data().pyodide_memory {
-        Some(m) => m,
-        None => {
-            return format!(
-                "{ctors_summary}\n\
-                 --- phase 5: C API path ---\n\
-                 Finding: pyodide_memory not set"
-            );
-        }
-    };
-    let scratch_ptr = match mem.grow(&mut *store, 1) {
-        Ok(prev_pages) => {
-            let offset = (prev_pages as usize) * 65536;
-            let mem_len = mem.data_size(&*store);
-            if offset + src.len() > mem_len {
-                return format!(
-                    "{ctors_summary}\n\
-                     --- phase 5: C API path ---\n\
-                     Finding: memory too small after grow: need {}, have {}",
-                    offset + src.len(),
-                    mem_len
-                );
-            }
-            mem.data_mut(&mut *store)[offset..offset + src.len()].copy_from_slice(src);
-            offset as i32
-        }
+    // Write PYTHON_CODE (NUL-terminated) into a fresh scratch page.
+    let scratch_ptr = match write_code_to_scratch(store, PYTHON_CODE) {
+        Ok(p) => p,
         Err(e) => {
             return format!(
                 "{ctors_summary}\n\
-                 --- phase 5: C API path ---\n\
-                 Finding: memory.grow failed: {e}"
+                 --- phase 5: PyRun_SimpleString ---\n\
+                 CODE WRITE FAILED: {e}"
             );
         }
     };
 
     store.data_mut().wasi_stdout.clear();
-    eprintln!("[probe P5] calling PyRun_SimpleString(ptr={scratch_ptr:#x})...");
-    let run_result = py_run.call(
-        &mut *store,
-        &[wasmtime::Val::I32(scratch_ptr)],
-        &mut [wasmtime::Val::I32(0)],
+    eprintln!(
+        "[probe P5] calling {py_run_name}(ptr={scratch_ptr:#x}) on already-live interpreter..."
     );
+
+    // PyRun_SimpleString(const char *) -> int (0 ok, -1 error).
+    // PyRun_SimpleStringFlags(const char *, PyCompilerFlags *) -> int; pass NULL (0).
+    let call_args: Vec<wasmtime::Val> = if py_run_name == "PyRun_SimpleStringFlags" {
+        vec![wasmtime::Val::I32(scratch_ptr), wasmtime::Val::I32(0)]
+    } else {
+        vec![wasmtime::Val::I32(scratch_ptr)]
+    };
+    let mut run_ret = [wasmtime::Val::I32(-99)];
+    let run_result = py_run.call(&mut *store, &call_args, &mut run_ret);
 
     let wasi_out = store.data().wasi_stdout.clone();
     let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
     let fuel_remaining = store.get_fuel().unwrap_or(0);
     let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
+    let noop_calls = noop_log.snapshot();
+    let mech_tail = mech_log.tail(MECH_TRACE_TAIL);
+    let mut mech_trace = String::new();
+    for (i, entry) in mech_tail.iter().enumerate() {
+        let line = if entry.arg0 != 0 || entry.arg1 != 0 {
+            format!(
+                "  [{:>3}] {} (arg0={}, arg1={})\n",
+                i + 1,
+                entry.name,
+                entry.arg0,
+                entry.arg1
+            )
+        } else {
+            format!("  [{:>3}] {}\n", i + 1, entry.name)
+        };
+        mech_trace.push_str(&line);
+    }
 
     match run_result {
-        Ok(()) => format!(
-            "{ctors_summary}\n\
-             --- phase 5: C API path ---\n\
-             PyRun_SimpleString returned (no trap)\n\
-             Fuel consumed: {total_fuel}\n\
-             JS-FFI calls: {}\n\
-             WASI stdout ({} bytes):\n{wasi_text}",
-            log.total_calls(),
-            wasi_out.len()
-        ),
+        Ok(()) => {
+            let ret = match run_ret[0] {
+                wasmtime::Val::I32(v) => v,
+                _ => -99,
+            };
+            eprintln!("[probe P5] {py_run_name} returned {ret}");
+            let milestone = if wasi_text.contains("hello from cpython on afterburner")
+                && wasi_text.contains("pyver")
+                && wasi_text.contains("4950")
+            {
+                "MILESTONE MET: Python executed and produced expected output"
+            } else if !wasi_text.is_empty() {
+                "PARTIAL: some output captured but expected strings missing"
+            } else {
+                "NO OUTPUT: PyRun_SimpleString returned but wasi_stdout is empty"
+            };
+            format!(
+                "{ctors_summary}\n\
+                 --- phase 5: {py_run_name} ---\n\
+                 run entries: PyRun_SimpleString={has_py_run_simple} \
+                 PyRun_SimpleStringFlags={has_py_run_simple_flags} \
+                 PyRun_String={has_py_run_string}\n\
+                 Used: {py_run_name}\n\
+                 Return code: {ret}\n\
+                 Fuel consumed: {total_fuel}\n\
+                 JS-FFI calls: {}\n\
+                 Noop stubs called ({} unique): {noop_calls:?}\n\
+                 Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
+                 WASI stdout ({} bytes):\n{wasi_text}\n\
+                 {milestone}",
+                log.total_calls(),
+                noop_calls.len(),
+                wasi_out.len()
+            )
+        }
         Err(e) => {
             let err_str = format!("{e}");
             let finding = classify_python_error(&err_str, log.total_calls());
+            let throw_count = store.data().cxa_throw_count;
+            let fs_paths: Vec<String> = store.data().fs_path_log.iter().cloned().collect();
             format!(
                 "{ctors_summary}\n\
-                 --- phase 5: C API path ---\n\
-                 TRAPPED at PyRun_SimpleString: {e}\n\
+                 --- phase 5: {py_run_name} ---\n\
+                 run entries: PyRun_SimpleString={has_py_run_simple} \
+                 PyRun_SimpleStringFlags={has_py_run_simple_flags} \
+                 PyRun_String={has_py_run_string}\n\
+                 Used: {py_run_name}\n\
+                 TRAPPED: {e}\n\
                  Fuel consumed: {total_fuel}\n\
                  JS-FFI calls: {}\n\
+                 C++ throws: {throw_count}\n\
+                 Last 12 FS paths: {fs_paths:?}\n\
                  WASI stdout ({} bytes):\n{wasi_text}\n\
+                 Noop stubs called ({} unique): {noop_calls:?}\n\
+                 Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
                  Finding: {finding}",
                 log.total_calls(),
-                wasi_out.len()
+                wasi_out.len(),
+                noop_calls.len()
             )
         }
     }
