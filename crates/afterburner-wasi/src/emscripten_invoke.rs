@@ -23,10 +23,7 @@ use crate::{embedder_vm::EmbedderState, emscripten_runtime::invoke_dispatch};
 ///
 /// Every entry shares `invoke_dispatch`: `params[0]` is the table slot,
 /// `params[1..]` are forwarded to the function at that slot.
-pub(crate) fn wire_invoke_trampolines(
-    engine: &Engine,
-    linker: &mut Linker<EmbedderState>,
-) -> Result<()> {
+pub fn wire_invoke_trampolines(engine: &Engine, linker: &mut Linker<EmbedderState>) -> Result<()> {
     linker.allow_shadowing(true);
 
     // ---- Pyodide PyCFunction trampolines ------------------------------------

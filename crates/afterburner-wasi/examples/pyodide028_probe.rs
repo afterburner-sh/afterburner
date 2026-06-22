@@ -53,10 +53,12 @@ use afterburner_wasi::emscripten_dylink::{
     fill_got_table_slots, parse_got_name_to_slot, wire_got_func_stubs_from_module,
 };
 use afterburner_wasi::emscripten_fs::mount_zip_into_fs;
+use afterburner_wasi::emscripten_invoke::wire_invoke_trampolines;
 use afterburner_wasi::emscripten_runtime::{
-    JsFfiCallLog, MechCallLog, PYODIDE_STACK_BASE, fill_unknown_imports_as_noops,
+    JsFfiCallLog, MechCallLog, NoopCallLog, PYODIDE_STACK_BASE, fill_unknown_imports_as_noops,
     wire_env_memory_and_table_in_store, wire_wasi_only,
 };
+use afterburner_wasi::emscripten_syscall::wire_fs_env_funcs;
 use wasmtime::{
     Config, Engine, FuncType, Global, GlobalType, Linker, Module, Mutability, OptLevel, Store, Tag,
     TagType, Val, ValType, WasmBacktraceDetails,
@@ -200,6 +202,7 @@ fn step1_succeeded(
     eprintln!("[probe] COMPILE SUCCEEDED - step 1 key deliverable MET ({import_count} imports)");
 
     let log = JsFfiCallLog::new();
+    let noop_log = NoopCallLog::new();
     let mut linker: Linker<EmbedderState> = Linker::new(&engine);
 
     // Wire only the WASI shims (wasi_snapshot_preview1.*). All env.* imports
@@ -210,7 +213,21 @@ fn step1_succeeded(
     if let Err(e) = wire_wasi_only(&mut linker) {
         return format!("IMPORT SETUP FAILED (wasi): {e}");
     }
+    // Wire invoke_* and PyCFunction trampolines. _PyEM_TrampolineCall_JS uses
+    // the same pure-i32 signature in 0.28 (the exnref translation only adds
+    // externref to JS-FFI stubs, not to these table-dispatch trampolines).
+    // Without this, the no-op stub returns NULL to every PyCFunction call, and
+    // CPython corrupts its heap on the way into malloc.
+    if let Err(e) = wire_invoke_trampolines(&engine, &mut linker) {
+        return format!("IMPORT SETUP FAILED (trampolines): {e}");
+    }
     let mech_log = MechCallLog::new();
+    // Wire __syscall_* FS functions. All are pure i32 (no externref in 0.28);
+    // the no-op stubs make getcwd/openat return 0/null and CPython's path
+    // evaluation fails before it can load any module.
+    if let Err(e) = wire_fs_env_funcs(&mut linker, mech_log.clone()) {
+        return format!("IMPORT SETUP FAILED (syscalls): {e}");
+    }
 
     // sentinel::is_sentinel: (externref) -> i32
     // sentinel::create_sentinel: () -> externref
@@ -332,7 +349,8 @@ fn step1_succeeded(
     // proceed past Pyodide 0.28 JS-FFI stubs that don't exist in 0.26.4.
     // A no-op returns zero/null; unknown stubs that matter will surface as
     // downstream errors (wrong return value) rather than immediate traps.
-    let auto_filled = fill_unknown_imports_as_noops(&mut store, &mut linker, &module);
+    let auto_filled =
+        fill_unknown_imports_as_noops(&mut store, &mut linker, &module, noop_log.clone());
     eprintln!(
         "[probe] {} imports auto-filled as no-op stubs",
         auto_filled.len()
@@ -454,6 +472,7 @@ fn step1_succeeded(
 
                 let throw_count = store.data().cxa_throw_count;
                 let fs_paths: Vec<String> = store.data().fs_path_log.iter().cloned().collect();
+                let noop_calls = noop_log.snapshot();
                 return format!(
                     "BOOT FAILED at __wasm_call_ctors\n\
                      Error: {e}\n\
@@ -465,9 +484,11 @@ fn step1_succeeded(
                      Last 12 FS paths: {fs_paths:?}\n\
                      WASI stdout ({} bytes): {wasi_text:?}\n\
                      Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
+                     Noop stubs called ({} unique): {noop_calls:?}\n\
                      Finding: {finding}",
                     log.total_calls(),
-                    wasi_out.len()
+                    wasi_out.len(),
+                    noop_calls.len()
                 );
             }
         }
@@ -475,7 +496,14 @@ fn step1_succeeded(
         ctors_summary = "CTORS: not exported (skipped)".to_owned();
     }
 
-    run_python_phase(&instance, &mut store, &log, &mech_log, &ctors_summary)
+    run_python_phase(
+        &instance,
+        &mut store,
+        &log,
+        &mech_log,
+        &noop_log,
+        &ctors_summary,
+    )
 }
 
 const SCRATCH_OFFSET: u32 = 32 * 1024 * 1024;
@@ -485,6 +513,7 @@ fn run_python_phase(
     store: &mut Store<EmbedderState>,
     log: &JsFfiCallLog,
     mech_log: &std::sync::Arc<afterburner_wasi::emscripten_runtime::MechCallLog>,
+    noop_log: &std::sync::Arc<afterburner_wasi::emscripten_runtime::NoopCallLog>,
     ctors_summary: &str,
 ) -> String {
     store.data_mut().wasi_stdout.clear();
@@ -537,6 +566,7 @@ fn run_python_phase(
                 }
                 let throw_count = store.data().cxa_throw_count;
                 let fs_paths: Vec<String> = store.data().fs_path_log.iter().cloned().collect();
+                let noop_calls = noop_log.snapshot();
                 return format!(
                     "{ctors_summary}\n\
                      --- phase 5: __main_argc_argv(0,0) ---\n\
@@ -547,9 +577,11 @@ fn run_python_phase(
                      Last 12 FS paths: {fs_paths:?}\n\
                      WASI stdout ({} bytes): {wasi_text:?}\n\
                      Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
+                     Noop stubs called ({} unique): {noop_calls:?}\n\
                      Finding: {finding}",
                     log.total_calls(),
-                    wasi_out.len()
+                    wasi_out.len(),
+                    noop_calls.len()
                 );
             }
         }

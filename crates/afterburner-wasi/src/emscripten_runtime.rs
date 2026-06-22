@@ -544,13 +544,54 @@ pub(crate) fn invoke_dispatch(
     Ok(())
 }
 
+// ---- no-op stub call log -----------------------------------------------------
+
+/// Ring buffer that records the name of every auto-filled no-op stub that is
+/// actually invoked during execution. Each stub emits its name to stderr on
+/// first call and appends it to the ring. Use [`NoopCallLog::snapshot`] after a
+/// trap to see which stubs CPython reached before failing.
+pub struct NoopCallLog {
+    ring: Mutex<VecDeque<String>>,
+}
+
+impl NoopCallLog {
+    /// Create an empty log.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            ring: Mutex::new(VecDeque::with_capacity(MECH_RING_CAP)),
+        })
+    }
+
+    /// Record one call. Prints to stderr and appends to the ring.
+    pub fn record(&self, name: &str) {
+        eprintln!("[noop-stub CALLED] {name}");
+        let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
+        if ring.len() == MECH_RING_CAP {
+            ring.pop_front();
+        }
+        ring.push_back(name.to_owned());
+    }
+
+    /// Return all recorded calls in chronological order.
+    pub fn snapshot(&self) -> Vec<String> {
+        self.ring
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
 /// Scan `module`'s import list and fill any remaining unsatisfied function
 /// imports with a trap stub. Returns the list of auto-filled import names.
 /// Auto-fill all unsatisfied imports with no-ops (return zero/null for each result).
 ///
 /// Use for bring-up probes where you want execution to continue past unknown
 /// stubs rather than trap immediately. Returns the list of filled import names.
-/// The stubs return zero-values; they do NOT record calls or emit errors.
+///
+/// Every stub that is actually *called* at runtime logs its name via `call_log`
+/// (to stderr immediately + to the ring buffer for post-mortem inspection).
 ///
 /// Call after all known imports are registered (WASI + GOT + known stubs) so
 /// only truly unknown functions get the no-op treatment.
@@ -558,6 +599,7 @@ pub fn fill_unknown_imports_as_noops(
     store: &mut wasmtime::Store<EmbedderState>,
     linker: &mut Linker<EmbedderState>,
     module: &wasmtime::Module,
+    call_log: Arc<NoopCallLog>,
 ) -> Vec<String> {
     let mut auto_filled = Vec::new();
     for import in module.imports() {
@@ -567,7 +609,8 @@ pub fn fill_unknown_imports_as_noops(
         {
             continue;
         }
-        auto_filled.push(format!("{}::{}", import.module(), import.name()));
+        let full_name = format!("{}::{}", import.module(), import.name());
+        auto_filled.push(full_name.clone());
         if let wasmtime::ExternType::Func(ft) = import.ty() {
             let m = import.module().to_owned();
             let n = import.name().to_owned();
@@ -577,7 +620,9 @@ pub fn fill_unknown_imports_as_noops(
             // slot's current value would return the wrong type for externref
             // results. Keying off the declared type is correct.
             let defaults: Vec<Val> = ft.results().map(|vt| default_val_for(&vt)).collect();
+            let log = call_log.clone();
             let _ = linker.func_new(&m, &n, ft, move |_, _, results| {
+                log.record(&full_name);
                 for (r, d) in results.iter_mut().zip(defaults.iter()) {
                     *r = *d;
                 }

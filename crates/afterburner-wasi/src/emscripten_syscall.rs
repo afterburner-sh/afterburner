@@ -40,7 +40,7 @@ fn log_stat(tag: &str, abs: &str, rc: i32, mode_size: Option<(u32, u64)>) {
 /// needs to initialize (getcwd, openat, read, pread64, close, lseek, fstat64,
 /// stat64, lstat64, newfstatat, ioctl, getdents64, faccessat, fcntl64,
 /// readlinkat). All other syscalls return -1 (ENOSYS).
-pub(crate) fn wire_fs_env_funcs(
+pub fn wire_fs_env_funcs(
     linker: &mut Linker<EmbedderState>,
     mech_log: Arc<MechCallLog>,
 ) -> Result<()> {
