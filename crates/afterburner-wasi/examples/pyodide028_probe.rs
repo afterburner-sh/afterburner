@@ -546,85 +546,6 @@ fn write_code_to_scratch(store: &mut Store<EmbedderState>, src: &[u8]) -> Result
     Ok(offset as i32)
 }
 
-/// Call `_Py_write(1, buf, len)` (CPython's own write wrapper) directly
-/// after ctors to verify the Python-level fd-1 write path.
-/// If captured, Python's write path works. If empty but probe_direct_write
-/// worked, CPython is bypassing _Py_write when running os.write.
-fn probe_py_write(instance: &wasmtime::Instance, store: &mut Store<EmbedderState>) {
-    const MSG: &[u8] = b"PROBE-PY-WRITE\n";
-    let mem = match store.data().pyodide_memory {
-        Some(m) => m,
-        None => {
-            eprintln!("[probe_py_write] no pyodide_memory - skip");
-            return;
-        }
-    };
-    let buf_ptr = match mem.grow(&mut *store, 1) {
-        Ok(prev_pages) => (prev_pages as usize) * 65536,
-        Err(e) => {
-            eprintln!("[probe_py_write] memory.grow failed: {e}");
-            return;
-        }
-    };
-    mem.data_mut(&mut *store)[buf_ptr..buf_ptr + MSG.len()].copy_from_slice(MSG);
-
-    // Dump the buffer from guest memory NOW, before calling _Py_write. If
-    // _Py_write traps before reaching the fd_write shim, the bytes are not
-    // lost: we have already read them from the linear memory here.
-    {
-        let buf_contents = mem.data(&*store)[buf_ptr..buf_ptr + MSG.len()].to_vec();
-        let text = String::from_utf8_lossy(&buf_contents);
-        eprintln!(
-            "[probe_py_write] buf pre-read: ptr={buf_ptr:#x} len={} bytes={text:?}",
-            MSG.len()
-        );
-    }
-
-    eprintln!(
-        "[probe_py_write] calling _Py_write(1, {buf_ptr:#x}, {})...",
-        MSG.len()
-    );
-    let py_write = match instance.get_func(&mut *store, "_Py_write") {
-        Some(f) => f,
-        None => {
-            eprintln!("[probe_py_write] '_Py_write' not exported - skip");
-            return;
-        }
-    };
-    let mut results = [wasmtime::Val::I32(-1)];
-    match py_write.call(
-        &mut *store,
-        &[
-            wasmtime::Val::I32(1),
-            wasmtime::Val::I32(buf_ptr as i32),
-            wasmtime::Val::I32(MSG.len() as i32),
-        ],
-        &mut results,
-    ) {
-        Ok(_) => {
-            let ret = match results[0] {
-                wasmtime::Val::I32(v) => v,
-                _ => -1,
-            };
-            let captured = store.data().wasi_stdout.len();
-            let snippet = String::from_utf8_lossy(&store.data().wasi_stdout).into_owned();
-            eprintln!("[probe_py_write] _Py_write() ret={ret} captured={captured}: {snippet:?}");
-        }
-        Err(ref e) => {
-            // Even on trap: dump any bytes the write shim managed to capture
-            // during the call (e.g. partial writes to fd 2 before the trap).
-            let captured = store.data().wasi_stdout.clone();
-            let snippet = String::from_utf8_lossy(&captured);
-            eprintln!(
-                "[probe_py_write] _Py_write() TRAPPED: {e}\n\
-                 [probe_py_write] captured during trap ({} bytes): {snippet:?}",
-                captured.len()
-            );
-        }
-    }
-    store.data_mut().wasi_stdout.clear();
-}
-
 /// Directly call the module's exported `write(fd=1, buf, len)` function to
 /// verify that `wasi_snapshot_preview1::fd_write` is reachable before Python.
 /// "PROBE-WRITE-DIRECT\n" in wasi_stdout = fd_write shim is wired correctly.
@@ -691,8 +612,6 @@ fn run_python_phase(
 ) -> String {
     // Verify fd_write shim reachable via direct `write` export (pre-Python).
     probe_direct_write(instance, store);
-    // Also probe via _Py_write (CPython's own write wrapper, post-ctors).
-    probe_py_write(instance, store);
     store.data_mut().wasi_stdout.clear();
 
     // Root cause: __main_argc_argv calls Py_Initialize internally, which
@@ -751,6 +670,93 @@ fn run_python_phase(
         "[probe P5] calling {py_run_name}(ptr={scratch_ptr:#x}) on already-live interpreter..."
     );
 
+    // Acquire a thread state / GIL before calling into CPython.
+    //
+    // Root cause of the previous trap: __wasm_call_ctors runs Py_Initialize,
+    // which sets the main thread state as the current thread, but after ctors
+    // returns to our host the GIL may be released (or the tstate pointer in
+    // the TLS slot zeroed). PyRun_SimpleString calls PyImport_AddModuleRef
+    // which dereferences the current thread state and hits a null pointer when
+    // there is none attached.
+    //
+    // Fix: call PyGILState_Ensure() -> PyGILState_STATE (i32) before entering
+    // CPython. This function acquires the GIL and installs a thread state if
+    // there is none current. Call PyGILState_Release(state) after, even on
+    // trap, to restore the previous GIL state.
+    //
+    // PyGILState_Ensure: () -> i32   (PyGILState_STATE enum)
+    // PyGILState_Release: (i32) -> ()
+    let (pgs_ensure, pgs_release) = match (
+        instance.get_func(&mut *store, "PyGILState_Ensure"),
+        instance.get_func(&mut *store, "PyGILState_Release"),
+    ) {
+        (Some(e), Some(r)) => (Some(e), Some(r)),
+        (e, r) => {
+            eprintln!(
+                "[probe P5] WARNING: PyGILState_Ensure={} PyGILState_Release={} - skipping GIL acquire",
+                e.is_some(),
+                r.is_some()
+            );
+            (None, None)
+        }
+    };
+
+    // Also log _PyThreadState_GetCurrent (returns i32 ptr to current tstate,
+    // 0 if none) so we can tell whether the interpreter already has a thread
+    // state before we call Ensure.
+    if let Some(unchecked) = instance.get_func(&mut *store, "PyThreadState_GetUnchecked") {
+        let mut ts_ret = [wasmtime::Val::I32(0)];
+        match unchecked.call(&mut *store, &[], &mut ts_ret) {
+            Ok(()) => {
+                let ptr = match ts_ret[0] {
+                    wasmtime::Val::I32(v) => v,
+                    _ => 0,
+                };
+                eprintln!(
+                    "[probe P5] PyThreadState_GetUnchecked() = {ptr:#x} ({} current tstate)",
+                    if ptr == 0 { "NO" } else { "HAS" }
+                );
+            }
+            Err(e) => eprintln!("[probe P5] PyThreadState_GetUnchecked() trapped: {e}"),
+        }
+    }
+
+    // Acquire GIL / install thread state.
+    let gil_state: Option<i32> = if let Some(ref ensure) = pgs_ensure {
+        let mut gil_ret = [wasmtime::Val::I32(0)];
+        match ensure.call(&mut *store, &[], &mut gil_ret) {
+            Ok(()) => {
+                let state = match gil_ret[0] {
+                    wasmtime::Val::I32(v) => v,
+                    _ => 0,
+                };
+                eprintln!("[probe P5] PyGILState_Ensure() = {state} (0=LOCKED 1=UNLOCKED)");
+                Some(state)
+            }
+            Err(e) => {
+                eprintln!("[probe P5] PyGILState_Ensure() TRAPPED: {e}");
+                // If Ensure itself traps, PyRun_SimpleString will also trap.
+                // Report this as the new blocker and return early.
+                let wasi_out = store.data().wasi_stdout.clone();
+                let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
+                return format!(
+                    "{ctors_summary}\n\
+                     --- phase 5: {py_run_name} (GIL) ---\n\
+                     PyGILState_Ensure() TRAPPED: {e}\n\
+                     WASI stdout ({} bytes):\n{wasi_text}\n\
+                     Finding: PyGILState_Ensure traps - Pyodide post-ctors JS-side \
+                     init (loadPyodide) was not run; the interpreter may lack \
+                     _PyRuntime state that the JS side normally sets up. \
+                     This means real Python output requires the full Pyodide JS \
+                     init path, not ctors alone.",
+                    wasi_out.len()
+                );
+            }
+        }
+    } else {
+        None
+    };
+
     // PyRun_SimpleString(const char *) -> int (0 ok, -1 error).
     // PyRun_SimpleStringFlags(const char *, PyCompilerFlags *) -> int; pass NULL (0).
     let call_args: Vec<wasmtime::Val> = if py_run_name == "PyRun_SimpleStringFlags" {
@@ -760,6 +766,14 @@ fn run_python_phase(
     };
     let mut run_ret = [wasmtime::Val::I32(-99)];
     let run_result = py_run.call(&mut *store, &call_args, &mut run_ret);
+
+    // Release GIL unconditionally, even if PyRun trapped.
+    if let (Some(state), Some(ref release)) = (gil_state, pgs_release) {
+        match release.call(&mut *store, &[wasmtime::Val::I32(state)], &mut []) {
+            Ok(()) => eprintln!("[probe P5] PyGILState_Release({state}) OK"),
+            Err(e) => eprintln!("[probe P5] PyGILState_Release({state}) trapped: {e}"),
+        }
+    }
 
     let wasi_out = store.data().wasi_stdout.clone();
     let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
