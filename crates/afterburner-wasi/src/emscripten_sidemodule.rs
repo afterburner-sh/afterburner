@@ -46,7 +46,7 @@ use wasmtime::{
 };
 
 use crate::embedder_vm::EmbedderState;
-use crate::emscripten_dylink::{parse_got_name_to_slot, resolve_got_func, resolve_got_mem};
+use crate::emscripten_dylink::{parse_got_name_to_slot, resolve_got_mem};
 
 /// Memory requirements declared in a SIDE_MODULE's `dylink.0` custom section.
 #[derive(Debug, Clone, Copy)]
@@ -362,17 +362,20 @@ pub fn pre_load_side_module(
 
     // Wire GOT.func and GOT.mem globals for the SIDE_MODULE.
     //
-    // All GOT globals are created with init 0.
+    // All GOT globals are created with init 0. Resolution happens in two
+    // phases: BEFORE instantiation (GOT.mem data-address symbols from main)
+    // and AFTER instantiation (GOT.func from the side module's own element
+    // segment + fallback to main). This mirrors Emscripten's call order:
     //
-    // GOT.mem entries are resolved via resolve_got_mem which reads the main
-    // instance's immutable-global exports (data-address symbols). Mirrors
-    // Emscripten's relocateExports + updateGOT semantics for data symbols.
+    //   1. GOTProxy traps/defers reads until updateGOT runs.
+    //   2. instantiate() -> active element segment places funcs in table.
+    //   3. relocateExports + updateGOT(moduleExports) writes slot indices.
+    //   4. __wasm_apply_data_relocs reads correct GOT values.
+    //   5. __wasm_call_ctors.
     //
-    // GOT.func entries are resolved via resolve_got_func which inserts each
-    // named function from the main instance into the shared indirect function
-    // table and writes the resulting slot index into the global. Mirrors
-    // Emscripten's updateGOT path that calls addFunction(value) for every
-    // function export to allocate a table slot.
+    // Critically: GOT.func globals MUST be correct BEFORE apply_data_relocs
+    // because that function reads fn-ptr-in-data fields from those globals to
+    // fill PyTypeObject.tp_traverse and similar slots.
     let got_ty = GlobalType::new(ValType::I32, Mutability::Var);
     // Collect GOT imports first to avoid repeated borrow conflicts.
     let got_imports: Vec<(String, String)> = module
@@ -408,8 +411,9 @@ pub fn pre_load_side_module(
             })?;
     }
 
-    // Apply updateGOT to GOT.mem entries: resolve data-address symbols from
-    // the main instance's immutable-global exports.
+    // Pre-fill GOT.mem with resolved data-address symbols from the main
+    // instance BEFORE instantiation (same pre-instantiation pass as Emscripten
+    // does for imports resolved from the main module's exports).
     let got_mem_pairs: Vec<(&str, Global)> = got_mem_globals
         .iter()
         .map(|(s, g)| (s.as_str(), *g))
@@ -419,19 +423,11 @@ pub fn pre_load_side_module(
         "[sidemodule] {path}: GOT.mem resolved={got_mem_resolved} zero={got_mem_zero}"
     );
 
-    // Apply updateGOT to GOT.func entries: for each function exported by the
-    // main instance, insert it into the shared indirect function table and
-    // write the slot index into the GOT.func global. This mirrors Emscripten's
-    // addFunction(value) call inside updateGOT for function-typed exports.
-    let got_func_pairs: Vec<(&str, Global)> = got_func_globals
-        .iter()
-        .map(|(s, g)| (s.as_str(), *g))
-        .collect();
-    let (got_func_resolved, got_func_missing) =
-        resolve_got_func(store, main_instance, &got_func_pairs);
-    eprintln!(
-        "[sidemodule] {path}: GOT.func resolved={got_func_resolved} missing={got_func_missing}"
-    );
+    // GOT.func is intentionally left at 0 here. The active element segment
+    // runs during instantiation and places the side module's own functions into
+    // the shared table at slots [table_base .. table_base + table_size). We
+    // resolve the GOT.func globals to those slots AFTER instantiation (below),
+    // mirroring Emscripten's updateGOT(moduleExports) call order.
 
     // Wire all env.* function imports from the main pyodide instance's exports.
     // For any env.* the main instance doesn't export, wire a typed no-op.
@@ -489,18 +485,102 @@ pub fn pre_load_side_module(
     }
     eprintln!("[sidemodule] {path}: env imports: {from_main} from main, {from_stub} stubs");
 
-    // Instantiate the SIDE_MODULE.
+    // Instantiate the SIDE_MODULE. The active element segment fires here and
+    // places the side module's own functions into the shared table at slots
+    // [table_base .. table_base + table_size).
     let instance = linker
         .instantiate(&mut *store, &module)
         .map_err(|e| AfterburnerError::Engine(format!("sidemodule instantiate {path}: {e}")))?;
     eprintln!("[sidemodule] {path}: instantiated");
 
     // Build a name->table_slot map from the side module's name section and
-    // element segments. Functions not placed in the element segment (e.g.
-    // PyInit_* which CPython retrieves via dlsym but never calls indirectly)
-    // are absent from the map; _dlsym_js inserts them on demand.
+    // element segments. This is the source-of-truth for which table slot each
+    // side-module function occupies after instantiation.
     let name_to_slot = parse_got_name_to_slot(wasm_bytes, table_base);
-    // Intersect with the module's actual exports to build func_table_slots.
+    eprintln!(
+        "[sidemodule] {path}: element segment map has {} entries (table_base={table_base})",
+        name_to_slot.len()
+    );
+
+    // updateGOT(moduleExports): write each GOT.func global with the table slot
+    // of the corresponding function. Mirrors Emscripten's updateGOT which calls
+    // addFunction(value) for each function export to get the slot index.
+    //
+    // Resolution order (mirrors Emscripten's updateGOT + resolveGlobalSymbol):
+    // 1. Side module's own element segment (name_to_slot): the canonical slot
+    //    the active element segment already wrote the funcref into. This is the
+    //    path for the side module's own C functions (tp_traverse, etc.).
+    // 2. Side module's exported function (not in element segment): insert into
+    //    the shared table at the next available slot.
+    // 3. Main module's exported function: same as (2) but from main.
+    // 4. Leave at 0 if not found (will trap on indirect call, loudly).
+    //
+    // CRITICAL: this runs BEFORE __wasm_apply_data_relocs so that when that
+    // function reads GOT.func globals to fill fn-ptr-in-data fields (e.g.
+    // PyTypeObject.tp_traverse), the globals hold valid table slot indices
+    // rather than 0 (which would write garbage/null into the type objects).
+    let mut got_func_from_elem = 0u32;
+    let mut got_func_from_side = 0u32;
+    let mut got_func_from_main = 0u32;
+    let mut got_func_zero = 0u32;
+
+    let Some(tbl) = store.data().pyodide_table else {
+        return Err(AfterburnerError::Engine(
+            "pre_load_side_module: pyodide_table missing for updateGOT".into(),
+        ));
+    };
+
+    for (name, g) in &got_func_globals {
+        // Path 1: side module's own element segment.
+        if let Some(&slot) = name_to_slot.get(name.as_str()) {
+            let _ = g.set(&mut *store, Val::I32(slot as i32));
+            got_func_from_elem += 1;
+            continue;
+        }
+
+        // Path 2: side module's own exported function (not in element segment).
+        if let Some(func) = instance.get_func(&mut *store, name.as_str()) {
+            let slot = tbl.size(&*store) as u32;
+            if tbl
+                .grow(&mut *store, 1, wasmtime::Ref::Func(None))
+                .is_ok()
+                && tbl
+                    .set(&mut *store, slot as u64, wasmtime::Ref::Func(Some(func)))
+                    .is_ok()
+            {
+                let _ = g.set(&mut *store, Val::I32(slot as i32));
+                got_func_from_side += 1;
+                continue;
+            }
+        }
+
+        // Path 3: main module's exported function.
+        if let Some(func) = main_instance.get_func(&mut *store, name.as_str()) {
+            let slot = tbl.size(&*store) as u32;
+            if tbl
+                .grow(&mut *store, 1, wasmtime::Ref::Func(None))
+                .is_ok()
+                && tbl
+                    .set(&mut *store, slot as u64, wasmtime::Ref::Func(Some(func)))
+                    .is_ok()
+            {
+                let _ = g.set(&mut *store, Val::I32(slot as i32));
+                got_func_from_main += 1;
+                continue;
+            }
+        }
+
+        // Path 4: unresolved - leave at 0 (traps loudly on indirect call).
+        got_func_zero += 1;
+    }
+    eprintln!(
+        "[sidemodule] {path}: updateGOT: elem={got_func_from_elem} side={got_func_from_side} \
+         main={got_func_from_main} zero={got_func_zero}"
+    );
+
+    // Intersect name_to_slot with the module's actual exports to build
+    // func_table_slots. Functions not in the element segment (e.g. PyInit_*)
+    // are absent here; _dlsym_js inserts them on demand.
     let func_table_slots: HashMap<String, u32> = module
         .exports()
         .filter(|exp| matches!(exp.ty(), wasmtime::ExternType::Func(_)))
@@ -524,7 +604,8 @@ pub fn pre_load_side_module(
             - func_table_slots.len(),
     );
 
-    // Call __wasm_apply_data_relocs if present.
+    // Call __wasm_apply_data_relocs AFTER updateGOT so it reads correct slot
+    // indices when filling fn-ptr-in-data fields (PyTypeObject slots, etc.).
     if let Some(reloc_fn) = instance.get_func(&mut *store, "__wasm_apply_data_relocs") {
         reloc_fn.call(&mut *store, &[], &mut []).map_err(|e| {
             AfterburnerError::Engine(format!("sidemodule __wasm_apply_data_relocs {path}: {e}"))
