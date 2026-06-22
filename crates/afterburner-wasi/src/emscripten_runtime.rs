@@ -61,8 +61,7 @@ use crate::{
 };
 use afterburner_core::{AfterburnerError, Result};
 use wasmtime::{
-    Caller, Engine, Global, GlobalType, Linker, MemoryType, Mutability, Table, TableType, Val,
-    ValType,
+    Engine, Global, GlobalType, Linker, MemoryType, Mutability, Table, TableType, Val, ValType,
 };
 
 // ---- mechanical env.* call trace --------------------------------------------
@@ -167,12 +166,6 @@ impl JsFfiCallLog {
     pub fn total_calls(&self) -> usize {
         self.total.load(Ordering::Relaxed)
     }
-}
-
-// ---- memory helper -----------------------------------------------------------
-
-pub(crate) fn caller_memory(caller: &mut Caller<'_, EmbedderState>) -> Option<wasmtime::Memory> {
-    caller.get_export("memory").and_then(|e| e.into_memory())
 }
 
 // ---- sizes / constants -------------------------------------------------------

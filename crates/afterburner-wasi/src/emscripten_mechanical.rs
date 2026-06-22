@@ -13,7 +13,7 @@ use wasmtime::{Caller, Engine, FuncType, Linker, ValType};
 use crate::{
     embedder_vm::EmbedderState,
     emscripten_abi::{VIRTUAL_EPOCH_MS, VIRTUAL_NOW_MS},
-    emscripten_runtime::{MechCallLog, PYODIDE_MEMORY_MAX_PAGES, caller_memory, invoke_dispatch},
+    emscripten_runtime::{MechCallLog, PYODIDE_MEMORY_MAX_PAGES, invoke_dispatch},
 };
 
 type WtResult<T> = wasmtime::Result<T>;
@@ -203,6 +203,7 @@ pub(crate) fn wire_mechanical_env_funcs(
                 _log.push("emscripten_console_log", ptr, 0);
                 if let Some(s) = read_cstr(&caller, ptr) {
                     let buf = &mut caller.data_mut().wasi_stdout;
+                    buf.extend_from_slice(b"[console] ");
                     buf.extend_from_slice(s.as_bytes());
                     buf.push(b'\n');
                 }
@@ -217,7 +218,7 @@ pub(crate) fn wire_mechanical_env_funcs(
                 _log.push("emscripten_console_warn", ptr, 0);
                 if let Some(s) = read_cstr(&caller, ptr) {
                     let buf = &mut caller.data_mut().wasi_stdout;
-                    buf.extend_from_slice(b"[warn] ");
+                    buf.extend_from_slice(b"[console] ");
                     buf.extend_from_slice(s.as_bytes());
                     buf.push(b'\n');
                 }
@@ -232,7 +233,7 @@ pub(crate) fn wire_mechanical_env_funcs(
                 _log.push("emscripten_console_error", ptr, 0);
                 if let Some(s) = read_cstr(&caller, ptr) {
                     let buf = &mut caller.data_mut().wasi_stdout;
-                    buf.extend_from_slice(b"[error] ");
+                    buf.extend_from_slice(b"[console] ");
                     buf.extend_from_slice(s.as_bytes());
                     buf.push(b'\n');
                 }
@@ -247,7 +248,7 @@ pub(crate) fn wire_mechanical_env_funcs(
                 _log.push("emscripten_err", ptr, 0);
                 if let Some(s) = read_cstr(&caller, ptr) {
                     let buf = &mut caller.data_mut().wasi_stdout;
-                    buf.extend_from_slice(b"[err] ");
+                    buf.extend_from_slice(b"[console] ");
                     buf.extend_from_slice(s.as_bytes());
                     buf.push(b'\n');
                 }
@@ -262,6 +263,7 @@ pub(crate) fn wire_mechanical_env_funcs(
                 _log.push("emscripten_out", ptr, 0);
                 if let Some(s) = read_cstr(&caller, ptr) {
                     let buf = &mut caller.data_mut().wasi_stdout;
+                    buf.extend_from_slice(b"[console] ");
                     buf.extend_from_slice(s.as_bytes());
                     buf.push(b'\n');
                 }
@@ -306,7 +308,10 @@ pub(crate) fn wire_mechanical_env_funcs(
                                              requested: i32|
               -> i32 {
             _log.push("emscripten_resize_heap", requested, 0);
-            let Some(memory) = caller_memory(&mut caller) else {
+            // pyodide.asm.wasm imports (not exports) its linear memory, so
+            // caller.get_export("memory") returns None. Read the handle stored
+            // in EmbedderState by wire_env_memory_and_table_in_store instead.
+            let Some(memory) = caller.data().pyodide_memory else {
                 return 0;
             };
             let current = memory.data_size(&caller);
@@ -324,7 +329,9 @@ pub(crate) fn wire_mechanical_env_funcs(
     def!(
         "emscripten_memcpy_js",
         |mut caller: Caller<'_, EmbedderState>, dest: i32, src: i32, num: i32| {
-            let Some(memory) = caller_memory(&mut caller) else {
+            // Use pyodide_memory (the env.memory import handle) rather than
+            // caller.get_export("memory") - Emscripten modules import, not export, memory.
+            let Some(memory) = caller.data().pyodide_memory else {
                 return;
             };
             let (d, s, n) = (
@@ -343,7 +350,8 @@ pub(crate) fn wire_mechanical_env_funcs(
     def!(
         "emscripten_memcpy_big",
         |mut caller: Caller<'_, EmbedderState>, dest: i32, src: i32, num: i32| {
-            let Some(memory) = caller_memory(&mut caller) else {
+            // Same as emscripten_memcpy_js: use pyodide_memory for the same reason.
+            let Some(memory) = caller.data().pyodide_memory else {
                 return;
             };
             let (d, s, n) = (
@@ -639,7 +647,9 @@ pub(crate) fn wire_mechanical_env_funcs(
             move |mut caller: Caller<'_, EmbedderState>, buf: i32, len: i32| {
                 _log.push("_emscripten_get_progname", buf, len);
                 let name = b"pyodide\0";
-                let Some(memory) = caller_memory(&mut caller) else {
+                // Use pyodide_memory (the env.memory import handle) rather than
+                // caller.get_export("memory") - Emscripten modules import memory.
+                let Some(memory) = caller.data().pyodide_memory else {
                     return;
                 };
                 let (start, cap) = (buf as u32 as usize, len as u32 as usize);
