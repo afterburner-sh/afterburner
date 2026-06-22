@@ -362,6 +362,18 @@ fn run_probe() -> String {
                     .downcast_ref::<wasmtime::Trap>()
                     .map(|t| format!("{t:?}"))
                     .unwrap_or_else(|| format!("(not a wasmtime::Trap); debug chain: {e:?}"));
+                // Capture the wasm backtrace to surface the trapped function index.
+                let trap_frames = e
+                    .downcast_ref::<wasmtime::WasmBacktrace>()
+                    .map(|bt| {
+                        bt.frames()
+                            .iter()
+                            .take(5)
+                            .map(|f| format!("func[{}]", f.func_index()))
+                            .collect::<Vec<_>>()
+                            .join(" <- ")
+                    })
+                    .unwrap_or_else(|| "(no wasm backtrace)".to_owned());
                 let finding = if err_str.contains("OutOfFuel") || err_str.contains("out of fuel") {
                     "fuel exhausted before boot completed; increase PROBE_FUEL"
                 } else if err_str.contains("unimplemented import") {
@@ -378,6 +390,7 @@ fn run_probe() -> String {
                     "BOOT FAILED at __wasm_call_ctors\n\
                      Error: {e}\n\
                      Trap kind: {trap_kind}\n\
+                     Trap frames (innermost first): {trap_frames}\n\
                      Fuel consumed: {total_fuel}\n\
                      JS-FFI call count: {js_calls}\n\
                      JS-FFI functions called: {js_names:?}\n\
@@ -472,6 +485,22 @@ fn run_python_phase(
                 let js_calls = log.total_calls();
                 let err_str = format!("{e}");
                 let finding = classify_python_error(&err_str, js_calls);
+                // Capture trap kind and wasm function index from the backtrace.
+                let trap_kind = e
+                    .downcast_ref::<wasmtime::Trap>()
+                    .map(|t| format!("{t:?}"))
+                    .unwrap_or_else(|| "(not a wasmtime::Trap)".to_owned());
+                let trap_frames = e
+                    .downcast_ref::<wasmtime::WasmBacktrace>()
+                    .map(|bt| {
+                        bt.frames()
+                            .iter()
+                            .take(5)
+                            .map(|f| format!("func[{}]", f.func_index()))
+                            .collect::<Vec<_>>()
+                            .join(" <- ")
+                    })
+                    .unwrap_or_else(|| "(no wasm backtrace)".to_owned());
                 // Mechanical trace from last N env.* calls before the trap.
                 let mech_tail = mech_log.tail(MECH_TRACE_TAIL);
                 let mut mech_trace = String::new();
@@ -495,6 +524,8 @@ fn run_python_phase(
                      --- phase 5: __main_argc_argv(0,0) ---\n\
                      Entry: __main_argc_argv\n\
                      TRAPPED: {e}\n\
+                     Trap kind: {trap_kind}\n\
+                     Trap frames (innermost first): {trap_frames}\n\
                      Total fuel consumed: {total_fuel}\n\
                      JS-FFI calls total: {js_calls}\n\
                      WASI stdout ({} bytes): {wasi_text:?}\n\
