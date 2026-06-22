@@ -35,17 +35,72 @@
 //! concurrent calls never share mutable state. `EmbedderVm` is `Send + Sync`.
 
 use afterburner_core::{AfterburnerError, Result};
+use std::path::PathBuf;
 use std::sync::Arc;
 use wasmtime::{Config, Engine, InstancePre, Linker, Module, OptLevel, Store, Trap};
-use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi::p1::{WasiP1Ctx, add_to_linker_sync};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 
 // ---- deterministic engine config -----------------------------------------
 
 /// Fuel budget used when the caller passes `None` to [`EmbedderVm::run`].
 /// Generous enough for unit tests; production callers supply their own bound.
 const DEFAULT_FUEL: u64 = 100_000_000;
+
+// ---- WASI command options ---------------------------------------------------
+
+/// Options for running a WASI command module via [`EmbedderVm::run_command`].
+///
+/// A WASI command module exports `_start` (signature `() -> ()`). It receives
+/// its arguments through `args_get` and its filesystem through preopened
+/// directories. `WasiCommandOpts` encapsulates both.
+///
+/// ## Example
+///
+/// ```no_run
+/// use afterburner_wasi::embedder_vm::WasiCommandOpts;
+///
+/// let opts = WasiCommandOpts::new()
+///     .args(["python", "-c", "print('hello from CPython')"])
+///     .preopen("/tmp/stdlib", "/usr/lib/python3.12");
+/// ```
+#[derive(Debug, Default, Clone)]
+pub struct WasiCommandOpts {
+    /// argv passed to the module via `args_get` / `args_sizes_get`.
+    /// The first element is conventionally the program name (argv[0]).
+    pub args: Vec<String>,
+    /// Pairs of (host_path, guest_path) preopened read-only into the
+    /// module's filesystem namespace. Python.wasm locates its stdlib
+    /// through a preopened directory.
+    pub preopens: Vec<(PathBuf, String)>,
+}
+
+impl WasiCommandOpts {
+    /// Create empty options (no args, no preopens).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the argument list. Replaces any previously set args.
+    /// The first element should be the program name (argv[0]).
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Add a preopened directory. `host_path` must exist on the host;
+    /// `guest_path` is the path the module sees (e.g. `"/usr/lib/python3.12"`).
+    /// The directory is opened read-only.
+    pub fn preopen(mut self, host_path: impl Into<PathBuf>, guest_path: impl Into<String>) -> Self {
+        self.preopens.push((host_path.into(), guest_path.into()));
+        self
+    }
+}
 
 /// Build a Wasmtime `Engine` configured for determinism and fuel metering.
 ///
@@ -354,6 +409,128 @@ impl EmbedderVm {
         };
 
         Ok(EmbedderRunOutput { result, stdout })
+    }
+
+    /// Run a WASI *command* module: one that exports `_start` with signature
+    /// `() -> ()` and signals its exit code via `proc_exit`.
+    ///
+    /// Unlike [`run`][Self::run], `run_command`:
+    ///
+    /// * Calls `_start` (no typed result - the module exits via `proc_exit`).
+    /// * Threads argv and preopened directories from `opts` into the WASI
+    ///   context so the module can read its arguments and access its stdlib.
+    /// * Returns `Ok(EmbedderRunOutput { result: exit_code as i64, stdout })`
+    ///   on a clean exit (exit code 0 is success; non-zero is surfaced in
+    ///   `result` rather than as an error, matching POSIX convention).
+    /// * Returns `Err(AfterburnerError::FuelExhausted)` if the module runs out
+    ///   of fuel, and `Err(AfterburnerError::WasmTrap(_))` for any other trap.
+    ///
+    /// The module must be compiled with `wasi: true`; `run_command` asserts
+    /// this and returns `AfterburnerError::Engine` if not.
+    ///
+    /// ## CPython example
+    ///
+    /// ```no_run
+    /// use afterburner_wasi::embedder_vm::{EmbedderVm, WasiCommandOpts};
+    ///
+    /// let wasm = std::fs::read("/tmp/python.wasm").unwrap();
+    /// let vm = EmbedderVm::new().unwrap();
+    /// let module = vm.compile(&wasm, true, |_| Ok(())).unwrap();
+    /// let opts = WasiCommandOpts::new()
+    ///     .args(["python", "-c", "print(sum(range(100)))"]);
+    /// let out = vm.run_command(&module, opts, None).unwrap();
+    /// println!("{}", String::from_utf8_lossy(&out.stdout));
+    /// ```
+    pub fn run_command(
+        &self,
+        module: &EmbedderModule,
+        opts: WasiCommandOpts,
+        fuel: Option<u64>,
+    ) -> Result<EmbedderRunOutput> {
+        if !module.wasi {
+            return Err(AfterburnerError::Engine(
+                "run_command requires a module compiled with wasi: true".into(),
+            ));
+        }
+
+        let pipe = MemoryOutputPipe::new(4 * 1024 * 1024);
+
+        let mut builder = WasiCtxBuilder::new();
+        builder.stdout(pipe.clone());
+
+        if !opts.args.is_empty() {
+            builder.args(&opts.args);
+        }
+
+        for (host_path, guest_path) in &opts.preopens {
+            builder
+                .preopened_dir(host_path, guest_path, DirPerms::READ, FilePerms::READ)
+                .map_err(|e| {
+                    AfterburnerError::Engine(format!(
+                        "embedder preopen {}: {e}",
+                        host_path.display()
+                    ))
+                })?;
+        }
+
+        let ctx = builder.build_p1();
+        let state = EmbedderState {
+            wasi: Some(WasiStateInner { ctx, stdout: pipe }),
+        };
+
+        let mut store = Store::new(&module.engine, state);
+        store
+            .set_fuel(fuel.unwrap_or(DEFAULT_FUEL))
+            .map_err(|e| AfterburnerError::Engine(format!("embedder set_fuel: {e}")))?;
+
+        let instance = module
+            .instance_pre
+            .instantiate(&mut store)
+            .map_err(|e| AfterburnerError::Engine(format!("embedder instantiate: {e}")))?;
+
+        let start_fn = instance.get_func(&mut store, "_start").ok_or_else(|| {
+            AfterburnerError::Engine(
+                "module does not export `_start` (not a WASI command module)".into(),
+            )
+        })?;
+
+        // Call _start with no params and no expected results.
+        // proc_exit() causes an anyhow error wrapping I32Exit; any other trap
+        // surfaces as WasmTrap. We extract the stdout before returning in all
+        // paths so captures are never lost.
+        let call_result = start_fn.call(&mut store, &[], &mut []);
+
+        let stdout = match store.into_data().wasi {
+            Some(w) => w.stdout.contents().to_vec(),
+            None => Vec::new(),
+        };
+
+        let exit_code = match call_result {
+            Ok(_) => 0i64,
+            Err(ref e) => {
+                // proc_exit wraps I32Exit inside an anyhow chain.
+                if let Some(exit) = e.downcast_ref::<I32Exit>() {
+                    exit.0 as i64
+                } else if let Some(t) = e.downcast_ref::<Trap>() {
+                    return match t {
+                        Trap::OutOfFuel => Err(AfterburnerError::FuelExhausted),
+                        Trap::Interrupt => Err(AfterburnerError::Timeout),
+                        other => Err(AfterburnerError::WasmTrap(format!(
+                            "embedder command trap: {other}"
+                        ))),
+                    };
+                } else {
+                    return Err(AfterburnerError::WasmTrap(format!(
+                        "embedder command trap: {e}"
+                    )));
+                }
+            }
+        };
+
+        Ok(EmbedderRunOutput {
+            result: exit_code,
+            stdout,
+        })
     }
 }
 
