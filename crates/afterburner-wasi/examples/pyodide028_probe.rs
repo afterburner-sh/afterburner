@@ -514,59 +514,49 @@ fn step1_succeeded(
     )
 }
 
-/// Python code executed via `PyRun_SimpleString` on the already-live CPython
-/// interpreter (initialized by `__wasm_call_ctors`).
+/// Python code passed as the `-c` argument to `__main_argc_argv`.
 ///
-/// NUL-terminated UTF-8 string written into a fresh scratch page in wasm memory.
+/// NUL-terminated. Written into wasm memory and pointed to by argv[2].
+/// The newline before the NUL is required by CPython's `-c` parser.
 const PYTHON_CODE: &[u8] =
     b"print('hello from cpython on afterburner')\nimport sys\nprint('pyver', sys.version.split()[0])\nprint('sum', sum(range(100)))\n\0";
 
-/// Grow wasm memory by one page (64 KiB) and write `src` (NUL-terminated) into
-/// the new page. Returns the wasm guest address of the first byte.
+/// Write a NUL-terminated C string into a newly grown wasm memory page.
 ///
-/// Growing by one page guarantees the scratch region does not overlap anything
-/// CPython placed during `__wasm_call_ctors`.
-fn write_code_to_scratch(store: &mut Store<EmbedderState>, src: &[u8]) -> Result<i32, String> {
-    let mem = match store.data().pyodide_memory {
-        Some(m) => m,
-        None => return Err("pyodide_memory not set".to_owned()),
-    };
-    let prev_pages = mem
+/// Grows memory by one page (64 KiB) so the write never overlaps anything
+/// CPython placed during `__wasm_call_ctors`. Returns the wasm guest address.
+fn alloc_cstr(store: &mut Store<EmbedderState>, s: &[u8]) -> Result<u32, String> {
+    let mem = store
+        .data()
+        .pyodide_memory
+        .ok_or_else(|| "pyodide_memory not set".to_owned())?;
+    let prev = mem
         .grow(&mut *store, 1)
-        .map_err(|e| format!("memory.grow failed: {e}"))?;
-    let offset = (prev_pages as usize) * 65536;
+        .map_err(|e| format!("memory.grow: {e}"))?;
+    let base = (prev as usize) * 65536;
     let mem_len = mem.data_size(&*store);
-    if offset + src.len() > mem_len {
+    if base + s.len() > mem_len {
         return Err(format!(
-            "scratch region [{offset:#x}..{:#x}) exceeds memory size {mem_len:#x}",
-            offset + src.len()
+            "alloc_cstr: [{base:#x}..{:#x}) exceeds memory {mem_len:#x}",
+            base + s.len()
         ));
     }
-    mem.data_mut(&mut *store)[offset..offset + src.len()].copy_from_slice(src);
-    Ok(offset as i32)
+    mem.data_mut(&mut *store)[base..base + s.len()].copy_from_slice(s);
+    Ok(base as u32)
 }
 
-/// Directly call the module's exported `write(fd=1, buf, len)` function to
-/// verify that `wasi_snapshot_preview1::fd_write` is reachable before Python.
+/// Verify fd_write shim reachable via direct `write` export (pre-Python).
 /// "PROBE-WRITE-DIRECT\n" in wasi_stdout = fd_write shim is wired correctly.
 /// Empty = Emscripten FS layer intercepts writes before they reach the shim.
 fn probe_direct_write(instance: &wasmtime::Instance, store: &mut Store<EmbedderState>) {
     const MSG: &[u8] = b"PROBE-WRITE-DIRECT\n";
-    let mem = match store.data().pyodide_memory {
-        Some(m) => m,
-        None => {
-            eprintln!("[probe_direct_write] no pyodide_memory - skip");
-            return;
-        }
-    };
-    let buf_ptr = match mem.grow(&mut *store, 1) {
-        Ok(prev_pages) => (prev_pages as usize) * 65536,
+    let buf_ptr = match alloc_cstr(store, MSG) {
+        Ok(p) => p,
         Err(e) => {
-            eprintln!("[probe_direct_write] memory.grow failed: {e}");
+            eprintln!("[probe_direct_write] alloc_cstr failed: {e}");
             return;
         }
     };
-    mem.data_mut(&mut *store)[buf_ptr..buf_ptr + MSG.len()].copy_from_slice(MSG);
     eprintln!(
         "[probe_direct_write] calling write(1, {buf_ptr:#x}, {}) via wasm export...",
         MSG.len()
@@ -602,6 +592,19 @@ fn probe_direct_write(instance: &wasmtime::Instance, store: &mut Store<EmbedderS
     store.data_mut().wasi_stdout.clear();
 }
 
+/// Source-faithful boot sequence (main.c authoritative):
+///
+/// 1. `__main_argc_argv(3, argv_ptr)` with argv = ["python", "-c", CODE].
+///    This is the Emscripten `__main_argc_argv` which calls
+///    `PyImport_AppendInittab` then `initialize_python` (Py_Initialize).
+///    CPython is NOT yet initialized after `__wasm_call_ctors`; that only
+///    ran C++ static constructors. `__main_argc_argv` MUST run EXACTLY ONCE.
+///    If it returns non-zero the probe reports the exit code and wasi_stdout.
+///
+/// 2. `run_main()` - calls `pymain_run_python` which executes the -c command.
+///    Returns i32 exitcode (0 = success).
+///
+/// 3. Read and print `wasi_stdout` verbatim.
 fn run_python_phase(
     instance: &wasmtime::Instance,
     store: &mut Store<EmbedderState>,
@@ -610,170 +613,185 @@ fn run_python_phase(
     noop_log: &std::sync::Arc<afterburner_wasi::emscripten_runtime::NoopCallLog>,
     ctors_summary: &str,
 ) -> String {
-    // Verify fd_write shim reachable via direct `write` export (pre-Python).
+    // Verify fd_write shim reachable before Python (diagnostic only).
     probe_direct_write(instance, store);
     store.data_mut().wasi_stdout.clear();
 
-    // Root cause: __main_argc_argv calls Py_Initialize internally, which
-    // fatally re-initializes CPython after __wasm_call_ctors already did it
-    // ("PyImport_AppendInittab() may not be called after Py_Initialize()").
-    // Fix: skip __main_argc_argv entirely. CPython is already live. Use the
-    // C API (PyRun_SimpleString) directly on the initialized interpreter.
+    // Report which exports are present.
     let has_main = instance.get_func(&mut *store, "__main_argc_argv").is_some();
-    eprintln!("[probe P5] __main_argc_argv exported={has_main} (SKIPPING - would re-init CPython)");
-
-    // Discover available run entry points.
-    let has_py_run_simple = instance
-        .get_func(&mut *store, "PyRun_SimpleString")
+    let has_run_main = instance.get_func(&mut *store, "run_main").is_some();
+    let has_pymain = instance
+        .get_func(&mut *store, "pymain_run_python")
         .is_some();
-    let has_py_run_simple_flags = instance
-        .get_func(&mut *store, "PyRun_SimpleStringFlags")
-        .is_some();
-    let has_py_run_string = instance.get_func(&mut *store, "PyRun_String").is_some();
     eprintln!(
-        "[probe P5] run entries: PyRun_SimpleString={has_py_run_simple} \
-         PyRun_SimpleStringFlags={has_py_run_simple_flags} \
-         PyRun_String={has_py_run_string}"
+        "[probe P5] exports: __main_argc_argv={has_main} run_main={has_run_main} \
+         pymain_run_python={has_pymain}"
     );
 
-    // Prefer PyRun_SimpleString; fall back to PyRun_SimpleStringFlags; then absent.
-    let py_run_name = if has_py_run_simple {
-        "PyRun_SimpleString"
-    } else if has_py_run_simple_flags {
-        "PyRun_SimpleStringFlags"
-    } else {
-        return format!(
-            "{ctors_summary}\n\
-             --- phase 5: PyRun_SimpleString ---\n\
-             run entries: PyRun_SimpleString={has_py_run_simple} \
-             PyRun_SimpleStringFlags={has_py_run_simple_flags} \
-             PyRun_String={has_py_run_string}\n\
-             Finding: no usable run entry exported"
-        );
-    };
-    let py_run = instance.get_func(&mut *store, py_run_name).unwrap();
-
-    // Write PYTHON_CODE (NUL-terminated) into a fresh scratch page.
-    let scratch_ptr = match write_code_to_scratch(store, PYTHON_CODE) {
-        Ok(p) => p,
-        Err(e) => {
+    // __main_argc_argv is required: it calls Py_Initialize with the -c argv.
+    let main_fn = match instance.get_func(&mut *store, "__main_argc_argv") {
+        Some(f) => f,
+        None => {
+            let wasi_out = store.data().wasi_stdout.clone();
+            let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
             return format!(
                 "{ctors_summary}\n\
-                 --- phase 5: PyRun_SimpleString ---\n\
-                 CODE WRITE FAILED: {e}"
+                 --- phase 5: __main_argc_argv ---\n\
+                 exports: __main_argc_argv={has_main} run_main={has_run_main}\n\
+                 BLOCKED: __main_argc_argv not exported; cannot initialize CPython.\n\
+                 WASI stdout ({} bytes):\n{wasi_text}",
+                wasi_out.len()
             );
         }
     };
 
-    store.data_mut().wasi_stdout.clear();
+    // Build argv in wasm memory: ["python\0", "-c\0", CODE\0] + pointer table.
+    // Layout (all wasm32 = 4-byte pointers, little-endian):
+    //   arg0_ptr  -> "python\0"
+    //   arg1_ptr  -> "-c\0"
+    //   arg2_ptr  -> PYTHON_CODE
+    //   argv_ptr  -> [arg0_ptr, arg1_ptr, arg2_ptr, 0] (NULL terminator)
+    let arg0_ptr = match alloc_cstr(store, b"python\0") {
+        Ok(p) => p,
+        Err(e) => return format!("{ctors_summary}\n--- phase 5 ---\nARGV ALLOC FAILED: {e}"),
+    };
+    let arg1_ptr = match alloc_cstr(store, b"-c\0") {
+        Ok(p) => p,
+        Err(e) => return format!("{ctors_summary}\n--- phase 5 ---\nARGV ALLOC FAILED: {e}"),
+    };
+    let arg2_ptr = match alloc_cstr(store, PYTHON_CODE) {
+        Ok(p) => p,
+        Err(e) => return format!("{ctors_summary}\n--- phase 5 ---\nARGV ALLOC FAILED: {e}"),
+    };
+    // argv[] array: 4 entries x 4 bytes = 16 bytes; use one more page.
+    let argv_ptr = {
+        let mem = store
+            .data()
+            .pyodide_memory
+            .expect("pyodide_memory set by wire_env_memory_and_table_in_store");
+        let prev = mem.grow(&mut *store, 1).map_err(|e| format!("{e}"));
+        let prev = match prev {
+            Ok(p) => p,
+            Err(e) => {
+                return format!("{ctors_summary}\n--- phase 5 ---\nARGV TABLE ALLOC FAILED: {e}");
+            }
+        };
+        let base = (prev as usize) * 65536;
+        let data = mem.data_mut(&mut *store);
+        data[base..base + 4].copy_from_slice(&arg0_ptr.to_le_bytes());
+        data[base + 4..base + 8].copy_from_slice(&arg1_ptr.to_le_bytes());
+        data[base + 8..base + 12].copy_from_slice(&arg2_ptr.to_le_bytes());
+        data[base + 12..base + 16].copy_from_slice(&0u32.to_le_bytes());
+        base as i32
+    };
     eprintln!(
-        "[probe P5] calling {py_run_name}(ptr={scratch_ptr:#x}) on already-live interpreter..."
+        "[probe P5] argv: arg0={arg0_ptr:#x}('python') arg1={arg1_ptr:#x}('-c') \
+         arg2={arg2_ptr:#x}(CODE) argv_table={argv_ptr:#x}"
     );
 
-    // Acquire a thread state / GIL before calling into CPython.
-    //
-    // Root cause of the previous trap: __wasm_call_ctors runs Py_Initialize,
-    // which sets the main thread state as the current thread, but after ctors
-    // returns to our host the GIL may be released (or the tstate pointer in
-    // the TLS slot zeroed). PyRun_SimpleString calls PyImport_AddModuleRef
-    // which dereferences the current thread state and hits a null pointer when
-    // there is none attached.
-    //
-    // Fix: call PyGILState_Ensure() -> PyGILState_STATE (i32) before entering
-    // CPython. This function acquires the GIL and installs a thread state if
-    // there is none current. Call PyGILState_Release(state) after, even on
-    // trap, to restore the previous GIL state.
-    //
-    // PyGILState_Ensure: () -> i32   (PyGILState_STATE enum)
-    // PyGILState_Release: (i32) -> ()
-    let (pgs_ensure, pgs_release) = match (
-        instance.get_func(&mut *store, "PyGILState_Ensure"),
-        instance.get_func(&mut *store, "PyGILState_Release"),
-    ) {
-        (Some(e), Some(r)) => (Some(e), Some(r)),
-        (e, r) => {
+    // Step 1: __main_argc_argv(argc=3, argv=argv_ptr).
+    // This calls PyImport_AppendInittab + initialize_python (= Py_Initialize).
+    // MUST be called EXACTLY ONCE; a second call is a fatal "after Py_Initialize".
+    store.data_mut().wasi_stdout.clear();
+    eprintln!("[probe P5] calling __main_argc_argv(3, {argv_ptr:#x})...");
+    let mut main_ret = [wasmtime::Val::I32(-99)];
+    let main_result = main_fn.call(
+        &mut *store,
+        &[wasmtime::Val::I32(3), wasmtime::Val::I32(argv_ptr)],
+        &mut main_ret,
+    );
+
+    {
+        let wasi_mid = store.data().wasi_stdout.clone();
+        if !wasi_mid.is_empty() {
             eprintln!(
-                "[probe P5] WARNING: PyGILState_Ensure={} PyGILState_Release={} - skipping GIL acquire",
-                e.is_some(),
-                r.is_some()
+                "[probe P5] wasi_stdout after __main_argc_argv ({} bytes): {:?}",
+                wasi_mid.len(),
+                String::from_utf8_lossy(&wasi_mid)
             );
-            (None, None)
-        }
-    };
-
-    // Also log _PyThreadState_GetCurrent (returns i32 ptr to current tstate,
-    // 0 if none) so we can tell whether the interpreter already has a thread
-    // state before we call Ensure.
-    if let Some(unchecked) = instance.get_func(&mut *store, "PyThreadState_GetUnchecked") {
-        let mut ts_ret = [wasmtime::Val::I32(0)];
-        match unchecked.call(&mut *store, &[], &mut ts_ret) {
-            Ok(()) => {
-                let ptr = match ts_ret[0] {
-                    wasmtime::Val::I32(v) => v,
-                    _ => 0,
-                };
-                eprintln!(
-                    "[probe P5] PyThreadState_GetUnchecked() = {ptr:#x} ({} current tstate)",
-                    if ptr == 0 { "NO" } else { "HAS" }
-                );
-            }
-            Err(e) => eprintln!("[probe P5] PyThreadState_GetUnchecked() trapped: {e}"),
         }
     }
 
-    // Acquire GIL / install thread state.
-    let gil_state: Option<i32> = if let Some(ref ensure) = pgs_ensure {
-        let mut gil_ret = [wasmtime::Val::I32(0)];
-        match ensure.call(&mut *store, &[], &mut gil_ret) {
-            Ok(()) => {
-                let state = match gil_ret[0] {
-                    wasmtime::Val::I32(v) => v,
-                    _ => 0,
-                };
-                eprintln!("[probe P5] PyGILState_Ensure() = {state} (0=LOCKED 1=UNLOCKED)");
-                Some(state)
-            }
-            Err(e) => {
-                eprintln!("[probe P5] PyGILState_Ensure() TRAPPED: {e}");
-                // If Ensure itself traps, PyRun_SimpleString will also trap.
-                // Report this as the new blocker and return early.
-                let wasi_out = store.data().wasi_stdout.clone();
-                let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
-                return format!(
-                    "{ctors_summary}\n\
-                     --- phase 5: {py_run_name} (GIL) ---\n\
-                     PyGILState_Ensure() TRAPPED: {e}\n\
-                     WASI stdout ({} bytes):\n{wasi_text}\n\
-                     Finding: PyGILState_Ensure traps - Pyodide post-ctors JS-side \
-                     init (loadPyodide) was not run; the interpreter may lack \
-                     _PyRuntime state that the JS side normally sets up. \
-                     This means real Python output requires the full Pyodide JS \
-                     init path, not ctors alone.",
-                    wasi_out.len()
-                );
-            }
+    let main_exitcode = match main_result {
+        Ok(()) => match main_ret[0] {
+            wasmtime::Val::I32(v) => v,
+            _ => -99,
+        },
+        Err(ref e) => {
+            let wasi_out = store.data().wasi_stdout.clone();
+            let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
+            let fuel_remaining = store.get_fuel().unwrap_or(0);
+            let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
+            let noop_calls = noop_log.snapshot();
+            let mech_tail = mech_log.tail(MECH_TRACE_TAIL);
+            let mech_trace = format_mech_tail(&mech_tail);
+            let throw_count = store.data().cxa_throw_count;
+            let fs_paths: Vec<String> = store.data().fs_path_log.iter().cloned().collect();
+            let finding = classify_python_error(&format!("{e}"), log.total_calls());
+            return format!(
+                "{ctors_summary}\n\
+                 --- phase 5: __main_argc_argv(3, argv) ---\n\
+                 exports: __main_argc_argv={has_main} run_main={has_run_main}\n\
+                 TRAPPED in __main_argc_argv: {e}\n\
+                 Fuel consumed: {total_fuel}\n\
+                 JS-FFI calls: {}\n\
+                 C++ throws: {throw_count}\n\
+                 Last 12 FS paths: {fs_paths:?}\n\
+                 Noop stubs called ({} unique): {noop_calls:?}\n\
+                 Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
+                 WASI stdout ({} bytes):\n{wasi_text}\n\
+                 Finding: {finding}",
+                log.total_calls(),
+                noop_calls.len(),
+                wasi_out.len()
+            );
         }
-    } else {
-        None
     };
+    eprintln!("[probe P5] __main_argc_argv returned {main_exitcode}");
 
-    // PyRun_SimpleString(const char *) -> int (0 ok, -1 error).
-    // PyRun_SimpleStringFlags(const char *, PyCompilerFlags *) -> int; pass NULL (0).
-    let call_args: Vec<wasmtime::Val> = if py_run_name == "PyRun_SimpleStringFlags" {
-        vec![wasmtime::Val::I32(scratch_ptr), wasmtime::Val::I32(0)]
+    if main_exitcode != 0 {
+        let wasi_out = store.data().wasi_stdout.clone();
+        let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
+        let fuel_remaining = store.get_fuel().unwrap_or(0);
+        let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
+        return format!(
+            "{ctors_summary}\n\
+             --- phase 5: __main_argc_argv(3, argv) ---\n\
+             exports: __main_argc_argv={has_main} run_main={has_run_main}\n\
+             __main_argc_argv returned {main_exitcode} (non-zero = init failure)\n\
+             Fuel consumed: {total_fuel}\n\
+             JS-FFI calls: {}\n\
+             WASI stdout ({} bytes):\n{wasi_text}\n\
+             Finding: CPython initialization returned non-zero exit",
+            log.total_calls(),
+            wasi_out.len()
+        );
+    }
+
+    // Step 2: run_main() calls pymain_run_python which executes the -c code.
+    // Prefer run_main (EMSCRIPTEN_KEEPALIVE); fall back to pymain_run_python
+    // if run_main is absent in this binary variant.
+    let (run_entry_name, run_fn) = if let Some(f) = instance.get_func(&mut *store, "run_main") {
+        ("run_main", f)
+    } else if let Some(f) = instance.get_func(&mut *store, "pymain_run_python") {
+        ("pymain_run_python", f)
     } else {
-        vec![wasmtime::Val::I32(scratch_ptr)]
+        let wasi_out = store.data().wasi_stdout.clone();
+        let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
+        return format!(
+            "{ctors_summary}\n\
+             --- phase 5: run_main ---\n\
+             exports: __main_argc_argv={has_main} run_main={has_run_main}\n\
+             BLOCKED: neither run_main nor pymain_run_python exported.\n\
+             WASI stdout ({} bytes):\n{wasi_text}",
+            wasi_out.len()
+        );
     };
+    eprintln!("[probe P5] calling {run_entry_name}()...");
+
+    store.data_mut().wasi_stdout.clear();
     let mut run_ret = [wasmtime::Val::I32(-99)];
-    let run_result = py_run.call(&mut *store, &call_args, &mut run_ret);
-
-    // Release GIL unconditionally, even if PyRun trapped.
-    if let (Some(state), Some(ref release)) = (gil_state, pgs_release) {
-        match release.call(&mut *store, &[wasmtime::Val::I32(state)], &mut []) {
-            Ok(()) => eprintln!("[probe P5] PyGILState_Release({state}) OK"),
-            Err(e) => eprintln!("[probe P5] PyGILState_Release({state}) trapped: {e}"),
-        }
-    }
+    let run_result = run_fn.call(&mut *store, &[], &mut run_ret);
 
     let wasi_out = store.data().wasi_stdout.clone();
     let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
@@ -781,29 +799,19 @@ fn run_python_phase(
     let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
     let noop_calls = noop_log.snapshot();
     let mech_tail = mech_log.tail(MECH_TRACE_TAIL);
-    let mut mech_trace = String::new();
-    for (i, entry) in mech_tail.iter().enumerate() {
-        let line = if entry.arg0 != 0 || entry.arg1 != 0 {
-            format!(
-                "  [{:>3}] {} (arg0={}, arg1={})\n",
-                i + 1,
-                entry.name,
-                entry.arg0,
-                entry.arg1
-            )
-        } else {
-            format!("  [{:>3}] {}\n", i + 1, entry.name)
-        };
-        mech_trace.push_str(&line);
-    }
+    let mech_trace = format_mech_tail(&mech_tail);
 
     match run_result {
         Ok(()) => {
-            let ret = match run_ret[0] {
+            let exitcode = match run_ret[0] {
                 wasmtime::Val::I32(v) => v,
                 _ => -99,
             };
-            eprintln!("[probe P5] {py_run_name} returned {ret}");
+            eprintln!("[probe P5] {run_entry_name} exitcode={exitcode}");
+            eprintln!(
+                "[probe P5] wasi_stdout ({} bytes):\n{wasi_text}",
+                wasi_out.len()
+            );
             let milestone = if wasi_text.contains("hello from cpython on afterburner")
                 && wasi_text.contains("pyver")
                 && wasi_text.contains("4950")
@@ -812,16 +820,15 @@ fn run_python_phase(
             } else if !wasi_text.is_empty() {
                 "PARTIAL: some output captured but expected strings missing"
             } else {
-                "NO OUTPUT: PyRun_SimpleString returned but wasi_stdout is empty"
+                "NO OUTPUT: run_main returned but wasi_stdout is empty"
             };
             format!(
                 "{ctors_summary}\n\
-                 --- phase 5: {py_run_name} ---\n\
-                 run entries: PyRun_SimpleString={has_py_run_simple} \
-                 PyRun_SimpleStringFlags={has_py_run_simple_flags} \
-                 PyRun_String={has_py_run_string}\n\
-                 Used: {py_run_name}\n\
-                 Return code: {ret}\n\
+                 --- phase 5: __main_argc_argv + {run_entry_name} ---\n\
+                 exports: __main_argc_argv={has_main} run_main={has_run_main} \
+                 pymain_run_python={has_pymain}\n\
+                 __main_argc_argv exitcode: {main_exitcode}\n\
+                 {run_entry_name} exitcode: {exitcode}\n\
                  Fuel consumed: {total_fuel}\n\
                  JS-FFI calls: {}\n\
                  Noop stubs called ({} unique): {noop_calls:?}\n\
@@ -834,32 +841,49 @@ fn run_python_phase(
             )
         }
         Err(e) => {
-            let err_str = format!("{e}");
-            let finding = classify_python_error(&err_str, log.total_calls());
+            let finding = classify_python_error(&format!("{e}"), log.total_calls());
             let throw_count = store.data().cxa_throw_count;
             let fs_paths: Vec<String> = store.data().fs_path_log.iter().cloned().collect();
             format!(
                 "{ctors_summary}\n\
-                 --- phase 5: {py_run_name} ---\n\
-                 run entries: PyRun_SimpleString={has_py_run_simple} \
-                 PyRun_SimpleStringFlags={has_py_run_simple_flags} \
-                 PyRun_String={has_py_run_string}\n\
-                 Used: {py_run_name}\n\
-                 TRAPPED: {e}\n\
+                 --- phase 5: __main_argc_argv + {run_entry_name} ---\n\
+                 exports: __main_argc_argv={has_main} run_main={has_run_main} \
+                 pymain_run_python={has_pymain}\n\
+                 __main_argc_argv exitcode: {main_exitcode}\n\
+                 TRAPPED in {run_entry_name}: {e}\n\
                  Fuel consumed: {total_fuel}\n\
                  JS-FFI calls: {}\n\
                  C++ throws: {throw_count}\n\
                  Last 12 FS paths: {fs_paths:?}\n\
-                 WASI stdout ({} bytes):\n{wasi_text}\n\
                  Noop stubs called ({} unique): {noop_calls:?}\n\
                  Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
+                 WASI stdout ({} bytes):\n{wasi_text}\n\
                  Finding: {finding}",
                 log.total_calls(),
-                wasi_out.len(),
-                noop_calls.len()
+                noop_calls.len(),
+                wasi_out.len()
             )
         }
     }
+}
+
+fn format_mech_tail(tail: &[afterburner_wasi::emscripten_runtime::MechCallEntry]) -> String {
+    tail.iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            if entry.arg0 != 0 || entry.arg1 != 0 {
+                format!(
+                    "  [{:>3}] {} (arg0={}, arg1={})\n",
+                    i + 1,
+                    entry.name,
+                    entry.arg0,
+                    entry.arg1
+                )
+            } else {
+                format!("  [{:>3}] {}\n", i + 1, entry.name)
+            }
+        })
+        .collect()
 }
 
 fn classify_python_error(err_str: &str, js_calls: usize) -> &'static str {
