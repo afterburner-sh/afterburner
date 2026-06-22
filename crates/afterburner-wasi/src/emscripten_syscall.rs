@@ -17,7 +17,7 @@ use wasmtime::{Caller, Linker};
 
 use crate::{
     embedder_vm::EmbedderState,
-    emscripten_fs::{EBADF, EINVAL, ENOENT, ENOTTY, write_dirent64},
+    emscripten_fs::{EBADF, EINVAL, ENOENT, ENOTTY},
     emscripten_mechanical::read_cstr,
     emscripten_runtime::MechCallLog,
 };
@@ -535,7 +535,9 @@ pub(crate) fn wire_fs_env_funcs(
     }
 
     // __syscall_getdents64(fd: i32, dirp: i32, count: i32) -> i32
-    // Serialize directory entries as `struct linux_dirent64` into guest memory.
+    // Serialize directory entries as `struct linux_dirent64` into guest memory,
+    // advancing the per-fd directory cursor. Returns 0 at end-of-directory so
+    // callers (CPython's readdir loop) terminate correctly.
     {
         let _log = mech_log.clone();
         linker
@@ -548,48 +550,24 @@ pub(crate) fn wire_fs_env_funcs(
                       count: i32|
                       -> i32 {
                     _log.push("__syscall_getdents64", fd, dirp);
-                    eprintln!("[getdents64] fd={fd}");
-                    let dir_path = match caller.data().fs.fd_path(fd) {
-                        Some(p) => p.to_owned(),
-                        None => return EBADF,
-                    };
-                    let entries = match caller.data().fs.list_dir(&dir_path) {
-                        Some(e) => e,
-                        None => return EBADF,
-                    };
                     let buf_cap = count as u32 as usize;
                     let mut tmp = vec![0u8; buf_cap];
-                    let mut pos = 0usize;
-                    let mut ino = 100u64;
-                    // Always include "." and "..".
-                    for name in [".", ".."] {
-                        let off = (pos + 1) as u64;
-                        let written = write_dirent64(&mut tmp, pos, ino, off, name, true);
-                        if written == 0 {
-                            break;
-                        }
-                        pos += written;
-                        ino += 1;
-                    }
-                    for (name, is_dir) in &entries {
-                        let off = (pos + 1) as u64;
-                        let written = write_dirent64(&mut tmp, pos, ino, off, name, *is_dir);
-                        if written == 0 {
-                            break;
-                        }
-                        pos += written;
-                        ino += 1;
+                    let n = caller.data_mut().fs.getdents64_into(fd, &mut tmp);
+                    eprintln!("[getdents64] fd={fd} count={count} -> n={n}");
+                    if n <= 0 {
+                        // 0 = end-of-directory (correct termination), negative = error.
+                        return n;
                     }
                     let Some(memory) = caller.data().pyodide_memory else {
                         return EBADF;
                     };
                     let start = dirp as u32 as usize;
                     let mem = memory.data_mut(&mut caller);
-                    if start + pos > mem.len() {
+                    if start + n as usize > mem.len() {
                         return EINVAL;
                     }
-                    mem[start..start + pos].copy_from_slice(&tmp[..pos]);
-                    pos as i32
+                    mem[start..start + n as usize].copy_from_slice(&tmp[..n as usize]);
+                    n
                 },
             )
             .map_err(|e| AfterburnerError::Engine(format!("__syscall_getdents64: {e}")))?;

@@ -136,7 +136,11 @@ pub enum FsNode {
 #[derive(Clone, Debug)]
 pub struct FdEntry {
     pub path: String,
+    /// Byte offset for file reads (unused for directory fds).
     pub offset: u64,
+    /// For directory fds: how many entries (including "." and "..") have
+    /// already been returned by `getdents64_into`. 0 on first call.
+    pub dir_cursor: usize,
 }
 
 // ---- the filesystem --------------------------------------------------------
@@ -191,6 +195,7 @@ impl InMemFs {
             Some(FdEntry {
                 path: "/".to_owned(),
                 offset: 0,
+                dir_cursor: 0,
             }),
         ];
         Self {
@@ -304,7 +309,11 @@ impl InMemFs {
     }
 
     fn alloc_fd(&mut self, path: String) -> i32 {
-        let entry = FdEntry { path, offset: 0 };
+        let entry = FdEntry {
+            path,
+            offset: 0,
+            dir_cursor: 0,
+        };
         // Reuse a slot if one is free, starting from index 3 to preserve
         // the 0/1/2 reservation for stdin/stdout/stderr.
         for (i, slot) in self.fds.iter_mut().enumerate().skip(3) {
@@ -455,6 +464,72 @@ impl InMemFs {
                 Some(entries)
             }
         }
+    }
+
+    /// Serialize `struct linux_dirent64` records for `fd` into `out`, starting
+    /// at the fd's `dir_cursor`. Emits "." and ".." first, then children in
+    /// sorted order. Advances `dir_cursor` by the number of entries consumed.
+    ///
+    /// Returns the number of bytes written, or 0 when the cursor is already at
+    /// or past the end of the entry list (signals end-of-directory to the
+    /// caller). Returns a negative errno on error.
+    pub fn getdents64_into(&mut self, fd: i32, out: &mut [u8]) -> i32 {
+        let fd_usize = fd as usize;
+        if fd_usize >= self.fds.len() {
+            return EBADF;
+        }
+        let (dir_path, cursor) = match &self.fds[fd_usize] {
+            None => return EBADF,
+            Some(e) => (e.path.clone(), e.dir_cursor),
+        };
+        // Verify this fd references a directory.
+        match self.nodes.get(&dir_path) {
+            None => return EBADF,
+            Some(FsNode::File(_)) => return ENOTDIR,
+            Some(FsNode::Dir) => {}
+        }
+
+        // Build the full ordered entry list: ".", "..", then sorted children.
+        let children = self.list_dir(&dir_path).unwrap_or_default();
+        // Total logical entries: 2 dot entries + children.
+        let total = 2 + children.len();
+
+        // Already exhausted - return 0 to signal end-of-directory.
+        if cursor >= total {
+            return 0;
+        }
+
+        // Write as many entries as fit in `out` starting from `cursor`.
+        // `i` is the relative position within this call (0-based); `idx` is
+        // the absolute entry index in the full list.
+        let mut pos = 0usize;
+        let mut written_count = 0usize;
+        for (i, idx) in (cursor..total).enumerate() {
+            let ino = 100u64 + cursor as u64 + i as u64;
+            let (name, is_dir): (&str, bool) = if idx == 0 {
+                (".", true)
+            } else if idx == 1 {
+                ("..", true)
+            } else {
+                let (ref n, d) = children[idx - 2];
+                (n.as_str(), d)
+            };
+            let off = (idx + 1) as u64; // opaque cookie: next entry index
+            let n = write_dirent64(out, pos, ino, off, name, is_dir);
+            if n == 0 {
+                // Entry does not fit - stop here.
+                break;
+            }
+            pos += n;
+            written_count += 1;
+        }
+
+        // Advance the per-fd cursor.
+        if let Some(Some(entry)) = self.fds.get_mut(fd_usize) {
+            entry.dir_cursor = cursor + written_count;
+        }
+
+        pos as i32
     }
 
     /// Check whether `abs_path` exists (for faccessat / access).
@@ -817,5 +892,56 @@ mod tests {
         assert_eq!(fs.close(1), EBADF);
         assert_eq!(fs.close(2), EBADF);
         assert_eq!(fs.read(0, &mut []), EBADF);
+    }
+
+    /// getdents64_into must advance the per-fd cursor and return 0 on the next
+    /// call once all entries have been consumed (simulating the CPython readdir
+    /// loop that terminates only when getdents64 returns 0).
+    #[test]
+    fn getdents64_terminates_at_end_of_dir() {
+        let mut fs = InMemFs::new();
+        fs.insert_file("/lib/a.py", b"".to_vec());
+        fs.insert_file("/lib/b.py", b"".to_vec());
+        let fd = fs.open("/lib".to_owned(), 0);
+        assert!(fd >= 3);
+
+        // Collect all entries across potentially multiple calls with a large buffer.
+        let mut all_bytes = 0usize;
+        let mut call_count = 0u32;
+        loop {
+            let mut buf = vec![0u8; 4096];
+            let n = fs.getdents64_into(fd, &mut buf);
+            assert!(n >= 0, "unexpected error from getdents64: {n}");
+            if n == 0 {
+                break;
+            }
+            all_bytes += n as usize;
+            call_count += 1;
+            // Guard against infinite loops in tests.
+            assert!(call_count < 100, "getdents64 did not terminate");
+        }
+        // Must have read something (at least ".", "..", "a.py", "b.py").
+        assert!(all_bytes > 0, "no bytes from getdents64");
+        // A second terminating call must still return 0, not restart.
+        let mut buf2 = vec![0u8; 4096];
+        let n2 = fs.getdents64_into(fd, &mut buf2);
+        assert_eq!(n2, 0, "cursor did not stay at end after exhaustion");
+    }
+
+    /// getdents64_into on an empty directory still emits "." and ".." exactly
+    /// once, then returns 0.
+    #[test]
+    fn getdents64_empty_dir_emits_dots_then_zero() {
+        let mut fs = InMemFs::new();
+        fs.mkdir_p("/empty");
+        let fd = fs.open("/empty".to_owned(), 0);
+        assert!(fd >= 3);
+
+        let mut buf = vec![0u8; 4096];
+        let n1 = fs.getdents64_into(fd, &mut buf);
+        assert!(n1 > 0, "expected dot entries, got {n1}");
+
+        let n2 = fs.getdents64_into(fd, &mut buf);
+        assert_eq!(n2, 0, "expected end-of-dir after dot entries");
     }
 }
