@@ -153,6 +153,39 @@ pub struct EmbedderState {
     wasi: Option<WasiStateInner>,
 }
 
+impl EmbedderState {
+    /// Create a non-WASI state (no stdout capture, no WASI context).
+    /// Used by host-import modules that need a store but no WASI.
+    pub fn headless() -> Self {
+        Self { wasi: None }
+    }
+
+    /// Create a WASI-enabled state with stdout captured to an in-memory pipe.
+    ///
+    /// Required when the store is used with a linker that wired
+    /// `wasmtime_wasi::p1::add_to_linker_sync`, such as the Emscripten
+    /// environment layer in [`crate::emscripten_runtime`]. The WASI context
+    /// runs sealed: no filesystem, no environment, no stdin.
+    pub fn with_wasi() -> Self {
+        let pipe = MemoryOutputPipe::new(4 * 1024 * 1024);
+        let ctx = WasiCtxBuilder::new().stdout(pipe.clone()).build_p1();
+        Self {
+            wasi: Some(WasiStateInner { ctx, stdout: pipe }),
+        }
+    }
+
+    /// Return a mutable reference to the WASI preview-1 context.
+    ///
+    /// Panics when called on a headless (non-WASI) state. Only call this
+    /// from a linker accessor registered for a WASI-enabled store.
+    pub fn wasi_ctx_mut(&mut self) -> &mut WasiP1Ctx {
+        self.wasi
+            .as_mut()
+            .map(|w| &mut w.ctx)
+            .unwrap_or_else(|| unreachable!("WASI accessor reached non-WASI store"))
+    }
+}
+
 struct WasiStateInner {
     ctx: WasiP1Ctx,
     stdout: MemoryOutputPipe,
