@@ -8,13 +8,14 @@
 use std::sync::Arc;
 
 use afterburner_core::{AfterburnerError, Result};
-use wasmtime::{Caller, Engine, Linker};
+use wasmtime::{Caller, Engine, FuncType, Linker, Val, ValType};
 
 use crate::{
     embedder_vm::EmbedderState,
     emscripten_abi::{VIRTUAL_EPOCH_MS, VIRTUAL_NOW_MS},
     emscripten_invoke::wire_invoke_trampolines,
-    emscripten_runtime::{MechCallLog, PYODIDE_MEMORY_MAX_PAGES},
+    emscripten_runtime::MechCallLog,
+    emscripten_runtime::PYODIDE_MEMORY_MAX_PAGES,
     emscripten_syscall::wire_fs_env_funcs,
 };
 
@@ -791,6 +792,140 @@ pub(crate) fn wire_mechanical_env_funcs(
     // All table-dispatch trampolines (invoke_* family plus _PyEM_TrampolineCall_JS
     // and _PyImport_InitFunc_TrampolineCall) live in emscripten_invoke.rs.
     wire_invoke_trampolines(engine, linker)?;
+
+    Ok(())
+}
+
+/// Wire the Pyodide 0.28 output-capture and PyCFunction-trampoline helper stubs.
+///
+/// Must be called BEFORE [`fill_got_table_slots`][crate::emscripten_dylink::fill_got_table_slots]
+/// so that Path 3 (linker host export) can place `emscripten_out` and
+/// `emscripten_err` into the GOT.func table slots, making `print` and other
+/// Python output land in `EmbedderState::wasi_stdout`.
+///
+/// Also wires the three PyCFunction-trampoline helpers that Pyodide 0.28 imports
+/// and that `fill_unknown_imports_as_noops` would otherwise auto-fill with
+/// silent zero-returning stubs (no behavioral difference, but explicit is better):
+///
+/// - `_PyEM_InitTrampoline_js` `() -> ()`: called once during `__wasm_call_ctors`
+///   to initialize the trampoline dispatch table. Our host does not need JS-side
+///   trampoline setup because `_PyEM_TrampolineCall_JS` is wired directly to
+///   `invoke_dispatch` (table dispatch). Safe to no-op.
+///
+/// - `_PyEM_GetCountArgsPtr` `() -> i32`: returns a guest-memory pointer to the
+///   per-function arg-count array used by `_PyEM_TrampolineCall_JS` when Wasm type
+///   reflection is unavailable. Returning 0 selects the fallback path (direct
+///   `call_indirect` via the table index), which is correct here.
+///
+/// - `__hiwire_deduplicate_new` `() -> externref`: allocates a new hiwire
+///   deduplication map on the JS side, returned as an opaque externref handle.
+///   Returning `null externref` is safe: the deduplication map is a JS-side
+///   optimization for repeated Python<->JS object round-trips; without it
+///   round-trips still work (they just do not share identity).
+///
+/// `emscripten_out(i32)` and `emscripten_err(i32)` are resolved through the
+/// GOT.func mechanism (not direct env.* imports) in Pyodide 0.28. Wiring them
+/// here ensures [`fill_got_table_slots`][crate::emscripten_dylink::fill_got_table_slots]
+/// Path 3 places the capturing stub into the function table, so CPython's
+/// `print` (which routes through `emscripten_out` via GOT dispatch) writes
+/// to `EmbedderState::wasi_stdout`.
+pub fn wire_pyodide028_env_stubs(
+    engine: &Engine,
+    linker: &mut Linker<EmbedderState>,
+) -> Result<()> {
+    linker.allow_shadowing(true);
+
+    macro_rules! def {
+        ($name:expr, $func:expr) => {
+            linker
+                .func_wrap("env", $name, $func)
+                .map_err(|e| AfterburnerError::Engine(format!("{}: {e}", $name)))?
+        };
+    }
+
+    // ---- output capture: emscripten_out / emscripten_err ---------------------
+    //
+    // In Pyodide 0.28 these are imported as GOT.func globals, not as env.*
+    // function imports. fill_got_table_slots resolves them via Path 3 (linker
+    // host export): it calls linker.get("env", "emscripten_out") and places the
+    // returned host func into the pre-assigned GOT.func stub table slot. The GOT
+    // global then points to that slot, so every indirect call through GOT.func
+    // dispatches to this capturing stub and bytes reach wasi_stdout.
+    def!("emscripten_out", |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+        eprintln!("[emscripten_out] ptr={ptr:#x}");
+        if let Some(s) = read_cstr(&caller, ptr) {
+            eprintln!("[emscripten_out] text={s:?}");
+            let buf = &mut caller.data_mut().wasi_stdout;
+            buf.extend_from_slice(s.as_bytes());
+            buf.push(b'\n');
+        }
+    });
+    def!("emscripten_err", |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+        eprintln!("[emscripten_err] ptr={ptr:#x}");
+        if let Some(s) = read_cstr(&caller, ptr) {
+            eprintln!("[emscripten_err] text={s:?}");
+            let buf = &mut caller.data_mut().wasi_stdout;
+            buf.extend_from_slice(s.as_bytes());
+            buf.push(b'\n');
+        }
+    });
+    // emscripten_console_* may also be called via GOT.func; same capture path.
+    def!("emscripten_console_log", |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+        if let Some(s) = read_cstr(&caller, ptr) {
+            let buf = &mut caller.data_mut().wasi_stdout;
+            buf.extend_from_slice(s.as_bytes());
+            buf.push(b'\n');
+        }
+    });
+    def!("emscripten_console_warn", |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+        if let Some(s) = read_cstr(&caller, ptr) {
+            let buf = &mut caller.data_mut().wasi_stdout;
+            buf.extend_from_slice(s.as_bytes());
+            buf.push(b'\n');
+        }
+    });
+    def!("emscripten_console_error", |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+        if let Some(s) = read_cstr(&caller, ptr) {
+            let buf = &mut caller.data_mut().wasi_stdout;
+            buf.extend_from_slice(s.as_bytes());
+            buf.push(b'\n');
+        }
+    });
+
+    // ---- _PyEM_InitTrampoline_js: () -> () -----------------------------------
+    //
+    // Called once during __wasm_call_ctors to initialize the PyCFunction
+    // trampoline dispatch table on the JS side. We use invoke_dispatch directly
+    // for _PyEM_TrampolineCall_JS so no JS-side init is needed.
+    def!("_PyEM_InitTrampoline_js", |_: Caller<'_, EmbedderState>| {});
+
+    // ---- _PyEM_GetCountArgsPtr: () -> i32 ------------------------------------
+    //
+    // Returns a guest-memory pointer to the per-function arg-count array.
+    // Returning 0 (null) selects the fallback path in the generated
+    // _PyEM_TrampolineCall_JS wrapper: it calls the external trampoline
+    // (our invoke_dispatch) directly, which is correct.
+    def!(
+        "_PyEM_GetCountArgsPtr",
+        |_: Caller<'_, EmbedderState>| -> i32 { 0 }
+    );
+
+    // ---- __hiwire_deduplicate_new: () -> externref ---------------------------
+    //
+    // Allocates a new JS-side hiwire deduplication map. With no JS runtime,
+    // returning null externref disables the dedup optimization; hiwire handles
+    // remain functional, just without object-identity sharing between calls.
+    // Must be registered via func_new because func_wrap cannot express
+    // externref return types.
+    {
+        let ft = FuncType::new(engine, [], [ValType::EXTERNREF]);
+        linker
+            .func_new("env", "__hiwire_deduplicate_new", ft, |_, _, results| {
+                results[0] = Val::ExternRef(None);
+                Ok(())
+            })
+            .map_err(|e| AfterburnerError::Engine(format!("__hiwire_deduplicate_new: {e}")))?;
+    }
 
     Ok(())
 }

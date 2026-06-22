@@ -58,6 +58,7 @@ use afterburner_wasi::emscripten_runtime::{
     JsFfiCallLog, MechCallLog, NoopCallLog, PYODIDE_STACK_BASE, fill_unknown_imports_as_noops,
     wire_env_memory_and_table_in_store, wire_wasi_only,
 };
+use afterburner_wasi::emscripten_mechanical::wire_pyodide028_env_stubs;
 use afterburner_wasi::emscripten_syscall::wire_fs_env_funcs;
 use wasmtime::{
     Config, Engine, FuncType, Global, GlobalType, Linker, Module, Mutability, OptLevel, Store, Tag,
@@ -227,6 +228,13 @@ fn step1_succeeded(
     // evaluation fails before it can load any module.
     if let Err(e) = wire_fs_env_funcs(&mut linker, mech_log.clone()) {
         return format!("IMPORT SETUP FAILED (syscalls): {e}");
+    }
+    // Wire output-capture and PyCFunction-trampoline helpers for Pyodide 0.28.
+    // This must happen BEFORE fill_got_table_slots so that emscripten_out and
+    // emscripten_err are placed in the GOT.func table (Path 3 resolution),
+    // making CPython print() write to wasi_stdout.
+    if let Err(e) = wire_pyodide028_env_stubs(&engine, &mut linker) {
+        return format!("IMPORT SETUP FAILED (pyodide028 stubs): {e}");
     }
 
     // sentinel::is_sentinel: (externref) -> i32
