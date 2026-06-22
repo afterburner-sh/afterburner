@@ -126,7 +126,7 @@ crossterm = "0.28"
 # prompt rendering (no editor/fuzzy/history extras).
 dialoguer = { version = "0.11", default-features = false }
 
-wasmtime = { version = "44", features = ["cranelift", "cache"] }
+wasmtime = { version = "44", features = ["cranelift", "cache", "gc"] }
 wasmtime-wasi = "44"
 anyhow = "1"
 

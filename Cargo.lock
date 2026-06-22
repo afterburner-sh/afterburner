@@ -286,6 +286,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "fastrace",
+ "flate2",
  "futures-util",
  "h3",
  "h3-quinn",
@@ -311,6 +312,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "wasmparser 0.252.0",
  "wasmtime",
  "wasmtime-wasi",
  "wat",
@@ -2400,6 +2402,8 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
  "allocator-api2",
  "foldhash 0.2.0",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -6130,6 +6134,19 @@ dependencies = [
  "bitflags",
  "indexmap",
  "semver",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.252.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3eb099dcadcde5be9eef55e3a337128efd4e44b4c93122487e4d2e4e1c6627c"
+dependencies = [
+ "bitflags",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "semver",
+ "serde",
 ]
 
 [[package]]

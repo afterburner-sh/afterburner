@@ -225,6 +225,36 @@ pub fn add_pyodide_imports(
     Ok(mech_log)
 }
 
+/// Wire WASI imports only, without mechanical env.* or JS-FFI stubs.
+///
+/// Use this for Pyodide 0.28+ modules translated to exnref via
+/// `wasm-opt --translate-to-exnref`: the translation changes JS-FFI and some
+/// mechanical import signatures (externref appears in former i32 positions),
+/// making the 0.26.4-typed stubs incompatible. Callers should follow up with
+/// [`fill_unknown_imports_as_traps`] passing the translated module so that all
+/// remaining env.* imports are auto-filled from the module's actual types.
+pub fn wire_wasi_only(linker: &mut Linker<EmbedderState>) -> Result<()> {
+    wire_wasi_snapshot_preview1(linker)
+}
+
+/// Wire WASI + mechanical env imports without the JS-FFI type stubs.
+///
+/// Use this when the module was translated to exnref (Pyodide 0.28+ via
+/// `wasm-opt --translate-to-exnref`): the exnref translation changes the
+/// JS-FFI import signatures (i32 sentinel/externref args appear), making the
+/// 0.26.4-typed stubs from [`wire_jsffi_stubs`] incompatible. Callers should
+/// follow up with [`fill_unknown_imports_as_traps`] to auto-fill the remaining
+/// JS-FFI imports from the module's actual types.
+pub fn add_pyodide_imports_no_jsffi(
+    engine: &Engine,
+    linker: &mut Linker<EmbedderState>,
+) -> Result<Arc<MechCallLog>> {
+    wire_wasi_snapshot_preview1(linker)?;
+    let mech_log = MechCallLog::new();
+    wire_mechanical_env_funcs(engine, linker, mech_log.clone())?;
+    Ok(mech_log)
+}
+
 /// Wire `env.memory`, `env.__indirect_function_table`, the three env base
 /// globals, and ALL GOT.* globals into a store-bound linker.
 ///
@@ -497,6 +527,50 @@ pub(crate) fn invoke_dispatch(
 
 /// Scan `module`'s import list and fill any remaining unsatisfied function
 /// imports with a trap stub. Returns the list of auto-filled import names.
+/// Auto-fill all unsatisfied imports with no-ops (return zero/null for each result).
+///
+/// Use for bring-up probes where you want execution to continue past unknown
+/// stubs rather than trap immediately. Returns the list of filled import names.
+/// The stubs return zero-values; they do NOT record calls or emit errors.
+///
+/// Call after all known imports are registered (WASI + GOT + known stubs) so
+/// only truly unknown functions get the no-op treatment.
+pub fn fill_unknown_imports_as_noops(
+    store: &mut wasmtime::Store<EmbedderState>,
+    linker: &mut Linker<EmbedderState>,
+    module: &wasmtime::Module,
+) -> Vec<String> {
+    let mut auto_filled = Vec::new();
+    for import in module.imports() {
+        if linker
+            .get(&mut *store, import.module(), import.name())
+            .is_ok()
+        {
+            continue;
+        }
+        auto_filled.push(format!("{}::{}", import.module(), import.name()));
+        if let wasmtime::ExternType::Func(ft) = import.ty() {
+            let m = import.module().to_owned();
+            let n = import.name().to_owned();
+            let _ = linker.func_new(&m, &n, ft, |_, _, results| {
+                for r in results.iter_mut() {
+                    *r = match r {
+                        Val::I32(_) => Val::I32(0),
+                        Val::I64(_) => Val::I64(0),
+                        Val::F32(_) => Val::F32(0),
+                        Val::F64(_) => Val::F64(0),
+                        Val::ExternRef(_) => Val::ExternRef(None),
+                        Val::FuncRef(_) => Val::FuncRef(None),
+                        _ => Val::I32(0),
+                    };
+                }
+                Ok(())
+            });
+        }
+    }
+    auto_filled
+}
+
 ///
 /// Call after [`add_pyodide_imports`] and [`wire_env_memory_and_table_in_store`]
 /// so only truly unknown functions get auto-filled.

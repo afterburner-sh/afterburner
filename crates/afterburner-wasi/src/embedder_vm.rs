@@ -144,6 +144,13 @@ pub fn deterministic_engine() -> Result<Engine> {
         // with `OutOfFuel`. This is the only bound we need for short-lived
         // modules; no epoch ticker, no background thread.
         .consume_fuel(true)
+        // Enable the new (exnref/try_table) exceptions proposal plus the
+        // function-references and GC proposals that it depends on. This lets
+        // Cranelift compile modules translated from legacy-EH via
+        // `wasm-opt --translate-to-exnref`.
+        .wasm_function_references(true)
+        .wasm_gc(true)
+        .wasm_exceptions(true)
         // Always capture Wasm backtraces so the probe can print trap frames.
         .wasm_backtrace_details(WasmBacktraceDetails::Enable);
     Engine::new(&cfg).map_err(|e| AfterburnerError::Engine(format!("embedder engine: {e}")))

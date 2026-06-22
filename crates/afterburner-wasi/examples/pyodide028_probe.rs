@@ -3,47 +3,48 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Bring-up probe for Pyodide 0.28.3 (`pyodide.asm.wasm`) with native Wasm EH.
+//! Bring-up probe for Pyodide 0.28.3 (`pyodide.asm.wasm`) via the exnref bridge.
 //!
-//! Pyodide 0.28+ is compiled with Emscripten `-fwasm-exceptions`. This emits
-//! native Wasm `try`/`catch`/`throw`/`rethrow` instructions (the legacy
-//! exceptions wasm proposal, NOT the newer exnref/try_table form) and two
-//! exception tag imports (`env.__c_longjmp`, `env.__cpp_exception`).
+//! # Background
 //!
-//! This probe attempts:
+//! Pyodide 0.28+ is compiled with Emscripten `-fwasm-exceptions`, which emits
+//! the legacy Wasm exceptions proposal (`try`/`catch`/`rethrow`). Cranelift 44
+//! does NOT compile that form. However, Binaryen wasm-opt v130 can translate it
+//! to the new exnref proposal (`try_table`/`throw_ref`), which Cranelift 44 DOES
+//! compile when `wasm_function_references(true)` + `wasm_gc(true)` +
+//! `wasm_exceptions(true)` are set on the engine config.
 //!
-//! 1. Engine creation with `wasm_legacy_exceptions(true)` to enable
-//!    `WasmFeatures::LEGACY_EXCEPTIONS`. Reports whether wasmtime 44 accepts it.
-//! 2. If step 1 fails, falls back to no-EH engine and attempts `Module::new`
-//!    to show exactly where Cranelift fails on the `try` instruction.
-//! 3. If step 1 succeeds (future wasmtime), continues bring-up through
-//!    instantiate -> relocs -> ctors -> interpreter.
+//! # Approach (exnref bridge)
 //!
-//! # Key deliverable (step 1)
+//! 1. Pre-translate `pyodide-new.asm.wasm` with wasm-opt to produce
+//!    `pyodide-exnref.wasm` (try_table form). Done offline; see path constant.
+//! 2. Build an engine with the new-EH config (function-references + gc + exceptions).
+//! 3. `Module::new` compiles the translated binary. Key deliverable: does it compile?
+//! 4. Wire imports (Emscripten ABI + sentinel stubs + EH tags) and boot CPython.
 //!
-//! Whether cranelift compiles the native-EH module. If not, the exact error
-//! names the blocker (wasmtime version, proposal support status).
-//!
-//! # Verified binary facts (pre-run, from wasm-tools)
+//! # Verified binary facts (from wasm-tools on the TRANSLATED binary)
 //!
 //! - Pyodide 0.28.3, CPython 3.13.2
-//! - 0 `invoke_*` imports (no legacy EH shims)
+//! - 0 `invoke_*` imports (none needed - native EH)
 //! - 2 tag imports: `env.__c_longjmp`, `env.__cpp_exception` (type: (i32) -> ())
 //! - 252 env function imports, 280 GOT.func imports
 //! - 2 `sentinel` imports: `sentinel::is_sentinel`, `sentinel::create_sentinel`
-//! - wasm-tools validate confirmed: uses `try` instruction (legacy exceptions)
+//! - After translation: 1142 `try_table` instructions; 0 legacy `try` instructions
 //! - Table initial: 6073; Memory: 320 pages initial, max 65536
 //!
 //! # Usage
 //!
+//! Translate first (one-time, ~5 seconds):
+//!
+//!   ~/.local/bin/wasm-opt --translate-to-exnref \
+//!     --enable-exception-handling --enable-reference-types \
+//!     --enable-bulk-memory --enable-simd --enable-sign-ext \
+//!     --enable-nontrapping-float-to-int --enable-mutable-globals \
+//!     /tmp/pyodide-new.asm.wasm -o /tmp/pyodide-exnref.wasm
+//!
+//! Then run:
+//!
 //!   cargo run -p afterburner-wasi --example pyodide028_probe
-//!
-//! Download first:
-//!
-//!   curl -fsSL -o /tmp/pyodide-new.asm.wasm \
-//!       https://cdn.jsdelivr.net/pyodide/v0.28.3/full/pyodide.asm.wasm
-//!   curl -fsSL -o /tmp/python_stdlib.zip \
-//!       https://cdn.jsdelivr.net/pyodide/v0.28.3/full/python_stdlib.zip
 
 use std::fs;
 
@@ -53,8 +54,8 @@ use afterburner_wasi::emscripten_dylink::{
 };
 use afterburner_wasi::emscripten_fs::mount_zip_into_fs;
 use afterburner_wasi::emscripten_runtime::{
-    JsFfiCallLog, PYODIDE_STACK_BASE, add_pyodide_imports, fill_unknown_imports_as_traps,
-    wire_env_memory_and_table_in_store,
+    JsFfiCallLog, MechCallLog, PYODIDE_STACK_BASE, fill_unknown_imports_as_noops,
+    wire_env_memory_and_table_in_store, wire_wasi_only,
 };
 use wasmtime::{
     Config, Engine, FuncType, Global, GlobalType, Linker, Module, Mutability, OptLevel, Store, Tag,
@@ -63,8 +64,12 @@ use wasmtime::{
 
 const MECH_TRACE_TAIL: usize = 40;
 
-/// Path to Pyodide 0.28.3 wasm binary.
-const PYODIDE_WASM_PATH: &str = "/tmp/pyodide-new.asm.wasm";
+/// Path to Pyodide 0.28.3 wasm binary (exnref-translated via wasm-opt --translate-to-exnref).
+/// Produce with: ~/.local/bin/wasm-opt --translate-to-exnref --enable-exception-handling
+///   --enable-reference-types --enable-bulk-memory --enable-simd --enable-sign-ext
+///   --enable-nontrapping-float-to-int --enable-mutable-globals
+///   /tmp/pyodide-new.asm.wasm -o /tmp/pyodide-exnref.wasm
+const PYODIDE_WASM_PATH: &str = "/tmp/pyodide-exnref.wasm";
 
 /// Path to the Pyodide 0.28.3 Python stdlib zip.
 const PYTHON_STDLIB_ZIP_PATH: &str = "/tmp/python_stdlib.zip";
@@ -87,8 +92,13 @@ fn main() {
     println!("{outcome}");
 }
 
-/// Build the deterministic engine base config (without EH flags).
-fn base_engine_cfg() -> Config {
+/// Build the exnref engine config: new exceptions proposal (try_table / throw_ref)
+/// plus the function-references and GC proposals it depends on. Cranelift 44
+/// supports this path; it does NOT support the legacy try/catch form.
+///
+/// The input binary must be pre-translated via:
+///   wasm-opt --translate-to-exnref ... pyodide-new.asm.wasm -o pyodide-exnref.wasm
+fn exnref_engine_cfg() -> Config {
     let mut cfg = Config::new();
     cfg.cranelift_opt_level(OptLevel::Speed)
         .cranelift_nan_canonicalization(true)
@@ -96,21 +106,36 @@ fn base_engine_cfg() -> Config {
         .relaxed_simd_deterministic(true)
         .wasm_threads(false)
         .consume_fuel(true)
+        // New exceptions proposal (try_table / throw_ref / exnref). Requires
+        // function-references + GC as the exnref type depends on them.
+        .wasm_function_references(true)
+        .wasm_gc(true)
+        .wasm_exceptions(true)
         .wasm_backtrace_details(WasmBacktraceDetails::Enable);
     cfg
 }
 
 fn run_probe() -> String {
     // ---- load the wasm bytes -------------------------------------------------
+    // Expects /tmp/pyodide-exnref.wasm: the Pyodide 0.28.3 binary translated
+    // from legacy-EH (try/catch) to the new exnref proposal (try_table) by:
+    //   ~/.local/bin/wasm-opt --translate-to-exnref \
+    //     --enable-exception-handling --enable-reference-types \
+    //     --enable-bulk-memory --enable-simd --enable-sign-ext \
+    //     --enable-nontrapping-float-to-int --enable-mutable-globals \
+    //     /tmp/pyodide-new.asm.wasm -o /tmp/pyodide-exnref.wasm
 
     let wasm_bytes = match fs::read(PYODIDE_WASM_PATH) {
         Ok(b) => b,
         Err(e) => {
             return format!(
                 "LOAD FAILED: cannot read {PYODIDE_WASM_PATH}: {e}\n\
-                 Download with:\n\
-                 curl -fsSL -o /tmp/pyodide-new.asm.wasm \\\n\
-                     https://cdn.jsdelivr.net/pyodide/v0.28.3/full/pyodide.asm.wasm"
+                 Translate with:\n\
+                 ~/.local/bin/wasm-opt --translate-to-exnref \\\n\
+                   --enable-exception-handling --enable-reference-types \\\n\
+                   --enable-bulk-memory --enable-simd --enable-sign-ext \\\n\
+                   --enable-nontrapping-float-to-int --enable-mutable-globals \\\n\
+                   /tmp/pyodide-new.asm.wasm -o /tmp/pyodide-exnref.wasm"
             );
         }
     };
@@ -124,96 +149,32 @@ fn run_probe() -> String {
     let name_to_slot = parse_got_name_to_slot(&wasm_bytes, /* table_base */ 1);
     eprintln!("[probe] parsed {} GOT entries", name_to_slot.len());
 
-    // ---- STEP 1: attempt Engine::new with wasm_legacy_exceptions(true) -------
+    // ---- STEP 1: Engine::new with exnref config + Module::new ---------------
     //
-    // Pyodide 0.28 uses Emscripten -fwasm-exceptions, which emits the legacy
-    // wasm exception proposal (try/catch/rethrow, NOT try_table). Wasmtime's
-    // API exposes this as Config::wasm_legacy_exceptions(true), setting
-    // WasmFeatures::LEGACY_EXCEPTIONS.
+    // The binary at PYODIDE_WASM_PATH has been translated from legacy-EH
+    // (try/catch) to the new exnref proposal (try_table / throw_ref) by
+    // wasm-opt v130. Cranelift 44 supports try_table; it rejects the legacy
+    // try/catch form. Enabling wasm_function_references + wasm_gc + wasm_exceptions
+    // is what allows Cranelift to compile the translated module.
     //
-    // On wasmtime 44: LEGACY_EXCEPTIONS is NOT in the "features known to
-    // wasmtime" set in Config::validate, so Engine::new returns an error.
-    // Cranelift itself also rejects Catch/Rethrow with "legacy exception
-    // handling proposal is not supported" in func_environ.rs.
-    //
-    // This step reports the exact error so the caller can decide whether to
-    // bump wasmtime to a version that supports it.
+    // Key deliverable (step 1): does Module::new succeed?
 
-    let mut eh_cfg = base_engine_cfg();
-    #[allow(deprecated)]
-    eh_cfg.wasm_legacy_exceptions(true);
-
-    eprintln!("[probe] STEP 1: attempting Engine::new with wasm_legacy_exceptions(true)...");
-    match Engine::new(&eh_cfg) {
-        Ok(engine) => {
-            eprintln!("[probe] Engine::new SUCCEEDED with native-EH config");
-            eprintln!("[probe] STEP 1 KEY DELIVERABLE MET: wasmtime accepts LEGACY_EXCEPTIONS");
-            // Engine supports it - proceed with Module::new and full bring-up.
-            step1_succeeded(engine, &wasm_bytes, &name_to_slot)
+    let cfg = exnref_engine_cfg();
+    eprintln!("[probe] STEP 1: Engine::new with exnref config (wasm_exceptions + gc)...");
+    let engine = match Engine::new(&cfg) {
+        Ok(e) => {
+            eprintln!("[probe] Engine::new SUCCEEDED");
+            e
         }
         Err(e) => {
-            let eh_engine_err = format!("{e}");
-            eprintln!("[probe] Engine::new FAILED with native-EH config: {eh_engine_err}");
-            eprintln!("[probe] Falling back: testing Module::new without EH flag...");
-
-            // Fallback: plain engine (no EH flag). Shows where Cranelift fails.
-            let plain_cfg = base_engine_cfg();
-            match Engine::new(&plain_cfg) {
-                Ok(plain_engine) => {
-                    eprintln!("[probe] plain engine OK; attempting Module::new...");
-                    let module_result = Module::new(&plain_engine, &wasm_bytes);
-                    let module_err = match &module_result {
-                        Ok(_) => {
-                            // Unexpected: compiled fine without EH flag. This
-                            // would mean the binary does NOT actually use try/catch.
-                            "Module::new SUCCEEDED without EH flag (unexpected - \
-                             wasm-tools validate said legacy_exceptions required)"
-                                .to_owned()
-                        }
-                        Err(e) => format!("Module::new FAILED: {e}"),
-                    };
-                    let module_err_short = &module_err[..module_err.len().min(500)];
-
-                    format!(
-                        "STEP 1 FAILED: wasmtime 44 does not support LEGACY_EXCEPTIONS.\n\
-                         \n\
-                         Engine::new error (with wasm_legacy_exceptions=true):\n\
-                         {eh_engine_err}\n\
-                         \n\
-                         Root cause: WasmFeatures::LEGACY_EXCEPTIONS is not in the set of\n\
-                         features known to wasmtime 44 (Config::compiler_panicking_wasm_features).\n\
-                         Cranelift 44 also explicitly returns an error for Catch/Rethrow/Delegate\n\
-                         instructions: 'legacy exception handling proposal is not supported'\n\
-                         (wasmtime-internal-cranelift/src/translate/code_translator.rs:604).\n\
-                         \n\
-                         Fallback Module::new result (plain engine, no EH flag):\n\
-                         {module_err_short}\n\
-                         \n\
-                         --- BINARY ANALYSIS (pre-run, from wasm-tools) ---\n\
-                         Pyodide 0.28.3 uses Emscripten -fwasm-exceptions (legacy EH proposal).\n\
-                         wasm-tools validate confirmed: 'legacy_exceptions feature required for\n\
-                         try instruction (at offset 0x4a30c0)'.\n\
-                         The binary has 0 invoke_* imports and 2 tag imports:\n\
-                         env.__c_longjmp and env.__cpp_exception (type: (i32) -> ()).\n\
-                         \n\
-                         --- PIVOT VIABILITY ---\n\
-                         NOT viable on wasmtime 44. The native-EH pivot requires a wasmtime\n\
-                         version where LEGACY_EXCEPTIONS is supported by Cranelift.\n\
-                         Wasmtime 44 Cranelift supports try_table (new exnref proposal) but NOT\n\
-                         try/catch/rethrow (legacy proposal). A bump to a wasmtime that adds\n\
-                         Cranelift legacy EH, or a Pyodide build with try_table, is needed.\n\
-                         \n\
-                         Alternatively: stay on Pyodide 0.26.4 and diagnose the func-551\n\
-                         trap root cause without the EH pivot."
-                    )
-                }
-                Err(e2) => format!(
-                    "STEP 1 FAILED: Engine::new(legacy_EH=true): {eh_engine_err}\n\
-                     ALSO FAILED: Engine::new(plain): {e2}"
-                ),
-            }
+            return format!(
+                "STEP 1 FAILED: Engine::new(exnref config): {e}\n\
+                 Expected: wasmtime 44 + gc feature should accept this config."
+            );
         }
-    }
+    };
+
+    step1_succeeded(engine, &wasm_bytes, &name_to_slot)
 }
 
 /// Continue the bring-up once the engine accepts native EH (step 1 passed).
@@ -241,18 +202,45 @@ fn step1_succeeded(
     let log = JsFfiCallLog::new();
     let mut linker: Linker<EmbedderState> = Linker::new(&engine);
 
-    let mech_log = match add_pyodide_imports(&engine, &mut linker, log.clone()) {
-        Ok(ml) => ml,
-        Err(e) => return format!("IMPORT SETUP FAILED: {e}"),
-    };
+    // Wire only the WASI shims (wasi_snapshot_preview1.*). All env.* imports
+    // (mechanical + jsffi) are auto-filled from the module's actual types below,
+    // because the exnref translation changed many env.* signatures (externref
+    // now appears where i32 was in 0.26.4). Pre-registering 0.26.4-typed stubs
+    // causes wasmtime type-mismatch at instantiation.
+    if let Err(e) = wire_wasi_only(&mut linker) {
+        return format!("IMPORT SETUP FAILED (wasi): {e}");
+    }
+    let mech_log = MechCallLog::new();
 
-    if let Err(e) = linker.func_wrap("sentinel", "is_sentinel", |_: i32| -> i32 { 0 }) {
+    // sentinel::is_sentinel: (externref) -> i32
+    // sentinel::create_sentinel: () -> externref
+    // After exnref translation the JS-sentinel types use externref. Wire them
+    // with func_new + explicit FuncType (func_wrap cannot express externref).
+    let is_sentinel_ty = FuncType::new(&engine, [ValType::EXTERNREF], [ValType::I32]);
+    if let Err(e) = linker.func_new(
+        "sentinel",
+        "is_sentinel",
+        is_sentinel_ty,
+        |_caller, _params, results| {
+            results[0] = Val::I32(0);
+            Ok(())
+        },
+    ) {
         return format!("IMPORT SETUP FAILED: sentinel::is_sentinel: {e}");
     }
-    if let Err(e) = linker.func_wrap("sentinel", "create_sentinel", || -> i32 { 0 }) {
+    let create_sentinel_ty = FuncType::new(&engine, [], [ValType::EXTERNREF]);
+    if let Err(e) = linker.func_new(
+        "sentinel",
+        "create_sentinel",
+        create_sentinel_ty,
+        |_caller, _params, results| {
+            results[0] = Val::ExternRef(None);
+            Ok(())
+        },
+    ) {
         return format!("IMPORT SETUP FAILED: sentinel::create_sentinel: {e}");
     }
-    eprintln!("[probe] wired sentinel stubs");
+    eprintln!("[probe] wired sentinel stubs (externref types)");
 
     let mut store = Store::new(&engine, EmbedderState::for_emscripten());
     store
@@ -340,9 +328,13 @@ fn step1_succeeded(
         Err(e) => return format!("GOT STUB WIRING FAILED: {e}"),
     }
 
-    let auto_filled = fill_unknown_imports_as_traps(&mut store, &mut linker, &module);
+    // Use no-ops (not traps) for remaining unknown imports so CPython boot can
+    // proceed past Pyodide 0.28 JS-FFI stubs that don't exist in 0.26.4.
+    // A no-op returns zero/null; unknown stubs that matter will surface as
+    // downstream errors (wrong return value) rather than immediate traps.
+    let auto_filled = fill_unknown_imports_as_noops(&mut store, &mut linker, &module);
     eprintln!(
-        "[probe] {} imports auto-filled as trap stubs",
+        "[probe] {} imports auto-filled as no-op stubs",
         auto_filled.len()
     );
 
