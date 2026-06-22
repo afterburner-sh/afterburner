@@ -112,6 +112,8 @@ pub const ENOTTY: i32 = -59;
 
 const O_WRONLY: i32 = 1;
 const O_RDWR: i32 = 2;
+const O_CREAT: i32 = 64;
+const O_TRUNC: i32 = 512;
 
 // ---- stat mode bits ---------------------------------------------------------
 
@@ -291,20 +293,40 @@ impl InMemFs {
         self.nodes.get(abs_path)
     }
 
-    /// Allocate a new fd for `path` (must already exist as a File or Dir).
-    /// Returns the fd, or ENOENT/EISDIR as appropriate (callers gate on flags).
+    /// Allocate a new fd for `path`.
+    ///
+    /// Supports `O_CREAT` (create if absent), `O_TRUNC` (truncate on open),
+    /// and `O_WRONLY` / `O_RDWR`. Parent directories are created when
+    /// `O_CREAT` is set.
+    ///
+    /// Returns the fd, or ENOENT/EISDIR as appropriate.
     pub fn open(&mut self, path: String, flags: i32) -> i32 {
+        let want_write = flags & O_WRONLY != 0 || flags & O_RDWR != 0;
+        let creat = flags & O_CREAT != 0;
+        let trunc = flags & O_TRUNC != 0;
+
         match self.nodes.get(&path) {
+            None if creat => {
+                // Create a new empty file. Ensure parent directory exists.
+                if let Some(parent) = parent_of(&path) {
+                    self.mkdir_p(&parent);
+                }
+                self.nodes.insert(path.clone(), FsNode::File(Vec::new()));
+                self.alloc_fd(path)
+            }
             None => ENOENT,
             Some(FsNode::Dir) => {
-                // Opening a directory is allowed for readdir; only reject if
-                // write-only.
-                if flags & O_WRONLY != 0 || flags & O_RDWR != 0 {
+                if want_write {
                     return EISDIR;
                 }
                 self.alloc_fd(path)
             }
-            Some(FsNode::File(_)) => self.alloc_fd(path),
+            Some(FsNode::File(_)) => {
+                if trunc && want_write {
+                    self.nodes.insert(path.clone(), FsNode::File(Vec::new()));
+                }
+                self.alloc_fd(path)
+            }
         }
     }
 
@@ -349,6 +371,37 @@ impl InMemFs {
                 self.fds[fd_usize].as_mut().unwrap().offset += n as u64;
                 n as i32
             }
+        }
+    }
+
+    /// Append `data` to the file referenced by `fd`, advancing the offset.
+    /// Returns bytes written, or a negative errno.
+    pub fn write(&mut self, fd: i32, data: &[u8]) -> i32 {
+        let fd_usize = fd as usize;
+        if fd_usize >= self.fds.len() {
+            return EBADF;
+        }
+        let path = match &self.fds[fd_usize] {
+            None => return EBADF,
+            Some(e) => e.path.clone(),
+        };
+        match self.nodes.get_mut(&path) {
+            None => ENOENT,
+            Some(FsNode::Dir) => EISDIR,
+            Some(FsNode::File(buf)) => {
+                buf.extend_from_slice(data);
+                let n = data.len();
+                self.fds[fd_usize].as_mut().unwrap().offset += n as u64;
+                n as i32
+            }
+        }
+    }
+
+    /// Return the contents of the file at `abs_path`, or `None` if absent/dir.
+    pub fn read_file(&self, abs_path: &str) -> Option<&[u8]> {
+        match self.nodes.get(abs_path) {
+            Some(FsNode::File(data)) => Some(data.as_slice()),
+            _ => None,
         }
     }
 

@@ -515,8 +515,16 @@ fn step1_succeeded(
 }
 
 /// Python code run via `python -c <CODE>`.
+///
+/// Writes output to `/out.txt` via a real MEMFS FILE. Python's `open()` goes
+/// through WASI `path_open` (with O_CREAT|O_TRUNC for 'w' mode), which is
+/// wired to the host MEMFS. `fd_write` writes through the same MEMFS fds.
+/// Because Pyodide/Emscripten routes fd 1/2 through a JS TTY callback
+/// (`Module.print`) that is absent headless, `print()` drops silently;
+/// writing to a named file via `path_open` survives and is read back after
+/// the run.
 const PYTHON_CODE: &[u8] =
-    b"import sys, os\nprint('hello from cpython on afterburner')\nprint('pyver', sys.version.split()[0])\nprint('sum', sum(range(100)))\nos.write(1, b'direct-os-write\\n')\nsys.stdout.flush()\n\0";
+    b"f=open('/out.txt','w'); import sys; f.write('hello from cpython on afterburner\\n'); f.write('pyver '+sys.version.split()[0]+'\\n'); f.write('sum '+str(sum(range(100)))+'\\n'); f.close()\n\0";
 
 /// Grow wasm memory by one page (64 KiB) and write argv strings + the i32
 /// pointer array into the new page. Returns the wasm guest address of the i32
@@ -580,6 +588,122 @@ fn write_argv(store: &mut Store<EmbedderState>) -> Result<i32, String> {
     Ok(arr_off as i32)
 }
 
+/// Call `_Py_write(1, buf, len)` (CPython's own write wrapper) directly
+/// after ctors to verify the Python-level fd-1 write path.
+/// If captured, Python's write path works. If empty but probe_direct_write
+/// worked, CPython is bypassing _Py_write when running os.write.
+fn probe_py_write(instance: &wasmtime::Instance, store: &mut Store<EmbedderState>) {
+    const MSG: &[u8] = b"PROBE-PY-WRITE\n";
+    let mem = match store.data().pyodide_memory {
+        Some(m) => m,
+        None => {
+            eprintln!("[probe_py_write] no pyodide_memory - skip");
+            return;
+        }
+    };
+    let buf_ptr = match mem.grow(&mut *store, 1) {
+        Ok(prev_pages) => (prev_pages as usize) * 65536,
+        Err(e) => {
+            eprintln!("[probe_py_write] memory.grow failed: {e}");
+            return;
+        }
+    };
+    mem.data_mut(&mut *store)[buf_ptr..buf_ptr + MSG.len()].copy_from_slice(MSG);
+    eprintln!(
+        "[probe_py_write] calling _Py_write(1, {buf_ptr:#x}, {})...",
+        MSG.len()
+    );
+    let py_write = match instance.get_func(&mut *store, "_Py_write") {
+        Some(f) => f,
+        None => {
+            eprintln!("[probe_py_write] '_Py_write' not exported - skip");
+            return;
+        }
+    };
+    let mut results = [wasmtime::Val::I32(-1)];
+    match py_write.call(
+        &mut *store,
+        &[
+            wasmtime::Val::I32(1),
+            wasmtime::Val::I32(buf_ptr as i32),
+            wasmtime::Val::I32(MSG.len() as i32),
+        ],
+        &mut results,
+    ) {
+        Ok(_) => {
+            let ret = match results[0] {
+                wasmtime::Val::I32(v) => v,
+                _ => -1,
+            };
+            let captured = store.data().wasi_stdout.len();
+            let snippet = String::from_utf8_lossy(&store.data().wasi_stdout).into_owned();
+            eprintln!(
+                "[probe_py_write] _Py_write() ret={ret} captured={captured}: {snippet:?}"
+            );
+        }
+        Err(e) => eprintln!("[probe_py_write] _Py_write() trapped: {e}"),
+    }
+    store.data_mut().wasi_stdout.clear();
+}
+
+/// Directly call the module's exported `write(fd=1, buf, len)` function to
+/// verify that `wasi_snapshot_preview1::fd_write` is reachable before Python.
+/// "PROBE-WRITE-DIRECT\n" in wasi_stdout = fd_write shim is wired correctly.
+/// Empty = Emscripten FS layer intercepts writes before they reach the shim.
+fn probe_direct_write(instance: &wasmtime::Instance, store: &mut Store<EmbedderState>) {
+    const MSG: &[u8] = b"PROBE-WRITE-DIRECT\n";
+    let mem = match store.data().pyodide_memory {
+        Some(m) => m,
+        None => {
+            eprintln!("[probe_direct_write] no pyodide_memory - skip");
+            return;
+        }
+    };
+    let buf_ptr = match mem.grow(&mut *store, 1) {
+        Ok(prev_pages) => (prev_pages as usize) * 65536,
+        Err(e) => {
+            eprintln!("[probe_direct_write] memory.grow failed: {e}");
+            return;
+        }
+    };
+    mem.data_mut(&mut *store)[buf_ptr..buf_ptr + MSG.len()].copy_from_slice(MSG);
+    eprintln!(
+        "[probe_direct_write] calling write(1, {buf_ptr:#x}, {}) via wasm export...",
+        MSG.len()
+    );
+    let write_fn = match instance.get_func(&mut *store, "write") {
+        Some(f) => f,
+        None => {
+            eprintln!("[probe_direct_write] 'write' not exported - skip");
+            return;
+        }
+    };
+    let mut results = [wasmtime::Val::I32(-1)];
+    match write_fn.call(
+        &mut *store,
+        &[
+            wasmtime::Val::I32(1),
+            wasmtime::Val::I32(buf_ptr as i32),
+            wasmtime::Val::I32(MSG.len() as i32),
+        ],
+        &mut results,
+    ) {
+        Ok(_) => {
+            let ret = match results[0] {
+                wasmtime::Val::I32(v) => v,
+                _ => -1,
+            };
+            let captured = store.data().wasi_stdout.len();
+            let snippet = String::from_utf8_lossy(&store.data().wasi_stdout).into_owned();
+            eprintln!(
+                "[probe_direct_write] write() ret={ret} captured={captured}: {snippet:?}"
+            );
+        }
+        Err(e) => eprintln!("[probe_direct_write] write() trapped: {e}"),
+    }
+    store.data_mut().wasi_stdout.clear();
+}
+
 fn run_python_phase(
     instance: &wasmtime::Instance,
     store: &mut Store<EmbedderState>,
@@ -588,6 +712,10 @@ fn run_python_phase(
     noop_log: &std::sync::Arc<afterburner_wasi::emscripten_runtime::NoopCallLog>,
     ctors_summary: &str,
 ) -> String {
+    // Verify fd_write shim reachable via direct `write` export (pre-Python).
+    probe_direct_write(instance, store);
+    // Also probe via _Py_write (CPython's own write wrapper, post-ctors).
+    probe_py_write(instance, store);
     store.data_mut().wasi_stdout.clear();
 
     if let Some(func) = instance.get_func(&mut *store, "__main_argc_argv") {
@@ -631,6 +759,16 @@ fn run_python_phase(
                         entry.arg1
                     ));
                 }
+                // Read /out.txt from the MEMFS. CPython wrote there via
+                // __syscall_openat(O_CREAT|O_WRONLY|O_TRUNC) + __syscall_writev.
+                // This is the capture channel: fd 1/2 drops headless (no JS TTY
+                // callback), but a real MEMFS file survives the run.
+                let out_txt = store
+                    .data()
+                    .fs
+                    .read_file("/out.txt")
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_else(|| "<absent>".to_owned());
                 return format!(
                     "{ctors_summary}\n\
                      --- phase 5: __main_argc_argv(3, argv) ---\n\
@@ -639,10 +777,12 @@ fn run_python_phase(
                      JS-FFI calls: {}\n\
                      Noop stubs called ({} unique): {noop_calls:?}\n\
                      Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
-                     WASI stdout ({} bytes):\n{wasi_text}",
+                     WASI stdout ({} bytes):\n{wasi_text}\n\
+                     /out.txt ({} bytes):\n{out_txt}",
                     log.total_calls(),
                     noop_calls.len(),
-                    wasi_out.len()
+                    wasi_out.len(),
+                    out_txt.len()
                 );
             }
             Err(e) => {

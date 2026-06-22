@@ -126,7 +126,10 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
     // ---- environ ------------------------------------------------------------
 
     // environ_sizes_get(count_ptr: i32, buf_size_ptr: i32) -> i32
-    // Empty environment: write 0 count + 0 buf size, return 0 (success).
+    // Returns one env var: PYTHONUNBUFFERED=1.
+    // This forces CPython to use unbuffered stdout (no buffering layer between
+    // print() and the underlying write syscall), ensuring output reaches fd_write
+    // even if Python's stdout buffering would otherwise hold bytes in the buffer.
     def!("environ_sizes_get", |mut caller: Caller<
         '_,
         EmbedderState,
@@ -134,21 +137,37 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                                count_ptr: i32,
                                buf_size_ptr: i32|
      -> i32 {
-        if !write_u32(&mut caller, count_ptr, 0) {
+        // "PYTHONUNBUFFERED=1\0" = 20 bytes
+        eprintln!("[environ_sizes_get] returning 1 var, 20 bytes (PYTHONUNBUFFERED=1)");
+        if !write_u32(&mut caller, count_ptr, 1) {
             return 1;
         }
-        if !write_u32(&mut caller, buf_size_ptr, 0) {
+        if !write_u32(&mut caller, buf_size_ptr, 20) {
             return 1;
         }
         0
     });
 
     // environ_get(environ_ptr: i32, buf_ptr: i32) -> i32
-    // No environment vars - nothing to write.
-    def!("environ_get", |_: Caller<'_, EmbedderState>,
-                         _environ_ptr: i32,
-                         _buf_ptr: i32|
-     -> i32 { 0 });
+    // Write PYTHONUNBUFFERED=1 into the environ buffer.
+    // environ_ptr: pointer to char* array (one entry: pointer to the env string).
+    // buf_ptr: pointer to the string storage ("PYTHONUNBUFFERED=1\0").
+    def!("environ_get", |mut caller: Caller<'_, EmbedderState>,
+                         environ_ptr: i32,
+                         buf_ptr: i32|
+     -> i32 {
+        eprintln!("[environ_get] writing PYTHONUNBUFFERED=1 at buf_ptr={buf_ptr:#x}");
+        // Write the env string "PYTHONUNBUFFERED=1\0" at buf_ptr.
+        let env_str = b"PYTHONUNBUFFERED=1\0";
+        if !write_bytes(&mut caller, buf_ptr, env_str) {
+            return 1;
+        }
+        // Write the pointer to the env string at environ_ptr.
+        if !write_u32(&mut caller, environ_ptr, buf_ptr as u32) {
+            return 1;
+        }
+        0
+    });
 
     // ---- args ---------------------------------------------------------------
 
@@ -157,6 +176,7 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                             argc_ptr: i32,
                             argv_buf_size_ptr: i32|
      -> i32 {
+        eprintln!("[args_sizes_get] called - returning 0 args");
         if !write_u32(&mut caller, argc_ptr, 0) {
             return 1;
         }
@@ -170,7 +190,10 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
     def!("args_get", |_: Caller<'_, EmbedderState>,
                       _argv_ptr: i32,
                       _buf_ptr: i32|
-     -> i32 { 0 });
+     -> i32 {
+        eprintln!("[args_get] called");
+        0
+    });
 
     // ---- fd_write -----------------------------------------------------------
 
@@ -206,11 +229,20 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                 Some(c) => c,
                 None => return EBADF,
             };
+            eprintln!("[fd_write] fd={fd} iov[{i}] buf_ptr={buf_ptr:#x} buf_len={buf_len}");
             if fd == 1 || fd == 2 {
                 caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
+            } else if caller.data().fs.is_fs_fd(fd) {
+                // Write to the MEMFS file opened by __syscall_openat.
+                // This path is used by Python's os.write() for non-stdout fds.
+                let n = caller.data_mut().fs.write(fd, &chunk);
+                if n < 0 {
+                    return -n; // WASI error codes are positive
+                }
             }
             total += buf_len as u32;
         }
+        eprintln!("[fd_write] fd={fd} total_bytes={total}");
         if !write_u32(&mut caller, nwritten_ptr, total) {
             return EBADF;
         }
@@ -338,6 +370,7 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                        _offset: i64,
                        nwritten_ptr: i32|
      -> i32 {
+        eprintln!("[fd_pwrite] fd={_fd} iovs_len={_iovs_len} offset={_offset}");
         if !write_u32(&mut caller, nwritten_ptr, 0) {
             return EBADF;
         }
@@ -485,13 +518,21 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
     // Open a path relative to preopened dir `dirfd` (fd 3 = "/").
     // Returns 0 on success with the new fd written to opened_fd_ptr.
     // Returns EBADF/ENOENT on failure.
+    //
+    // WASI oflags bits:
+    //   bit 0 = O_CREAT (create if absent)
+    //   bit 1 = O_DIRECTORY (must be dir)
+    //   bit 2 = O_EXCL (exclusive create)
+    //   bit 3 = O_TRUNC (truncate on open)
+    //
+    // WASI fs_rights_base: bit 6 = FD_WRITE. If set, translate to O_WRONLY.
     def!("path_open", |mut caller: Caller<'_, EmbedderState>,
                        dirfd: i32,
                        _dirflags: i32,
                        path_ptr: i32,
                        path_len: i32,
-                       _oflags: i32,
-                       _fs_rights_base: i64,
+                       oflags: i32,
+                       fs_rights_base: i64,
                        _fs_rights_inheriting: i64,
                        _fdflags: i32,
                        opened_fd_ptr: i32|
@@ -522,9 +563,21 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
             }
         };
         let abs = caller.data().fs.resolve(&base, &path_str);
-        // Open with flags=0 (read-only). Negative return = error.
-        let new_fd = caller.data_mut().fs.open(abs.clone(), 0);
-        eprintln!("[path_open] dirfd={dirfd} {:?} -> new_fd={new_fd}", abs);
+        // Translate WASI oflags + rights to Linux-style open flags for InMemFs.
+        // WASI bit 6 of fs_rights_base = FD_WRITE; map to O_WRONLY.
+        let fd_write_right: i64 = 1 << 6;
+        let mut linux_flags: i32 = 0;
+        if fs_rights_base & fd_write_right != 0 {
+            linux_flags |= 1; // O_WRONLY
+        }
+        if oflags & 1 != 0 {
+            linux_flags |= 64; // O_CREAT
+        }
+        if oflags & 8 != 0 {
+            linux_flags |= 512; // O_TRUNC
+        }
+        let new_fd = caller.data_mut().fs.open(abs.clone(), linux_flags);
+        eprintln!("[path_open] dirfd={dirfd} {:?} oflags={oflags:#x} rights={fs_rights_base:#x} linux_flags={linux_flags:#x} -> new_fd={new_fd}", abs);
         if new_fd < 0 {
             // Translate to WASI ENOENT (errno 44) or EBADF (8).
             return if new_fd == -2 { 44 } else { EBADF };

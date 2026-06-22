@@ -318,11 +318,18 @@ pub fn wire_fs_env_funcs(
                         }
                         let chunk: Vec<u8> =
                             memory.data(&caller)[buf_ptr..buf_ptr + buf_len].to_vec();
+                        eprintln!("[__syscall_writev] fd={fd} iov[{i}] buf_ptr={buf_ptr:#x} buf_len={buf_len}");
                         if fd == 1 || fd == 2 {
                             caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
+                        } else if caller.data().fs.is_fs_fd(fd) {
+                            let n = caller.data_mut().fs.write(fd, &chunk);
+                            if n < 0 {
+                                return n;
+                            }
                         }
                         total += buf_len as i32;
                     }
+                    eprintln!("[__syscall_writev] fd={fd} total_bytes={total}");
                     total
                 },
             )
