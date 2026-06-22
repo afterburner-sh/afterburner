@@ -336,6 +336,52 @@ pub fn wire_fs_env_funcs(
             .map_err(|e| AfterburnerError::Engine(format!("__syscall_writev: {e}")))?;
     }
 
+    // __syscall_write(fd: i32, buf: i32, count: i32) -> i32
+    // Plain write(2) - used by CPython buffered IO (PyFileIO_Type / PyTextIOWrapper)
+    // when writing to a file fd opened via open(path, 'w'). For fd 1/2 bytes go
+    // to wasi_stdout; for file fds they are appended to the MEMFS node.
+    {
+        let _log = mech_log.clone();
+        linker
+            .func_wrap(
+                "env",
+                "__syscall_write",
+                move |mut caller: Caller<'_, EmbedderState>,
+                      fd: i32,
+                      buf: i32,
+                      count: i32|
+                      -> i32 {
+                    _log.push("__syscall_write", fd, buf);
+                    let len = count as u32 as usize;
+                    if len == 0 {
+                        return 0;
+                    }
+                    let Some(memory) = caller.data().pyodide_memory else {
+                        return EBADF;
+                    };
+                    let start = buf as u32 as usize;
+                    let mem_len = memory.data_size(&caller);
+                    if start + len > mem_len {
+                        return EINVAL;
+                    }
+                    let chunk: Vec<u8> = memory.data(&caller)[start..start + len].to_vec();
+                    eprintln!("[__syscall_write] fd={fd} buf={buf:#x} count={len}");
+                    if fd == 1 || fd == 2 {
+                        caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
+                    } else if caller.data().fs.is_fs_fd(fd) {
+                        let n = caller.data_mut().fs.write(fd, &chunk);
+                        if n < 0 {
+                            return n;
+                        }
+                    } else {
+                        return EBADF;
+                    }
+                    len as i32
+                },
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("__syscall_write: {e}")))?;
+    }
+
     // __syscall_pread64(fd: i32, buf: i32, count: i32, offset: i64) -> i32
     {
         let _log = mech_log.clone();

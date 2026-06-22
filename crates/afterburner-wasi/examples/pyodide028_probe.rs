@@ -334,6 +334,9 @@ fn step1_succeeded(
     }
     eprintln!("[probe] auto-filled {extra_got_filled} extra GOT globals (0.28 additions)");
 
+    // Pre-create /tmp so Python's open('/tmp/pyout.txt', 'w') can O_CREAT there.
+    store.data_mut().fs.mkdir_p("/tmp");
+
     match fs::read(PYTHON_STDLIB_ZIP_PATH) {
         Ok(zip_bytes) => {
             store
@@ -516,10 +519,16 @@ fn step1_succeeded(
 
 /// Python code passed as the `-c` argument to `__main_argc_argv`.
 ///
+/// Writes to `/tmp/pyout.txt` via file I/O so output is captured through
+/// MEMFS `__syscall_write` (Pyodide routes `sys.stdout` through a JS-bridge
+/// Writer that is a noop headless; file I/O hits our syscall shims instead).
+///
 /// NUL-terminated. Written into wasm memory and pointed to by argv[2].
-/// The newline before the NUL is required by CPython's `-c` parser.
 const PYTHON_CODE: &[u8] =
-    b"print('hello from cpython on afterburner')\nimport sys\nprint('pyver', sys.version.split()[0])\nprint('sum', sum(range(100)))\n\0";
+    b"import sys\nf=open('/tmp/pyout.txt','w')\nf.write('hello from cpython on afterburner\\n')\nf.write('pyver '+sys.version.split()[0]+'\\n')\nf.write('sum '+str(sum(range(100)))+'\\n')\nf.close()\n\0";
+
+/// Guest path where Python writes its output.
+const PYOUT_PATH: &str = "/tmp/pyout.txt";
 
 /// Write a NUL-terminated C string into a newly grown wasm memory page.
 ///
@@ -812,15 +821,29 @@ fn run_python_phase(
                 "[probe P5] wasi_stdout ({} bytes):\n{wasi_text}",
                 wasi_out.len()
             );
-            let milestone = if wasi_text.contains("hello from cpython on afterburner")
-                && wasi_text.contains("pyver")
-                && wasi_text.contains("4950")
+            // Read /tmp/pyout.txt from MEMFS - Python wrote here via file I/O.
+            let pyout_bytes = store
+                .data()
+                .fs
+                .read_file(PYOUT_PATH)
+                .map(|b| b.to_vec())
+                .unwrap_or_default();
+            let pyout_text = String::from_utf8_lossy(&pyout_bytes).into_owned();
+            eprintln!(
+                "[probe P5] {PYOUT_PATH} ({} bytes):\n{pyout_text}",
+                pyout_bytes.len()
+            );
+            let milestone = if pyout_text.contains("hello from cpython on afterburner")
+                && pyout_text.contains("pyver")
+                && pyout_text.contains("4950")
             {
-                "MILESTONE MET: Python executed and produced expected output"
-            } else if !wasi_text.is_empty() {
-                "PARTIAL: some output captured but expected strings missing"
+                "MILESTONE MET: Python executed and produced correct output via MEMFS file"
+            } else if !pyout_bytes.is_empty() {
+                "PARTIAL: /tmp/pyout.txt has content but expected strings missing"
+            } else if wasi_text.contains("hello from cpython on afterburner") {
+                "PARTIAL: output in wasi_stdout (print path) but not in /tmp/pyout.txt"
             } else {
-                "NO OUTPUT: run_main returned but wasi_stdout is empty"
+                "NO OUTPUT: run_main returned but /tmp/pyout.txt is absent or empty"
             };
             format!(
                 "{ctors_summary}\n\
@@ -834,16 +857,25 @@ fn run_python_phase(
                  Noop stubs called ({} unique): {noop_calls:?}\n\
                  Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
                  WASI stdout ({} bytes):\n{wasi_text}\n\
+                 {PYOUT_PATH} ({} bytes):\n{pyout_text}\n\
                  {milestone}",
                 log.total_calls(),
                 noop_calls.len(),
-                wasi_out.len()
+                wasi_out.len(),
+                pyout_bytes.len()
             )
         }
         Err(e) => {
             let finding = classify_python_error(&format!("{e}"), log.total_calls());
             let throw_count = store.data().cxa_throw_count;
             let fs_paths: Vec<String> = store.data().fs_path_log.iter().cloned().collect();
+            let pyout_bytes = store
+                .data()
+                .fs
+                .read_file(PYOUT_PATH)
+                .map(|b| b.to_vec())
+                .unwrap_or_default();
+            let pyout_text = String::from_utf8_lossy(&pyout_bytes).into_owned();
             format!(
                 "{ctors_summary}\n\
                  --- phase 5: __main_argc_argv + {run_entry_name} ---\n\
@@ -858,10 +890,12 @@ fn run_python_phase(
                  Noop stubs called ({} unique): {noop_calls:?}\n\
                  Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
                  WASI stdout ({} bytes):\n{wasi_text}\n\
+                 {PYOUT_PATH} ({} bytes):\n{pyout_text}\n\
                  Finding: {finding}",
                 log.total_calls(),
                 noop_calls.len(),
-                wasi_out.len()
+                wasi_out.len(),
+                pyout_bytes.len()
             )
         }
     }
