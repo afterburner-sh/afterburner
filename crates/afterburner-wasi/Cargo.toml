@@ -105,6 +105,7 @@ quinn = { workspace = true, optional = true }
 h3 = { workspace = true, optional = true }
 h3-quinn = { workspace = true, optional = true }
 wasmparser = "0.252.0"
+flate2.workspace = true
 
 # Genuinely unix-only — no Windows equivalent for the parts we use.
 [target.'cfg(unix)'.dependencies]

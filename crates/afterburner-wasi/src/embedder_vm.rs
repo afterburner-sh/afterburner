@@ -34,6 +34,7 @@
 //! `Send + Sync`. Each `run` call builds a fresh `Store<EmbedderState>`, so
 //! concurrent calls never share mutable state. `EmbedderVm` is `Send + Sync`.
 
+use crate::emscripten_fs::InMemFs;
 use afterburner_core::{AfterburnerError, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -167,6 +168,10 @@ pub struct EmbedderState {
     /// Appended by the `wasi_snapshot_preview1::fd_write` shim; read after
     /// `__wasm_call_ctors` returns.
     pub wasi_stdout: Vec<u8>,
+    /// In-memory filesystem for Emscripten syscall shims. Holds the Python
+    /// stdlib (mounted from `python_stdlib.zip`) and the current working
+    /// directory state. Populated by `mount_zip_into_fs` before instantiation.
+    pub fs: InMemFs,
 }
 
 impl EmbedderState {
@@ -178,6 +183,7 @@ impl EmbedderState {
             pyodide_memory: None,
             pyodide_table: None,
             wasi_stdout: Vec::new(),
+            fs: InMemFs::new(),
         }
     }
 
@@ -190,13 +196,16 @@ impl EmbedderState {
     /// [`EmbedderState::pyodide_memory`].
     ///
     /// Call `store.data_mut().pyodide_memory = Some(mem)` immediately after
-    /// `wire_env_memory_and_table_in_store` to activate the shims.
+    /// `wire_env_memory_and_table_in_store` to activate the shims. Call
+    /// `mount_zip_into_fs` to populate `store.data_mut().fs` with the Python
+    /// stdlib before calling `__wasm_call_ctors`.
     pub fn for_emscripten() -> Self {
         Self {
             wasi: None,
             pyodide_memory: None,
             pyodide_table: None,
             wasi_stdout: Vec::new(),
+            fs: InMemFs::new(),
         }
     }
 
@@ -214,6 +223,7 @@ impl EmbedderState {
             pyodide_memory: None,
             pyodide_table: None,
             wasi_stdout: Vec::new(),
+            fs: InMemFs::new(),
         }
     }
 
@@ -447,6 +457,7 @@ impl EmbedderVm {
                 pyodide_memory: None,
                 pyodide_table: None,
                 wasi_stdout: Vec::new(),
+                fs: InMemFs::new(),
             }
         } else {
             EmbedderState {
@@ -454,6 +465,7 @@ impl EmbedderVm {
                 pyodide_memory: None,
                 pyodide_table: None,
                 wasi_stdout: Vec::new(),
+                fs: InMemFs::new(),
             }
         };
 
@@ -563,6 +575,7 @@ impl EmbedderVm {
             pyodide_memory: None,
             pyodide_table: None,
             wasi_stdout: Vec::new(),
+            fs: InMemFs::new(),
         };
 
         let mut store = Store::new(&module.engine, state);

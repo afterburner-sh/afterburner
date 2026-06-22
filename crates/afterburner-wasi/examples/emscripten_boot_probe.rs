@@ -50,6 +50,7 @@ use afterburner_wasi::embedder_vm::{EmbedderState, deterministic_engine};
 use afterburner_wasi::emscripten_dylink::{
     fill_got_table_slots, parse_got_name_to_slot, wire_got_func_stubs_from_module,
 };
+use afterburner_wasi::emscripten_fs::mount_zip_into_fs;
 use afterburner_wasi::emscripten_runtime::{
     JsFfiCallLog, PYODIDE_STACK_BASE, add_pyodide_imports, fill_unknown_imports_as_traps,
     wire_env_memory_and_table_in_store,
@@ -59,6 +60,13 @@ const MECH_TRACE_TAIL: usize = 40;
 use wasmtime::{Linker, Module, Store};
 
 const PYODIDE_WASM_PATH: &str = "/tmp/pyodide.asm.wasm";
+/// Path to the Pyodide Python stdlib zip. Download before running:
+///   curl -fsSL -o /tmp/python_stdlib.zip \
+///       https://cdn.jsdelivr.net/pyodide/v0.26.4/full/python_stdlib.zip
+const PYTHON_STDLIB_ZIP_PATH: &str = "/tmp/python_stdlib.zip";
+/// The prefix at which Pyodide expects the stdlib. The wasm binary has
+/// "/lib/python" hardcoded as its PYTHONPATH root.
+const STDLIB_MOUNT_PREFIX: &str = "/lib/python";
 
 /// Instruction budget for the boot probe. CPython static init is heavy, and
 /// `Py_InitializeEx` (phase 5) is similarly expensive.
@@ -164,6 +172,33 @@ fn run_probe() -> String {
         "[probe] wired env.memory, env.__indirect_function_table, env.__*_base globals, \
          GOT.func (pre-filled with slot indices), GOT.mem (pre-filled with symbol addresses)"
     );
+
+    // ---- mount Python stdlib into the in-memory filesystem ------------------
+    //
+    // CPython's path-config function (func 9523) calls __syscall_getcwd and
+    // then tries to stat/open /lib/python (Pyodide's compiled-in PYTHONPATH).
+    // Without the stdlib, init fails with "No module named 'encodings'".
+    // Mount the stdlib zip contents at /lib/python before instantiation so the
+    // FS is ready when __wasm_call_ctors first calls into it.
+    match fs::read(PYTHON_STDLIB_ZIP_PATH) {
+        Ok(zip_bytes) => {
+            match mount_zip_into_fs(&mut store.data_mut().fs, STDLIB_MOUNT_PREFIX, &zip_bytes) {
+                Ok(n) => eprintln!(
+                    "[probe] mounted {n} stdlib files from {PYTHON_STDLIB_ZIP_PATH} at {STDLIB_MOUNT_PREFIX}"
+                ),
+                Err(e) => eprintln!("[probe] WARN: stdlib mount error: {e}"),
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "[probe] WARN: cannot read {PYTHON_STDLIB_ZIP_PATH}: {e}\n\
+                 CPython will likely fail with 'No module named encodings'.\n\
+                 Download with:\n\
+                 curl -fsSL -o /tmp/python_stdlib.zip \\\n\
+                     https://cdn.jsdelivr.net/pyodide/v0.26.4/full/python_stdlib.zip"
+            );
+        }
+    }
 
     // Wire correctly-typed stubs for any GOT.func env.* imports not yet in the
     // linker (emscripten_gl*, emscripten_console_*, etc.). Must happen before
@@ -377,7 +412,7 @@ fn run_probe() -> String {
     // "No module named 'encodings'" because `python_stdlib.zip` is not mounted
     // into the MEMFS. That error message is the primary deliverable of this
     // phase: it names the next layer to implement.
-    run_python_phase(&instance, &mut store, &log, &ctors_summary)
+    run_python_phase(&instance, &mut store, &log, &mech_log, &ctors_summary)
 }
 
 /// Scratch offset in guest linear memory for small C-string arguments.
@@ -392,6 +427,7 @@ fn run_python_phase(
     instance: &wasmtime::Instance,
     store: &mut Store<EmbedderState>,
     log: &JsFfiCallLog,
+    mech_log: &std::sync::Arc<afterburner_wasi::emscripten_runtime::MechCallLog>,
     ctors_summary: &str,
 ) -> String {
     // Drain stdout accumulated during ctors before phase 5 starts.
@@ -436,6 +472,23 @@ fn run_python_phase(
                 let js_calls = log.total_calls();
                 let err_str = format!("{e}");
                 let finding = classify_python_error(&err_str, js_calls);
+                // Mechanical trace from last N env.* calls before the trap.
+                let mech_tail = mech_log.tail(MECH_TRACE_TAIL);
+                let mut mech_trace = String::new();
+                for (i, entry) in mech_tail.iter().enumerate() {
+                    let line = if entry.arg0 != 0 || entry.arg1 != 0 {
+                        format!(
+                            "  [{:>3}] {} (arg0={}, arg1={})\n",
+                            i + 1,
+                            entry.name,
+                            entry.arg0,
+                            entry.arg1
+                        )
+                    } else {
+                        format!("  [{:>3}] {}\n", i + 1, entry.name)
+                    };
+                    mech_trace.push_str(&line);
+                }
                 return format!(
                     "{ctors_summary}\n\
                      \n\
@@ -445,6 +498,9 @@ fn run_python_phase(
                      Total fuel consumed: {total_fuel}\n\
                      JS-FFI calls total: {js_calls}\n\
                      WASI stdout ({} bytes): {wasi_text:?}\n\
+                     \n\
+                     --- last {MECH_TRACE_TAIL} mechanical env.* calls before trap ---\n\
+                     {mech_trace}\
                      Finding: {finding}",
                     wasi_out.len()
                 );
