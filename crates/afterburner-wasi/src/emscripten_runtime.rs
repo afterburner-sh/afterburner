@@ -404,18 +404,39 @@ pub(crate) fn invoke_dispatch(
     let Some(tbl) = caller.data().pyodide_table else {
         return Err(wasmtime::Trap::UnreachableCodeReached.into());
     };
-    // DIAG: log every dispatch so the probe can see what table slot was requested
-    // and whether it holds a null funcref.
+    // Record this dispatch so the probe can read the last active table index
+    // from store.data().last_invoke_idx when a trap is reported.
+    caller.data_mut().last_invoke_idx = idx;
+
     let slot_content = tbl.get(&mut caller, idx);
     let is_null = !matches!(&slot_content, Some(wasmtime::Ref::Func(Some(_))));
     eprintln!(
-        "[invoke_dispatch] idx={idx} slot={slot_content:?} null={is_null} params_len={}",
+        "[invoke_dispatch] idx={idx} slot_is_null={is_null} params_len={}",
         params.len()
     );
     let Some(wasmtime::Ref::Func(Some(func))) = slot_content else {
-        return Err(wasmtime::Trap::UnreachableCodeReached.into());
+        // Return a named error (not a Trap) so the probe's "debug chain" shows
+        // the exact table index rather than just UnreachableCodeReached.
+        return Err(wasmtime::Error::msg(format!(
+            "invoke_dispatch: null or absent funcref at table[{idx}] (params_len={})",
+            params.len()
+        )));
     };
-    func.call(&mut caller, &params[1..], results)
+    // Emscripten's C ABI allows function-pointer casts that mismatch arity;
+    // callers may pass more arguments than the callee declares. Wasmtime
+    // enforces strict arity, so truncate the forwarded args to the funcref's
+    // declared parameter count rather than letting the call fail with a type
+    // error. Extra args from the trampoline side are silently dropped, matching
+    // the C calling-convention semantics Emscripten assumes.
+    let func_ty = func.ty(&caller);
+    let callee_param_count = func_ty.params().len();
+    let forwarded = &params[1..];
+    let call_params = if forwarded.len() > callee_param_count {
+        &forwarded[..callee_param_count]
+    } else {
+        forwarded
+    };
+    func.call(&mut caller, call_params, results)
 }
 
 /// Scan `module`'s import list and fill any remaining unsatisfied function
@@ -440,8 +461,11 @@ pub fn fill_unknown_imports_as_traps(
         if let wasmtime::ExternType::Func(ft) = import.ty() {
             let m = import.module().to_owned();
             let n = import.name().to_owned();
-            let _ = linker.func_new(&m, &n, ft, |_, _, _| {
-                Err(wasmtime::Error::msg("unimplemented import"))
+            // Include the import name in the error so the probe's debug chain
+            // reveals which auto-filled stub fired under the trapped frame.
+            let label = format!("unimplemented import: {}::{}", m, n);
+            let _ = linker.func_new(&m, &n, ft, move |_, _, _| {
+                Err(wasmtime::Error::msg(label.clone()))
             });
         }
     }

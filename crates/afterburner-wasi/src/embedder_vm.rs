@@ -38,7 +38,9 @@ use crate::emscripten_fs::InMemFs;
 use afterburner_core::{AfterburnerError, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
-use wasmtime::{Config, Engine, InstancePre, Linker, Module, OptLevel, Store, Trap};
+use wasmtime::{
+    Config, Engine, InstancePre, Linker, Module, OptLevel, Store, Trap, WasmBacktraceDetails,
+};
 use wasmtime_wasi::p1::{WasiP1Ctx, add_to_linker_sync};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
@@ -141,7 +143,9 @@ pub fn deterministic_engine() -> Result<Engine> {
         // counter. When the counter reaches zero the next instruction traps
         // with `OutOfFuel`. This is the only bound we need for short-lived
         // modules; no epoch ticker, no background thread.
-        .consume_fuel(true);
+        .consume_fuel(true)
+        // Always capture Wasm backtraces so the probe can print trap frames.
+        .wasm_backtrace_details(WasmBacktraceDetails::Enable);
     Engine::new(&cfg).map_err(|e| AfterburnerError::Engine(format!("embedder engine: {e}")))
 }
 
@@ -172,6 +176,9 @@ pub struct EmbedderState {
     /// stdlib (mounted from `python_stdlib.zip`) and the current working
     /// directory state. Populated by `mount_zip_into_fs` before instantiation.
     pub fs: InMemFs,
+    /// The last table index passed to `invoke_dispatch`. Set on every call so
+    /// the probe can report which table slot was active when the trap fired.
+    pub last_invoke_idx: u64,
 }
 
 impl EmbedderState {
@@ -184,6 +191,7 @@ impl EmbedderState {
             pyodide_table: None,
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
+            last_invoke_idx: u64::MAX,
         }
     }
 
@@ -206,6 +214,7 @@ impl EmbedderState {
             pyodide_table: None,
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
+            last_invoke_idx: u64::MAX,
         }
     }
 
@@ -224,6 +233,7 @@ impl EmbedderState {
             pyodide_table: None,
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
+            last_invoke_idx: u64::MAX,
         }
     }
 
@@ -458,6 +468,7 @@ impl EmbedderVm {
                 pyodide_table: None,
                 wasi_stdout: Vec::new(),
                 fs: InMemFs::new(),
+                last_invoke_idx: u64::MAX,
             }
         } else {
             EmbedderState {
@@ -466,6 +477,7 @@ impl EmbedderVm {
                 pyodide_table: None,
                 wasi_stdout: Vec::new(),
                 fs: InMemFs::new(),
+                last_invoke_idx: u64::MAX,
             }
         };
 
@@ -576,6 +588,7 @@ impl EmbedderVm {
             pyodide_table: None,
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
+            last_invoke_idx: u64::MAX,
         };
 
         let mut store = Store::new(&module.engine, state);

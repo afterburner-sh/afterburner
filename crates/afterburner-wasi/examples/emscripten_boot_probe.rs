@@ -386,11 +386,18 @@ fn run_probe() -> String {
                     "CPython static init trapped in a mechanical Emscripten ABI function or in module code"
                 };
 
+                let last_invoke = store.data().last_invoke_idx;
+                let last_invoke_str = if last_invoke == u64::MAX {
+                    "none (invoke_dispatch not reached)".to_owned()
+                } else {
+                    format!("table[{last_invoke}]")
+                };
                 return format!(
                     "BOOT FAILED at __wasm_call_ctors\n\
                      Error: {e}\n\
                      Trap kind: {trap_kind}\n\
                      Trap frames (innermost first): {trap_frames}\n\
+                     Last invoke_dispatch table index: {last_invoke_str}\n\
                      Fuel consumed: {total_fuel}\n\
                      JS-FFI call count: {js_calls}\n\
                      JS-FFI functions called: {js_names:?}\n\
@@ -515,7 +522,7 @@ fn run_python_phase(
                 let trap_kind = e
                     .downcast_ref::<wasmtime::Trap>()
                     .map(|t| format!("{t:?}"))
-                    .unwrap_or_else(|| "(not a wasmtime::Trap)".to_owned());
+                    .unwrap_or_else(|| format!("(not a wasmtime::Trap); debug chain: {e:?}"));
                 let trap_frames = e
                     .downcast_ref::<wasmtime::WasmBacktrace>()
                     .map(|bt| {
@@ -544,6 +551,12 @@ fn run_python_phase(
                     };
                     mech_trace.push_str(&line);
                 }
+                let last_invoke = store.data().last_invoke_idx;
+                let last_invoke_str = if last_invoke == u64::MAX {
+                    "none (invoke_dispatch not reached)".to_owned()
+                } else {
+                    format!("table[{last_invoke}]")
+                };
                 return format!(
                     "{ctors_summary}\n\
                      \n\
@@ -552,6 +565,7 @@ fn run_python_phase(
                      TRAPPED: {e}\n\
                      Trap kind: {trap_kind}\n\
                      Trap frames (innermost first): {trap_frames}\n\
+                     Last invoke_dispatch table index: {last_invoke_str}\n\
                      Total fuel consumed: {total_fuel}\n\
                      JS-FFI calls total: {js_calls}\n\
                      WASI stdout ({} bytes): {wasi_text:?}\n\
