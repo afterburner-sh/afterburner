@@ -16,6 +16,7 @@
 //!   cargo run -p afterburner-wasi --example numpy_import_probe
 
 use std::fs;
+use std::num::NonZeroUsize;
 
 use afterburner_wasi::embedder_vm::EmbedderState;
 use afterburner_wasi::emscripten_dylink::{
@@ -32,7 +33,7 @@ use afterburner_wasi::emscripten_sidemodule::{pre_load_side_module, wire_dlopen_
 use afterburner_wasi::emscripten_syscall::wire_fs_env_funcs;
 use wasmtime::{
     Config, Engine, FuncType, Global, GlobalType, Linker, Module, Mutability, OptLevel, Store, Tag,
-    TagType, Val, ValType, WasmBacktraceDetails,
+    TagType, Trap, Val, ValType, WasmBacktrace, WasmBacktraceDetails,
 };
 
 const PYODIDE_WASM_PATH: &str = "/tmp/pyodide-exnref.wasm";
@@ -73,7 +74,9 @@ fn exnref_engine_cfg() -> Config {
         .wasm_function_references(true)
         .wasm_gc(true)
         .wasm_exceptions(true)
-        .wasm_backtrace_details(WasmBacktraceDetails::Enable);
+        .wasm_backtrace_details(WasmBacktraceDetails::Enable)
+        // Raise the frame cap so the full chain is not truncated at the default 20.
+        .wasm_backtrace_max_frames(NonZeroUsize::new(500));
     cfg
 }
 
@@ -587,13 +590,47 @@ fn run_numpy_phase(
             let noop_calls = noop_log.snapshot();
             let mech_tail = mech_log.tail(MECH_TRACE_TAIL);
             let mech_trace = format_mech_tail(&mech_tail);
+
+            // Trap kind (unreachable, OOB, indirect-call-type-mismatch, ...).
+            let trap_kind = e
+                .downcast_ref::<Trap>()
+                .map(|t| format!("{t:?}"))
+                .unwrap_or_else(|| "(no Trap root cause)".to_owned());
+
+            // Full Debug chain (includes WasmBacktrace as context).
+            let debug_chain = format!("{e:?}");
+
+            // Frame-by-frame WasmBacktrace: func_index + module_offset + name.
+            let frame_lines = e
+                .downcast_ref::<WasmBacktrace>()
+                .map(|bt| {
+                    let frames = bt.frames();
+                    let mut s = format!("WasmBacktrace ({} frames):\n", frames.len());
+                    for (i, fr) in frames.iter().enumerate() {
+                        let offset = fr
+                            .module_offset()
+                            .map(|o| format!("{o:#x}"))
+                            .unwrap_or_else(|| "?".to_owned());
+                        let name = fr.func_name().unwrap_or("<unnamed>");
+                        s.push_str(&format!(
+                            "  [{i:>4}] func_index={} module_offset={offset} {name}\n",
+                            fr.func_index()
+                        ));
+                    }
+                    s
+                })
+                .unwrap_or_else(|| "WasmBacktrace: not attached to error\n".to_owned());
+
             return format!(
                 "TRAPPED in run_main: {e}\n\
+                 Trap kind: {trap_kind}\n\
                  Fuel consumed: {fuel}\n\
                  C++ throws: {}\n\
                  Last FS paths: {:?}\n\
                  Noop stubs ({} unique): {noop_calls:?}\n\
                  Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
+                 {frame_lines}\
+                 Full debug chain:\n{debug_chain}\n\
                  {PYOUT_PATH}:\n{pyout}",
                 store.data().cxa_throw_count,
                 store.data().fs_path_log.iter().cloned().collect::<Vec<_>>(),

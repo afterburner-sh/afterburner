@@ -470,8 +470,14 @@ pub fn pre_load_side_module(
         "[sidemodule] {path}: {} export table slots resolved from element segment \
          ({} exports total, {} not in table)",
         func_table_slots.len(),
-        module.exports().filter(|e| matches!(e.ty(), wasmtime::ExternType::Func(_))).count(),
-        module.exports().filter(|e| matches!(e.ty(), wasmtime::ExternType::Func(_))).count()
+        module
+            .exports()
+            .filter(|e| matches!(e.ty(), wasmtime::ExternType::Func(_)))
+            .count(),
+        module
+            .exports()
+            .filter(|e| matches!(e.ty(), wasmtime::ExternType::Func(_)))
+            .count()
             - func_table_slots.len(),
     );
 
@@ -505,7 +511,6 @@ pub fn pre_load_side_module(
         next_table_base,
     ))
 }
-
 
 /// Wire `env._dlopen_js`, `env._dlsym_js`, and `env._emscripten_dlopen_js`
 /// against the [`SideModuleRegistry`] stored in [`EmbedderState::side_modules`].
@@ -543,9 +548,7 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                 // not a pointer to a string stored at that offset).
                 let name_str_ptr = (handle_struct_ptr as u32).saturating_add(36) as i32;
                 let Some(name) = read_cstr_sidemodule(&caller, name_str_ptr) else {
-                    eprintln!(
-                        "[dlopen_js] cannot read filename at handle+36={name_str_ptr:#x}"
-                    );
+                    eprintln!("[dlopen_js] cannot read filename at handle+36={name_str_ptr:#x}");
                     return 0;
                 };
                 eprintln!("[dlopen_js] looking up '{name}'");
@@ -618,17 +621,12 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
 
                 // Grow the table by 1 to get a fresh slot, then place the func there.
                 let slot = table.size(&caller) as u32;
-                if let Err(e) =
-                    table.grow(&mut caller, 1, wasmtime::Ref::Func(None))
-                {
+                if let Err(e) = table.grow(&mut caller, 1, wasmtime::Ref::Func(None)) {
                     eprintln!("[dlsym_js] table grow for '{sym_name}': {e}");
                     return 0;
                 }
-                if let Err(e) = table.set(
-                    &mut caller,
-                    slot as u64,
-                    wasmtime::Ref::Func(Some(func)),
-                ) {
+                if let Err(e) = table.set(&mut caller, slot as u64, wasmtime::Ref::Func(Some(func)))
+                {
                     eprintln!("[dlsym_js] table.set slot {slot} for '{sym_name}': {e}");
                     return 0;
                 }
