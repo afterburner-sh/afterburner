@@ -31,7 +31,7 @@ use std::num::NonZeroUsize;
 
 use afterburner_wasi::embedder_vm::EmbedderState;
 use afterburner_wasi::emscripten_dylink::{
-    fill_got_table_slots, parse_got_name_to_slot, wire_got_func_stubs_from_module,
+    GotGlobalMap, fill_got_table_slots, parse_got_name_to_slot, wire_got_func_stubs_from_module,
 };
 use afterburner_wasi::emscripten_fs::mount_zip_into_fs;
 use afterburner_wasi::emscripten_invoke::wire_invoke_trampolines;
@@ -471,13 +471,13 @@ fn run_probe() -> String {
         match func.call(&mut store, &[], &mut []) {
             Ok(_) => eprintln!("[markupsafe_probe] __wasm_call_ctors OK"),
             Err(e) => {
-                let diag = memory_diag(&store);
+                let diag = memory_diag(&mut store, Some(&got_globals));
                 return format!("CTORS FAILED: {e}\n{diag}");
             }
         }
     }
 
-    run_python_phase(&instance, &mut store, &mech_log, &noop_log)
+    run_python_phase(&instance, &mut store, &mech_log, &noop_log, &got_globals)
 }
 
 /// Python code that exercises markupsafe and writes output to /tmp/pyout.txt.
@@ -513,6 +513,7 @@ fn run_python_phase(
     store: &mut Store<EmbedderState>,
     mech_log: &std::sync::Arc<afterburner_wasi::emscripten_runtime::MechCallLog>,
     noop_log: &std::sync::Arc<afterburner_wasi::emscripten_runtime::NoopCallLog>,
+    got_globals: &GotGlobalMap,
 ) -> String {
     store.data_mut().wasi_stdout.clear();
 
@@ -559,7 +560,7 @@ fn run_python_phase(
             let noop_calls = noop_log.snapshot();
             let mech_tail = mech_log.tail(MECH_TRACE_TAIL);
             let mech_trace = format_mech_tail(&mech_tail);
-            let diag = memory_diag(store);
+            let diag = memory_diag(store, Some(got_globals));
             return format!(
                 "TRAPPED in __main_argc_argv: {e}\n\
                  Fuel consumed: {fuel}\n\
@@ -633,7 +634,7 @@ fn run_python_phase(
                 })
                 .unwrap_or_else(|| "WasmBacktrace: not attached to error\n".to_owned());
 
-            let diag = memory_diag(store);
+            let diag = memory_diag(store, Some(got_globals));
 
             return format!(
                 "TRAPPED in run_main: {e}\n\
@@ -782,10 +783,221 @@ fn scan_bytes(store: &Store<EmbedderState>, needle: &[u8]) -> Vec<u32> {
     hits
 }
 
-/// Run all three diagnostics and format a single report block.
-fn memory_diag(store: &Store<EmbedderState>) -> String {
+/// CPython 3.13 wasm32 PyTypeObject field name for a given byte offset within
+/// the object (ob_refcnt at +0, ob_type at +4).
+///
+/// Offsets are for wasm32 (4-byte pointers/Py_ssize_t). Source: cpython/Include/cpython/object.h.
+fn py_typeobject_slot_name(offset: u32) -> &'static str {
+    match offset {
+        0 => "ob_refcnt",
+        4 => "ob_type",
+        8 => "ob_size",
+        12 => "tp_name",
+        16 => "tp_basicsize",
+        20 => "tp_itemsize",
+        24 => "tp_dealloc",
+        28 => "tp_vectorcall_offset",
+        32 => "tp_getattr",
+        36 => "tp_setattr",
+        40 => "tp_as_async",
+        44 => "tp_repr",
+        48 => "tp_as_number",
+        52 => "tp_as_sequence",
+        56 => "tp_as_mapping",
+        60 => "tp_hash",
+        64 => "tp_call",
+        68 => "tp_str",
+        72 => "tp_getattro",
+        76 => "tp_setattro",
+        80 => "tp_as_buffer",
+        84 => "tp_flags",
+        88 => "tp_doc",
+        92 => "tp_traverse",
+        96 => "tp_clear",
+        100 => "tp_richcompare",
+        104 => "tp_weaklistoffset",
+        108 => "tp_iter",
+        112 => "tp_iternext",
+        116 => "tp_methods",
+        120 => "tp_members",
+        124 => "tp_getset",
+        128 => "tp_base",
+        132 => "tp_dict",
+        136 => "tp_descr_get",
+        140 => "tp_descr_set",
+        144 => "tp_dictoffset",
+        148 => "tp_init",
+        152 => "tp_alloc",
+        156 => "tp_new",
+        160 => "tp_free",
+        164 => "tp_is_gc",
+        168 => "tp_bases",
+        172 => "tp_mro",
+        176 => "tp_cache",
+        180 => "tp_subclasses",
+        184 => "tp_weaklist",
+        188 => "tp_del",
+        192 => "tp_version_tag",
+        196 => "tp_finalize",
+        200 => "tp_vectorcall",
+        _ => "<unknown>",
+    }
+}
+
+/// For a hit address holding the bad value, snap backward in 4-byte steps to
+/// find the nearest CPython object boundary (where ob_refcnt looks plausible
+/// and ob_type resolves to a readable tp_name). Returns a formatted string.
+///
+/// Heuristic: scan up to 512 bytes back in 4-byte steps looking for a slot
+/// where the u32 at +0 is 1..=10000 (plausible refcnt) and the u32 at +4
+/// points somewhere in linear memory that itself has a printable C string at
+/// +12 (tp_name of the ob_type). Reports the best match found.
+fn identify_object_at_hit(store: &Store<EmbedderState>, hit_addr: u32) -> String {
+    let Some(mem) = store.data().pyodide_memory else {
+        return "  pyodide_memory not set\n".to_owned();
+    };
+    let data = mem.data(store);
+    let mem_len = data.len();
+
+    // Snap hit_addr down to 4-byte alignment.
+    let hit_aligned = hit_addr & !3;
+
+    // Scan backward up to 512 bytes for a plausible ob_type.
+    let scan_start = hit_aligned.saturating_sub(512);
+    let mut best_obj: Option<(u32, u32, String, u32)> = None; // (obj_addr, ob_type, tp_name, offset)
+
+    let mut candidate = scan_start;
+    while candidate <= hit_aligned {
+        let c = candidate as usize;
+        if c + 8 > mem_len {
+            candidate += 4;
+            continue;
+        }
+        let refcnt = u32::from_le_bytes(data[c..c + 4].try_into().unwrap());
+        // Plausible refcnt: 1..=1_000_000
+        if refcnt == 0 || refcnt > 1_000_000 {
+            candidate += 4;
+            continue;
+        }
+        let ob_type = u32::from_le_bytes(data[c + 4..c + 8].try_into().unwrap());
+        if ob_type == 0 || (ob_type as usize) + 16 > mem_len {
+            candidate += 4;
+            continue;
+        }
+        // Read tp_name pointer at ob_type+12.
+        let tp = ob_type as usize;
+        if tp + 16 > mem_len {
+            candidate += 4;
+            continue;
+        }
+        let tp_name_ptr = u32::from_le_bytes(data[tp + 12..tp + 16].try_into().unwrap()) as usize;
+        if tp_name_ptr == 0 || tp_name_ptr + 1 > mem_len {
+            candidate += 4;
+            continue;
+        }
+        // Read the C string at tp_name_ptr (up to 64 bytes).
+        let name_end = (tp_name_ptr + 64).min(mem_len);
+        let name_bytes = &data[tp_name_ptr..name_end];
+        let nul = name_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(name_bytes.len());
+        let name_slice = &name_bytes[..nul];
+        if name_slice.is_empty()
+            || !name_slice
+                .iter()
+                .all(|&b| b.is_ascii_graphic() || b == b' ')
+        {
+            candidate += 4;
+            continue;
+        }
+        let tp_name = String::from_utf8_lossy(name_slice).into_owned();
+        let offset = hit_aligned.saturating_sub(candidate);
+        // Prefer the candidate closest to the hit (largest offset that still
+        // makes the hit fall within the first 256 bytes of a PyTypeObject).
+        if offset <= 256 {
+            best_obj = Some((candidate, ob_type, tp_name, offset));
+        }
+        candidate += 4;
+    }
+
+    match best_obj {
+        None => format!(
+            "  hit {hit_addr:#010x}: no plausible CPython object boundary found in [{scan_start:#010x}..{hit_aligned:#010x}]\n"
+        ),
+        Some((obj_addr, ob_type, ref tp_name, offset)) => {
+            let slot = py_typeobject_slot_name(offset);
+            let dump_end = ((obj_addr as usize) + 96).min(mem_len);
+            let dump = hexdump(&data[obj_addr as usize..dump_end], obj_addr as usize);
+            format!(
+                "  hit {hit_addr:#010x}: object at {obj_addr:#010x} ob_type={ob_type:#010x} tp_name=\"{tp_name}\"\n\
+                     field offset +{offset} ({offset:#04x}) = {slot}\n\
+                     object dump (96 bytes from {obj_addr:#010x}):\n{dump}"
+            )
+        }
+    }
+}
+
+/// Scan all GOT globals in `got_globals` for the value `needle` (as i32).
+/// Returns a formatted report.
+fn scan_got_globals_for_needle(
+    store: &mut Store<EmbedderState>,
+    got_globals: &GotGlobalMap,
+    needle: u32,
+) -> String {
+    let needle_i32 = needle as i32;
+    let mut hits: Vec<(String, i32)> = Vec::new();
+    for (key, &g) in got_globals {
+        if let Val::I32(v) = g.get(&mut *store)
+            && v == needle_i32
+        {
+            hits.push((key.clone(), v));
+        }
+    }
+    if hits.is_empty() {
+        format!(
+            "GOT global scan for {needle:#010x}: no GOT.func or GOT.mem global holds this value\n"
+        )
+    } else {
+        let mut s = format!(
+            "GOT global scan for {needle:#010x} ({} hits - SMOKING GUN candidates):\n",
+            hits.len()
+        );
+        for (key, v) in &hits {
+            s.push_str(&format!("  {key} = {v:#010x}\n"));
+        }
+        s
+    }
+}
+
+/// Dump `window` bytes centred on `addr` from linear memory. Returns hex+ASCII.
+fn dump_bytes_around(store: &Store<EmbedderState>, addr: u32, window: usize) -> String {
+    let Some(mem) = store.data().pyodide_memory else {
+        return "  pyodide_memory not set\n".to_owned();
+    };
+    let data = mem.data(store);
+    let mem_len = data.len();
+    let half = window / 2;
+    let start = (addr as usize).saturating_sub(half);
+    let end = ((addr as usize) + half).min(mem_len);
+    if start >= mem_len {
+        return format!("  addr {addr:#010x} out of range (mem len={mem_len:#x})\n");
+    }
+    format!(
+        "  [{start:#010x}..{end:#010x}) around {addr:#010x}:\n{}",
+        hexdump(&data[start..end], start)
+    )
+}
+
+/// Run all diagnostics and format a single report block.
+///
+/// `got_globals` is `Some` when available (at trap sites that have the map in scope).
+/// When `None`, the GOT global scan is skipped with a note.
+fn memory_diag(store: &mut Store<EmbedderState>, got_globals: Option<&GotGlobalMap>) -> String {
     const NEEDLE: u32 = 0x7472_6176;
-    let (hits, first_dump) = scan_u32_all(store, NEEDLE);
+
+    // --- Section 1: raw scan for all occurrences of the needle ---
+    let (hits, first_dump) = scan_u32_all(&*store, NEEDLE);
     let scan_report = if hits.is_empty() {
         format!("scan for {NEEDLE:#010x}: no occurrences in linear memory\n")
     } else {
@@ -797,8 +1009,44 @@ fn memory_diag(store: &Store<EmbedderState>) -> String {
         s
     };
 
-    let slot70 = read_u32_at(store, MEMORY_BASE + 0x70);
-    let slot74 = read_u32_at(store, MEMORY_BASE + 0x74);
+    // --- Section 2: identify the object at each hit (up to 5 unique objects) ---
+    // Deduplicate by snapping each hit back to its inferred object boundary so
+    // that 22 hits on the same type do not produce 22 identical dumps.
+    let obj_report = if hits.is_empty() {
+        String::new()
+    } else {
+        let mut s = "object identification (first 5 unique CPython heap hits):\n".to_owned();
+        let mut seen_objs: Vec<u32> = Vec::new();
+        let heap_hits: Vec<u32> = hits
+            .iter()
+            .filter(|(_, r)| *r == "CPython heap")
+            .map(|(a, _)| *a)
+            .collect();
+        for hit_addr in &heap_hits {
+            if seen_objs.len() >= 5 {
+                break;
+            }
+            // Snap to infer object start (heuristic: back up to 512 bytes).
+            let aligned = hit_addr & !3;
+            let start = aligned.saturating_sub(512);
+            // Try to find the object start by the same heuristic as
+            // identify_object_at_hit uses internally; we just check if this
+            // hit already belongs to an already-reported object.
+            if seen_objs
+                .iter()
+                .any(|&o| o <= *hit_addr && *hit_addr < o.saturating_add(512))
+            {
+                continue;
+            }
+            seen_objs.push(start);
+            s.push_str(&identify_object_at_hit(&*store, *hit_addr));
+        }
+        s
+    };
+
+    // --- Section 3: reloc slot spot-check (pre-existing) ---
+    let slot70 = read_u32_at(&*store, MEMORY_BASE + 0x70);
+    let slot74 = read_u32_at(&*store, MEMORY_BASE + 0x74);
     let slot_report = format!(
         "memory_base+0x70 ({:#010x}): {slot70}  (expected: {:#010x})\n\
          memory_base+0x74 ({:#010x}): {slot74}  (expected: 0x00001aa8 = table_base 6824)\n",
@@ -807,21 +1055,38 @@ fn memory_diag(store: &Store<EmbedderState>) -> String {
         MEMORY_BASE + 0x74,
     );
 
-    // "traverse" = 74 72 61 76 65 72 73 65
-    let trav_hits = scan_bytes(store, b"traverse");
+    // --- Section 4: GOT global scan ---
+    let got_report = match got_globals {
+        Some(g) => scan_got_globals_for_needle(store, g, NEEDLE),
+        None => format!(
+            "GOT global scan for {NEEDLE:#010x}: got_globals not available at this trap site\n"
+        ),
+    };
+
+    // --- Section 5: "traverse" string occurrences + 48-byte dump around 0x4b8411 ---
+    // First 4 bytes of "traverse" are 74 72 61 76 = 0x74726176 = NEEDLE.
+    // A pointer to this string equals NEEDLE, explaining the 22 bad slots.
+    let trav_hits = scan_bytes(&*store, b"traverse");
     let trav_report = if trav_hits.is_empty() {
         "scan for \"traverse\": no occurrences in linear memory\n".to_owned()
     } else {
-        // Note: first 4 bytes of "traverse" are 74 72 61 76 = 0x74726176 = NEEDLE.
-        // Any hit address means a pointer to this string == NEEDLE.
         let mut s = format!("scan for \"traverse\" ({} hits):\n", trav_hits.len());
         for addr in &trav_hits {
-            s.push_str(&format!("  [{addr:#010x}] {}\n", classify_addr(*addr),));
+            s.push_str(&format!("  [{addr:#010x}] {}\n", classify_addr(*addr)));
         }
         s
     };
 
-    format!("{scan_report}{slot_report}{trav_report}")
+    // Dump 48 bytes around the known side-module "traverse" string at 0x4b8411.
+    // This address was identified in the previous scan as the side-module data
+    // region occurrence of "traverse". Dump clarifies what structure it belongs to.
+    const TRAV_ADDR: u32 = 0x004b_8411;
+    let trav_dump_report = format!(
+        "48-byte dump around side-module \"traverse\" string at {TRAV_ADDR:#010x}:\n{}",
+        dump_bytes_around(&*store, TRAV_ADDR, 48)
+    );
+
+    format!("{scan_report}{obj_report}{slot_report}{got_report}{trav_report}{trav_dump_report}")
 }
 
 fn format_mech_tail(tail: &[afterburner_wasi::emscripten_runtime::MechCallEntry]) -> String {
