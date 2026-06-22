@@ -45,10 +45,13 @@
 use std::fs;
 
 use afterburner_wasi::embedder_vm::{EmbedderState, deterministic_engine};
+use afterburner_wasi::emscripten_dylink::{fill_got_table_slots, parse_got_name_to_slot};
 use afterburner_wasi::emscripten_runtime::{
     JsFfiCallLog, PYODIDE_STACK_BASE, add_pyodide_imports, fill_unknown_imports_as_traps,
     wire_env_memory_and_table_in_store,
 };
+
+const MECH_TRACE_TAIL: usize = 40;
 use wasmtime::{Linker, Module, Store};
 
 const PYODIDE_WASM_PATH: &str = "/tmp/pyodide.asm.wasm";
@@ -86,6 +89,16 @@ fn run_probe() -> String {
         wasm_bytes.len()
     );
 
+    // ---- parse name section + element segments (before engine init) ----------
+    //
+    // table_base = 1 matches the value passed to wire_env_memory_and_table_in_store.
+    eprintln!("[probe] parsing wasm name section + element segments for GOT resolution...");
+    let name_to_slot = parse_got_name_to_slot(&wasm_bytes, /* table_base */ 1);
+    eprintln!(
+        "[probe] parsed {} name->table_slot entries",
+        name_to_slot.len()
+    );
+
     // ---- build the deterministic engine -------------------------------------
 
     let engine = match deterministic_engine() {
@@ -114,28 +127,38 @@ fn run_probe() -> String {
     let log = JsFfiCallLog::new();
     let mut linker: Linker<EmbedderState> = Linker::new(&engine);
 
-    if let Err(e) = add_pyodide_imports(&engine, &mut linker, log.clone()) {
-        return format!("IMPORT SETUP FAILED: {e}");
-    }
+    let mech_log = match add_pyodide_imports(&engine, &mut linker, log.clone()) {
+        Ok(ml) => ml,
+        Err(e) => return format!("IMPORT SETUP FAILED: {e}"),
+    };
     eprintln!("[probe] wired env.* functions and GOT.* globals");
 
     // ---- build a store and wire memory/table --------------------------------
 
-    let mut store = Store::new(&engine, EmbedderState::with_wasi());
+    // Use for_emscripten (not with_wasi): pyodide.asm.wasm imports its linear
+    // memory as env.memory and does NOT export it. The standard wasmtime-wasi
+    // preview-1 accessor calls caller.get_export("memory") which fails for this
+    // module. Custom WASI shims in emscripten_wasi read memory via
+    // EmbedderState::pyodide_memory, set by wire_env_memory_and_table_in_store.
+    let mut store = Store::new(&engine, EmbedderState::for_emscripten());
     store
         .set_fuel(PROBE_FUEL)
         .expect("set_fuel on consume_fuel engine");
 
-    if let Err(e) = wire_env_memory_and_table_in_store(
+    let got_globals = match wire_env_memory_and_table_in_store(
         &mut store,
         &mut linker,
         /* memory_base */ 0,
         /* table_base */ 1,
         /* stack_base */ PYODIDE_STACK_BASE,
     ) {
-        return format!("MEMORY/TABLE SETUP FAILED: {e}");
-    }
-    eprintln!("[probe] wired env.memory, env.__indirect_function_table, env.__*_base globals");
+        Ok(g) => g,
+        Err(e) => return format!("MEMORY/TABLE SETUP FAILED: {e}"),
+    };
+    eprintln!(
+        "[probe] wired env.memory, env.__indirect_function_table, env.__*_base globals, \
+         GOT.func (pre-filled with slot indices), GOT.mem (pre-filled with symbol addresses)"
+    );
 
     // Fill any remaining unsatisfied function imports with trap stubs.
     let auto_filled = fill_unknown_imports_as_traps(&mut store, &mut linker, &module);
@@ -175,7 +198,29 @@ fn run_probe() -> String {
     let inst_fuel = PROBE_FUEL.saturating_sub(fuel_after_inst);
     eprintln!("[probe] fuel consumed by instantiation: {inst_fuel}");
 
-    // ---- phase 2: __wasm_apply_data_relocs ----------------------------------
+    // ---- phase 2: GOT resolution (assignGOTEntries) -------------------------
+    //
+    // Place host funcrefs into the pre-reserved table slots and write the
+    // correct symbol addresses into GOT.mem globals. GOT.func globals were
+    // already pre-filled with slot indices by wire_env_memory_and_table_in_store.
+
+    eprintln!("[probe] resolving GOT entries...");
+    match fill_got_table_slots(&mut store, &linker, &instance, &got_globals, &name_to_slot) {
+        Ok(report) => {
+            eprintln!(
+                "[probe] GOT resolved: {} from elem-seg, {} from export, {} stub (unresolved), {} mem",
+                report.funcs_from_elem,
+                report.funcs_from_export,
+                report.funcs_stubbed,
+                report.mem_resolved
+            );
+        }
+        Err(e) => {
+            return format!("GOT RESOLUTION FAILED: {e}");
+        }
+    }
+
+    // ---- phase 3: __wasm_apply_data_relocs ----------------------------------
 
     if let Some(func) = instance.get_func(&mut store, "__wasm_apply_data_relocs") {
         eprintln!("[probe] calling __wasm_apply_data_relocs...");
@@ -196,7 +241,7 @@ fn run_probe() -> String {
         eprintln!("[probe] __wasm_apply_data_relocs not found (skipping)");
     }
 
-    // ---- phase 3: __wasm_call_ctors (CPython static init) -------------------
+    // ---- phase 4: __wasm_call_ctors (CPython static init) -------------------
 
     if let Some(func) = instance.get_func(&mut store, "__wasm_call_ctors") {
         eprintln!("[probe] calling __wasm_call_ctors (CPython static init)...");
@@ -206,15 +251,19 @@ fn run_probe() -> String {
                 let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
                 let js_calls = log.total_calls();
                 let js_names = log.snapshot();
+                let wasi_out = store.data().wasi_stdout.clone();
+                let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
 
                 if js_calls == 0 {
                     format!(
                         "BOOT SUCCEEDED (no JS-FFI calls required)\n\
                          Total fuel consumed: {total_fuel}\n\
                          JS-FFI calls: 0\n\
+                         WASI stdout ({} bytes): {wasi_text:?}\n\
                          Finding: Pyodide CPython static init completed without any\n\
                          JS-FFI calls. The module CAN boot headless up to static init.\n\
-                         Next step: probe Python interpreter entry points."
+                         Next step: probe Python interpreter entry points.",
+                        wasi_out.len()
                     )
                 } else {
                     format!(
@@ -222,8 +271,10 @@ fn run_probe() -> String {
                          Total fuel consumed: {total_fuel}\n\
                          JS-FFI call count: {js_calls}\n\
                          JS-FFI functions called: {js_names:?}\n\
+                         WASI stdout ({} bytes): {wasi_text:?}\n\
                          Finding: CPython static init completed but invoked JS-FFI stubs.\n\
-                         These stubs returned 0/null; real JS would be needed to pass them."
+                         These stubs returned 0/null; real JS would be needed to pass them.",
+                        wasi_out.len()
                     )
                 }
             }
@@ -232,13 +283,39 @@ fn run_probe() -> String {
                 let js_names = log.snapshot();
                 let fuel_remaining = store.get_fuel().unwrap_or(0);
                 let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
+                let wasi_out = store.data().wasi_stdout.clone();
+                let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
+
+                // Mechanical trace: last N env.* calls before the trap.
+                let mech_tail = mech_log.tail(MECH_TRACE_TAIL);
+                let mut mech_trace = String::new();
+                for (i, entry) in mech_tail.iter().enumerate() {
+                    let line = if entry.arg0 != 0 || entry.arg1 != 0 {
+                        format!(
+                            "  [{:>3}] {} (arg0={}, arg1={})\n",
+                            i + 1,
+                            entry.name,
+                            entry.arg0,
+                            entry.arg1
+                        )
+                    } else {
+                        format!("  [{:>3}] {}\n", i + 1, entry.name)
+                    };
+                    mech_trace.push_str(&line);
+                }
 
                 // Classify the error.
                 let err_str = format!("{e}");
+                let trap_kind = e
+                    .downcast_ref::<wasmtime::Trap>()
+                    .map(|t| format!("{t:?}"))
+                    .unwrap_or_else(|| format!("(not a wasmtime::Trap); debug chain: {e:?}"));
                 let finding = if err_str.contains("OutOfFuel") || err_str.contains("out of fuel") {
                     "fuel exhausted before boot completed; increase PROBE_FUEL"
                 } else if err_str.contains("unimplemented import") {
                     "hit an auto-filled trap stub (unexpected import not in our list)"
+                } else if err_str.contains("proc_exit") {
+                    "CPython called proc_exit (clean or error exit via WASI)"
                 } else if js_calls > 0 {
                     "CPython static init hit a JS-FFI stub that returned 0/null and caused a downstream trap"
                 } else {
@@ -248,11 +325,17 @@ fn run_probe() -> String {
                 format!(
                     "BOOT FAILED at __wasm_call_ctors\n\
                      Error: {e}\n\
+                     Trap kind: {trap_kind}\n\
                      Fuel consumed: {total_fuel}\n\
                      JS-FFI call count: {js_calls}\n\
                      JS-FFI functions called: {js_names:?}\n\
+                     WASI stdout ({} bytes): {wasi_text:?}\n\
                      Auto-filled imports: {auto_filled:?}\n\
-                     Finding: {finding}"
+                     \n\
+                     --- last {MECH_TRACE_TAIL} mechanical env.* calls before trap ---\n\
+                     {mech_trace}\
+                     Finding: {finding}",
+                    wasi_out.len()
                 )
             }
         }

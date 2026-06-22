@@ -30,7 +30,7 @@
 //! | `emscripten_memcpy_big`      | Same as `emscripten_memcpy_js` (Emscripten routes large copies here). |
 //! | `abort`                      | Traps with an `unreachable` trap (maps to `AfterburnerError::WasmTrap`). |
 //! | `_abort_js`                  | Same - Emscripten's newer JS-layer abort shim. |
-//! | `emscripten_get_now`         | Returns the deterministic virtual clock value (`VIRTUAL_NOW_MS`). No real wall clock - sealed and replay-safe. |
+//! | `emscripten_get_now`         | Returns the deterministic virtual clock value (`VIRTUAL_NOW_MS`). No real wall clock - sealed and deterministic. |
 //! | `emscripten_date_now`        | Returns the deterministic virtual epoch ms (`VIRTUAL_EPOCH_MS`). No real wall clock. |
 //!
 //! ### What Pyodide additionally needs (not in this increment)
@@ -91,6 +91,9 @@ pub const VIRTUAL_NOW_MS: f64 = 1_000.0;
 ///
 /// 2026-01-01 00:00:00 UTC in milliseconds.
 pub const VIRTUAL_EPOCH_MS: f64 = 1_767_139_200_000.0;
+
+/// The same epoch in nanoseconds, for WASI `clock_time_get` (which takes u64 ns).
+pub const VIRTUAL_EPOCH_NS: u64 = 1_767_139_200_000_000_000;
 
 // ---- memory helper ----------------------------------------------------------
 

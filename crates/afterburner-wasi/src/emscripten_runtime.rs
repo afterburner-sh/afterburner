@@ -26,32 +26,105 @@
 //!
 //! ## WASI
 //!
-//! [`add_pyodide_imports`] wires `wasi_snapshot_preview1` via a real WASI
-//! preview-1 context so Pyodide's fd_write/fd_read/proc_exit calls succeed.
-//! The caller must create the store with a WASI-enabled [`EmbedderState`];
-//! see [`EmbedderState::with_wasi`].
+//! [`add_pyodide_imports`] wires `wasi_snapshot_preview1` via custom host
+//! shims in [`crate::emscripten_wasi`]. These shims access guest memory
+//! through `EmbedderState::pyodide_memory` (the `env.memory` import handle)
+//! rather than `caller.get_export("memory")`, which does not exist because
+//! Emscripten modules import rather than export their linear memory.
+//!
+//! After calling `wire_env_memory_and_table_in_store`, the returned `Memory`
+//! handle is set into the store: `store.data_mut().pyodide_memory = Some(mem)`.
+//! The store must be created with [`EmbedderState::for_emscripten`].
 //!
 //! ## Determinism
 //!
 //! All clock functions return fixed virtual constants from
 //! [`crate::emscripten_abi`]. No real wall clock.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
+use crate::{
+    embedder_vm::EmbedderState,
+    emscripten_dylink::{
+        GOT_FUNC_NAMES, GotGlobalMap, PYODIDE_TABLE_WITH_GOT_SIZE, prefill_got_func_globals,
+        prefill_got_mem_globals,
+    },
+    emscripten_jsffi::wire_jsffi_stubs,
+    emscripten_mechanical::wire_mechanical_env_funcs,
+    emscripten_wasi::wire_wasi_snapshot_preview1,
+};
 use afterburner_core::{AfterburnerError, Result};
 use wasmtime::{
     Caller, Engine, Global, GlobalType, Linker, MemoryType, Mutability, Table, TableType, Val,
     ValType,
 };
-use wasmtime_wasi::p1::add_to_linker_sync;
 
-use crate::{
-    embedder_vm::EmbedderState, emscripten_jsffi::wire_jsffi_stubs,
-    emscripten_mechanical::wire_mechanical_env_funcs,
-};
+// ---- mechanical env.* call trace --------------------------------------------
+
+/// Capacity of the mechanical-call ring buffer (power of two).
+const MECH_RING_CAP: usize = 64;
+
+/// One recorded mechanical env.* call.
+#[derive(Clone, Debug)]
+pub struct MechCallEntry {
+    /// The function name (e.g. `"__syscall_openat"`).
+    pub name: &'static str,
+    /// First integer argument (fd / dirfd / path ptr), or 0 when not applicable.
+    pub arg0: i32,
+    /// Second integer argument, or 0 when not applicable.
+    pub arg1: i32,
+}
+
+/// Shared lock-free-ish ring buffer of the last `MECH_RING_CAP` mechanical
+/// env.* calls. Single-threaded wasmtime execution means the `Mutex` is never
+/// contended; it serves only to satisfy `Send + Sync` for `Arc`.
+pub struct MechCallLog {
+    ring: Mutex<VecDeque<MechCallEntry>>,
+}
+
+impl MechCallLog {
+    /// Create a new, empty log.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            ring: Mutex::new(VecDeque::with_capacity(MECH_RING_CAP)),
+        })
+    }
+
+    /// Record one mechanical env.* call. Keeps only the last `MECH_RING_CAP` entries.
+    pub fn push(&self, name: &'static str, arg0: i32, arg1: i32) {
+        let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
+        if ring.len() == MECH_RING_CAP {
+            ring.pop_front();
+        }
+        ring.push_back(MechCallEntry { name, arg0, arg1 });
+    }
+
+    /// Return the last `n` entries in chronological order.
+    pub fn tail(&self, n: usize) -> Vec<MechCallEntry> {
+        let ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
+        let skip = ring.len().saturating_sub(n);
+        ring.iter().skip(skip).cloned().collect()
+    }
+
+    /// Total entries ever pushed (wraps at `usize::MAX`, irrelevant for diagnostics).
+    pub fn len(&self) -> usize {
+        self.ring.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Returns true if no entries have been recorded.
+    pub fn is_empty(&self) -> bool {
+        self.ring
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+    }
+}
 
 // ---- wasmtime Result alias ---------------------------------------------------
 
@@ -131,23 +204,32 @@ pub const PYODIDE_STACK_BASE: u32 = 4_632_232 + 5 * 1024 * 1024;
 /// into `linker`.
 ///
 /// Does NOT wire memory, table, or any globals (those are store-bound); call
-/// [`wire_env_memory_and_table_in_store`] with the instantiation store.
+/// [`wire_env_memory_and_table_in_store`] with the instantiation store, then
+/// set `store.data_mut().pyodide_memory = Some(mem)` with the returned handle.
 ///
-/// `log` receives the name of every JS-FFI stub call during execution.
+/// The store must be created with [`EmbedderState::for_emscripten`] (not
+/// `with_wasi`). Custom `wasi_snapshot_preview1` shims read guest memory via
+/// `EmbedderState::pyodide_memory` because Emscripten modules import rather
+/// than export their linear memory.
+///
+/// `js_log` receives the name of every JS-FFI stub call during execution.
+/// Returns the [`MechCallLog`] that records every mechanical env.* call;
+/// inspect it after a trap with [`MechCallLog::tail`] to diagnose the failure.
 pub fn add_pyodide_imports(
     engine: &Engine,
     linker: &mut Linker<EmbedderState>,
-    log: Arc<JsFfiCallLog>,
-) -> Result<()> {
-    // Wire real WASI preview-1. Pyodide imports fd_write, fd_read, proc_exit,
-    // etc. The store must be created with a WASI EmbedderState so the accessor
-    // is non-None at call time.
-    add_to_linker_sync(linker, |s: &mut EmbedderState| s.wasi_ctx_mut())
-        .map_err(|e| AfterburnerError::Engine(format!("wasi preview1 linker: {e}")))?;
+    js_log: Arc<JsFfiCallLog>,
+) -> Result<Arc<MechCallLog>> {
+    // Custom WASI shims that read guest memory via EmbedderState::pyodide_memory
+    // (the env.memory import handle). The standard wasmtime-wasi preview-1
+    // cannot be used here because it calls caller.get_export("memory"), but
+    // Emscripten modules import (not export) their linear memory.
+    wire_wasi_snapshot_preview1(linker)?;
 
-    wire_mechanical_env_funcs(engine, linker)?;
-    wire_jsffi_stubs(engine, linker, log)?;
-    Ok(())
+    let mech_log = MechCallLog::new();
+    wire_mechanical_env_funcs(engine, linker, mech_log.clone())?;
+    wire_jsffi_stubs(engine, linker, js_log)?;
+    Ok(mech_log)
 }
 
 /// Wire `env.memory`, `env.__indirect_function_table`, the three env base
@@ -155,16 +237,38 @@ pub fn add_pyodide_imports(
 ///
 /// Everything is created in `store` to satisfy wasmtime's same-store
 /// requirement. Must be called with the exact store passed to instantiate.
+///
+/// The table is sized to `PYODIDE_TABLE_WITH_GOT_SIZE` (module slots +
+/// host-GOT slots) so that `fill_got_table_slots` can place host funcrefs
+/// into the pre-reserved host slots after instantiation.
+///
+/// GOT.func globals are pre-filled with their pre-assigned table slot indices
+/// (not zero) and GOT.mem globals are pre-filled with the known symbol
+/// addresses. Both happen before instantiation so any code that reads these
+/// globals during or after the active element segment fires sees valid values.
+///
+/// Sets `store.data_mut().pyodide_memory = Some(memory)` so the custom
+/// `wasi_snapshot_preview1` shims can access guest linear memory via
+/// `Caller::data()` rather than `caller.get_export("memory")`.
+///
+/// Returns the [`GotGlobalMap`] containing all `Global` handles keyed by
+/// `"GOT.func::name"` and `"GOT.mem::name"`. Pass these to
+/// `fill_got_table_slots` if further writes are needed (currently pre-filling
+/// is complete).
 pub fn wire_env_memory_and_table_in_store(
     store: &mut wasmtime::Store<EmbedderState>,
     linker: &mut Linker<EmbedderState>,
     memory_base: u32,
     table_base: u32,
     stack_base: u32,
-) -> Result<()> {
+) -> Result<GotGlobalMap> {
     let mem_ty = MemoryType::new(PYODIDE_MEMORY_INITIAL_PAGES, Some(PYODIDE_MEMORY_MAX_PAGES));
     let memory = wasmtime::Memory::new(&mut *store, mem_ty)
         .map_err(|e| AfterburnerError::Engine(format!("pyodide memory: {e}")))?;
+    // Store the handle in EmbedderState so custom WASI shims can access
+    // guest linear memory without relying on a "memory" export (which
+    // Emscripten modules do not provide - they import, not export, memory).
+    store.data_mut().pyodide_memory = Some(memory);
     linker
         .define(
             &mut *store,
@@ -174,7 +278,15 @@ pub fn wire_env_memory_and_table_in_store(
         )
         .map_err(|e| AfterburnerError::Engine(format!("define env.memory: {e}")))?;
 
-    let tbl_ty = TableType::new(wasmtime::RefType::FUNCREF, PYODIDE_TABLE_INITIAL_SIZE, None);
+    // Size = module element region + pre-reserved host GOT slots.
+    // The active element segment fires at instantiation and fills slots
+    // [table_base .. table_base + 6642); host GOT slots follow at
+    // [PYODIDE_TABLE_INITIAL_SIZE .. PYODIDE_TABLE_WITH_GOT_SIZE).
+    let tbl_ty = TableType::new(
+        wasmtime::RefType::FUNCREF,
+        PYODIDE_TABLE_WITH_GOT_SIZE,
+        None,
+    );
     let table = Table::new(&mut *store, tbl_ty, wasmtime::Ref::Func(None))
         .map_err(|e| AfterburnerError::Engine(format!("pyodide table: {e}")))?;
     linker
@@ -236,20 +348,18 @@ pub fn wire_env_memory_and_table_in_store(
         )
         .map_err(|e| AfterburnerError::Engine(format!("define env.__stack_pointer: {e}")))?;
 
-    // GOT.func and GOT.mem globals: mutable i32, zero-initialized.
-    // Created in the same store so wasmtime's same-store check in
-    // linker.instantiate passes. `__wasm_apply_data_relocs` patches them
-    // at runtime with the actual symbol indices and memory addresses.
-    //
-    // vertexia: all GOT entries start at 0; a real dynamic linker patches them
-    // at link time. Upgrade path: parse module exports to pre-fill GOTs.
+    // GOT.func and GOT.mem globals: mutable i32.
+    // We collect handles into a map so callers can pre-fill and update them.
+    let mut got_globals: GotGlobalMap = HashMap::new();
     let got_ty = GlobalType::new(ValType::I32, Mutability::Var);
+
     for name in GOT_FUNC_NAMES {
         let g = Global::new(&mut *store, got_ty.clone(), Val::I32(0))
             .map_err(|e| AfterburnerError::Engine(format!("GOT.func.{name}: {e}")))?;
         linker
             .define(&mut *store, "GOT.func", name, wasmtime::Extern::Global(g))
             .map_err(|e| AfterburnerError::Engine(format!("define GOT.func.{name}: {e}")))?;
+        got_globals.insert(format!("GOT.func::{name}"), g);
     }
     for name in GOT_MEM_NAMES {
         let g = Global::new(&mut *store, got_ty.clone(), Val::I32(0))
@@ -257,196 +367,19 @@ pub fn wire_env_memory_and_table_in_store(
         linker
             .define(&mut *store, "GOT.mem", name, wasmtime::Extern::Global(g))
             .map_err(|e| AfterburnerError::Engine(format!("define GOT.mem.{name}: {e}")))?;
+        got_globals.insert(format!("GOT.mem::{name}"), g);
     }
 
-    Ok(())
+    // Pre-fill GOT.func with pre-assigned table slot indices (not zero).
+    // Pre-fill GOT.mem with known symbol addresses.
+    prefill_got_func_globals(store, &got_globals)?;
+    prefill_got_mem_globals(store, &got_globals, memory_base, stack_base)?;
+
+    Ok(got_globals)
 }
 
-// ---- GOT.func / GOT.mem global name tables -----------------------------------
-
-const GOT_FUNC_NAMES: &[&str] = &[
-    "__cxa_end_catch",
-    "__cxa_rethrow",
-    "abort",
-    "emscripten_glVertexAttribDivisorANGLE",
-    "emscripten_glDrawElementsInstancedANGLE",
-    "emscripten_glDrawArraysInstancedANGLE",
-    "emscripten_glDrawBuffersWEBGL",
-    "emscripten_glIsVertexArrayOES",
-    "emscripten_glGenVertexArraysOES",
-    "emscripten_glDeleteVertexArraysOES",
-    "emscripten_glBindVertexArrayOES",
-    "emscripten_glGetQueryObjectui64vEXT",
-    "emscripten_glGetQueryObjecti64vEXT",
-    "emscripten_glGetQueryObjectuivEXT",
-    "emscripten_glGetQueryObjectivEXT",
-    "emscripten_glGetQueryivEXT",
-    "emscripten_glQueryCounterEXT",
-    "emscripten_glEndQueryEXT",
-    "emscripten_glBeginQueryEXT",
-    "emscripten_glIsQueryEXT",
-    "emscripten_glDeleteQueriesEXT",
-    "emscripten_glGenQueriesEXT",
-    "emscripten_err",
-    "emscripten_out",
-    "emscripten_console_warn",
-    "emscripten_console_error",
-    "emscripten_console_log",
-    "emscripten_glViewport",
-    "emscripten_glVertexAttribPointer",
-    "emscripten_glVertexAttrib4fv",
-    "emscripten_glVertexAttrib4f",
-    "emscripten_glVertexAttrib3fv",
-    "emscripten_glVertexAttrib3f",
-    "emscripten_glVertexAttrib2fv",
-    "emscripten_glVertexAttrib2f",
-    "emscripten_glVertexAttrib1fv",
-    "emscripten_glVertexAttrib1f",
-    "emscripten_glValidateProgram",
-    "emscripten_glUseProgram",
-    "emscripten_glUniformMatrix4fv",
-    "emscripten_glUniformMatrix3fv",
-    "emscripten_glUniformMatrix2fv",
-    "emscripten_glUniform4iv",
-    "emscripten_glUniform4i",
-    "emscripten_glUniform4fv",
-    "emscripten_glUniform4f",
-    "emscripten_glUniform3iv",
-    "emscripten_glUniform3i",
-    "emscripten_glUniform3fv",
-    "emscripten_glUniform3f",
-    "emscripten_glUniform2iv",
-    "emscripten_glUniform2i",
-    "emscripten_glUniform2fv",
-    "emscripten_glUniform2f",
-    "emscripten_glUniform1iv",
-    "emscripten_glUniform1i",
-    "emscripten_glUniform1fv",
-    "emscripten_glUniform1f",
-    "emscripten_glUniformBlockBinding",
-    "emscripten_glTexSubImage2D",
-    "emscripten_glTexParameteriv",
-    "emscripten_glTexParameteri",
-    "emscripten_glTexParameterfv",
-    "emscripten_glTexParameterf",
-    "emscripten_glTexImage3D",
-    "emscripten_glTexImage2D",
-    "emscripten_glStencilOpSeparate",
-    "emscripten_glStencilOp",
-    "emscripten_glStencilMaskSeparate",
-    "emscripten_glStencilMask",
-    "emscripten_glStencilFuncSeparate",
-    "emscripten_glStencilFunc",
-    "emscripten_glShaderSource",
-    "emscripten_glScissor",
-    "emscripten_glSampleCoverage",
-    "emscripten_glRenderbufferStorage",
-    "emscripten_glReadPixels",
-    "emscripten_glPolygonOffset",
-    "emscripten_glPixelStorei",
-    "emscripten_glLinkProgram",
-    "emscripten_glLineWidth",
-    "emscripten_glIsVertexArray",
-    "emscripten_glIsTexture",
-    "emscripten_glIsShader",
-    "emscripten_glIsRenderbuffer",
-    "emscripten_glIsProgram",
-    "emscripten_glIsFramebuffer",
-    "emscripten_glIsEnabled",
-    "emscripten_glIsBuffer",
-    "emscripten_glGetVertexAttribPointerv",
-    "emscripten_glGetVertexAttribiv",
-    "emscripten_glGetVertexAttribfv",
-    "emscripten_glGetUniformLocation",
-    "emscripten_glGetUniformiv",
-    "emscripten_glGetUniformfv",
-    "emscripten_glGetUniformBlockIndex",
-    "emscripten_glGetTexParameteriv",
-    "emscripten_glGetTexParameterfv",
-    "emscripten_glGetShaderSource",
-    "emscripten_glGetShaderPrecisionFormat",
-    "emscripten_glGetShaderiv",
-    "emscripten_glGetShaderInfoLog",
-    "emscripten_glGetRenderbufferParameteriv",
-    "emscripten_glGetProgramiv",
-    "emscripten_glGetProgramInfoLog",
-    "emscripten_glGetIntegerv",
-    "emscripten_glGetFramebufferAttachmentParameteriv",
-    "emscripten_glGetError",
-    "emscripten_glGetBufferParameteriv",
-    "emscripten_glGetAttribLocation",
-    "emscripten_glGetAttachedShaders",
-    "emscripten_glGetActiveUniformBlockiv",
-    "emscripten_glGetActiveUniformBlockName",
-    "emscripten_glGetActiveUniform",
-    "emscripten_glGetActiveAttrib",
-    "emscripten_glGenVertexArrays",
-    "emscripten_glGenTextures",
-    "emscripten_glGenRenderbuffers",
-    "emscripten_glGenFramebuffers",
-    "emscripten_glGenBuffers",
-    "emscripten_glFramebufferTextureLayer",
-    "emscripten_glFramebufferTexture2D",
-    "emscripten_glFramebufferRenderbuffer",
-    "emscripten_glFlush",
-    "emscripten_glFinish",
-    "emscripten_glEnableVertexAttribArray",
-    "emscripten_glEnable",
-    "emscripten_glDrawRangeElements",
-    "emscripten_glDrawElements",
-    "emscripten_glDrawBuffers",
-    "emscripten_glDrawArrays",
-    "emscripten_glDisableVertexAttribArray",
-    "emscripten_glDisable",
-    "emscripten_glDetachShader",
-    "emscripten_glDepthRange",
-    "emscripten_glDepthMask",
-    "emscripten_glDepthFunc",
-    "emscripten_glDeleteVertexArrays",
-    "emscripten_glDeleteTextures",
-    "emscripten_glDeleteShader",
-    "emscripten_glDeleteRenderbuffers",
-    "emscripten_glDeleteProgram",
-    "emscripten_glDeleteFramebuffers",
-    "emscripten_glDeleteBuffers",
-    "emscripten_glCullFace",
-    "emscripten_glCreateShader",
-    "emscripten_glCreateProgram",
-    "emscripten_glCopyTexSubImage2D",
-    "emscripten_glCompileShader",
-    "emscripten_glColorMask",
-    "emscripten_glClearStencil",
-    "emscripten_glClearDepthf",
-    "emscripten_glClearColor",
-    "emscripten_glClear",
-    "emscripten_glCheckFramebufferStatus",
-    "emscripten_glBufferSubData",
-    "emscripten_glBufferData",
-    "emscripten_glBlendFuncSeparate",
-    "emscripten_glBlendFunc",
-    "emscripten_glBlendEquationSeparate",
-    "emscripten_glBlendEquation",
-    "emscripten_glBlendColor",
-    "emscripten_glBindTexture",
-    "emscripten_glBindRenderbuffer",
-    "emscripten_glBindFramebuffer",
-    "emscripten_glBindBuffer",
-    "emscripten_glBindAttribLocation",
-    "emscripten_glAttachShader",
-    "emscripten_glActiveTexture",
-    "emscripten_glShaderBinary",
-    "emscripten_glReleaseShaderCompiler",
-    "emscripten_glHint",
-    "emscripten_glGetString",
-    "emscripten_glGetFloatv",
-    "emscripten_glGetBooleanv",
-    "emscripten_glGenerateMipmap",
-    "emscripten_glFrontFace",
-    "emscripten_glDepthRangef",
-    "emscripten_glCopyTexImage2D",
-    "emscripten_glCompressedTexSubImage2D",
-    "emscripten_glCompressedTexImage2D",
-];
+// ---- GOT.mem name table ------------------------------------------------------
+// GOT.func names live in emscripten_dylink::GOT_FUNC_NAMES (imported above).
 
 const GOT_MEM_NAMES: &[&str] = &["__heap_base", "__stack_low", "__stack_high"];
 

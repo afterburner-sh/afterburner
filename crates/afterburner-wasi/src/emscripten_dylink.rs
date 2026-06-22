@@ -1,0 +1,622 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 vertexclique
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
+//! Emscripten GOT resolution for standalone (no-JS) hosting of SIDE_MODULEs.
+//!
+//! ## What this solves
+//!
+//! `pyodide.asm.wasm` is an Emscripten SIDE_MODULE. It imports 181 `GOT.func.*`
+//! and 3 `GOT.mem.*` mutable i32 globals. The standard JS loader populates them
+//! after instantiation via `assignGOTEntries`. Without that step every read of a
+//! GOT slot returns 0, which an indirect `call_indirect` uses as a table index -
+//! slot 0 is the Wasm null/trap slot, so `__wasm_call_ctors` traps immediately.
+//!
+//! ## Algorithm (mirrors Emscripten's assignGOTEntries)
+//!
+//! GOT.func.<name>:
+//!   - Parse the module bytes once (via `parse_got_name_to_slot`) to build a
+//!     `name -> table_slot` map from the wasm name section + active element
+//!     segments. This is the correct source: the element segments place function
+//!     references at specific table slots at instantiation time, and the name
+//!     section records which function index owns which name. 178 of 181 GOT.func
+//!     symbols are internal module functions not exported by name; they are only
+//!     reachable via this path.
+//!   - Each GOT.func global is pre-assigned a stub table slot at
+//!     `PYODIDE_TABLE_INITIAL_SIZE + index` before instantiation so that any
+//!     `call_indirect` that fires before `fill_got_table_slots` lands on a
+//!     defined (stub) entry rather than the null slot.
+//!   - After instantiation, `fill_got_table_slots` overwrites the GOT global with
+//!     the real table slot from the parsed map (resolution order: name+elem map
+//!     first, then module export fallback, else leave stub slot).
+//!
+//! GOT.mem.<name>:
+//!   - `__heap_base` = `memory_base` + dylink.0 `memory_size` (4 632 232 bytes).
+//!   - `__stack_high` = initial stack pointer (top of stack region).
+//!   - `__stack_low`  = `__stack_high` - stack region size.
+//!   - All three are written by `prefill_got_mem_globals` before instantiation
+//!     via the `Global` handles returned from `wire_env_memory_and_table_in_store`.
+//!
+//! ## Call order in the probe
+//!
+//!   1. `parse_got_name_to_slot` - parse wasm bytes to build name->table_slot.
+//!   2. `wire_env_memory_and_table_in_store` - creates memory/table/GOT globals,
+//!      pre-fills GOT.func with stub slot indices, GOT.mem with symbol addresses.
+//!   3. `linker.instantiate` - active element segment populates module slots
+//!      [table_base .. table_base + table_size); host stub slots follow.
+//!   4. `fill_got_table_slots` - updates GOT.func globals to real table slots
+//!      using the parsed name->slot map; places host funcs into the table for
+//!      names that resolved via a linker export.
+//!   5. `__wasm_apply_data_relocs` - relocates data symbols relative to memory_base.
+//!   6. `__wasm_call_ctors` - C++ / CPython static init.
+
+use std::collections::HashMap;
+
+use afterburner_core::{AfterburnerError, Result};
+use wasmparser::{ElementItems, ElementKind, Name, Operator, Parser, Payload};
+use wasmtime::{Func, FuncType, Global, Instance, Linker, Ref, Store, Val};
+
+use crate::embedder_vm::EmbedderState;
+use crate::emscripten_runtime::PYODIDE_TABLE_INITIAL_SIZE;
+
+/// Memory size declared in `pyodide.asm.wasm`'s `dylink.0` section (bytes).
+const DYLINK_MEMORY_SIZE: u32 = 4_632_232;
+
+/// Stack region size (same as used in PYODIDE_STACK_BASE calculation).
+pub const PYODIDE_STACK_SIZE: u32 = 5 * 1024 * 1024;
+
+/// Number of host-slot entries: one per GOT.func symbol.
+pub const GOT_FUNC_HOST_SLOTS: u32 = GOT_FUNC_NAMES.len() as u32;
+
+/// Total table size that must be created: module region + host GOT slots.
+///
+/// Pass this to `TableType::new` instead of `PYODIDE_TABLE_INITIAL_SIZE` so
+/// the host slots exist before instantiation fires the active element segment.
+pub const PYODIDE_TABLE_WITH_GOT_SIZE: u32 = PYODIDE_TABLE_INITIAL_SIZE + GOT_FUNC_HOST_SLOTS;
+
+/// Pre-assigned table slot index for GOT.func entry at position `idx`
+/// in `GOT_FUNC_NAMES`.
+#[inline]
+pub fn got_func_slot(idx: usize) -> u32 {
+    PYODIDE_TABLE_INITIAL_SIZE + idx as u32
+}
+
+// ---- GOT global handles passed between wiring and resolution -----------------
+
+/// Handles to every GOT global that was defined into the store by
+/// `wire_env_memory_and_table_in_store`. Keyed by `"GOT.func::name"` or
+/// `"GOT.mem::name"`. These handles are `Copy` (wasmtime::Global is Copy)
+/// so they can be cloned and used after the linker/store are borrowed elsewhere.
+pub type GotGlobalMap = HashMap<String, Global>;
+
+// ---- pre-fill GOT.func globals -----------------------------------------------
+
+/// Write the pre-assigned slot index into every `GOT.func.*` global.
+///
+/// Called from `wire_env_memory_and_table_in_store` after creating the globals
+/// so that any code reading a GOT.func slot before `fill_got_table_slots` sees
+/// a non-zero index (pointing to a null funcref slot rather than the trap slot 0).
+pub fn prefill_got_func_globals(
+    store: &mut Store<EmbedderState>,
+    got_globals: &GotGlobalMap,
+) -> Result<()> {
+    for (idx, name) in GOT_FUNC_NAMES.iter().enumerate() {
+        let slot = got_func_slot(idx) as i32;
+        let key = format!("GOT.func::{name}");
+        if let Some(&g) = got_globals.get(&key) {
+            g.set(&mut *store, Val::I32(slot))
+                .map_err(|e| AfterburnerError::Engine(format!("prefill {key} = {slot}: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
+/// Write the known symbol addresses into every `GOT.mem.*` global.
+///
+/// - `__heap_base` = `memory_base` + dylink.0 memory_size.
+/// - `__stack_high` = `stack_high` (= PYODIDE_STACK_BASE).
+/// - `__stack_low`  = `stack_high` - `PYODIDE_STACK_SIZE`.
+pub fn prefill_got_mem_globals(
+    store: &mut Store<EmbedderState>,
+    got_globals: &GotGlobalMap,
+    memory_base: u32,
+    stack_high: u32,
+) -> Result<()> {
+    let heap_base = memory_base + DYLINK_MEMORY_SIZE;
+    let stack_low = stack_high.saturating_sub(PYODIDE_STACK_SIZE);
+
+    let pairs: &[(&str, u32)] = &[
+        ("__heap_base", heap_base),
+        ("__stack_high", stack_high),
+        ("__stack_low", stack_low),
+    ];
+    for (name, value) in pairs {
+        let key = format!("GOT.mem::{name}");
+        if let Some(&g) = got_globals.get(&key) {
+            g.set(&mut *store, Val::I32(*value as i32))
+                .map_err(|e| AfterburnerError::Engine(format!("prefill {key} = {value}: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
+// ---- parse name section + element segments to build name->table_slot ----------
+
+/// Parse `wasm` bytes to build a `name -> table_slot` map for GOT.func resolution.
+///
+/// Emscripten SIDE_MODULE structure:
+/// - Name section "functions" subsection: `func_index -> name` for every
+///   function in the module (imports included, starting at index 0).
+/// - One active element segment targeting table 0 with offset
+///   `global.get $__table_base` (= `table_base`) followed by a list of function
+///   indices. Position `k` in the list maps to table slot `table_base + k`.
+///
+/// Compose: `name -> func_index` (name section) + `func_index -> table_slot`
+/// (element segment, inverted) = `name -> table_slot`.
+///
+/// `table_base` must match the value passed to `wire_env_memory_and_table_in_store`
+/// (conventionally 1 for Emscripten SIDE_MODULEs).
+///
+/// Resolution is best-effort: names absent from the name section or not placed
+/// in any element segment are not present in the returned map.
+pub fn parse_got_name_to_slot(wasm: &[u8], table_base: u32) -> HashMap<String, u32> {
+    // func_index -> name (from name section, subsection 1 = functions).
+    let mut func_names: HashMap<u32, String> = HashMap::new();
+    // func_index -> table_slot (inverted element segment).
+    let mut func_to_slot: HashMap<u32, u32> = HashMap::new();
+
+    for payload in Parser::new(0).parse_all(wasm) {
+        let payload = match payload {
+            Ok(p) => p,
+            Err(_) => break,
+        };
+        match payload {
+            Payload::CustomSection(cs) if cs.name() == "name" => {
+                parse_name_section(cs.data(), cs.data_offset(), &mut func_names);
+            }
+            Payload::ElementSection(reader) => {
+                parse_element_section(reader, table_base, &mut func_to_slot);
+            }
+            Payload::End(_) => break,
+            _ => {}
+        }
+    }
+
+    // Compose: name -> table_slot.
+    let mut out: HashMap<String, u32> = HashMap::with_capacity(func_names.len());
+    for (fi, name) in &func_names {
+        if let Some(&slot) = func_to_slot.get(fi) {
+            out.insert(name.clone(), slot);
+        }
+    }
+    out
+}
+
+/// Parse the name-section bytes (already extracted from the custom section).
+fn parse_name_section(data: &[u8], data_offset: usize, out: &mut HashMap<u32, String>) {
+    use wasmparser::BinaryReader;
+    use wasmparser::Subsections;
+
+    let reader = BinaryReader::new(data, data_offset);
+    let mut subs: Subsections<'_, Name<'_>> = Subsections::new(reader);
+    while let Some(Ok(sub)) = subs.next() {
+        if let Name::Function(map) = sub {
+            for naming in map.into_iter().flatten() {
+                out.insert(naming.index, naming.name.to_owned());
+            }
+        }
+    }
+}
+
+/// Parse all active element segments and record `func_index -> table_slot`.
+///
+/// Emscripten emits the segment offset as `global.get $__table_base` (a single
+/// GlobalGet operator, resolved at runtime to `table_base`). An `i32.const N`
+/// offset is also handled for defensive coverage.
+fn parse_element_section(
+    reader: wasmparser::ElementSectionReader<'_>,
+    table_base: u32,
+    out: &mut HashMap<u32, u32>,
+) {
+    for elem in reader.into_iter().flatten() {
+        let offset = match &elem.kind {
+            ElementKind::Active {
+                table_index,
+                offset_expr,
+            } => {
+                // Only handle table 0 (None = implicit 0, Some(0) = explicit 0).
+                if matches!(table_index, Some(n) if *n != 0) {
+                    continue;
+                }
+                eval_offset_expr(offset_expr, table_base)
+            }
+            _ => continue,
+        };
+        let offset = match offset {
+            Some(o) => o,
+            None => continue,
+        };
+
+        match elem.items {
+            ElementItems::Functions(fs) => {
+                for (pos, fi) in fs.into_iter().flatten().enumerate() {
+                    let slot = offset.saturating_add(pos as u32);
+                    // First write wins (element segments don't overlap for a
+                    // well-formed SIDE_MODULE).
+                    out.entry(fi).or_insert(slot);
+                }
+            }
+            ElementItems::Expressions(_, exprs) => {
+                // Emscripten SIDE_MODULEs use Functions items, not Expressions.
+                // Handle defensively in case a future version differs.
+                for (pos, expr) in exprs.into_iter().flatten().enumerate() {
+                    let mut ops = expr.get_operators_reader();
+                    if let Ok(Operator::RefFunc { function_index }) = ops.read() {
+                        let slot = offset.saturating_add(pos as u32);
+                        out.entry(function_index).or_insert(slot);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Evaluate a ConstExpr to a u32 table offset.
+///
+/// Handles:
+/// - `i32.const N` -> `N as u32`
+/// - `global.get <any>` -> `table_base` (the only global.get in SIDE_MODULE
+///   element offsets is `$__table_base`, resolved to `table_base` at runtime)
+///
+/// Returns `None` for compound or unsupported expressions.
+fn eval_offset_expr(expr: &wasmparser::ConstExpr<'_>, table_base: u32) -> Option<u32> {
+    let mut ops = expr.get_operators_reader();
+    match ops.read().ok()? {
+        Operator::I32Const { value } => Some(value as u32),
+        Operator::GlobalGet { .. } => Some(table_base),
+        _ => None,
+    }
+}
+
+// ---- post-instantiation: resolve GOT.func globals ---------------------------
+
+/// Resolution summary returned by `fill_got_table_slots`.
+#[derive(Debug)]
+pub struct GotResolutionReport {
+    /// GOT.func globals updated to a real element-segment table slot.
+    pub funcs_from_elem: u32,
+    /// GOT.func globals resolved via a linker host export (env.* function).
+    pub funcs_from_export: u32,
+    /// GOT.func globals that remain on their pre-assigned stub slot.
+    pub funcs_stubbed: u32,
+    /// GOT.mem entries resolved (always 3 for pyodide.asm.wasm).
+    pub mem_resolved: u32,
+}
+
+/// Update GOT.func globals with real table slot indices from the module's element
+/// segments, then place host funcs into the stub slots for any name found in the
+/// linker.
+///
+/// Must be called AFTER `linker.instantiate` and BEFORE
+/// `__wasm_apply_data_relocs` / `__wasm_call_ctors`.
+///
+/// Resolution order per name:
+/// 1. Name-section + element-segment table slot (`name_to_slot` map): update the
+///    GOT global to that slot. The function reference was placed there by the
+///    active element segment during instantiation.
+/// 2. Module export fallback via `instance.get_func(name)`: place the func into
+///    the pre-assigned stub slot and keep the global pointing to it.
+/// 3. Linker host export (`env.<name>`): place the func into the stub slot.
+/// 4. Unresolved: leave the pre-assigned stub slot (null funcref, will trap if
+///    called, but `call_indirect` at a non-zero slot index does not trap on
+///    address-of usage).
+///
+/// `name_to_slot` should come from `parse_got_name_to_slot` called on the same
+/// wasm bytes before instantiation.
+///
+/// `got_globals` should be the map returned by `wire_env_memory_and_table_in_store`.
+pub fn fill_got_table_slots(
+    store: &mut Store<EmbedderState>,
+    linker: &Linker<EmbedderState>,
+    instance: &Instance,
+    got_globals: &GotGlobalMap,
+    name_to_slot: &HashMap<String, u32>,
+) -> Result<GotResolutionReport> {
+    // The table is a host-defined import; retrieve it from the linker.
+    let table = linker
+        .get(&mut *store, "env", "__indirect_function_table")
+        .map_err(|e| {
+            AfterburnerError::Engine(format!(
+                "GOT resolution: cannot get env.__indirect_function_table from linker: {e}"
+            ))
+        })?
+        .into_table()
+        .ok_or_else(|| {
+            AfterburnerError::Engine(
+                "GOT resolution: env.__indirect_function_table is not a table".into(),
+            )
+        })?;
+
+    let mut funcs_from_elem = 0u32;
+    let mut funcs_from_export = 0u32;
+    let mut funcs_stubbed = 0u32;
+
+    // Stub type for the linker-export / fallback path. The GOT global already
+    // points to this pre-allocated slot; we just place a func there so
+    // call_indirect does not fault on a null funcref.
+    //
+    // vertexia: single i32->i32 stub type; upgrade to per-symbol type from the
+    // import section if exact call signatures are needed.
+    let stub_ft = FuncType::new(
+        store.engine(),
+        [wasmtime::ValType::I32],
+        [wasmtime::ValType::I32],
+    );
+
+    for (idx, name) in GOT_FUNC_NAMES.iter().enumerate() {
+        let global_key = format!("GOT.func::{name}");
+
+        // Path 1: name section + element segment -> real table slot.
+        if let Some(&real_slot) = name_to_slot.get(*name) {
+            if let Some(&g) = got_globals.get(&global_key) {
+                g.set(&mut *store, Val::I32(real_slot as i32))
+                    .map_err(|e| {
+                        AfterburnerError::Engine(format!(
+                            "GOT.func.{name}: set global to slot {real_slot}: {e}"
+                        ))
+                    })?;
+            }
+            funcs_from_elem += 1;
+            continue;
+        }
+
+        // Path 2: module export by name.
+        let stub_slot = got_func_slot(idx) as u64;
+        if let Some(func) = instance.get_func(&mut *store, name) {
+            table
+                .set(&mut *store, stub_slot, Ref::Func(Some(func)))
+                .map_err(|e| {
+                    AfterburnerError::Engine(format!(
+                        "GOT.func.{name}: table.set(slot={stub_slot}) [export]: {e}"
+                    ))
+                })?;
+            funcs_from_export += 1;
+            continue;
+        }
+
+        // Path 3: linker host export env.<name>.
+        if let Ok(ext) = linker.get(&mut *store, "env", name)
+            && let Some(func) = ext.into_func()
+        {
+            table
+                .set(&mut *store, stub_slot, Ref::Func(Some(func)))
+                .map_err(|e| {
+                    AfterburnerError::Engine(format!(
+                        "GOT.func.{name}: table.set(slot={stub_slot}) [linker]: {e}"
+                    ))
+                })?;
+            funcs_from_export += 1;
+            continue;
+        }
+
+        // Path 4: unresolved - place a null-returning stub so the slot is a
+        // defined funcref (avoids null-funcref traps on address-of usage).
+        let stub_func = make_stub(store, &stub_ft);
+        table
+            .set(&mut *store, stub_slot, Ref::Func(Some(stub_func)))
+            .map_err(|e| {
+                AfterburnerError::Engine(format!(
+                    "GOT.func.{name}: table.set(slot={stub_slot}) [stub]: {e}"
+                ))
+            })?;
+        funcs_stubbed += 1;
+    }
+
+    Ok(GotResolutionReport {
+        funcs_from_elem,
+        funcs_from_export,
+        funcs_stubbed,
+        mem_resolved: 3,
+    })
+}
+
+// ---- internal helper ---------------------------------------------------------
+
+fn make_stub(store: &mut Store<EmbedderState>, ft: &FuncType) -> Func {
+    Func::new(&mut *store, ft.clone(), |_, _, results| {
+        if !results.is_empty() {
+            results[0] = Val::I32(0);
+        }
+        Ok(())
+    })
+}
+
+// ---- GOT.func symbol names ---------------------------------------------------
+//
+// 169 entries from `pyodide.asm.wasm` (0.26.4) GOT.func imports.
+// Slot index = PYODIDE_TABLE_INITIAL_SIZE + position in this list.
+
+pub(crate) const GOT_FUNC_NAMES: &[&str] = &[
+    "__cxa_end_catch",
+    "__cxa_rethrow",
+    "abort",
+    "emscripten_glVertexAttribDivisorANGLE",
+    "emscripten_glDrawElementsInstancedANGLE",
+    "emscripten_glDrawArraysInstancedANGLE",
+    "emscripten_glDrawBuffersWEBGL",
+    "emscripten_glIsVertexArrayOES",
+    "emscripten_glGenVertexArraysOES",
+    "emscripten_glDeleteVertexArraysOES",
+    "emscripten_glBindVertexArrayOES",
+    "emscripten_glGetQueryObjectui64vEXT",
+    "emscripten_glGetQueryObjecti64vEXT",
+    "emscripten_glGetQueryObjectuivEXT",
+    "emscripten_glGetQueryObjectivEXT",
+    "emscripten_glGetQueryivEXT",
+    "emscripten_glQueryCounterEXT",
+    "emscripten_glEndQueryEXT",
+    "emscripten_glBeginQueryEXT",
+    "emscripten_glIsQueryEXT",
+    "emscripten_glDeleteQueriesEXT",
+    "emscripten_glGenQueriesEXT",
+    "emscripten_err",
+    "emscripten_out",
+    "emscripten_console_warn",
+    "emscripten_console_error",
+    "emscripten_console_log",
+    "emscripten_glViewport",
+    "emscripten_glVertexAttribPointer",
+    "emscripten_glVertexAttrib4fv",
+    "emscripten_glVertexAttrib4f",
+    "emscripten_glVertexAttrib3fv",
+    "emscripten_glVertexAttrib3f",
+    "emscripten_glVertexAttrib2fv",
+    "emscripten_glVertexAttrib2f",
+    "emscripten_glVertexAttrib1fv",
+    "emscripten_glVertexAttrib1f",
+    "emscripten_glValidateProgram",
+    "emscripten_glUseProgram",
+    "emscripten_glUniformMatrix4fv",
+    "emscripten_glUniformMatrix3fv",
+    "emscripten_glUniformMatrix2fv",
+    "emscripten_glUniform4iv",
+    "emscripten_glUniform4i",
+    "emscripten_glUniform4fv",
+    "emscripten_glUniform4f",
+    "emscripten_glUniform3iv",
+    "emscripten_glUniform3i",
+    "emscripten_glUniform3fv",
+    "emscripten_glUniform3f",
+    "emscripten_glUniform2iv",
+    "emscripten_glUniform2i",
+    "emscripten_glUniform2fv",
+    "emscripten_glUniform2f",
+    "emscripten_glUniform1iv",
+    "emscripten_glUniform1i",
+    "emscripten_glUniform1fv",
+    "emscripten_glUniform1f",
+    "emscripten_glUniformBlockBinding",
+    "emscripten_glTexSubImage2D",
+    "emscripten_glTexParameteriv",
+    "emscripten_glTexParameteri",
+    "emscripten_glTexParameterfv",
+    "emscripten_glTexParameterf",
+    "emscripten_glTexImage3D",
+    "emscripten_glTexImage2D",
+    "emscripten_glStencilOpSeparate",
+    "emscripten_glStencilOp",
+    "emscripten_glStencilMaskSeparate",
+    "emscripten_glStencilMask",
+    "emscripten_glStencilFuncSeparate",
+    "emscripten_glStencilFunc",
+    "emscripten_glShaderSource",
+    "emscripten_glScissor",
+    "emscripten_glSampleCoverage",
+    "emscripten_glRenderbufferStorage",
+    "emscripten_glReadPixels",
+    "emscripten_glPolygonOffset",
+    "emscripten_glPixelStorei",
+    "emscripten_glLinkProgram",
+    "emscripten_glLineWidth",
+    "emscripten_glIsVertexArray",
+    "emscripten_glIsTexture",
+    "emscripten_glIsShader",
+    "emscripten_glIsRenderbuffer",
+    "emscripten_glIsProgram",
+    "emscripten_glIsFramebuffer",
+    "emscripten_glIsEnabled",
+    "emscripten_glIsBuffer",
+    "emscripten_glGetVertexAttribPointerv",
+    "emscripten_glGetVertexAttribiv",
+    "emscripten_glGetVertexAttribfv",
+    "emscripten_glGetUniformLocation",
+    "emscripten_glGetUniformiv",
+    "emscripten_glGetUniformfv",
+    "emscripten_glGetUniformBlockIndex",
+    "emscripten_glGetTexParameteriv",
+    "emscripten_glGetTexParameterfv",
+    "emscripten_glGetShaderSource",
+    "emscripten_glGetShaderPrecisionFormat",
+    "emscripten_glGetShaderiv",
+    "emscripten_glGetShaderInfoLog",
+    "emscripten_glGetRenderbufferParameteriv",
+    "emscripten_glGetProgramiv",
+    "emscripten_glGetProgramInfoLog",
+    "emscripten_glGetIntegerv",
+    "emscripten_glGetFramebufferAttachmentParameteriv",
+    "emscripten_glGetError",
+    "emscripten_glGetBufferParameteriv",
+    "emscripten_glGetAttribLocation",
+    "emscripten_glGetAttachedShaders",
+    "emscripten_glGetActiveUniformBlockiv",
+    "emscripten_glGetActiveUniformBlockName",
+    "emscripten_glGetActiveUniform",
+    "emscripten_glGetActiveAttrib",
+    "emscripten_glGenVertexArrays",
+    "emscripten_glGenTextures",
+    "emscripten_glGenRenderbuffers",
+    "emscripten_glGenFramebuffers",
+    "emscripten_glGenBuffers",
+    "emscripten_glFramebufferTextureLayer",
+    "emscripten_glFramebufferTexture2D",
+    "emscripten_glFramebufferRenderbuffer",
+    "emscripten_glFlush",
+    "emscripten_glFinish",
+    "emscripten_glEnableVertexAttribArray",
+    "emscripten_glEnable",
+    "emscripten_glDrawRangeElements",
+    "emscripten_glDrawElements",
+    "emscripten_glDrawBuffers",
+    "emscripten_glDrawArrays",
+    "emscripten_glDisableVertexAttribArray",
+    "emscripten_glDisable",
+    "emscripten_glDetachShader",
+    "emscripten_glDepthRange",
+    "emscripten_glDepthMask",
+    "emscripten_glDepthFunc",
+    "emscripten_glDeleteVertexArrays",
+    "emscripten_glDeleteTextures",
+    "emscripten_glDeleteShader",
+    "emscripten_glDeleteRenderbuffers",
+    "emscripten_glDeleteProgram",
+    "emscripten_glDeleteFramebuffers",
+    "emscripten_glDeleteBuffers",
+    "emscripten_glCullFace",
+    "emscripten_glCreateShader",
+    "emscripten_glCreateProgram",
+    "emscripten_glCopyTexSubImage2D",
+    "emscripten_glCompileShader",
+    "emscripten_glColorMask",
+    "emscripten_glClearStencil",
+    "emscripten_glClearDepthf",
+    "emscripten_glClearColor",
+    "emscripten_glClear",
+    "emscripten_glCheckFramebufferStatus",
+    "emscripten_glBufferSubData",
+    "emscripten_glBufferData",
+    "emscripten_glBlendFuncSeparate",
+    "emscripten_glBlendFunc",
+    "emscripten_glBlendEquationSeparate",
+    "emscripten_glBlendEquation",
+    "emscripten_glBlendColor",
+    "emscripten_glBindTexture",
+    "emscripten_glBindRenderbuffer",
+    "emscripten_glBindFramebuffer",
+    "emscripten_glBindBuffer",
+    "emscripten_glBindAttribLocation",
+    "emscripten_glAttachShader",
+    "emscripten_glActiveTexture",
+    "emscripten_glShaderBinary",
+    "emscripten_glReleaseShaderCompiler",
+    "emscripten_glHint",
+    "emscripten_glGetString",
+    "emscripten_glGetFloatv",
+    "emscripten_glGetBooleanv",
+    "emscripten_glGenerateMipmap",
+    "emscripten_glFrontFace",
+    "emscripten_glDepthRangef",
+    "emscripten_glCopyTexImage2D",
+    "emscripten_glCompressedTexSubImage2D",
+    "emscripten_glCompressedTexImage2D",
+];

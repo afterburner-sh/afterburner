@@ -151,26 +151,61 @@ pub fn deterministic_engine() -> Result<Engine> {
 /// [`EmbedderLinker::func_wrap`]; external callers do not construct it.
 pub struct EmbedderState {
     wasi: Option<WasiStateInner>,
+    /// Linear memory imported as `env.memory` by Emscripten-compiled modules
+    /// (e.g. `pyodide.asm.wasm`). Set after the store is created and the
+    /// memory is defined via `wire_env_memory_and_table_in_store`. Custom
+    /// `wasi_snapshot_preview1` shims use this handle instead of the standard
+    /// wasmtime-wasi preview-1 accessor, which requires a `"memory"` *export*
+    /// that Emscripten modules do not provide.
+    pub pyodide_memory: Option<wasmtime::Memory>,
+    /// Accumulated stdout bytes from custom WASI `fd_write` calls (fd 1/2).
+    /// Appended by the `wasi_snapshot_preview1::fd_write` shim; read after
+    /// `__wasm_call_ctors` returns.
+    pub wasi_stdout: Vec<u8>,
 }
 
 impl EmbedderState {
     /// Create a non-WASI state (no stdout capture, no WASI context).
     /// Used by host-import modules that need a store but no WASI.
     pub fn headless() -> Self {
-        Self { wasi: None }
+        Self {
+            wasi: None,
+            pyodide_memory: None,
+            wasi_stdout: Vec::new(),
+        }
+    }
+
+    /// Create a state suitable for the Emscripten/Pyodide boot path.
+    ///
+    /// Unlike `with_wasi` (which wires a real wasmtime-wasi preview-1 context
+    /// requiring a `"memory"` export), this state pairs with the custom
+    /// `wasi_snapshot_preview1` shims in [`crate::emscripten_wasi`] that read
+    /// guest memory via the `env.memory` import handle stored in
+    /// [`EmbedderState::pyodide_memory`].
+    ///
+    /// Call `store.data_mut().pyodide_memory = Some(mem)` immediately after
+    /// `wire_env_memory_and_table_in_store` to activate the shims.
+    pub fn for_emscripten() -> Self {
+        Self {
+            wasi: None,
+            pyodide_memory: None,
+            wasi_stdout: Vec::new(),
+        }
     }
 
     /// Create a WASI-enabled state with stdout captured to an in-memory pipe.
     ///
     /// Required when the store is used with a linker that wired
-    /// `wasmtime_wasi::p1::add_to_linker_sync`, such as the Emscripten
-    /// environment layer in [`crate::emscripten_runtime`]. The WASI context
-    /// runs sealed: no filesystem, no environment, no stdin.
+    /// `wasmtime_wasi::p1::add_to_linker_sync`, such as ordinary WASI command
+    /// modules. Not used for Emscripten modules that import rather than export
+    /// their linear memory; use [`EmbedderState::for_emscripten`] instead.
     pub fn with_wasi() -> Self {
         let pipe = MemoryOutputPipe::new(4 * 1024 * 1024);
         let ctx = WasiCtxBuilder::new().stdout(pipe.clone()).build_p1();
         Self {
             wasi: Some(WasiStateInner { ctx, stdout: pipe }),
+            pyodide_memory: None,
+            wasi_stdout: Vec::new(),
         }
     }
 
@@ -401,9 +436,15 @@ impl EmbedderVm {
             let ctx = WasiCtxBuilder::new().stdout(pipe.clone()).build_p1();
             EmbedderState {
                 wasi: Some(WasiStateInner { ctx, stdout: pipe }),
+                pyodide_memory: None,
+                wasi_stdout: Vec::new(),
             }
         } else {
-            EmbedderState { wasi: None }
+            EmbedderState {
+                wasi: None,
+                pyodide_memory: None,
+                wasi_stdout: Vec::new(),
+            }
         };
 
         let mut store = Store::new(&module.engine, state);
@@ -509,6 +550,8 @@ impl EmbedderVm {
         let ctx = builder.build_p1();
         let state = EmbedderState {
             wasi: Some(WasiStateInner { ctx, stdout: pipe }),
+            pyodide_memory: None,
+            wasi_stdout: Vec::new(),
         };
 
         let mut store = Store::new(&module.engine, state);

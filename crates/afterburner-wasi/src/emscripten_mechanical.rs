@@ -5,21 +5,28 @@
 
 //! Mechanical Emscripten env.* imports: syscalls, memory ops, C++ EH, invoke trampolines.
 
+use std::sync::Arc;
+
 use afterburner_core::{AfterburnerError, Result};
 use wasmtime::{Caller, Engine, FuncType, Linker, ValType};
 
 use crate::{
     embedder_vm::EmbedderState,
     emscripten_abi::{VIRTUAL_EPOCH_MS, VIRTUAL_NOW_MS},
-    emscripten_runtime::{PYODIDE_MEMORY_MAX_PAGES, caller_memory, invoke_dispatch},
+    emscripten_runtime::{MechCallLog, PYODIDE_MEMORY_MAX_PAGES, caller_memory, invoke_dispatch},
 };
 
 type WtResult<T> = wasmtime::Result<T>;
 
 /// Wire the pure-i32/i64/f64 env.* imports (syscalls, exceptions, trampolines).
+///
+/// `mech_log` receives the name (and first 1-2 integer args for syscalls)
+/// of every mechanical env.* call; inspect [`MechCallLog::tail`] after a trap
+/// to see the call sequence leading into the failure.
 pub(crate) fn wire_mechanical_env_funcs(
     engine: &Engine,
     linker: &mut Linker<EmbedderState>,
+    mech_log: Arc<MechCallLog>,
 ) -> Result<()> {
     linker.allow_shadowing(true);
 
@@ -32,64 +39,123 @@ pub(crate) fn wire_mechanical_env_funcs(
         };
     }
 
-    // def_syscall!: returns -1 (ENOSYS) with N i32 arguments.
+    // def_syscall!: returns -1 (ENOSYS) with N i32 arguments, recording name + first 2 args.
     macro_rules! def_syscall {
-        ($name:expr, 1) => {
-            def!($name, |_: Caller<'_, EmbedderState>, _a: i32| -> i32 { -1 })
-        };
-        ($name:expr, 2) => {
-            def!($name, |_: Caller<'_, EmbedderState>,
-                         _a: i32,
-                         _b: i32|
-             -> i32 { -1 })
-        };
-        ($name:expr, 3) => {
-            def!($name, |_: Caller<'_, EmbedderState>,
-                         _a: i32,
-                         _b: i32,
-                         _c: i32|
-             -> i32 { -1 })
-        };
-        ($name:expr, 4) => {
-            def!($name, |_: Caller<'_, EmbedderState>,
-                         _a: i32,
-                         _b: i32,
-                         _c: i32,
-                         _d: i32|
-             -> i32 { -1 })
-        };
-        ($name:expr, 5) => {
-            def!($name, |_: Caller<'_, EmbedderState>,
-                         _a: i32,
-                         _b: i32,
-                         _c: i32,
-                         _d: i32,
-                         _e: i32|
-             -> i32 { -1 })
-        };
-        ($name:expr, 6) => {
-            def!($name, |_: Caller<'_, EmbedderState>,
-                         _a: i32,
-                         _b: i32,
-                         _c: i32,
-                         _d: i32,
-                         _e: i32,
-                         _f: i32|
-             -> i32 { -1 })
-        };
+        ($name:expr, 1) => {{
+            let _log = mech_log.clone();
+            linker
+                .func_wrap(
+                    "env",
+                    $name,
+                    move |_: Caller<'_, EmbedderState>, a: i32| -> i32 {
+                        _log.push($name, a, 0);
+                        -1
+                    },
+                )
+                .map_err(|e| AfterburnerError::Engine(format!("{}: {e}", $name)))?
+        }};
+        ($name:expr, 2) => {{
+            let _log = mech_log.clone();
+            linker
+                .func_wrap(
+                    "env",
+                    $name,
+                    move |_: Caller<'_, EmbedderState>, a: i32, b: i32| -> i32 {
+                        _log.push($name, a, b);
+                        -1
+                    },
+                )
+                .map_err(|e| AfterburnerError::Engine(format!("{}: {e}", $name)))?
+        }};
+        ($name:expr, 3) => {{
+            let _log = mech_log.clone();
+            linker
+                .func_wrap(
+                    "env",
+                    $name,
+                    move |_: Caller<'_, EmbedderState>, a: i32, b: i32, _c: i32| -> i32 {
+                        _log.push($name, a, b);
+                        -1
+                    },
+                )
+                .map_err(|e| AfterburnerError::Engine(format!("{}: {e}", $name)))?
+        }};
+        ($name:expr, 4) => {{
+            let _log = mech_log.clone();
+            linker
+                .func_wrap(
+                    "env",
+                    $name,
+                    move |_: Caller<'_, EmbedderState>, a: i32, b: i32, _c: i32, _d: i32| -> i32 {
+                        _log.push($name, a, b);
+                        -1
+                    },
+                )
+                .map_err(|e| AfterburnerError::Engine(format!("{}: {e}", $name)))?
+        }};
+        ($name:expr, 5) => {{
+            let _log = mech_log.clone();
+            linker
+                .func_wrap(
+                    "env",
+                    $name,
+                    move |_: Caller<'_, EmbedderState>,
+                          a: i32,
+                          b: i32,
+                          _c: i32,
+                          _d: i32,
+                          _e: i32|
+                          -> i32 {
+                        _log.push($name, a, b);
+                        -1
+                    },
+                )
+                .map_err(|e| AfterburnerError::Engine(format!("{}: {e}", $name)))?
+        }};
+        ($name:expr, 6) => {{
+            let _log = mech_log.clone();
+            linker
+                .func_wrap(
+                    "env",
+                    $name,
+                    move |_: Caller<'_, EmbedderState>,
+                          a: i32,
+                          b: i32,
+                          _c: i32,
+                          _d: i32,
+                          _e: i32,
+                          _f: i32|
+                          -> i32 {
+                        _log.push($name, a, b);
+                        -1
+                    },
+                )
+                .map_err(|e| AfterburnerError::Engine(format!("{}: {e}", $name)))?
+        }};
     }
 
     // ---- abort ---------------------------------------------------------------
 
-    def!("abort", |_: Caller<'_, EmbedderState>| -> WtResult<()> {
-        Err(wasmtime::Trap::UnreachableCodeReached.into())
-    });
-    def!(
-        "_abort_js",
-        |_: Caller<'_, EmbedderState>| -> WtResult<()> {
-            Err(wasmtime::Trap::UnreachableCodeReached.into())
-        }
-    );
+    {
+        let _log = mech_log.clone();
+        def!(
+            "abort",
+            move |_: Caller<'_, EmbedderState>| -> WtResult<()> {
+                _log.push("abort", 0, 0);
+                Err(wasmtime::Trap::UnreachableCodeReached.into())
+            }
+        );
+    }
+    {
+        let _log = mech_log.clone();
+        def!(
+            "_abort_js",
+            move |_: Caller<'_, EmbedderState>| -> WtResult<()> {
+                _log.push("_abort_js", 0, 0);
+                Err(wasmtime::Trap::UnreachableCodeReached.into())
+            }
+        );
+    }
 
     // ---- time ----------------------------------------------------------------
 
@@ -108,32 +174,41 @@ pub(crate) fn wire_mechanical_env_funcs(
 
     // ---- heap ----------------------------------------------------------------
 
-    def!(
-        "emscripten_get_heap_max",
-        |_: Caller<'_, EmbedderState>| -> i32 {
+    {
+        let _log = mech_log.clone();
+        def!("emscripten_get_heap_max", move |_: Caller<
+            '_,
+            EmbedderState,
+        >|
+              -> i32 {
+            _log.push("emscripten_get_heap_max", 0, 0);
             (PYODIDE_MEMORY_MAX_PAGES as u64 * 65536u64) as i32
-        }
-    );
-    def!("emscripten_resize_heap", |mut caller: Caller<
-        '_,
-        EmbedderState,
-    >,
-                                    requested: i32|
-     -> i32 {
-        let Some(memory) = caller_memory(&mut caller) else {
-            return 0;
-        };
-        let current = memory.data_size(&caller);
-        let wanted = requested as u32 as usize;
-        if wanted <= current {
-            return 1;
-        }
-        let pages = (wanted - current).div_ceil(65_536) as u64;
-        match memory.grow(&mut caller, pages) {
-            Ok(_) => 1,
-            Err(_) => 0,
-        }
-    });
+        });
+    }
+    {
+        let _log = mech_log.clone();
+        def!("emscripten_resize_heap", move |mut caller: Caller<
+            '_,
+            EmbedderState,
+        >,
+                                             requested: i32|
+              -> i32 {
+            _log.push("emscripten_resize_heap", requested, 0);
+            let Some(memory) = caller_memory(&mut caller) else {
+                return 0;
+            };
+            let current = memory.data_size(&caller);
+            let wanted = requested as u32 as usize;
+            if wanted <= current {
+                return 1;
+            }
+            let pages = (wanted - current).div_ceil(65_536) as u64;
+            match memory.grow(&mut caller, pages) {
+                Ok(_) => 1,
+                Err(_) => 0,
+            }
+        });
+    }
     def!(
         "emscripten_memcpy_js",
         |mut caller: Caller<'_, EmbedderState>, dest: i32, src: i32, num: i32| {
@@ -361,25 +436,32 @@ pub(crate) fn wire_mechanical_env_funcs(
     def!("getprotobyname", |_: Caller<'_, EmbedderState>,
                             _name: i32|
      -> i32 { 0 });
-    def!("getentropy", |mut caller: Caller<'_, EmbedderState>,
-                        buffer: i32,
-                        length: i32|
-     -> i32 {
-        // Deterministic fill (0xAB) in sealed mode.
-        // vertexia: upgrade path is a seeded PRNG in EmbedderState.
-        let Some(memory) = caller_memory(&mut caller) else {
-            return -1;
-        };
-        let start = buffer as u32 as usize;
-        let len = length as u32 as usize;
-        let mem = memory.data_mut(&mut caller);
-        if start.checked_add(len).is_some_and(|e| e <= mem.len()) {
-            mem[start..start + len].fill(0xAB);
-            0
-        } else {
-            -1
-        }
-    });
+    {
+        let _log = mech_log.clone();
+        def!("getentropy", move |mut caller: Caller<
+            '_,
+            EmbedderState,
+        >,
+                                 buffer: i32,
+                                 length: i32|
+              -> i32 {
+            _log.push("getentropy", buffer, length);
+            // Deterministic fill (0xAB) in sealed mode.
+            // vertexia: upgrade path is a seeded PRNG in EmbedderState.
+            let Some(memory) = caller_memory(&mut caller) else {
+                return -1;
+            };
+            let start = buffer as u32 as usize;
+            let len = length as u32 as usize;
+            let mem = memory.data_mut(&mut caller);
+            if start.checked_add(len).is_some_and(|e| e <= mem.len()) {
+                mem[start..start + len].fill(0xAB);
+                0
+            } else {
+                -1
+            }
+        });
+    }
 
     // ---- dlopen / dlsym stubs -----------------------------------------------
 
@@ -431,21 +513,25 @@ pub(crate) fn wire_mechanical_env_funcs(
 
     // ---- progname / system --------------------------------------------------
 
-    def!(
-        "_emscripten_get_progname",
-        |mut caller: Caller<'_, EmbedderState>, buf: i32, len: i32| {
-            let name = b"pyodide\0";
-            let Some(memory) = caller_memory(&mut caller) else {
-                return;
-            };
-            let (start, cap) = (buf as u32 as usize, len as u32 as usize);
-            let n = name.len().min(cap);
-            let mem = memory.data_mut(&mut caller);
-            if start.checked_add(n).is_some_and(|e| e <= mem.len()) {
-                mem[start..start + n].copy_from_slice(&name[..n]);
+    {
+        let _log = mech_log.clone();
+        def!(
+            "_emscripten_get_progname",
+            move |mut caller: Caller<'_, EmbedderState>, buf: i32, len: i32| {
+                _log.push("_emscripten_get_progname", buf, len);
+                let name = b"pyodide\0";
+                let Some(memory) = caller_memory(&mut caller) else {
+                    return;
+                };
+                let (start, cap) = (buf as u32 as usize, len as u32 as usize);
+                let n = name.len().min(cap);
+                let mem = memory.data_mut(&mut caller);
+                if start.checked_add(n).is_some_and(|e| e <= mem.len()) {
+                    mem[start..start + n].copy_from_slice(&name[..n]);
+                }
             }
-        }
-    );
+        );
+    }
     def!("_emscripten_lookup_name", |_: Caller<'_, EmbedderState>,
                                      _a: i32|
      -> i32 { 0 });
@@ -455,35 +541,78 @@ pub(crate) fn wire_mechanical_env_funcs(
 
     // ---- Python-specific env shims ------------------------------------------
 
-    def!(
-        "_Py_emscripten_runtime",
-        |_: Caller<'_, EmbedderState>| -> i32 { 0 }
-    );
-    def!("_Py_CheckEmscriptenSignals_Helper", |_: Caller<
-        '_,
-        EmbedderState,
-    >|
-     -> i32 { 0 });
-    def!("_PyEM_detect_type_reflection", |_: Caller<
-        '_,
-        EmbedderState,
-    >|
-     -> i32 { 0 });
-    def!("_PyEM_CountFuncParams", |_: Caller<'_, EmbedderState>,
-                                   _f: i32|
-     -> i32 { 0 });
-    def!("_PyEM_TrampolineCall_JS", |_: Caller<'_, EmbedderState>,
-                                     _f: i32,
-                                     _a: i32,
-                                     _b: i32,
-                                     _c: i32|
-     -> i32 { 0 });
-    def!("_PyImport_InitFunc_TrampolineCall", |_: Caller<
-        '_,
-        EmbedderState,
-    >,
-                                               _f: i32|
-     -> i32 { 0 });
+    {
+        let _log = mech_log.clone();
+        def!("_Py_emscripten_runtime", move |_: Caller<
+            '_,
+            EmbedderState,
+        >|
+              -> i32 {
+            _log.push("_Py_emscripten_runtime", 0, 0);
+            0
+        });
+    }
+    {
+        let _log = mech_log.clone();
+        def!("_Py_CheckEmscriptenSignals_Helper", move |_: Caller<
+            '_,
+            EmbedderState,
+        >|
+              -> i32 {
+            _log.push("_Py_CheckEmscriptenSignals_Helper", 0, 0);
+            0
+        });
+    }
+    {
+        let _log = mech_log.clone();
+        def!("_PyEM_detect_type_reflection", move |_: Caller<
+            '_,
+            EmbedderState,
+        >|
+              -> i32 {
+            _log.push("_PyEM_detect_type_reflection", 0, 0);
+            0
+        });
+    }
+    {
+        let _log = mech_log.clone();
+        def!("_PyEM_CountFuncParams", move |_: Caller<
+            '_,
+            EmbedderState,
+        >,
+                                            f: i32|
+              -> i32 {
+            _log.push("_PyEM_CountFuncParams", f, 0);
+            0
+        });
+    }
+    {
+        let _log = mech_log.clone();
+        def!("_PyEM_TrampolineCall_JS", move |_: Caller<
+            '_,
+            EmbedderState,
+        >,
+                                              f: i32,
+                                              a: i32,
+                                              _b: i32,
+                                              _c: i32|
+              -> i32 {
+            _log.push("_PyEM_TrampolineCall_JS", f, a);
+            0
+        });
+    }
+    {
+        let _log = mech_log.clone();
+        def!("_PyImport_InitFunc_TrampolineCall", move |_: Caller<
+            '_,
+            EmbedderState,
+        >,
+                                                        f: i32|
+              -> i32 {
+            _log.push("_PyImport_InitFunc_TrampolineCall", f, 0);
+            0
+        });
+    }
 
     // ---- test helpers -------------------------------------------------------
 
@@ -502,12 +631,33 @@ pub(crate) fn wire_mechanical_env_funcs(
         "hiwire_invalid_ref",
         |_: Caller<'_, EmbedderState>, _a: i32, _b: i32| {}
     );
-    def!("jslib_init_js", |_: Caller<'_, EmbedderState>| -> i32 { 1 });
-    def!(
-        "jslib_init_buffers_js",
-        |_: Caller<'_, EmbedderState>| -> i32 { 1 }
-    );
-    def!("pyodide_js_init", |_: Caller<'_, EmbedderState>| {});
+    {
+        let _log = mech_log.clone();
+        def!(
+            "jslib_init_js",
+            move |_: Caller<'_, EmbedderState>| -> i32 {
+                _log.push("jslib_init_js", 0, 0);
+                1
+            }
+        );
+    }
+    {
+        let _log = mech_log.clone();
+        def!("jslib_init_buffers_js", move |_: Caller<
+            '_,
+            EmbedderState,
+        >|
+              -> i32 {
+            _log.push("jslib_init_buffers_js", 0, 0);
+            1
+        });
+    }
+    {
+        let _log = mech_log.clone();
+        def!("pyodide_js_init", move |_: Caller<'_, EmbedderState>| {
+            _log.push("pyodide_js_init", 0, 0);
+        });
+    }
 
     // ---- libffi JS bridge ---------------------------------------------------
 
