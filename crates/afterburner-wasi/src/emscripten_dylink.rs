@@ -480,6 +480,9 @@ pub fn fill_got_table_slots(
         // Path 2: module export by name.
         let stub_slot = got_func_slot(idx) as u64;
         if let Some(func) = instance.get_func(&mut *store, name) {
+            if *name == "emscripten_out" || *name == "emscripten_err" {
+                eprintln!("[GOT Path2] {name} -> stub_slot={stub_slot} (module export)");
+            }
             table
                 .set(&mut *store, stub_slot, Ref::Func(Some(func)))
                 .map_err(|e| {
@@ -497,6 +500,9 @@ pub fn fill_got_table_slots(
         if let Ok(ext) = linker.get(&mut *store, "env", name)
             && let Some(func) = ext.into_func()
         {
+            if *name == "emscripten_out" || *name == "emscripten_err" {
+                eprintln!("[GOT Path3] {name} -> stub_slot={stub_slot}");
+            }
             table
                 .set(&mut *store, stub_slot, Ref::Func(Some(func)))
                 .map_err(|e| {
@@ -506,6 +512,10 @@ pub fn fill_got_table_slots(
                 })?;
             funcs_from_export += 1;
             continue;
+        }
+
+        if *name == "emscripten_out" || *name == "emscripten_err" {
+            eprintln!("[GOT Path4-fallback] {name} -> stub_slot={stub_slot}");
         }
 
         // Path 4: unresolved - place a correctly-typed no-op stub so the slot

@@ -186,11 +186,12 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                       iovs_len: i32,
                       nwritten_ptr: i32|
      -> i32 {
+        eprintln!("[fd_write] fd={fd} iovs_ptr={iovs_ptr:#x} iovs_len={iovs_len} nwritten_ptr={nwritten_ptr:#x} mem={}", caller.data().pyodide_memory.is_some());
         let iovs_len = iovs_len as u32 as usize;
         // Read the entire iovec array (8 bytes * iovs_len).
         let iov_bytes = match read_bytes(&caller, iovs_ptr, iovs_len * 8) {
             Some(b) => b,
-            None => return EBADF,
+            None => { eprintln!("[fd_write] EBADF on iov_bytes read"); return EBADF; },
         };
         let mut total: u32 = 0;
         for i in 0..iovs_len {

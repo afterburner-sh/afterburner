@@ -516,7 +516,7 @@ fn step1_succeeded(
 
 /// Python code run via `python -c <CODE>`.
 const PYTHON_CODE: &[u8] =
-    b"print('hello from cpython on afterburner')\nimport sys\nprint('pyver', sys.version.split()[0])\nprint('sum', sum(range(100)))\n\0";
+    b"import sys, os\nprint('hello from cpython on afterburner')\nprint('pyver', sys.version.split()[0])\nprint('sum', sum(range(100)))\nos.write(1, b'direct-os-write\\n')\nsys.stdout.flush()\n\0";
 
 /// Grow wasm memory by one page (64 KiB) and write argv strings + the i32
 /// pointer array into the new page. Returns the wasm guest address of the i32
