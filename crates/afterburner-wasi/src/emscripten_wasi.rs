@@ -209,12 +209,18 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                       iovs_len: i32,
                       nwritten_ptr: i32|
      -> i32 {
-        eprintln!("[fd_write] fd={fd} iovs_ptr={iovs_ptr:#x} iovs_len={iovs_len} nwritten_ptr={nwritten_ptr:#x} mem={}", caller.data().pyodide_memory.is_some());
+        eprintln!(
+            "[fd_write] fd={fd} iovs_ptr={iovs_ptr:#x} iovs_len={iovs_len} nwritten_ptr={nwritten_ptr:#x} mem={}",
+            caller.data().pyodide_memory.is_some()
+        );
         let iovs_len = iovs_len as u32 as usize;
         // Read the entire iovec array (8 bytes * iovs_len).
         let iov_bytes = match read_bytes(&caller, iovs_ptr, iovs_len * 8) {
             Some(b) => b,
-            None => { eprintln!("[fd_write] EBADF on iov_bytes read"); return EBADF; },
+            None => {
+                eprintln!("[fd_write] EBADF on iov_bytes read");
+                return EBADF;
+            }
         };
         let mut total: u32 = 0;
         for i in 0..iovs_len {
@@ -577,7 +583,10 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
             linux_flags |= 512; // O_TRUNC
         }
         let new_fd = caller.data_mut().fs.open(abs.clone(), linux_flags);
-        eprintln!("[path_open] dirfd={dirfd} {:?} oflags={oflags:#x} rights={fs_rights_base:#x} linux_flags={linux_flags:#x} -> new_fd={new_fd}", abs);
+        eprintln!(
+            "[path_open] dirfd={dirfd} {:?} oflags={oflags:#x} rights={fs_rights_base:#x} linux_flags={linux_flags:#x} -> new_fd={new_fd}",
+            abs
+        );
         if new_fd < 0 {
             // Translate to WASI ENOENT (errno 44) or EBADF (8).
             return if new_fd == -2 { 44 } else { EBADF };

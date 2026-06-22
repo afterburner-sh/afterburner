@@ -54,11 +54,11 @@ use afterburner_wasi::emscripten_dylink::{
 };
 use afterburner_wasi::emscripten_fs::mount_zip_into_fs;
 use afterburner_wasi::emscripten_invoke::wire_invoke_trampolines;
+use afterburner_wasi::emscripten_mechanical::wire_pyodide028_env_stubs;
 use afterburner_wasi::emscripten_runtime::{
     JsFfiCallLog, MechCallLog, NoopCallLog, PYODIDE_STACK_BASE, fill_unknown_imports_as_noops,
     wire_env_memory_and_table_in_store, wire_wasi_only,
 };
-use afterburner_wasi::emscripten_mechanical::wire_pyodide028_env_stubs;
 use afterburner_wasi::emscripten_syscall::wire_fs_env_funcs;
 use wasmtime::{
     Config, Engine, FuncType, Global, GlobalType, Linker, Module, Mutability, OptLevel, Store, Tag,
@@ -516,15 +516,49 @@ fn step1_succeeded(
 
 /// Python code run via `python -c <CODE>`.
 ///
-/// Writes output to `/out.txt` via a real MEMFS FILE. Python's `open()` goes
-/// through WASI `path_open` (with O_CREAT|O_TRUNC for 'w' mode), which is
-/// wired to the host MEMFS. `fd_write` writes through the same MEMFS fds.
-/// Because Pyodide/Emscripten routes fd 1/2 through a JS TTY callback
-/// (`Module.print`) that is absent headless, `print()` drops silently;
-/// writing to a named file via `path_open` survives and is read back after
-/// the run.
-const PYTHON_CODE: &[u8] =
-    b"f=open('/out.txt','w'); import sys; f.write('hello from cpython on afterburner\\n'); f.write('pyver '+sys.version.split()[0]+'\\n'); f.write('sum '+str(sum(range(100)))+'\\n'); f.close()\n\0";
+/// Uses `sys.exit(42)` to probe exit-code capture. If Pyodide's keepalive path
+/// swallows the exit (returning 0), the second constant below also writes to
+/// `/out.txt` via `os` syscalls so we can confirm code execution independently.
+const PYTHON_CODE: &[u8] = b"import sys; sys.exit(42)\0";
+
+/// Fallback probe run only when `PYTHON_CODE` exits with 0 (i.e., `sys.exit(42)`
+/// did not reach `proc_exit`). Writes a side-channel sentinel to `/out.txt` via
+/// raw `os` syscalls - bypasses Python stdout/stderr to confirm code execution.
+const PYTHON_CODE_SIDE_CHANNEL: &[u8] =
+    b"import sys,os\nfd=os.open('/out.txt',os.O_CREAT|os.O_WRONLY|os.O_TRUNC,0o644)\nos.write(fd,b'EXECUTED\\n')\nos.close(fd)\nsys.exit(7)\n\0";
+
+/// Dump the argv pointer array from guest memory: prints each pointer and the
+/// string it points to. Called when `sys.exit(42)` did NOT fire to diagnose
+/// whether CPython received the correct argv layout.
+fn dump_argv_from_memory(store: &Store<EmbedderState>, argc: i32, argv_ptr: i32) -> String {
+    let Some(mem) = store.data().pyodide_memory else {
+        return "  pyodide_memory not set - cannot dump argv".to_owned();
+    };
+    let data = mem.data(store);
+    let mut out = format!("  argc={argc} argv_ptr={argv_ptr:#x}\n");
+    for i in 0..argc as usize {
+        let slot = argv_ptr as u32 as usize + i * 4;
+        if slot + 4 > data.len() {
+            out.push_str(&format!("  argv[{i}]: slot {slot:#x} out of bounds\n"));
+            continue;
+        }
+        let ptr = u32::from_le_bytes(data[slot..slot + 4].try_into().unwrap_or([0; 4])) as usize;
+        if ptr == 0 || ptr >= data.len() {
+            out.push_str(&format!(
+                "  argv[{i}]: ptr={ptr:#x} null or out of bounds\n"
+            ));
+            continue;
+        }
+        let end = data[ptr..]
+            .iter()
+            .position(|&b| b == 0)
+            .map(|n| ptr + n)
+            .unwrap_or(ptr);
+        let s = String::from_utf8_lossy(&data[ptr..end]);
+        out.push_str(&format!("  argv[{i}]: ptr={ptr:#x} value={s:?}\n"));
+    }
+    out
+}
 
 /// Grow wasm memory by one page (64 KiB) and write argv strings + the i32
 /// pointer array into the new page. Returns the wasm guest address of the i32
@@ -588,6 +622,43 @@ fn write_argv(store: &mut Store<EmbedderState>) -> Result<i32, String> {
     Ok(arr_off as i32)
 }
 
+/// Like `write_argv` but uses an explicit `code` slice instead of `PYTHON_CODE`.
+/// Used for the side-channel second run in the `Ok(ret=0)` path.
+/// Returns `Ok(argv_ptr)` or `Err(message)`.
+fn write_argv_code(store: &mut Store<EmbedderState>, code: &[u8]) -> Result<i32, String> {
+    let arg0: &[u8] = b"python\0";
+    let arg1: &[u8] = b"-c\0";
+    let mem = match store.data().pyodide_memory {
+        Some(m) => m,
+        None => return Err("pyodide_memory not set".to_owned()),
+    };
+    let prev_pages = mem
+        .grow(&mut *store, 1)
+        .map_err(|e| format!("memory.grow failed: {e}"))?;
+    let base = (prev_pages as usize) * 65536;
+    let off0 = base;
+    let off1 = off0 + arg0.len();
+    let off2 = off1 + arg1.len();
+    let arr_off = (off2 + code.len() + 3) & !3;
+    let total = arr_off + 12;
+    let mem_len = mem.data_size(&*store);
+    if total > mem_len {
+        return Err(format!(
+            "scratch region [{base:#x}..{total:#x}) exceeds memory size {mem_len:#x}"
+        ));
+    }
+    let data = mem.data_mut(&mut *store);
+    data[off0..off0 + arg0.len()].copy_from_slice(arg0);
+    data[off1..off1 + arg1.len()].copy_from_slice(arg1);
+    data[off2..off2 + code.len()].copy_from_slice(code);
+    let ptrs: [u32; 3] = [off0 as u32, off1 as u32, off2 as u32];
+    for (i, ptr) in ptrs.iter().enumerate() {
+        let slot = arr_off + i * 4;
+        data[slot..slot + 4].copy_from_slice(&ptr.to_le_bytes());
+    }
+    Ok(arr_off as i32)
+}
+
 /// Call `_Py_write(1, buf, len)` (CPython's own write wrapper) directly
 /// after ctors to verify the Python-level fd-1 write path.
 /// If captured, Python's write path works. If empty but probe_direct_write
@@ -637,9 +708,7 @@ fn probe_py_write(instance: &wasmtime::Instance, store: &mut Store<EmbedderState
             };
             let captured = store.data().wasi_stdout.len();
             let snippet = String::from_utf8_lossy(&store.data().wasi_stdout).into_owned();
-            eprintln!(
-                "[probe_py_write] _Py_write() ret={ret} captured={captured}: {snippet:?}"
-            );
+            eprintln!("[probe_py_write] _Py_write() ret={ret} captured={captured}: {snippet:?}");
         }
         Err(e) => eprintln!("[probe_py_write] _Py_write() trapped: {e}"),
     }
@@ -695,9 +764,7 @@ fn probe_direct_write(instance: &wasmtime::Instance, store: &mut Store<EmbedderS
             };
             let captured = store.data().wasi_stdout.len();
             let snippet = String::from_utf8_lossy(&store.data().wasi_stdout).into_owned();
-            eprintln!(
-                "[probe_direct_write] write() ret={ret} captured={captured}: {snippet:?}"
-            );
+            eprintln!("[probe_direct_write] write() ret={ret} captured={captured}: {snippet:?}");
         }
         Err(e) => eprintln!("[probe_direct_write] write() trapped: {e}"),
     }
@@ -743,6 +810,73 @@ fn run_python_phase(
                     wasmtime::Val::I32(v) => *v,
                     _ => -1,
                 };
+                eprintln!("[probe P5] __main_argc_argv returned {ret}");
+                let argv_dump = dump_argv_from_memory(store, 3, argv_ptr);
+                let fuel_remaining_p5 = store.get_fuel().unwrap_or(0);
+                let total_fuel_p5 = PROBE_FUEL.saturating_sub(fuel_remaining_p5);
+
+                // sys.exit(42) returned 0 - Pyodide's keepalive may swallow the exit.
+                // Run a second call with PYTHON_CODE_SIDE_CHANNEL: writes to /out.txt
+                // via os syscalls and calls sys.exit(7). If /out.txt contains "EXECUTED"
+                // the -c code IS running (Pyodide handles SystemExit internally).
+                store.data_mut().wasi_stdout.clear();
+                // Reset /out.txt so the side-channel test gets a clean slate.
+                store.data_mut().fs.insert_file("/out.txt", vec![]);
+                let side_argv_ptr = write_argv_code(store, PYTHON_CODE_SIDE_CHANNEL);
+                let side_result = side_argv_ptr.map(|ap| {
+                    let mut side_res = [wasmtime::Val::I32(0)];
+                    let call_res = func.call(
+                        &mut *store,
+                        &[wasmtime::Val::I32(3), wasmtime::Val::I32(ap)],
+                        &mut side_res,
+                    );
+                    let sc_ret = match &side_res[0] {
+                        wasmtime::Val::I32(v) => *v,
+                        _ => -1,
+                    };
+                    let err_str = call_res.err().map(|e| format!("{e}")).unwrap_or_default();
+                    let sc_exit: Option<i32> = err_str
+                        .find("proc_exit(")
+                        .and_then(|pos| {
+                            let rest = &err_str[pos + "proc_exit(".len()..];
+                            rest.split(')').next()?.parse().ok()
+                        });
+                    let out_txt = store
+                        .data()
+                        .fs
+                        .read_file("/out.txt")
+                        .map(|b| String::from_utf8_lossy(b).into_owned())
+                        .unwrap_or_default();
+                    eprintln!(
+                        "[probe P5b] side-channel ret={sc_ret} proc_exit={sc_exit:?} /out.txt={out_txt:?}"
+                    );
+                    format!(
+                        "side-channel ret={sc_ret} proc_exit={sc_exit:?} /out.txt={out_txt:?}"
+                    )
+                });
+                let side_summary =
+                    side_result.unwrap_or_else(|e| format!("side-channel failed: {e}"));
+
+                // Determine whether -c code executed: if /out.txt contains "EXECUTED"
+                // then the code ran (Pyodide swallows sys.exit via SystemExit, not proc_exit).
+                let out_txt_final = store
+                    .data()
+                    .fs
+                    .read_file("/out.txt")
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_default();
+                let code_verdict = if out_txt_final.contains("EXECUTED") {
+                    format!(
+                        "EXIT-CODE TEST: sys.exit(42) returned {ret} (Pyodide swallows SystemExit \
+                         internally - NOT routed to proc_exit; code IS EXECUTING).\n\
+                         SIDE-CHANNEL CONFIRMS: /out.txt='EXECUTED' - -c CODE EXECUTES."
+                    )
+                } else {
+                    format!(
+                        "EXIT-CODE TEST: sys.exit(42) returned {ret} AND side-channel /out.txt absent.\n\
+                         -c CODE NOT EXECUTING. argv layout:\n{argv_dump}"
+                    )
+                };
                 let wasi_out = store.data().wasi_stdout.clone();
                 let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
                 let fuel_remaining = store.get_fuel().unwrap_or(0);
@@ -759,30 +893,20 @@ fn run_python_phase(
                         entry.arg1
                     ));
                 }
-                // Read /out.txt from the MEMFS. CPython wrote there via
-                // __syscall_openat(O_CREAT|O_WRONLY|O_TRUNC) + __syscall_writev.
-                // This is the capture channel: fd 1/2 drops headless (no JS TTY
-                // callback), but a real MEMFS file survives the run.
-                let out_txt = store
-                    .data()
-                    .fs
-                    .read_file("/out.txt")
-                    .map(|b| String::from_utf8_lossy(b).into_owned())
-                    .unwrap_or_else(|| "<absent>".to_owned());
                 return format!(
                     "{ctors_summary}\n\
                      --- phase 5: __main_argc_argv(3, argv) ---\n\
-                     Return: {ret}\n\
-                     Fuel consumed: {total_fuel}\n\
+                     {code_verdict}\n\
+                     Argv layout:\n{argv_dump}\
+                     Fuel at phase-5 end: {total_fuel_p5} | total: {total_fuel}\n\
+                     Side-channel: {side_summary}\n\
                      JS-FFI calls: {}\n\
                      Noop stubs called ({} unique): {noop_calls:?}\n\
                      Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
-                     WASI stdout ({} bytes):\n{wasi_text}\n\
-                     /out.txt ({} bytes):\n{out_txt}",
+                     WASI stdout ({} bytes):\n{wasi_text}",
                     log.total_calls(),
                     noop_calls.len(),
-                    wasi_out.len(),
-                    out_txt.len()
+                    wasi_out.len()
                 );
             }
             Err(e) => {
@@ -791,6 +915,14 @@ fn run_python_phase(
                 let fuel_remaining = store.get_fuel().unwrap_or(0);
                 let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
                 let err_str = format!("{e}");
+                // Extract the exact code from proc_exit(N) - this is the decisive signal.
+                let proc_exit_code: Option<i32> = err_str.find("proc_exit(").and_then(|pos| {
+                    let rest = &err_str[pos + "proc_exit(".len()..];
+                    rest.split(')').next()?.parse().ok()
+                });
+                eprintln!(
+                    "[probe P5] __main_argc_argv TRAPPED: {err_str} | proc_exit_code={proc_exit_code:?}"
+                );
                 let finding = classify_python_error(&err_str, log.total_calls());
                 let mech_tail = mech_log.tail(MECH_TRACE_TAIL);
                 let mut mech_trace = String::new();
@@ -806,10 +938,24 @@ fn run_python_phase(
                 let throw_count = store.data().cxa_throw_count;
                 let fs_paths: Vec<String> = store.data().fs_path_log.iter().cloned().collect();
                 let noop_calls = noop_log.snapshot();
+                let exit_verdict = match proc_exit_code {
+                    Some(42) => {
+                        "EXIT-CODE=42: -c CODE EXECUTED (CPython ran sys.exit(42))".to_owned()
+                    }
+                    Some(c) => format!(
+                        "EXIT-CODE={c}: -c CODE ran but exited with unexpected code (not 42)"
+                    ),
+                    None => {
+                        "NO proc_exit: trapped before sys.exit - argv may not have reached CPython"
+                            .to_owned()
+                    }
+                };
                 return format!(
                     "{ctors_summary}\n\
                      --- phase 5: __main_argc_argv(3, argv) ---\n\
                      TRAPPED: {e}\n\
+                     proc_exit code: {proc_exit_code:?}\n\
+                     Verdict: {exit_verdict}\n\
                      Fuel consumed: {total_fuel}\n\
                      JS-FFI calls: {}\n\
                      C++ throws: {throw_count}\n\

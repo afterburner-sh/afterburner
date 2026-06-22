@@ -851,7 +851,8 @@ pub fn wire_pyodide028_env_stubs(
     // returned host func into the pre-assigned GOT.func stub table slot. The GOT
     // global then points to that slot, so every indirect call through GOT.func
     // dispatches to this capturing stub and bytes reach wasi_stdout.
-    def!("emscripten_out", |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+    def!("emscripten_out", |mut caller: Caller<'_, EmbedderState>,
+                            ptr: i32| {
         eprintln!("[emscripten_out] ptr={ptr:#x}");
         if let Some(s) = read_cstr(&caller, ptr) {
             eprintln!("[emscripten_out] text={s:?}");
@@ -860,7 +861,8 @@ pub fn wire_pyodide028_env_stubs(
             buf.push(b'\n');
         }
     });
-    def!("emscripten_err", |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+    def!("emscripten_err", |mut caller: Caller<'_, EmbedderState>,
+                            ptr: i32| {
         eprintln!("[emscripten_err] ptr={ptr:#x}");
         if let Some(s) = read_cstr(&caller, ptr) {
             eprintln!("[emscripten_err] text={s:?}");
@@ -870,27 +872,38 @@ pub fn wire_pyodide028_env_stubs(
         }
     });
     // emscripten_console_* may also be called via GOT.func; same capture path.
-    def!("emscripten_console_log", |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
-        if let Some(s) = read_cstr(&caller, ptr) {
-            let buf = &mut caller.data_mut().wasi_stdout;
-            buf.extend_from_slice(s.as_bytes());
-            buf.push(b'\n');
+    def!(
+        "emscripten_console_log",
+        |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+            eprintln!("[emscripten_console_log] ptr={ptr:#x}");
+            if let Some(s) = read_cstr(&caller, ptr) {
+                eprintln!("[emscripten_console_log] text={s:?}");
+                let buf = &mut caller.data_mut().wasi_stdout;
+                buf.extend_from_slice(s.as_bytes());
+                buf.push(b'\n');
+            }
         }
-    });
-    def!("emscripten_console_warn", |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
-        if let Some(s) = read_cstr(&caller, ptr) {
-            let buf = &mut caller.data_mut().wasi_stdout;
-            buf.extend_from_slice(s.as_bytes());
-            buf.push(b'\n');
+    );
+    def!(
+        "emscripten_console_warn",
+        |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+            if let Some(s) = read_cstr(&caller, ptr) {
+                let buf = &mut caller.data_mut().wasi_stdout;
+                buf.extend_from_slice(s.as_bytes());
+                buf.push(b'\n');
+            }
         }
-    });
-    def!("emscripten_console_error", |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
-        if let Some(s) = read_cstr(&caller, ptr) {
-            let buf = &mut caller.data_mut().wasi_stdout;
-            buf.extend_from_slice(s.as_bytes());
-            buf.push(b'\n');
+    );
+    def!(
+        "emscripten_console_error",
+        |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+            if let Some(s) = read_cstr(&caller, ptr) {
+                let buf = &mut caller.data_mut().wasi_stdout;
+                buf.extend_from_slice(s.as_bytes());
+                buf.push(b'\n');
+            }
         }
-    });
+    );
 
     // ---- _PyEM_InitTrampoline_js: () -> () -----------------------------------
     //
