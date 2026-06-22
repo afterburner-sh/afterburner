@@ -46,7 +46,7 @@ use wasmtime::{
 };
 
 use crate::embedder_vm::EmbedderState;
-use crate::emscripten_dylink::{parse_got_name_to_slot, resolve_got_mem};
+use crate::emscripten_dylink::{parse_got_name_to_slot, resolve_got_func, resolve_got_mem};
 
 /// Memory requirements declared in a SIDE_MODULE's `dylink.0` custom section.
 #[derive(Debug, Clone, Copy)]
@@ -362,13 +362,17 @@ pub fn pre_load_side_module(
 
     // Wire GOT.func and GOT.mem globals for the SIDE_MODULE.
     //
-    // All GOT globals are created with init 0. GOT.mem entries are then resolved
-    // via resolve_got_mem (shared with the main-module path) which reads the
-    // main instance's immutable-global exports - each immutable export IS the
-    // data address (memory_base=0 for the main module, so no adjustment needed).
-    // This mirrors Emscripten's relocateExports + updateGOT semantics.
-    // GOT.func slot resolution happens via the side module's element segment
-    // at instantiation time.
+    // All GOT globals are created with init 0.
+    //
+    // GOT.mem entries are resolved via resolve_got_mem which reads the main
+    // instance's immutable-global exports (data-address symbols). Mirrors
+    // Emscripten's relocateExports + updateGOT semantics for data symbols.
+    //
+    // GOT.func entries are resolved via resolve_got_func which inserts each
+    // named function from the main instance into the shared indirect function
+    // table and writes the resulting slot index into the global. Mirrors
+    // Emscripten's updateGOT path that calls addFunction(value) for every
+    // function export to allocate a table slot.
     let got_ty = GlobalType::new(ValType::I32, Mutability::Var);
     // Collect GOT imports first to avoid repeated borrow conflicts.
     let got_imports: Vec<(String, String)> = module
@@ -382,8 +386,9 @@ pub fn pre_load_side_module(
         })
         .collect();
 
-    // Build all GOT globals (init 0), separating GOT.mem for later resolution.
+    // Build all GOT globals (init 0), collecting func and mem for resolution.
     let mut got_mem_globals: Vec<(String, Global)> = Vec::new();
+    let mut got_func_globals: Vec<(String, Global)> = Vec::new();
     for (m, name) in &got_imports {
         if linker.get(&mut *store, m.as_str(), name.as_str()).is_ok() {
             continue;
@@ -393,6 +398,8 @@ pub fn pre_load_side_module(
         })?;
         if m == "GOT.mem" {
             got_mem_globals.push((name.clone(), g));
+        } else {
+            got_func_globals.push((name.clone(), g));
         }
         linker
             .define(&mut *store, m.as_str(), name.as_str(), g)
@@ -401,7 +408,8 @@ pub fn pre_load_side_module(
             })?;
     }
 
-    // Apply updateGOT to GOT.mem entries using the shared resolve_got_mem.
+    // Apply updateGOT to GOT.mem entries: resolve data-address symbols from
+    // the main instance's immutable-global exports.
     let got_mem_pairs: Vec<(&str, Global)> = got_mem_globals
         .iter()
         .map(|(s, g)| (s.as_str(), *g))
@@ -409,6 +417,20 @@ pub fn pre_load_side_module(
     let (got_mem_resolved, got_mem_zero) = resolve_got_mem(store, main_instance, &got_mem_pairs);
     eprintln!(
         "[sidemodule] {path}: GOT.mem resolved={got_mem_resolved} zero={got_mem_zero}"
+    );
+
+    // Apply updateGOT to GOT.func entries: for each function exported by the
+    // main instance, insert it into the shared indirect function table and
+    // write the slot index into the GOT.func global. This mirrors Emscripten's
+    // addFunction(value) call inside updateGOT for function-typed exports.
+    let got_func_pairs: Vec<(&str, Global)> = got_func_globals
+        .iter()
+        .map(|(s, g)| (s.as_str(), *g))
+        .collect();
+    let (got_func_resolved, got_func_missing) =
+        resolve_got_func(store, main_instance, &got_func_pairs);
+    eprintln!(
+        "[sidemodule] {path}: GOT.func resolved={got_func_resolved} missing={got_func_missing}"
     );
 
     // Wire all env.* function imports from the main pyodide instance's exports.

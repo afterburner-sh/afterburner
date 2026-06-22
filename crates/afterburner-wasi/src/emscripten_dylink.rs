@@ -189,6 +189,69 @@ pub fn resolve_got_mem(
     (resolved, zero)
 }
 
+// ---- updateGOT: resolve GOT.func entries via addFunction (table slot alloc) ----
+
+/// Resolve `GOT.func.<sym>` globals by inserting the named function from
+/// `main_instance` into the shared indirect function table.
+///
+/// Mirrors Emscripten's `updateGOT` path for function exports: when a symbol
+/// is a function, JS calls `addFunction(value)` which finds or allocates a table
+/// slot for the funcref and returns the slot index. We replicate this by:
+///
+/// 1. Looking up `name` in `main_instance`'s exports.
+/// 2. Growing the shared table by one slot.
+/// 3. Placing the funcref at that slot via `table.set`.
+/// 4. Writing the slot index into the GOT.func `Global` handle.
+///
+/// `entries` is a slice of `(symbol_name, Global)` pairs for each `GOT.func.*`
+/// import in the side module that needs resolution.
+///
+/// Returns `(resolved, missing)` where `resolved` is the count of entries
+/// successfully filled and `missing` is the count for which the main instance
+/// has no matching export.
+pub fn resolve_got_func(
+    store: &mut Store<EmbedderState>,
+    main_instance: &Instance,
+    entries: &[(&str, Global)],
+) -> (u32, u32) {
+    let Some(table) = store.data().pyodide_table else {
+        return (0, entries.len() as u32);
+    };
+    let mut resolved = 0u32;
+    let mut missing = 0u32;
+    for (name, g) in entries {
+        let Some(func) = main_instance.get_func(&mut *store, name) else {
+            missing += 1;
+            continue;
+        };
+        // Grow the shared table by one slot to get a fresh index.
+        let slot = table.size(&*store) as u32;
+        if table
+            .grow(&mut *store, 1, wasmtime::Ref::Func(None))
+            .is_err()
+        {
+            missing += 1;
+            continue;
+        }
+        // Place the funcref at the new slot.
+        if table
+            .set(
+                &mut *store,
+                slot as u64,
+                wasmtime::Ref::Func(Some(func)),
+            )
+            .is_err()
+        {
+            missing += 1;
+            continue;
+        }
+        // Write the slot index into the GOT.func global.
+        let _ = g.set(&mut *store, Val::I32(slot as i32));
+        resolved += 1;
+    }
+    (resolved, missing)
+}
+
 // ---- parse name section + element segments to build name->table_slot ----------
 
 /// Parse `wasm` bytes to build a `name -> table_slot` map for GOT.func resolution.
