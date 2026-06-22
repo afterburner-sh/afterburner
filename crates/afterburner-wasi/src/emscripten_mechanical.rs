@@ -558,9 +558,16 @@ pub(crate) fn wire_mechanical_env_funcs(
                                  length: i32|
               -> i32 {
             _log.push("getentropy", buffer, length);
-            // Deterministic fill (0xAB) in sealed mode.
-            // vertexia: upgrade path is a seeded PRNG in EmbedderState.
-            let Some(memory) = caller_memory(&mut caller) else {
+            // Emscripten modules import rather than export their linear memory,
+            // so caller.get_export("memory") returns None. Use the pyodide_memory
+            // handle set in EmbedderState by wire_env_memory_and_table_in_store.
+            //
+            // Deterministic fill (0xAB) in sealed mode - determinism is desired
+            // so re-execution produces byte-identical results.
+            //
+            // vertexia: fixed fill; upgrade path is a seeded PRNG in EmbedderState
+            // if callers need distinct entropy per instantiation.
+            let Some(memory) = caller.data().pyodide_memory else {
                 return -1;
             };
             let start = buffer as u32 as usize;

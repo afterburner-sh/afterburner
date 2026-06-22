@@ -37,7 +37,9 @@
 //! 2. Instantiate with all imports provided.
 //! 3. Call `__wasm_apply_data_relocs` (patches GOT entries).
 //! 4. Call `__wasm_call_ctors` (runs C++ static constructors = CPython init).
-//! 5. Report the outcome.
+//! 5. Run Python: try `__main_argc_argv(0,0)` first; if absent, call
+//!    `Py_InitializeEx(0)` then `PyRun_SimpleString("print(...)")`.
+//! 6. Report the outcome.
 //!
 //! If any phase fails, the probe reports the exact trap or error message.
 //! The findings are HONEST: no fabricated results.
@@ -58,12 +60,13 @@ use wasmtime::{Linker, Module, Store};
 
 const PYODIDE_WASM_PATH: &str = "/tmp/pyodide.asm.wasm";
 
-/// Instruction budget for the boot probe. CPython static init is heavy.
-/// 5 billion instructions; adjust if needed.
+/// Instruction budget for the boot probe. CPython static init is heavy, and
+/// `Py_InitializeEx` (phase 5) is similarly expensive.
+/// 50 billion instructions; adjust if needed.
 ///
 /// vertexia: global fuel budget; upgrade path is per-phase sub-budgets to
 /// measure which init phases consume the most instructions.
-const PROBE_FUEL: u64 = 5_000_000_000;
+const PROBE_FUEL: u64 = 50_000_000_000;
 
 fn main() {
     let outcome = run_probe();
@@ -260,6 +263,7 @@ fn run_probe() -> String {
 
     // ---- phase 4: __wasm_call_ctors (CPython static init) -------------------
 
+    let ctors_summary: String;
     if let Some(func) = instance.get_func(&mut store, "__wasm_call_ctors") {
         eprintln!("[probe] calling __wasm_call_ctors (CPython static init)...");
         match func.call(&mut store, &[], &mut []) {
@@ -272,28 +276,24 @@ fn run_probe() -> String {
                 let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
 
                 if js_calls == 0 {
-                    format!(
-                        "BOOT SUCCEEDED (no JS-FFI calls required)\n\
-                         Total fuel consumed: {total_fuel}\n\
+                    ctors_summary = format!(
+                        "CTORS SUCCEEDED (no JS-FFI calls required)\n\
+                         Total fuel consumed so far: {total_fuel}\n\
                          JS-FFI calls: 0\n\
-                         WASI stdout ({} bytes): {wasi_text:?}\n\
-                         Finding: Pyodide CPython static init completed without any\n\
-                         JS-FFI calls. The module CAN boot headless up to static init.\n\
-                         Next step: probe Python interpreter entry points.",
+                         WASI stdout after ctors ({} bytes): {wasi_text:?}",
                         wasi_out.len()
-                    )
+                    );
                 } else {
-                    format!(
-                        "BOOT SUCCEEDED (JS-FFI calls were logged but returned safe defaults)\n\
-                         Total fuel consumed: {total_fuel}\n\
+                    ctors_summary = format!(
+                        "CTORS SUCCEEDED (JS-FFI calls were logged but returned safe defaults)\n\
+                         Total fuel consumed so far: {total_fuel}\n\
                          JS-FFI call count: {js_calls}\n\
                          JS-FFI functions called: {js_names:?}\n\
-                         WASI stdout ({} bytes): {wasi_text:?}\n\
-                         Finding: CPython static init completed but invoked JS-FFI stubs.\n\
-                         These stubs returned 0/null; real JS would be needed to pass them.",
+                         WASI stdout after ctors ({} bytes): {wasi_text:?}",
                         wasi_out.len()
-                    )
+                    );
                 }
+                eprintln!("[probe] {ctors_summary}");
             }
             Err(e) => {
                 let js_calls = log.total_calls();
@@ -339,7 +339,7 @@ fn run_probe() -> String {
                     "CPython static init trapped in a mechanical Emscripten ABI function or in module code"
                 };
 
-                format!(
+                return format!(
                     "BOOT FAILED at __wasm_call_ctors\n\
                      Error: {e}\n\
                      Trap kind: {trap_kind}\n\
@@ -353,21 +353,284 @@ fn run_probe() -> String {
                      {mech_trace}\
                      Finding: {finding}",
                     wasi_out.len()
-                )
+                );
             }
         }
     } else {
-        format!(
-            "NO BOOT ENTRY FOUND\n\
-             The module exports neither __wasm_call_ctors nor _start.\n\
-             Instantiation succeeded and data relocs ran (if present).\n\
-             Exports available: {:?}\n\
-             JS-FFI calls during instantiation: {}",
-            instance
-                .exports(&mut store)
-                .map(|e| e.name().to_owned())
-                .collect::<Vec<_>>(),
-            log.total_calls()
-        )
+        eprintln!("[probe] __wasm_call_ctors not found; skipping to phase 5");
+        ctors_summary = "CTORS: __wasm_call_ctors not exported (skipped)".to_owned();
+    }
+
+    // ---- phase 5: run the CPython interpreter --------------------------------
+    //
+    // Strategy A: `__main_argc_argv` is exported - call it with argc=0, argv=0.
+    //   This is the standard Emscripten app entry; it drives full Python init
+    //   and processes the interpreter flags baked in at compile time.
+    //
+    // Strategy B: No usable `main` - use the C API:
+    //   1. Call `Py_InitializeEx(0)` (suppress signal registration).
+    //   2. Write the print statement into guest memory at a scratch offset
+    //      above the heap/stack area.
+    //   3. Call `PyRun_SimpleString(ptr)`.
+    //
+    // The most likely outcome from either path is a CPython fatal error such as
+    // "No module named 'encodings'" because `python_stdlib.zip` is not mounted
+    // into the MEMFS. That error message is the primary deliverable of this
+    // phase: it names the next layer to implement.
+    run_python_phase(&instance, &mut store, &log, &ctors_summary)
+}
+
+/// Scratch offset in guest linear memory for small C-string arguments.
+/// Placed well above `__heap_base` (4_632_232) and the stack region.
+/// 32 MiB gives comfortable distance from both data and stack.
+const SCRATCH_OFFSET: u32 = 32 * 1024 * 1024;
+
+/// Drive the Python interpreter (phase 5) after ctors have completed.
+///
+/// Returns a human-readable outcome string (honest - no fabricated success).
+fn run_python_phase(
+    instance: &wasmtime::Instance,
+    store: &mut Store<EmbedderState>,
+    log: &JsFfiCallLog,
+    ctors_summary: &str,
+) -> String {
+    // Drain stdout accumulated during ctors before phase 5 starts.
+    store.data_mut().wasi_stdout.clear();
+
+    // Strategy A: `__main_argc_argv(0, 0)` - Emscripten app entry.
+    if let Some(func) = instance.get_func(&mut *store, "__main_argc_argv") {
+        eprintln!("[probe P5] calling __main_argc_argv(0, 0)...");
+        let mut results = [wasmtime::Val::I32(0)];
+        match func.call(
+            &mut *store,
+            &[wasmtime::Val::I32(0), wasmtime::Val::I32(0)],
+            &mut results,
+        ) {
+            Ok(_) => {
+                let ret = match &results[0] {
+                    wasmtime::Val::I32(v) => *v,
+                    _ => -1,
+                };
+                let wasi_out = store.data().wasi_stdout.clone();
+                let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
+                let fuel_remaining = store.get_fuel().unwrap_or(0);
+                let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
+                let js_calls = log.total_calls();
+                return format!(
+                    "{ctors_summary}\n\
+                     \n\
+                     --- phase 5: __main_argc_argv(0,0) ---\n\
+                     Entry: __main_argc_argv\n\
+                     Return value: {ret}\n\
+                     Total fuel consumed: {total_fuel}\n\
+                     JS-FFI calls total: {js_calls}\n\
+                     WASI stdout ({} bytes): {wasi_text:?}",
+                    wasi_out.len()
+                );
+            }
+            Err(e) => {
+                let wasi_out = store.data().wasi_stdout.clone();
+                let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
+                let fuel_remaining = store.get_fuel().unwrap_or(0);
+                let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
+                let js_calls = log.total_calls();
+                let err_str = format!("{e}");
+                let finding = classify_python_error(&err_str, js_calls);
+                return format!(
+                    "{ctors_summary}\n\
+                     \n\
+                     --- phase 5: __main_argc_argv(0,0) ---\n\
+                     Entry: __main_argc_argv\n\
+                     TRAPPED: {e}\n\
+                     Total fuel consumed: {total_fuel}\n\
+                     JS-FFI calls total: {js_calls}\n\
+                     WASI stdout ({} bytes): {wasi_text:?}\n\
+                     Finding: {finding}",
+                    wasi_out.len()
+                );
+            }
+        }
+    }
+
+    // Strategy B: C API - Py_InitializeEx + PyRun_SimpleString.
+    eprintln!("[probe P5] __main_argc_argv not found; using C API path");
+
+    // Step B1: Py_InitializeEx(0).
+    let py_init = match instance.get_func(&mut *store, "Py_InitializeEx") {
+        Some(f) => f,
+        None => {
+            return format!(
+                "{ctors_summary}\n\
+                 \n\
+                 --- phase 5: C API path ---\n\
+                 Finding: Py_InitializeEx not exported; cannot initialize interpreter"
+            );
+        }
+    };
+
+    eprintln!("[probe P5] calling Py_InitializeEx(0)...");
+    match py_init.call(&mut *store, &[wasmtime::Val::I32(0)], &mut []) {
+        Ok(_) => {
+            let wasi_after_init = store.data().wasi_stdout.clone();
+            let init_text = String::from_utf8_lossy(&wasi_after_init).into_owned();
+            eprintln!(
+                "[probe P5] Py_InitializeEx returned; stdout so far ({} bytes): {init_text:?}",
+                wasi_after_init.len()
+            );
+        }
+        Err(e) => {
+            let wasi_out = store.data().wasi_stdout.clone();
+            let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
+            let fuel_remaining = store.get_fuel().unwrap_or(0);
+            let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
+            let js_calls = log.total_calls();
+            let err_str = format!("{e}");
+            let finding = classify_python_error(&err_str, js_calls);
+            return format!(
+                "{ctors_summary}\n\
+                 \n\
+                 --- phase 5: C API path ---\n\
+                 Entry: Py_InitializeEx(0)\n\
+                 TRAPPED at Py_InitializeEx: {e}\n\
+                 Total fuel consumed: {total_fuel}\n\
+                 JS-FFI calls total: {js_calls}\n\
+                 WASI stdout ({} bytes): {wasi_text:?}\n\
+                 Finding: {finding}",
+                wasi_out.len()
+            );
+        }
+    }
+
+    // Step B2: write the Python source into guest memory and call PyRun_SimpleString.
+    let py_run = match instance.get_func(&mut *store, "PyRun_SimpleString") {
+        Some(f) => f,
+        None => {
+            let wasi_out = store.data().wasi_stdout.clone();
+            let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
+            return format!(
+                "{ctors_summary}\n\
+                 \n\
+                 --- phase 5: C API path ---\n\
+                 Entry: Py_InitializeEx(0) succeeded\n\
+                 Finding: PyRun_SimpleString not exported; cannot run code\n\
+                 WASI stdout ({} bytes): {wasi_text:?}",
+                wasi_out.len()
+            );
+        }
+    };
+
+    // Write a null-terminated Python one-liner into guest memory.
+    let src = b"print('hello from cpython on afterburner')\n\0";
+
+    // Borrow check note: Memory is Copy; extract the handle first, then write.
+    let maybe_mem = store.data().pyodide_memory;
+    let scratch_ptr = match maybe_mem {
+        Some(mem) => {
+            let offset = SCRATCH_OFFSET as usize;
+            let mem_len = mem.data_size(&*store);
+            if offset + src.len() > mem_len {
+                let wasi_out = store.data().wasi_stdout.clone();
+                let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
+                return format!(
+                    "{ctors_summary}\n\
+                     \n\
+                     --- phase 5: C API path ---\n\
+                     Entry: Py_InitializeEx(0) succeeded\n\
+                     Finding: cannot write to guest memory at SCRATCH_OFFSET={SCRATCH_OFFSET} \
+                     (offset+len={} > mem_size={mem_len})\n\
+                     WASI stdout ({} bytes): {wasi_text:?}",
+                    offset + src.len(),
+                    wasi_out.len()
+                );
+            }
+            let data = mem.data_mut(&mut *store);
+            data[offset..offset + src.len()].copy_from_slice(src);
+            eprintln!(
+                "[probe P5] wrote {} bytes to guest memory at 0x{offset:x}",
+                src.len()
+            );
+            offset as i32
+        }
+        None => {
+            let wasi_out = store.data().wasi_stdout.clone();
+            let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
+            return format!(
+                "{ctors_summary}\n\
+                 \n\
+                 --- phase 5: C API path ---\n\
+                 Entry: Py_InitializeEx(0) succeeded\n\
+                 Finding: cannot write to guest memory at SCRATCH_OFFSET={SCRATCH_OFFSET} \
+                 (memory too small or not yet set)\n\
+                 WASI stdout ({} bytes): {wasi_text:?}",
+                wasi_out.len()
+            );
+        }
+    };
+
+    // Drain init stdout before the run call.
+    store.data_mut().wasi_stdout.clear();
+
+    eprintln!("[probe P5] calling PyRun_SimpleString(ptr={scratch_ptr:#x})...");
+    let run_result = py_run.call(
+        &mut *store,
+        &[wasmtime::Val::I32(scratch_ptr)],
+        &mut [wasmtime::Val::I32(0)],
+    );
+
+    let wasi_out = store.data().wasi_stdout.clone();
+    let wasi_text = String::from_utf8_lossy(&wasi_out).into_owned();
+    let fuel_remaining = store.get_fuel().unwrap_or(0);
+    let total_fuel = PROBE_FUEL.saturating_sub(fuel_remaining);
+    let js_calls = log.total_calls();
+
+    match run_result {
+        Ok(()) => {
+            format!(
+                "{ctors_summary}\n\
+                 \n\
+                 --- phase 5: C API path ---\n\
+                 Entry: Py_InitializeEx(0) then PyRun_SimpleString\n\
+                 PyRun_SimpleString returned (no trap)\n\
+                 Total fuel consumed: {total_fuel}\n\
+                 JS-FFI calls total: {js_calls}\n\
+                 WASI stdout ({} bytes): {wasi_text:?}",
+                wasi_out.len()
+            )
+        }
+        Err(e) => {
+            let err_str = format!("{e}");
+            let finding = classify_python_error(&err_str, js_calls);
+            format!(
+                "{ctors_summary}\n\
+                 \n\
+                 --- phase 5: C API path ---\n\
+                 Entry: Py_InitializeEx(0) then PyRun_SimpleString\n\
+                 TRAPPED at PyRun_SimpleString: {e}\n\
+                 Total fuel consumed: {total_fuel}\n\
+                 JS-FFI calls total: {js_calls}\n\
+                 WASI stdout ({} bytes): {wasi_text:?}\n\
+                 Finding: {finding}",
+                wasi_out.len()
+            )
+        }
+    }
+}
+
+/// Classify a Python-phase error string into a human-readable finding.
+fn classify_python_error(err_str: &str, js_calls: usize) -> &'static str {
+    if err_str.contains("OutOfFuel") || err_str.contains("out of fuel") {
+        "fuel exhausted; increase PROBE_FUEL"
+    } else if err_str.contains("proc_exit") {
+        "CPython called proc_exit (fatal init failure or clean exit)"
+    } else if err_str.contains("encodings") || err_str.contains("No module named") {
+        "Python stdlib not found: python_stdlib.zip is not mounted in MEMFS; next step is MEMFS"
+    } else if err_str.contains("prefix") || err_str.contains("path configuration") {
+        "Python path configuration error: no prefix/exec-prefix set; MEMFS with stdlib needed"
+    } else if err_str.contains("unimplemented import") {
+        "hit an auto-filled trap stub (unexpected import)"
+    } else if js_calls > 0 {
+        "JS-FFI stub returned 0/null and caused a downstream trap"
+    } else {
+        "trapped in Emscripten ABI or module code; check WASI stdout for Python fatal message"
     }
 }

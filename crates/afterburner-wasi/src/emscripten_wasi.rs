@@ -360,5 +360,50 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
         0
     });
 
+    // ---- random_get ----------------------------------------------------------
+
+    // random_get(buf_ptr: i32, buf_len: i32) -> i32
+    //
+    // CPython calls this (via _Py_HashRandomization_Init) to seed its internal
+    // hash randomization. Returning an error or 0 bytes produces the fatal:
+    // "Fatal Python error: _Py_HashRandomization_Init: failed to get random
+    // numbers to initialize Python".
+    //
+    // Determinism is DESIRED here: a sealed engine with a fixed seed produces
+    // byte-identical output across runs, making re-execution exact.
+    //
+    // Implementation: SplitMix64 with a fixed seed. Each call re-seeds from
+    // the same constant so buf_ptr/buf_len combinations are stable across runs.
+    //
+    // vertexia: fixed seed; upgrade path is a per-store seed in EmbedderState
+    // if callers need distinct entropy per instantiation.
+    def!("random_get", |mut caller: Caller<'_, EmbedderState>,
+                        buf_ptr: i32,
+                        buf_len: i32|
+     -> i32 {
+        let len = buf_len as u32 as usize;
+        if len == 0 {
+            return 0;
+        }
+        // SplitMix64 generator with a fixed deterministic seed.
+        // Each call starts from the same seed so output is stable across runs.
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut buf = Vec::with_capacity(len);
+        while buf.len() < len {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^= z >> 31;
+            buf.extend_from_slice(&z.to_le_bytes());
+        }
+        buf.truncate(len);
+        if write_bytes(&mut caller, buf_ptr, &buf) {
+            0
+        } else {
+            1
+        }
+    });
+
     Ok(())
 }
