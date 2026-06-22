@@ -446,6 +446,32 @@ fn run_python_phase(
     // Drain stdout accumulated during ctors before phase 5 starts.
     store.data_mut().wasi_stdout.clear();
 
+    // DIAG: read global[175]+20 to see if the type-reflection struct was written.
+    // global[175] is the first defined global (init=3246520); +20 is the reflection
+    // function pointer slot checked in func 2176 before choosing reflection vs trampoline.
+    if let Some(mem) = store.data().pyodide_memory {
+        let mem_data = mem.data(&*store);
+        let g175_addr: usize = 3246520;
+        let check_addr = g175_addr + 20;
+        if check_addr + 4 <= mem_data.len() {
+            let word = i32::from_le_bytes(mem_data[check_addr..check_addr + 4].try_into().unwrap());
+            eprintln!("[probe P5 DIAG] *(global175+20) @ 0x{check_addr:x} = {word}");
+        }
+        // Also check a wider view of the struct at global175
+        if g175_addr + 64 <= mem_data.len() {
+            let mut view = String::new();
+            for off in (0..64).step_by(4) {
+                let word = i32::from_le_bytes(
+                    mem_data[g175_addr + off..g175_addr + off + 4]
+                        .try_into()
+                        .unwrap(),
+                );
+                view.push_str(&format!("  +{off}: {word}\n"));
+            }
+            eprintln!("[probe P5 DIAG] struct at global175 (3246520):\n{view}");
+        }
+    }
+
     // Strategy A: `__main_argc_argv(0, 0)` - Emscripten app entry.
     if let Some(func) = instance.get_func(&mut *store, "__main_argc_argv") {
         eprintln!("[probe P5] calling __main_argc_argv(0, 0)...");

@@ -404,7 +404,15 @@ pub(crate) fn invoke_dispatch(
     let Some(tbl) = caller.data().pyodide_table else {
         return Err(wasmtime::Trap::UnreachableCodeReached.into());
     };
-    let Some(wasmtime::Ref::Func(Some(func))) = tbl.get(&mut caller, idx) else {
+    // DIAG: log every dispatch so the probe can see what table slot was requested
+    // and whether it holds a null funcref.
+    let slot_content = tbl.get(&mut caller, idx);
+    let is_null = !matches!(&slot_content, Some(wasmtime::Ref::Func(Some(_))));
+    eprintln!(
+        "[invoke_dispatch] idx={idx} slot={slot_content:?} null={is_null} params_len={}",
+        params.len()
+    );
+    let Some(wasmtime::Ref::Func(Some(func))) = slot_content else {
         return Err(wasmtime::Trap::UnreachableCodeReached.into());
     };
     func.call(&mut caller, &params[1..], results)
