@@ -313,6 +313,40 @@ pub(crate) fn wire_mechanical_env_funcs(
         // Store the exception pointer so __cxa_find_matching_catch_* can
         // return it to the landing pad after invoke_dispatch catches the trap.
         caller.data_mut().cxa_thrown_ptr = _ptr;
+        // Read the mangled type name from the std::type_info layout in
+        // guest memory. On wasm32: [vtable_ptr @0][name_ptr @4].
+        // Read i32 at type_info_ptr+4 -> pointer to NUL-terminated mangled name.
+        let type_name: String = if let Some(mem) = caller.data().pyodide_memory {
+            let data = mem.data(&caller);
+            let tp_base = _tp as u32 as usize;
+            let name_ptr: usize = if tp_base + 8 <= data.len() {
+                u32::from_le_bytes(data[tp_base + 4..tp_base + 8].try_into().unwrap_or([0; 4]))
+                    as usize
+            } else {
+                0
+            };
+            if name_ptr != 0 && name_ptr < data.len() {
+                let end = data[name_ptr..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .map(|n| name_ptr + n)
+                    .unwrap_or(name_ptr);
+                String::from_utf8_lossy(&data[name_ptr..end]).into_owned()
+            } else {
+                format!("<name_ptr=0x{name_ptr:x} out of bounds>")
+            }
+        } else {
+            "<no memory>".to_owned()
+        };
+        // Increment counter; record up to 64 entries.
+        let st = caller.data_mut();
+        st.cxa_throw_count += 1;
+        let count = st.cxa_throw_count;
+        eprintln!("[__cxa_throw #{count}] ptr=0x{_ptr:x} tp=0x{_tp:x} name={type_name:?}");
+        if st.cxa_throw_log.len() >= 64 {
+            st.cxa_throw_log.remove(0);
+        }
+        st.cxa_throw_log.push((count, type_name));
         Err(wasmtime::Trap::UnreachableCodeReached.into())
     });
     def!("__cxa_find_matching_catch_2", |caller: Caller<
@@ -332,9 +366,20 @@ pub(crate) fn wire_mechanical_env_funcs(
      -> i32 {
         caller.data().cxa_thrown_ptr
     });
-    def!("__resumeException", |_: Caller<'_, EmbedderState>,
+    def!("__resumeException", |caller: Caller<'_, EmbedderState>,
                                _ptr: i32|
      -> WtResult<()> {
+        // This is the uncaught-exception path: the exception survived all
+        // invoke_ catch boundaries and reached the top-level re-thrower.
+        // Log the last __cxa_throw entry as the escaping exception.
+        let st = caller.data();
+        let last = st.cxa_throw_log.last().cloned();
+        let total = st.cxa_throw_count;
+        let fs_ctx: Vec<String> = st.fs_path_log.iter().cloned().collect();
+        eprintln!(
+            "[__resumeException] ptr=0x{_ptr:x} total_throws={total} \
+             last_throw={last:?} last_fs_paths={fs_ctx:?}"
+        );
         Err(wasmtime::Trap::UnreachableCodeReached.into())
     });
     def!("__assert_fail", |_: Caller<'_, EmbedderState>,

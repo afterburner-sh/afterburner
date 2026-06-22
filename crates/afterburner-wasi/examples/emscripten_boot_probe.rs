@@ -413,6 +413,14 @@ fn run_probe() -> String {
                 } else {
                     format!("table[{last_invoke}]")
                 };
+                let throw_count = store.data().cxa_throw_count;
+                let throw_log = store.data().cxa_throw_log.clone();
+                let last_throw = throw_log.last().cloned();
+                let mut throw_trace = String::new();
+                for (n, name) in &throw_log {
+                    throw_trace.push_str(&format!("  [throw #{n}] {name:?}\n"));
+                }
+                let fs_paths: Vec<String> = store.data().fs_path_log.iter().cloned().collect();
                 return format!(
                     "BOOT FAILED at __wasm_call_ctors\n\
                      Error: {e}\n\
@@ -424,6 +432,13 @@ fn run_probe() -> String {
                      JS-FFI functions called: {js_names:?}\n\
                      WASI stdout ({} bytes): {wasi_text:?}\n\
                      Auto-filled imports: {auto_filled:?}\n\
+                     \n\
+                     --- C++ exception throw log ({throw_count} total) ---\n\
+                     {throw_trace}\
+                     Last (escaping) throw: {last_throw:?}\n\
+                     \n\
+                     --- last 12 FS paths before escape ---\n\
+                     {fs_paths:?}\n\
                      \n\
                      --- last {MECH_TRACE_TAIL} mechanical env.* calls before trap ---\n\
                      {mech_trace}\
@@ -549,7 +564,7 @@ fn run_python_phase(
                     .map(|bt| {
                         bt.frames()
                             .iter()
-                            .take(5)
+                            .take(20)
                             .map(|f| format!("func[{}]", f.func_index()))
                             .collect::<Vec<_>>()
                             .join(" <- ")
@@ -578,6 +593,16 @@ fn run_python_phase(
                 } else {
                     format!("table[{last_invoke}]")
                 };
+                // C++ exception throw log: all recorded throws + last one (the escape candidate).
+                let throw_count = store.data().cxa_throw_count;
+                let throw_log = store.data().cxa_throw_log.clone();
+                let last_throw = throw_log.last().cloned();
+                let mut throw_trace = String::new();
+                for (n, name) in &throw_log {
+                    throw_trace.push_str(&format!("  [throw #{n}] {name:?}\n"));
+                }
+                // Last 12 FS paths before the exception escaped.
+                let fs_paths: Vec<String> = store.data().fs_path_log.iter().cloned().collect();
                 return format!(
                     "{ctors_summary}\n\
                      \n\
@@ -585,11 +610,18 @@ fn run_python_phase(
                      Entry: __main_argc_argv\n\
                      TRAPPED: {e}\n\
                      Trap kind: {trap_kind}\n\
-                     Trap frames (innermost first): {trap_frames}\n\
+                     Trap frames (innermost first, up to 20): {trap_frames}\n\
                      Last invoke_dispatch table index: {last_invoke_str}\n\
                      Total fuel consumed: {total_fuel}\n\
                      JS-FFI calls total: {js_calls}\n\
                      WASI stdout ({} bytes): {wasi_text:?}\n\
+                     \n\
+                     --- C++ exception throw log ({throw_count} total) ---\n\
+                     {throw_trace}\
+                     Last (escaping) throw: {last_throw:?}\n\
+                     \n\
+                     --- last 12 FS paths before escape ---\n\
+                     {fs_paths:?}\n\
                      \n\
                      --- last {MECH_TRACE_TAIL} mechanical env.* calls before trap ---\n\
                      {mech_trace}\

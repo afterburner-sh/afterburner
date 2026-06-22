@@ -182,6 +182,16 @@ pub struct EmbedderState {
     /// Exception pointer set by `__cxa_throw`. Read by `__cxa_find_matching_catch_*`
     /// to return the thrown object pointer to the C++ EH landing pad.
     pub cxa_thrown_ptr: i32,
+    /// Running count of all `__cxa_throw` calls (caught + uncaught).
+    pub cxa_throw_count: u32,
+    /// Log of (count_at_throw, mangled_type_name) for every `__cxa_throw` call.
+    /// Mangled name is read from `type_info_ptr + 4` in guest memory (wasm32 layout:
+    /// `[vtable_ptr @0][name_ptr @4]`). Capped at 64 entries; older entries dropped.
+    pub cxa_throw_log: Vec<(u32, String)>,
+    /// Rolling log of the last 12 paths passed to `__syscall_openat` or
+    /// `__syscall_stat64`. Used to identify which module CPython was looking for
+    /// when the uncaught exception escaped.
+    pub fs_path_log: std::collections::VecDeque<String>,
 }
 
 impl EmbedderState {
@@ -196,6 +206,9 @@ impl EmbedderState {
             fs: InMemFs::new(),
             last_invoke_idx: u64::MAX,
             cxa_thrown_ptr: 0,
+            cxa_throw_count: 0,
+            cxa_throw_log: Vec::new(),
+            fs_path_log: std::collections::VecDeque::new(),
         }
     }
 
@@ -222,6 +235,9 @@ impl EmbedderState {
             fs: InMemFs::new_with_root_preopen(),
             last_invoke_idx: u64::MAX,
             cxa_thrown_ptr: 0,
+            cxa_throw_count: 0,
+            cxa_throw_log: Vec::new(),
+            fs_path_log: std::collections::VecDeque::new(),
         }
     }
 
@@ -242,6 +258,9 @@ impl EmbedderState {
             fs: InMemFs::new(),
             last_invoke_idx: u64::MAX,
             cxa_thrown_ptr: 0,
+            cxa_throw_count: 0,
+            cxa_throw_log: Vec::new(),
+            fs_path_log: std::collections::VecDeque::new(),
         }
     }
 
@@ -478,6 +497,9 @@ impl EmbedderVm {
                 fs: InMemFs::new(),
                 last_invoke_idx: u64::MAX,
                 cxa_thrown_ptr: 0,
+                cxa_throw_count: 0,
+                cxa_throw_log: Vec::new(),
+                fs_path_log: std::collections::VecDeque::new(),
             }
         } else {
             EmbedderState {
@@ -488,6 +510,9 @@ impl EmbedderVm {
                 fs: InMemFs::new(),
                 last_invoke_idx: u64::MAX,
                 cxa_thrown_ptr: 0,
+                cxa_throw_count: 0,
+                cxa_throw_log: Vec::new(),
+                fs_path_log: std::collections::VecDeque::new(),
             }
         };
 
@@ -600,6 +625,9 @@ impl EmbedderVm {
             fs: InMemFs::new(),
             last_invoke_idx: u64::MAX,
             cxa_thrown_ptr: 0,
+            cxa_throw_count: 0,
+            cxa_throw_log: Vec::new(),
+            fs_path_log: std::collections::VecDeque::new(),
         };
 
         let mut store = Store::new(&module.engine, state);

@@ -214,6 +214,14 @@ pub(crate) fn wire_fs_env_funcs(
                         }
                     };
                     let abs = caller.data().fs.resolve(&base, &path_str);
+                    // Track last 12 paths for exception context.
+                    {
+                        let log = &mut caller.data_mut().fs_path_log;
+                        if log.len() >= 12 {
+                            log.pop_front();
+                        }
+                        log.push_back(format!("openat:{abs}"));
+                    }
                     let fd = caller.data_mut().fs.open(abs.clone(), flags);
                     eprintln!("[openat] {:?} flags={flags} -> fd={fd}", abs);
                     fd
@@ -406,6 +414,14 @@ pub(crate) fn wire_fs_env_funcs(
                         None => return ENOENT,
                     };
                     let abs = caller.data().fs.resolve("/", &path_str);
+                    // Track last 12 paths for exception context.
+                    {
+                        let log = &mut caller.data_mut().fs_path_log;
+                        if log.len() >= 12 {
+                            log.pop_front();
+                        }
+                        log.push_back(format!("stat64:{abs}"));
+                    }
                     let mut buf = [0u8; 112];
                     let rc = caller.data_mut().fs.stat_into(&abs, &mut buf);
                     let mode_size = caller.data().fs.stat_mode_size(&abs);
