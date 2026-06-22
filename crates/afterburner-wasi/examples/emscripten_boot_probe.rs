@@ -45,7 +45,9 @@
 use std::fs;
 
 use afterburner_wasi::embedder_vm::{EmbedderState, deterministic_engine};
-use afterburner_wasi::emscripten_dylink::{fill_got_table_slots, parse_got_name_to_slot};
+use afterburner_wasi::emscripten_dylink::{
+    fill_got_table_slots, parse_got_name_to_slot, wire_got_func_stubs_from_module,
+};
 use afterburner_wasi::emscripten_runtime::{
     JsFfiCallLog, PYODIDE_STACK_BASE, add_pyodide_imports, fill_unknown_imports_as_traps,
     wire_env_memory_and_table_in_store,
@@ -160,6 +162,14 @@ fn run_probe() -> String {
          GOT.func (pre-filled with slot indices), GOT.mem (pre-filled with symbol addresses)"
     );
 
+    // Wire correctly-typed stubs for any GOT.func env.* imports not yet in the
+    // linker (emscripten_gl*, emscripten_console_*, etc.). Must happen before
+    // instantiation so the stubs are available for Path-3 in fill_got_table_slots.
+    match wire_got_func_stubs_from_module(&mut store, &mut linker, &module) {
+        Ok(n) => eprintln!("[probe] wired {n} GOT.func env.* stubs from module import section"),
+        Err(e) => return format!("GOT STUB WIRING FAILED: {e}"),
+    }
+
     // Fill any remaining unsatisfied function imports with trap stubs.
     let auto_filled = fill_unknown_imports_as_traps(&mut store, &mut linker, &module);
     if !auto_filled.is_empty() {
@@ -205,7 +215,14 @@ fn run_probe() -> String {
     // already pre-filled with slot indices by wire_env_memory_and_table_in_store.
 
     eprintln!("[probe] resolving GOT entries...");
-    match fill_got_table_slots(&mut store, &linker, &instance, &got_globals, &name_to_slot) {
+    match fill_got_table_slots(
+        &mut store,
+        &linker,
+        &instance,
+        &got_globals,
+        &name_to_slot,
+        &module,
+    ) {
         Ok(report) => {
             eprintln!(
                 "[probe] GOT resolved: {} from elem-seg, {} from export, {} stub (unresolved), {} mem",

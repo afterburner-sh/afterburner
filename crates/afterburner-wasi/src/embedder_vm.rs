@@ -158,6 +158,11 @@ pub struct EmbedderState {
     /// wasmtime-wasi preview-1 accessor, which requires a `"memory"` *export*
     /// that Emscripten modules do not provide.
     pub pyodide_memory: Option<wasmtime::Memory>,
+    /// Indirect function table imported as `env.__indirect_function_table` by
+    /// Emscripten-compiled modules. Set by `wire_env_memory_and_table_in_store`.
+    /// Used by `invoke_dispatch` to call funcrefs by table index without
+    /// `caller.get_export`, which only works for module *exports* (not imports).
+    pub pyodide_table: Option<wasmtime::Table>,
     /// Accumulated stdout bytes from custom WASI `fd_write` calls (fd 1/2).
     /// Appended by the `wasi_snapshot_preview1::fd_write` shim; read after
     /// `__wasm_call_ctors` returns.
@@ -171,6 +176,7 @@ impl EmbedderState {
         Self {
             wasi: None,
             pyodide_memory: None,
+            pyodide_table: None,
             wasi_stdout: Vec::new(),
         }
     }
@@ -189,6 +195,7 @@ impl EmbedderState {
         Self {
             wasi: None,
             pyodide_memory: None,
+            pyodide_table: None,
             wasi_stdout: Vec::new(),
         }
     }
@@ -205,6 +212,7 @@ impl EmbedderState {
         Self {
             wasi: Some(WasiStateInner { ctx, stdout: pipe }),
             pyodide_memory: None,
+            pyodide_table: None,
             wasi_stdout: Vec::new(),
         }
     }
@@ -437,12 +445,14 @@ impl EmbedderVm {
             EmbedderState {
                 wasi: Some(WasiStateInner { ctx, stdout: pipe }),
                 pyodide_memory: None,
+                pyodide_table: None,
                 wasi_stdout: Vec::new(),
             }
         } else {
             EmbedderState {
                 wasi: None,
                 pyodide_memory: None,
+                pyodide_table: None,
                 wasi_stdout: Vec::new(),
             }
         };
@@ -551,6 +561,7 @@ impl EmbedderVm {
         let state = EmbedderState {
             wasi: Some(WasiStateInner { ctx, stdout: pipe }),
             pyodide_memory: None,
+            pyodide_table: None,
             wasi_stdout: Vec::new(),
         };
 

@@ -18,6 +18,27 @@ use crate::{
 
 type WtResult<T> = wasmtime::Result<T>;
 
+/// Read a null-terminated C string from guest memory at `ptr`.
+///
+/// Uses `EmbedderState::pyodide_memory` (set by `wire_env_memory_and_table_in_store`)
+/// because Emscripten modules import rather than export their linear memory.
+/// Returns `None` if the memory handle is absent, the pointer is out of bounds,
+/// or the string is not valid UTF-8. Silently replaces invalid UTF-8 sequences.
+fn read_cstr(caller: &Caller<'_, EmbedderState>, ptr: i32) -> Option<String> {
+    let mem = caller.data().pyodide_memory?;
+    let data = mem.data(caller);
+    let start = ptr as u32 as usize;
+    if start >= data.len() {
+        return None;
+    }
+    // Find the null terminator, bounded by memory length.
+    let end = data[start..]
+        .iter()
+        .position(|&b| b == 0)
+        .map(|n| start + n)?;
+    Some(String::from_utf8_lossy(&data[start..end]).into_owned())
+}
+
 /// Wire the pure-i32/i64/f64 env.* imports (syscalls, exceptions, trampolines).
 ///
 /// `mech_log` receives the name (and first 1-2 integer args for syscalls)
@@ -140,8 +161,14 @@ pub(crate) fn wire_mechanical_env_funcs(
         let _log = mech_log.clone();
         def!(
             "abort",
-            move |_: Caller<'_, EmbedderState>| -> WtResult<()> {
+            move |mut caller: Caller<'_, EmbedderState>| -> WtResult<()> {
                 _log.push("abort", 0, 0);
+                // Tag stdout so the probe can see the fatal signal even when
+                // no prior fd_write has been called.
+                caller
+                    .data_mut()
+                    .wasi_stdout
+                    .extend_from_slice(b"[abort reached]\n");
                 Err(wasmtime::Trap::UnreachableCodeReached.into())
             }
         );
@@ -150,9 +177,94 @@ pub(crate) fn wire_mechanical_env_funcs(
         let _log = mech_log.clone();
         def!(
             "_abort_js",
-            move |_: Caller<'_, EmbedderState>| -> WtResult<()> {
+            move |mut caller: Caller<'_, EmbedderState>| -> WtResult<()> {
                 _log.push("_abort_js", 0, 0);
+                caller
+                    .data_mut()
+                    .wasi_stdout
+                    .extend_from_slice(b"[_abort_js reached]\n");
                 Err(wasmtime::Trap::UnreachableCodeReached.into())
+            }
+        );
+    }
+
+    // ---- console / output ---------------------------------------------------
+    //
+    // emscripten_console_* and emscripten_err/out appear in GOT.func.* so they
+    // must be wired as env.* imports with the correct signature. The module
+    // passes a char* (i32 address) to these; we read the string from guest
+    // memory and append it to wasi_stdout.
+
+    {
+        let _log = mech_log.clone();
+        def!(
+            "emscripten_console_log",
+            move |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+                _log.push("emscripten_console_log", ptr, 0);
+                if let Some(s) = read_cstr(&caller, ptr) {
+                    let buf = &mut caller.data_mut().wasi_stdout;
+                    buf.extend_from_slice(s.as_bytes());
+                    buf.push(b'\n');
+                }
+            }
+        );
+    }
+    {
+        let _log = mech_log.clone();
+        def!(
+            "emscripten_console_warn",
+            move |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+                _log.push("emscripten_console_warn", ptr, 0);
+                if let Some(s) = read_cstr(&caller, ptr) {
+                    let buf = &mut caller.data_mut().wasi_stdout;
+                    buf.extend_from_slice(b"[warn] ");
+                    buf.extend_from_slice(s.as_bytes());
+                    buf.push(b'\n');
+                }
+            }
+        );
+    }
+    {
+        let _log = mech_log.clone();
+        def!(
+            "emscripten_console_error",
+            move |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+                _log.push("emscripten_console_error", ptr, 0);
+                if let Some(s) = read_cstr(&caller, ptr) {
+                    let buf = &mut caller.data_mut().wasi_stdout;
+                    buf.extend_from_slice(b"[error] ");
+                    buf.extend_from_slice(s.as_bytes());
+                    buf.push(b'\n');
+                }
+            }
+        );
+    }
+    {
+        let _log = mech_log.clone();
+        def!(
+            "emscripten_err",
+            move |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+                _log.push("emscripten_err", ptr, 0);
+                if let Some(s) = read_cstr(&caller, ptr) {
+                    let buf = &mut caller.data_mut().wasi_stdout;
+                    buf.extend_from_slice(b"[err] ");
+                    buf.extend_from_slice(s.as_bytes());
+                    buf.push(b'\n');
+                }
+            }
+        );
+    }
+    {
+        let _log = mech_log.clone();
+        def!(
+            "emscripten_out",
+            move |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
+                _log.push("emscripten_out", ptr, 0);
+                if let Some(s) = read_cstr(&caller, ptr) {
+                    let buf = &mut caller.data_mut().wasi_stdout;
+                    buf.extend_from_slice(s.as_bytes());
+                    buf.push(b'\n');
+                }
             }
         );
     }

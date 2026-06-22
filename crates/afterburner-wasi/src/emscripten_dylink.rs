@@ -55,7 +55,7 @@ use std::collections::HashMap;
 
 use afterburner_core::{AfterburnerError, Result};
 use wasmparser::{ElementItems, ElementKind, Name, Operator, Parser, Payload};
-use wasmtime::{Func, FuncType, Global, Instance, Linker, Ref, Store, Val};
+use wasmtime::{ExternType, Func, FuncType, Global, Instance, Linker, Module, Ref, Store, Val};
 
 use crate::embedder_vm::EmbedderState;
 use crate::emscripten_runtime::PYODIDE_TABLE_INITIAL_SIZE;
@@ -279,6 +279,100 @@ fn eval_offset_expr(expr: &wasmparser::ConstExpr<'_>, table_base: u32) -> Option
     }
 }
 
+// ---- pre-instantiation: wire missing env.* stubs for GOT.func entries -------
+
+/// For every `GOT.func.<name>` entry whose `env.<name>` counterpart is NOT yet
+/// in the linker, wire a correctly-typed no-op stub (or a trap for terminal
+/// functions). This must be called BEFORE `linker.instantiate`.
+///
+/// Uses the compiled module's import section to discover the exact `FuncType`
+/// for each `env.<name>` import. A stub with the wrong type placed in the
+/// indirect function table would cause a type-mismatch trap on `call_indirect`;
+/// this function ensures every GOT.func slot gets a funcref with the right type.
+///
+/// Returns the number of stubs wired.
+pub fn wire_got_func_stubs_from_module(
+    store: &mut Store<EmbedderState>,
+    linker: &mut Linker<EmbedderState>,
+    module: &Module,
+) -> Result<u32> {
+    // Build name -> FuncType for all env.* function imports in the module.
+    let env_func_types: HashMap<String, FuncType> = module
+        .imports()
+        .filter_map(|imp| {
+            if imp.module() != "env" {
+                return None;
+            }
+            if let ExternType::Func(ft) = imp.ty() {
+                Some((imp.name().to_owned(), ft))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut wired = 0u32;
+
+    for name in GOT_FUNC_NAMES {
+        // Skip if already in the linker (wired by mechanical/jsffi layers).
+        if linker.get(&mut *store, "env", name).is_ok() {
+            continue;
+        }
+
+        // Determine the FuncType from the module's env.* import, if present.
+        let ft = match env_func_types.get(*name) {
+            Some(ft) => ft.clone(),
+            None => {
+                // Not imported as env.* at all - use a safe void->void type.
+                FuncType::new(store.engine(), [], [])
+            }
+        };
+
+        // Wire a no-op stub (or a trap for terminal functions). Terminal
+        // functions are those that must not return normally; they are the ones
+        // already wired as traps in the mechanical layer and appear here only
+        // because they were not yet in the linker.
+        let name_owned = *name;
+        let is_terminal = matches!(*name, "abort" | "__cxa_rethrow");
+
+        if is_terminal {
+            linker
+                .func_new("env", name_owned, ft, |_, _, _| {
+                    Err(wasmtime::Trap::UnreachableCodeReached.into())
+                })
+                .map_err(|e| {
+                    AfterburnerError::Engine(format!("GOT stub terminal env.{name_owned}: {e}"))
+                })?;
+        } else {
+            linker
+                .func_new("env", name_owned, ft.clone(), move |_, _, results| {
+                    // Fill results with zero/false/null defaults.
+                    for r in results.iter_mut() {
+                        *r = zero_val_for(r);
+                    }
+                    Ok(())
+                })
+                .map_err(|e| AfterburnerError::Engine(format!("GOT stub env.{name_owned}: {e}")))?;
+        }
+        wired += 1;
+    }
+    Ok(wired)
+}
+
+/// Return a type-appropriate zero value for a `Val` slot.
+///
+/// `val` already holds the correct `Val` variant (set by wasmtime before
+/// calling the host function); we overwrite its numeric payload with zero.
+fn zero_val_for(val: &Val) -> Val {
+    match val {
+        Val::I32(_) => Val::I32(0),
+        Val::I64(_) => Val::I64(0),
+        Val::F32(_) => Val::F32(0),
+        Val::F64(_) => Val::F64(0),
+        _ => *val,
+    }
+}
+
 // ---- post-instantiation: resolve GOT.func globals ---------------------------
 
 /// Resolution summary returned by `fill_got_table_slots`.
@@ -308,20 +402,25 @@ pub struct GotResolutionReport {
 /// 2. Module export fallback via `instance.get_func(name)`: place the func into
 ///    the pre-assigned stub slot and keep the global pointing to it.
 /// 3. Linker host export (`env.<name>`): place the func into the stub slot.
-/// 4. Unresolved: leave the pre-assigned stub slot (null funcref, will trap if
-///    called, but `call_indirect` at a non-zero slot index does not trap on
-///    address-of usage).
+///    After `wire_got_func_stubs_from_module` has been called, ALL 169 GOT.func
+///    names have a matching `env.*` entry in the linker, so this path resolves
+///    all remaining entries.
+/// 4. Unresolved: place a void->void stub so the slot holds a defined funcref.
 ///
 /// `name_to_slot` should come from `parse_got_name_to_slot` called on the same
 /// wasm bytes before instantiation.
 ///
 /// `got_globals` should be the map returned by `wire_env_memory_and_table_in_store`.
+///
+/// `module` is used to derive the correct `FuncType` for Path-4 fallback stubs
+/// so that `call_indirect` type checks pass even in the absence of a linker entry.
 pub fn fill_got_table_slots(
     store: &mut Store<EmbedderState>,
     linker: &Linker<EmbedderState>,
     instance: &Instance,
     got_globals: &GotGlobalMap,
     name_to_slot: &HashMap<String, u32>,
+    module: &Module,
 ) -> Result<GotResolutionReport> {
     // The table is a host-defined import; retrieve it from the linker.
     let table = linker
@@ -338,21 +437,28 @@ pub fn fill_got_table_slots(
             )
         })?;
 
+    // Per-symbol FuncType from the module's env.* imports. Used for Path-4
+    // fallback stubs to ensure call_indirect type checks pass.
+    let env_func_types: HashMap<String, FuncType> = module
+        .imports()
+        .filter_map(|imp| {
+            if imp.module() != "env" {
+                return None;
+            }
+            if let ExternType::Func(ft) = imp.ty() {
+                Some((imp.name().to_owned(), ft))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Fallback void->void type for names with no env.* import entry.
+    let void_ft = FuncType::new(store.engine(), [], []);
+
     let mut funcs_from_elem = 0u32;
     let mut funcs_from_export = 0u32;
     let mut funcs_stubbed = 0u32;
-
-    // Stub type for the linker-export / fallback path. The GOT global already
-    // points to this pre-allocated slot; we just place a func there so
-    // call_indirect does not fault on a null funcref.
-    //
-    // vertexia: single i32->i32 stub type; upgrade to per-symbol type from the
-    // import section if exact call signatures are needed.
-    let stub_ft = FuncType::new(
-        store.engine(),
-        [wasmtime::ValType::I32],
-        [wasmtime::ValType::I32],
-    );
 
     for (idx, name) in GOT_FUNC_NAMES.iter().enumerate() {
         let global_key = format!("GOT.func::{name}");
@@ -386,6 +492,8 @@ pub fn fill_got_table_slots(
         }
 
         // Path 3: linker host export env.<name>.
+        // After wire_got_func_stubs_from_module this covers all GOT.func entries
+        // that have a matching env.* import in the module.
         if let Ok(ext) = linker.get(&mut *store, "env", name)
             && let Some(func) = ext.into_func()
         {
@@ -400,9 +508,13 @@ pub fn fill_got_table_slots(
             continue;
         }
 
-        // Path 4: unresolved - place a null-returning stub so the slot is a
-        // defined funcref (avoids null-funcref traps on address-of usage).
-        let stub_func = make_stub(store, &stub_ft);
+        // Path 4: unresolved - place a correctly-typed no-op stub so the slot
+        // holds a defined funcref and call_indirect type checks pass.
+        let ft = env_func_types
+            .get(*name)
+            .cloned()
+            .unwrap_or_else(|| void_ft.clone());
+        let stub_func = make_typed_stub(store, &ft);
         table
             .set(&mut *store, stub_slot, Ref::Func(Some(stub_func)))
             .map_err(|e| {
@@ -423,10 +535,18 @@ pub fn fill_got_table_slots(
 
 // ---- internal helper ---------------------------------------------------------
 
-fn make_stub(store: &mut Store<EmbedderState>, ft: &FuncType) -> Func {
+/// Create a no-op `Func` with the given type, filling all result slots with
+/// a type-appropriate zero. Used for Path-4 table stubs.
+fn make_typed_stub(store: &mut Store<EmbedderState>, ft: &FuncType) -> Func {
     Func::new(&mut *store, ft.clone(), |_, _, results| {
-        if !results.is_empty() {
-            results[0] = Val::I32(0);
+        for r in results.iter_mut() {
+            *r = match *r {
+                Val::I32(_) => Val::I32(0),
+                Val::I64(_) => Val::I64(0),
+                Val::F32(_) => Val::F32(0),
+                Val::F64(_) => Val::F64(0),
+                other => other,
+            };
         }
         Ok(())
     })

@@ -289,6 +289,10 @@ pub fn wire_env_memory_and_table_in_store(
     );
     let table = Table::new(&mut *store, tbl_ty, wasmtime::Ref::Func(None))
         .map_err(|e| AfterburnerError::Engine(format!("pyodide table: {e}")))?;
+    // Store the handle in EmbedderState so invoke_dispatch can reach the table
+    // via caller.data().pyodide_table. caller.get_export("__indirect_function_table")
+    // only resolves module *exports*; this module imports the table, not exports it.
+    store.data_mut().pyodide_table = Some(table);
     linker
         .define(
             &mut *store,
@@ -401,10 +405,10 @@ pub(crate) fn invoke_dispatch(
         Some(Val::I32(i)) => *i as u64,
         _ => return Err(wasmtime::Trap::UnreachableCodeReached.into()),
     };
-    let Some(tbl) = caller
-        .get_export("__indirect_function_table")
-        .and_then(|e| e.into_table())
-    else {
+    // The table is a host-defined import, not a module export. caller.get_export
+    // only resolves module exports, so we read the handle stored in EmbedderState
+    // by wire_env_memory_and_table_in_store.
+    let Some(tbl) = caller.data().pyodide_table else {
         return Err(wasmtime::Trap::UnreachableCodeReached.into());
     };
     let Some(wasmtime::Ref::Func(Some(func))) = tbl.get(&mut caller, idx) else {
