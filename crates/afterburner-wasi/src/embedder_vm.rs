@@ -254,15 +254,14 @@ impl EmbedderVm {
         let mut raw_linker: Linker<EmbedderState> = Linker::new(&self.engine);
 
         if wasi {
-            // Wire the WASI preview1 shim. The accessor extracts the
-            // `WasiP1Ctx` from `EmbedderState::wasi`; the unwrap is safe
-            // because WASI imports are only resolved for modules compiled
-            // with `wasi: true`, and every such run builds a `WasiStateInner`.
+            // Invariant: this accessor is only registered when `wasi == true`;
+            // every `run` call on such a module builds `EmbedderState::wasi = Some(...)`,
+            // so `wasi.as_mut()` is always `Some` here.
             add_to_linker_sync(&mut raw_linker, |s| {
                 s.wasi
                     .as_mut()
                     .map(|w| &mut w.ctx)
-                    .expect("WASI import reached non-WASI store")
+                    .unwrap_or_else(|| unreachable!("wasi accessor reached a non-WASI store"))
             })
             .map_err(|e| AfterburnerError::Engine(format!("embedder wasi linker: {e}")))?;
         }
@@ -306,20 +305,14 @@ impl EmbedderVm {
         export: &str,
         fuel: Option<u64>,
     ) -> Result<EmbedderRunOutput> {
-        let stdout_pipe = if module.wasi {
-            Some(MemoryOutputPipe::new(1024 * 1024))
-        } else {
-            None
-        };
-
+        // Build the store state. For WASI modules, create the pipe once and
+        // share it: one clone goes to the WASI context (receives the writes),
+        // the other is kept in `WasiStateInner::stdout` for reading after the run.
         let state = if module.wasi {
-            let pipe = stdout_pipe.as_ref().unwrap().clone();
-            let ctx = WasiCtxBuilder::new().stdout(pipe).build_p1();
+            let pipe = MemoryOutputPipe::new(1024 * 1024);
+            let ctx = WasiCtxBuilder::new().stdout(pipe.clone()).build_p1();
             EmbedderState {
-                wasi: Some(WasiStateInner {
-                    ctx,
-                    stdout: stdout_pipe.as_ref().unwrap().clone(),
-                }),
+                wasi: Some(WasiStateInner { ctx, stdout: pipe }),
             }
         } else {
             EmbedderState { wasi: None }
