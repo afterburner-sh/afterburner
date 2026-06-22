@@ -680,6 +680,19 @@ fn probe_py_write(instance: &wasmtime::Instance, store: &mut Store<EmbedderState
         }
     };
     mem.data_mut(&mut *store)[buf_ptr..buf_ptr + MSG.len()].copy_from_slice(MSG);
+
+    // Dump the buffer from guest memory NOW, before calling _Py_write. If
+    // _Py_write traps before reaching the fd_write shim, the bytes are not
+    // lost: we have already read them from the linear memory here.
+    {
+        let buf_contents = mem.data(&*store)[buf_ptr..buf_ptr + MSG.len()].to_vec();
+        let text = String::from_utf8_lossy(&buf_contents);
+        eprintln!(
+            "[probe_py_write] buf pre-read: ptr={buf_ptr:#x} len={} bytes={text:?}",
+            MSG.len()
+        );
+    }
+
     eprintln!(
         "[probe_py_write] calling _Py_write(1, {buf_ptr:#x}, {})...",
         MSG.len()
@@ -710,7 +723,17 @@ fn probe_py_write(instance: &wasmtime::Instance, store: &mut Store<EmbedderState
             let snippet = String::from_utf8_lossy(&store.data().wasi_stdout).into_owned();
             eprintln!("[probe_py_write] _Py_write() ret={ret} captured={captured}: {snippet:?}");
         }
-        Err(e) => eprintln!("[probe_py_write] _Py_write() trapped: {e}"),
+        Err(ref e) => {
+            // Even on trap: dump any bytes the write shim managed to capture
+            // during the call (e.g. partial writes to fd 2 before the trap).
+            let captured = store.data().wasi_stdout.clone();
+            let snippet = String::from_utf8_lossy(&captured);
+            eprintln!(
+                "[probe_py_write] _Py_write() TRAPPED: {e}\n\
+                 [probe_py_write] captured during trap ({} bytes): {snippet:?}",
+                captured.len()
+            );
+        }
     }
     store.data_mut().wasi_stdout.clear();
 }
