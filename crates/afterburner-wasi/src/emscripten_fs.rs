@@ -29,30 +29,55 @@
 //! - `-38` ENOSYS  - function not implemented
 //! - `-59` ENOTTY  - not a tty (returned by ioctl TIOCGWINSZ etc.)
 //!
-//! ## wasm32 stat layout (musl `struct stat`, little-endian)
+//! ## Emscripten stat buffer layout (doStat, little-endian)
 //!
-//! The layout that Emscripten / musl on wasm32 expects (offsets in bytes):
+//! This is the layout Emscripten's `doStat()` function writes into the guest
+//! buffer passed to `__syscall_stat64` / `__syscall_fstat64` / etc. It is
+//! NOT the musl C `struct stat` layout; it is Emscripten's internal JS-FS
+//! format, verified against `pyodide.asm.js` (Pyodide 0.26.4):
 //!
 //! ```text
 //! offset  size  field
-//!  0       8    st_dev (u64)
-//!  8       8    st_ino (u64)
-//!  16      4    st_mode (u32)
-//!  20      4    st_nlink (u32)
-//!  24      4    st_uid (u32)
-//!  28      4    st_gid (u32)
-//!  32      8    st_rdev (u64)
-//!  40      8    st_size (i64)
-//!  48      4    st_blksize (u32)
+//!  0       4    st_dev (i32)
+//!  4       4    st_mode (i32)          <- CPython reads this to detect file/dir
+//!  8       4    st_nlink (u32)
+//!  12      4    st_uid (i32)
+//!  16      4    st_gid (i32)
+//!  20      4    st_rdev (i32)
+//!  24      8    st_size (i64)          <- CPython reads this for file size
+//!  32      4    st_blksize (i32, 4096)
+//!  36      4    st_blocks (i32)
+//!  40      8    st_atim tv_sec (i64)
+//!  48      4    st_atim tv_nsec (u32)
 //!  52      4    padding
-//!  56      8    st_blocks (i64)
-//!  64      8    st_atim (timespec: tv_sec i64)
-//!  72      8    st_atim tv_nsec (i64, but stored as u64 here)
-//!  80      8    st_mtim tv_sec (i64)
-//!  88      8    st_mtim tv_nsec
-//!  96      8    st_ctim tv_sec (i64)
-//!  104     8    st_ctim tv_nsec
-//!  112     -    end
+//!  56      8    st_mtim tv_sec (i64)
+//!  64      4    st_mtim tv_nsec (u32)
+//!  68      4    padding
+//!  72      8    st_ctim tv_sec (i64)
+//!  80      4    st_ctim tv_nsec (u32)
+//!  84      4    padding
+//!  88      8    st_ino (i64)           <- inode at end
+//!  96      -    end
+//! ```
+//!
+//! Source: `SYSCALLS.doStat` in `pyodide.asm.js` (Pyodide 0.26.4):
+//! ```js
+//! HEAP32[buf>>2]=stat.dev;          // +0
+//! HEAP32[buf+4>>2]=stat.mode;       // +4
+//! HEAPU32[buf+8>>2]=stat.nlink;     // +8
+//! HEAP32[buf+12>>2]=stat.uid;       // +12
+//! HEAP32[buf+16>>2]=stat.gid;       // +16
+//! HEAP32[buf+20>>2]=stat.rdev;      // +20
+//! HEAP64[buf+24>>3]=BigInt(stat.size); // +24
+//! HEAP32[buf+32>>2]=4096;           // +32
+//! HEAP32[buf+36>>2]=stat.blocks;    // +36
+//! HEAP64[buf+40>>3]=...atime sec;   // +40
+//! HEAPU32[buf+48>>2]=...atime nsec; // +48
+//! HEAP64[buf+56>>3]=...mtime sec;   // +56
+//! HEAPU32[buf+64>>2]=...mtime nsec; // +64
+//! HEAP64[buf+72>>3]=...ctime sec;   // +72
+//! HEAPU32[buf+80>>2]=...ctime nsec; // +80
+//! HEAP64[buf+88>>3]=BigInt(stat.ino); // +88
 //! ```
 //!
 //! ## getdents64 layout (musl `struct linux_dirent64`, wasm32)
@@ -280,8 +305,9 @@ impl InMemFs {
 
     fn alloc_fd(&mut self, path: String) -> i32 {
         let entry = FdEntry { path, offset: 0 };
-        // Reuse a slot if one is free.
-        for (i, slot) in self.fds.iter_mut().enumerate() {
+        // Reuse a slot if one is free, starting from index 3 to preserve
+        // the 0/1/2 reservation for stdin/stdout/stderr.
+        for (i, slot) in self.fds.iter_mut().enumerate().skip(3) {
             if slot.is_none() {
                 *slot = Some(entry);
                 return i as i32;
@@ -359,8 +385,8 @@ impl InMemFs {
         0
     }
 
-    /// Fill a `struct stat` buffer (112 bytes, wasm32 musl layout) for the
-    /// node at `abs_path`. Returns 0 or ENOENT.
+    /// Fill an Emscripten stat buffer (96 bytes, Emscripten doStat layout) for
+    /// the node at `abs_path`. Returns 0 or ENOENT.
     pub fn stat_into(&mut self, abs_path: &str, buf: &mut [u8; 112]) -> i32 {
         match self.nodes.get(abs_path) {
             None => ENOENT,
@@ -374,6 +400,15 @@ impl InMemFs {
                 0
             }
         }
+    }
+
+    /// Return (mode, size) for the node at `abs_path`, or None if not found.
+    /// Used by syscall handlers for debug logging after `stat_into`.
+    pub fn stat_mode_size(&self, abs_path: &str) -> Option<(u32, u64)> {
+        self.nodes.get(abs_path).map(|node| match node {
+            FsNode::Dir => (S_IFDIR | S_IRWXU, 0u64),
+            FsNode::File(data) => (S_IFREG | S_IRWXU, data.len() as u64),
+        })
     }
 
     /// Fill a `struct stat` buffer for the node referenced by `fd`.
@@ -519,27 +554,36 @@ fn parent_of(path: &str) -> Option<String> {
 
 // ---- stat buffer writer ----------------------------------------------------
 
-/// Write a wasm32 musl `struct stat` (112-byte little-endian) into `buf`.
+/// Write an Emscripten stat buffer (96 bytes, little-endian) into `buf`.
+///
+/// Uses the Emscripten `doStat()` field layout from `pyodide.asm.js`, NOT the
+/// musl C `struct stat` layout. The buffer passed by Emscripten is 96 bytes;
+/// our `buf` is 112 bytes so the tail is always zeroed and safe to ignore.
+///
+/// Critical fields CPython reads:
+/// - `st_mode` at offset 4 (i32): `S_IFREG` or `S_IFDIR` bits
+/// - `st_size` at offset 24 (i64): byte length for regular files
 fn write_stat_buf(buf: &mut [u8; 112], ino: u64, mode: u32, size: u64) {
     buf.fill(0);
-    // st_dev at offset 0 (u64 LE)
-    buf[0..8].copy_from_slice(&1u64.to_le_bytes());
-    // st_ino at offset 8 (u64 LE)
-    buf[8..16].copy_from_slice(&ino.to_le_bytes());
-    // st_mode at offset 16 (u32 LE)
-    buf[16..20].copy_from_slice(&mode.to_le_bytes());
-    // st_nlink at offset 20 (u32 LE)
-    buf[20..24].copy_from_slice(&1u32.to_le_bytes());
-    // st_uid/gid at offsets 24, 28 (u32 LE) - 0
-    // st_rdev at offset 32 (u64 LE) - 0
-    // st_size at offset 40 (i64 LE)
-    buf[40..48].copy_from_slice(&(size as i64).to_le_bytes());
-    // st_blksize at offset 48 (u32 LE)
-    buf[48..52].copy_from_slice(&512u32.to_le_bytes());
-    // st_blocks at offset 56 (i64 LE) - size in 512-byte blocks
-    let blocks = size.div_ceil(512);
-    buf[56..64].copy_from_slice(&(blocks as i64).to_le_bytes());
-    // timestamps at offsets 64, 72, 80, 88, 96, 104 - leave 0 (epoch)
+    // st_dev at offset 0 (i32 LE) - device 1
+    buf[0..4].copy_from_slice(&1i32.to_le_bytes());
+    // st_mode at offset 4 (i32 LE)
+    buf[4..8].copy_from_slice(&(mode as i32).to_le_bytes());
+    // st_nlink at offset 8 (u32 LE) - 1 link
+    buf[8..12].copy_from_slice(&1u32.to_le_bytes());
+    // st_uid at offset 12 (i32 LE) - 0
+    // st_gid at offset 16 (i32 LE) - 0
+    // st_rdev at offset 20 (i32 LE) - 0
+    // st_size at offset 24 (i64 LE)
+    buf[24..32].copy_from_slice(&(size as i64).to_le_bytes());
+    // st_blksize at offset 32 (i32 LE) - 4096 (Emscripten hardcodes this)
+    buf[32..36].copy_from_slice(&4096i32.to_le_bytes());
+    // st_blocks at offset 36 (i32 LE) - size in 512-byte blocks
+    let blocks = size.div_ceil(512) as i32;
+    buf[36..40].copy_from_slice(&blocks.to_le_bytes());
+    // timestamps at offsets 40, 48, 56, 64, 72, 80 - leave 0 (epoch)
+    // st_ino at offset 88 (i64 LE)
+    buf[88..96].copy_from_slice(&(ino as i64).to_le_bytes());
 }
 
 // ---- getdents64 layout helper ----------------------------------------------

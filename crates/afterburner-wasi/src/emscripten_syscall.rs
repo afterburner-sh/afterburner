@@ -22,6 +22,18 @@ use crate::{
     emscripten_runtime::MechCallLog,
 };
 
+/// Log a stat syscall result: path, rc, and (if found) st_mode + st_size.
+#[inline]
+fn log_stat(tag: &str, abs: &str, rc: i32, mode_size: Option<(u32, u64)>) {
+    match mode_size {
+        Some((mode, size)) => eprintln!(
+            "[{tag}] {:?} -> rc={rc} st_mode=0o{mode:o} st_size={size}",
+            abs
+        ),
+        None => eprintln!("[{tag}] {:?} -> rc={rc}", abs),
+    }
+}
+
 /// Wire all `__syscall_*` filesystem and POSIX imports into `linker`.
 ///
 /// Real in-memory FS implementations are provided for the syscalls that CPython
@@ -349,8 +361,19 @@ pub(crate) fn wire_fs_env_funcs(
                 "__syscall_fstat64",
                 move |mut caller: Caller<'_, EmbedderState>, fd: i32, stat_ptr: i32| -> i32 {
                     _log.push("__syscall_fstat64", fd, stat_ptr);
+                    // Resolve path for logging before the mutable borrow.
+                    let path_for_log = caller.data().fs.fd_path(fd).map(str::to_owned);
                     let mut buf = [0u8; 112];
                     let rc = caller.data_mut().fs.fstat_into(fd, &mut buf);
+                    let mode_size = path_for_log
+                        .as_deref()
+                        .and_then(|p| caller.data().fs.stat_mode_size(p));
+                    log_stat(
+                        "fstat64",
+                        path_for_log.as_deref().unwrap_or("<unknown fd>"),
+                        rc,
+                        mode_size,
+                    );
                     if rc != 0 {
                         return rc;
                     }
@@ -385,9 +408,8 @@ pub(crate) fn wire_fs_env_funcs(
                     let abs = caller.data().fs.resolve("/", &path_str);
                     let mut buf = [0u8; 112];
                     let rc = caller.data_mut().fs.stat_into(&abs, &mut buf);
-                    // Diagnostic: print every stat64 path + result so we can see
-                    // exactly which stdlib paths CPython probes and what we return.
-                    eprintln!("[stat64] {:?} -> rc={rc}", abs);
+                    let mode_size = caller.data().fs.stat_mode_size(&abs);
+                    log_stat("stat64", &abs, rc, mode_size);
                     if rc != 0 {
                         return rc;
                     }
@@ -423,6 +445,8 @@ pub(crate) fn wire_fs_env_funcs(
                     let abs = caller.data().fs.resolve("/", &path_str);
                     let mut buf = [0u8; 112];
                     let rc = caller.data_mut().fs.stat_into(&abs, &mut buf);
+                    let mode_size = caller.data().fs.stat_mode_size(&abs);
+                    log_stat("lstat64", &abs, rc, mode_size);
                     if rc != 0 {
                         return rc;
                     }
@@ -470,6 +494,8 @@ pub(crate) fn wire_fs_env_funcs(
                     let abs = caller.data().fs.resolve(&base, &path_str);
                     let mut buf = [0u8; 112];
                     let rc = caller.data_mut().fs.stat_into(&abs, &mut buf);
+                    let mode_size = caller.data().fs.stat_mode_size(&abs);
+                    log_stat("newfstatat", &abs, rc, mode_size);
                     if rc != 0 {
                         return rc;
                     }
@@ -660,12 +686,12 @@ pub(crate) fn wire_fs_env_funcs(
     def_syscall!("__syscall_fchdir", 1);
     def_syscall!("__syscall_dup", 1);
     def_syscall!("__syscall_dup3", 3);
-    def_syscall!("__syscall_fcntl64", 3);
+    // __syscall_fcntl64 and __syscall_faccessat have real implementations above;
+    // omit them from the stub list so the real handlers are not shadowed.
     def_syscall!("__syscall_fdatasync", 1);
     def_syscall!("__syscall_poll", 3);
     def_syscall!("__syscall_pipe", 1);
     def_syscall!("__syscall_utimensat", 4);
-    def_syscall!("__syscall_faccessat", 4);
     def_syscall!("__syscall_socket", 6);
     def_syscall!("__syscall_bind", 6);
     def_syscall!("__syscall_connect", 6);

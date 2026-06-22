@@ -81,7 +81,7 @@ const STDLIB_ZIP_MOUNT_PATH: &str = "/lib/python312.zip";
 ///
 /// vertexia: global fuel budget; upgrade path is per-phase sub-budgets to
 /// measure which init phases consume the most instructions.
-const PROBE_FUEL: u64 = 50_000_000_000;
+const PROBE_FUEL: u64 = 500_000_000_000;
 
 fn main() {
     let outcome = run_probe();
