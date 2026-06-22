@@ -50,7 +50,9 @@ const STDLIB_MOUNT_PREFIX: &str = "/lib/python3.13";
 const STDLIB_ZIP_MOUNT_PATH: &str = "/lib/python313.zip";
 
 /// Instruction budget - numpy init is heavier than bare CPython.
-const PROBE_FUEL: u64 = 2_000_000_000_000;
+/// 2T was exhausted during module discovery before dlopen; 10T gives margin
+/// to reach and exercise the dlopen/dlsym path.
+const PROBE_FUEL: u64 = 10_000_000_000_000;
 
 const MECH_TRACE_TAIL: usize = 40;
 

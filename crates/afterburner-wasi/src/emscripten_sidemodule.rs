@@ -46,6 +46,7 @@ use wasmtime::{
 };
 
 use crate::embedder_vm::EmbedderState;
+use crate::emscripten_dylink::parse_got_name_to_slot;
 
 /// Memory requirements declared in a SIDE_MODULE's `dylink.0` custom section.
 #[derive(Debug, Clone, Copy)]
@@ -201,6 +202,18 @@ impl SideModuleRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.handles.is_empty()
+    }
+
+    /// Cache a symbol->slot mapping into an already-registered handle (1-based).
+    ///
+    /// Called by `_dlsym_js` after dynamically inserting a function into the
+    /// shared table so that repeat lookups skip the table-grow step.
+    pub fn set_slot(&mut self, handle: u32, name: String, slot: u32) {
+        let idx = handle as usize;
+        if idx == 0 || idx > self.handles.len() {
+            return;
+        }
+        self.handles[idx - 1].1.func_table_slots.insert(name, slot);
     }
 }
 
@@ -439,13 +452,27 @@ pub fn pre_load_side_module(
         .map_err(|e| AfterburnerError::Engine(format!("sidemodule instantiate {path}: {e}")))?;
     eprintln!("[sidemodule] {path}: instantiated");
 
-    // Collect exported function -> table slot mapping.
-    // vertexia: sequential slot assignment from table_base; upgrade path is
-    // parsing the dylink.0 element segment to get exact per-export slots.
-    let func_table_slots = collect_export_table_slots(&mut *store, &instance, table_base);
+    // Build a name->table_slot map from the side module's name section and
+    // element segments. Functions not placed in the element segment (e.g.
+    // PyInit_* which CPython retrieves via dlsym but never calls indirectly)
+    // are absent from the map; _dlsym_js inserts them on demand.
+    let name_to_slot = parse_got_name_to_slot(wasm_bytes, table_base);
+    // Intersect with the module's actual exports to build func_table_slots.
+    let func_table_slots: HashMap<String, u32> = module
+        .exports()
+        .filter(|exp| matches!(exp.ty(), wasmtime::ExternType::Func(_)))
+        .filter_map(|exp| {
+            let name = exp.name().to_owned();
+            name_to_slot.get(&name).map(|&slot| (name, slot))
+        })
+        .collect();
     eprintln!(
-        "[sidemodule] {path}: {} export table slots collected",
-        func_table_slots.len()
+        "[sidemodule] {path}: {} export table slots resolved from element segment \
+         ({} exports total, {} not in table)",
+        func_table_slots.len(),
+        module.exports().filter(|e| matches!(e.ty(), wasmtime::ExternType::Func(_))).count(),
+        module.exports().filter(|e| matches!(e.ty(), wasmtime::ExternType::Func(_))).count()
+            - func_table_slots.len(),
     );
 
     // Call __wasm_apply_data_relocs if present.
@@ -479,32 +506,6 @@ pub fn pre_load_side_module(
     ))
 }
 
-/// Collect exported function -> table slot mapping.
-///
-/// For Emscripten SIDE_MODULEs, functions are placed into the shared table
-/// starting at `table_base` in element-segment order. Since `wasmtime::Func`
-/// does not implement `PartialEq`, we assign slots sequentially to exported
-/// functions starting at `table_base`, which matches Emscripten's layout.
-///
-/// vertexia: sequential slot assignment; upgrade path is parsing the dylink.0
-/// section's element-segment to get exact per-export slots.
-fn collect_export_table_slots(
-    store: &mut Store<EmbedderState>,
-    instance: &Instance,
-    table_base: u32,
-) -> HashMap<String, u32> {
-    let mut out = HashMap::new();
-    let mut slot = table_base;
-    for export in instance.exports(&mut *store) {
-        let name = export.name().to_owned();
-        if export.into_func().is_none() {
-            continue;
-        }
-        out.insert(name, slot);
-        slot = slot.saturating_add(1);
-    }
-    out
-}
 
 /// Wire `env._dlopen_js`, `env._dlsym_js`, and `env._emscripten_dlopen_js`
 /// against the [`SideModuleRegistry`] stored in [`EmbedderState::side_modules`].
@@ -512,19 +513,23 @@ fn collect_export_table_slots(
 /// Called from `emscripten_mechanical::wire_mechanical_env_funcs`. Extracted
 /// here to keep that file under 1000 lines.
 ///
-/// ## ABI
+/// ## ABI (from pyodide.asm.js + wasm type section)
 ///
-/// `_dlopen_js(handle_struct_ptr: i32) -> i32`
-///   - `handle_struct_ptr` points to the Emscripten LDSO handle struct.
-///   - The filename C string pointer is at `struct + 36` (wasm32, from
-///     `pyodide.asm.js`: `UTF8ToString(handle+36)`).
+/// `_dlopen_js(handle_struct_ptr: i32) -> i32`  [wasm type 2]
+///   - `handle_struct_ptr` points to the Emscripten LDSO DSO struct in linear
+///     memory. The filename C string starts directly at `handle_struct_ptr + 36`
+///     (from pyodide.asm.js: `UTF8ToString(handle+36)` - direct string, NOT a
+///     pointer stored at +36).
 ///   - Returns the 1-based opaque handle integer, or 0 on failure.
 ///
-/// `_dlsym_js(handle: i32, sym_ptr: i32, sym_idx_ptr: i32) -> i32`
+/// `_dlsym_js(handle: i32, sym_ptr: i32, sym_idx_ptr: i32) -> i32`  [wasm type 1]
 ///   - `handle` is the value returned by `_dlopen_js`.
 ///   - `sym_ptr` points to the null-terminated symbol name.
-///   - `sym_idx_ptr` receives the export index (same as slot).
-///   - Returns the table slot (non-zero = success).
+///   - `sym_idx_ptr` receives the export index within the lib (written as u32).
+///   - Returns the table slot at which the function was placed (non-zero = success).
+///     For symbols not placed in the element segment (e.g. `PyInit_*`), the func
+///     is inserted into the shared `__indirect_function_table` at the next slot
+///     past the side module's pre-allocated range and that slot is returned.
 pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
     linker.allow_shadowing(true);
 
@@ -533,22 +538,14 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
             "env",
             "_dlopen_js",
             |caller: Caller<'_, EmbedderState>, handle_struct_ptr: i32| -> i32 {
-                // Filename pointer at struct offset +36 (from pyodide.asm.js).
-                let name_ptr = {
-                    let Some(mem) = caller.data().pyodide_memory else {
-                        eprintln!("[dlopen_js] pyodide_memory not set");
-                        return 0;
-                    };
-                    let base = handle_struct_ptr as u32 as usize;
-                    let data = mem.data(&caller);
-                    if base + 40 > data.len() {
-                        eprintln!("[dlopen_js] struct ptr {handle_struct_ptr:#x} out of bounds");
-                        return 0;
-                    }
-                    i32::from_le_bytes(data[base + 36..base + 40].try_into().unwrap_or([0; 4]))
-                };
-                let Some(name) = read_cstr_sidemodule(&caller, name_ptr) else {
-                    eprintln!("[dlopen_js] cannot read filename at {name_ptr:#x}");
+                // The filename C string starts directly at handle_struct_ptr+36
+                // (from pyodide.asm.js: `UTF8ToString(handle+36)` - direct string,
+                // not a pointer to a string stored at that offset).
+                let name_str_ptr = (handle_struct_ptr as u32).saturating_add(36) as i32;
+                let Some(name) = read_cstr_sidemodule(&caller, name_str_ptr) else {
+                    eprintln!(
+                        "[dlopen_js] cannot read filename at handle+36={name_str_ptr:#x}"
+                    );
                     return 0;
                 };
                 eprintln!("[dlopen_js] looking up '{name}'");
@@ -583,25 +580,67 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                     }
                 };
                 eprintln!("[dlsym_js] handle={handle} symbol='{sym_name}'");
-                let slot_opt: Option<u32> = caller
+
+                // Instance and table are Copy; snapshot them before any mut borrow.
+                let instance_opt = caller
+                    .data()
+                    .side_modules
+                    .get_by_handle(handle as u32)
+                    .map(|h| h.instance);
+                let table_opt = caller.data().pyodide_table;
+
+                let (Some(instance), Some(table)) = (instance_opt, table_opt) else {
+                    eprintln!("[dlsym_js] MISS: handle={handle} not found or table absent");
+                    return 0;
+                };
+
+                // Check if the slot was pre-computed from the element segment.
+                let pre_slot = caller
                     .data()
                     .side_modules
                     .get_by_handle(handle as u32)
                     .and_then(|h| h.func_table_slots.get(&sym_name).copied());
-                let Some(slot) = slot_opt else {
-                    eprintln!("[dlsym_js] MISS: handle={handle} has no export '{sym_name}'");
+
+                if let Some(slot) = pre_slot {
+                    // Symbol is already in the table at the correct slot.
+                    write_sym_idx(&mut caller, sym_idx_ptr, slot);
+                    eprintln!("[dlsym_js] pre-slot '{sym_name}' -> {slot}");
+                    return slot as i32;
+                }
+
+                // Symbol not in element segment - get its Func and insert into
+                // the shared table at the next available slot past the current end.
+                let func_opt = instance.get_func(&mut caller, sym_name.as_str());
+                let Some(func) = func_opt else {
+                    eprintln!("[dlsym_js] MISS: '{sym_name}' not exported by side module");
                     return 0;
                 };
-                if sym_idx_ptr != 0
-                    && let Some(mem) = caller.data().pyodide_memory
+
+                // Grow the table by 1 to get a fresh slot, then place the func there.
+                let slot = table.size(&caller) as u32;
+                if let Err(e) =
+                    table.grow(&mut caller, 1, wasmtime::Ref::Func(None))
                 {
-                    let data = mem.data_mut(&mut caller);
-                    let off = sym_idx_ptr as u32 as usize;
-                    if off + 4 <= data.len() {
-                        data[off..off + 4].copy_from_slice(&slot.to_le_bytes());
-                    }
+                    eprintln!("[dlsym_js] table grow for '{sym_name}': {e}");
+                    return 0;
                 }
-                eprintln!("[dlsym_js] resolved '{sym_name}' -> table slot {slot}");
+                if let Err(e) = table.set(
+                    &mut caller,
+                    slot as u64,
+                    wasmtime::Ref::Func(Some(func)),
+                ) {
+                    eprintln!("[dlsym_js] table.set slot {slot} for '{sym_name}': {e}");
+                    return 0;
+                }
+
+                // Cache the slot in the registry for future lookups.
+                caller
+                    .data_mut()
+                    .side_modules
+                    .set_slot(handle as u32, sym_name.clone(), slot);
+
+                write_sym_idx(&mut caller, sym_idx_ptr, slot);
+                eprintln!("[dlsym_js] inserted '{sym_name}' -> table slot {slot}");
                 slot as i32
             },
         )
@@ -617,6 +656,22 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
         .map_err(|e| AfterburnerError::Engine(format!("wire _emscripten_dlopen_js: {e}")))?;
 
     Ok(())
+}
+
+/// Write a u32 slot index into guest memory at `sym_idx_ptr` if the pointer
+/// is non-zero and in bounds.
+fn write_sym_idx(caller: &mut Caller<'_, EmbedderState>, sym_idx_ptr: i32, slot: u32) {
+    if sym_idx_ptr == 0 {
+        return;
+    }
+    let Some(mem) = caller.data().pyodide_memory else {
+        return;
+    };
+    let data = mem.data_mut(caller);
+    let off = sym_idx_ptr as u32 as usize;
+    if off + 4 <= data.len() {
+        data[off..off + 4].copy_from_slice(&slot.to_le_bytes());
+    }
 }
 
 /// Read a NUL-terminated C string from guest memory using `EmbedderState::pyodide_memory`.
