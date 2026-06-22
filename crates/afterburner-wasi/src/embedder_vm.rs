@@ -1,0 +1,537 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 vertexclique
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
+//! Generic, embedder-driven Wasm VM - sealed and deterministic.
+//!
+//! Provides [`EmbedderVm`] for running arbitrary Wasm modules whose host
+//! imports are supplied by the caller as Rust closures at build time. This
+//! path is entirely independent of the Javy/QuickJS plugin machinery; it
+//! never touches `host_imports`, `HostState`, or the 189-import linker.
+//!
+//! ## Design
+//!
+//! * One `Engine` per `EmbedderVm`, configured with the deterministic
+//!   profile (NaN canonicalization, relaxed-SIMD determinism, threads and
+//!   shared memory off). See [`deterministic_engine`].
+//! * One `Arc<InstancePre<EmbedderState>>` per compiled module, built once by
+//!   [`EmbedderVm::compile`]. Per-call cost is a fresh `Store::new` plus
+//!   `instance_pre.instantiate` - no linker re-walk, no import re-typecheck.
+//!   This is the same caching pattern the Javy path uses for its plugin.
+//! * Host imports are wired once, at `compile` time, via a callback
+//!   `FnOnce(&mut EmbedderLinker) -> Result<()>`. [`EmbedderLinker`] is a
+//!   public newtype over the internal `Linker<EmbedderState>` so callers
+//!   define imports without knowing the store data type.
+//! * Fuel (not epoch) bounds execution: deterministic instruction budget,
+//!   no background ticker thread, no epoch increment races.
+//! * Returns the i64 result of a named export plus any bytes the module
+//!   wrote to stdout via WASI (optional WASI must be opted in per compile).
+//!
+//! ## Thread safety
+//!
+//! `Engine`, `Module`, and `InstancePre<EmbedderState>` are all
+//! `Send + Sync`. Each `run` call builds a fresh `Store<EmbedderState>`, so
+//! concurrent calls never share mutable state. `EmbedderVm` is `Send + Sync`.
+
+use afterburner_core::{AfterburnerError, Result};
+use std::sync::Arc;
+use wasmtime::{Config, Engine, InstancePre, Linker, Module, OptLevel, Store, Trap};
+use wasmtime_wasi::WasiCtxBuilder;
+use wasmtime_wasi::p1::{WasiP1Ctx, add_to_linker_sync};
+use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+
+// ---- deterministic engine config -----------------------------------------
+
+/// Fuel budget used when the caller passes `None` to [`EmbedderVm::run`].
+/// Generous enough for unit tests; production callers supply their own bound.
+const DEFAULT_FUEL: u64 = 100_000_000;
+
+/// Build a Wasmtime `Engine` configured for determinism and fuel metering.
+///
+/// Profile (all flags are deterministic-profile defaults):
+///
+/// * `cranelift_nan_canonicalization(true)` - NaN payloads are canonicalized
+///   so floating-point results are identical across host CPUs that produce
+///   different NaN bit patterns.
+/// * `relaxed_simd_deterministic(true)` - relaxed-SIMD instructions choose
+///   the single deterministic result instead of the host-preferred one. This
+///   keeps SIMD output byte-identical across micro-architectures.
+/// * `wasm_threads(false)` - shared-memory multi-threading disabled; modules
+///   using `shared` memories or `wait`/`notify` fail at compile time. No
+///   shared mutable state can leak between runs.
+/// * `consume_fuel(true)` - every run is bounded by an instruction budget
+///   supplied by the caller. An infinite loop surfaces as
+///   `AfterburnerError::FuelExhausted` rather than a hung thread.
+/// * Epoch interruption and pooling are intentionally omitted: the generic
+///   path hosts short-lived modules with embedder-supplied imports, not the
+///   long-lived plugin. Fuel is sufficient and simpler; pooling is worth the
+///   configuration cost only for the plugin's large linear-memory image.
+pub fn deterministic_engine() -> Result<Engine> {
+    let mut cfg = Config::new();
+    cfg.cranelift_opt_level(OptLevel::Speed)
+        .cranelift_nan_canonicalization(true)
+        // Keep relaxed-SIMD enabled but force deterministic semantics so
+        // modules that use relaxed-SIMD instructions produce identical output
+        // across host micro-architectures (AVX-512 vs SSE4, Neon variants, etc).
+        .wasm_relaxed_simd(true)
+        .relaxed_simd_deterministic(true)
+        // Threads + shared memory allow cross-instance communication that
+        // breaks determinism. Disable both at the engine level so any module
+        // that declares a shared memory or uses thread-local atomics fails at
+        // compile time, not silently.
+        .wasm_threads(false)
+        // Fuel metering: every Wasm instruction decrements a per-Store
+        // counter. When the counter reaches zero the next instruction traps
+        // with `OutOfFuel`. This is the only bound we need for short-lived
+        // modules; no epoch ticker, no background thread.
+        .consume_fuel(true);
+    Engine::new(&cfg).map_err(|e| AfterburnerError::Engine(format!("embedder engine: {e}")))
+}
+
+// ---- internal store-data type ------------------------------------------------
+
+/// Per-call store state that parameterises the embedder linker and stores.
+/// Exposed as `pub` so it can appear in the `IntoFunc` bound on
+/// [`EmbedderLinker::func_wrap`]; external callers do not construct it.
+pub struct EmbedderState {
+    wasi: Option<WasiStateInner>,
+}
+
+struct WasiStateInner {
+    ctx: WasiP1Ctx,
+    stdout: MemoryOutputPipe,
+}
+
+// ---- public linker wrapper ---------------------------------------------------
+
+/// Public handle to the Wasmtime linker used during [`EmbedderVm::compile`].
+///
+/// Passed to the embedder's `setup` callback so it can define host imports
+/// via [`EmbedderLinker::func_wrap`] and other linker methods, without
+/// needing to name the internal store-data type.
+///
+/// The full wasmtime `Linker<EmbedderState>` is exposed via
+/// [`EmbedderLinker::inner_mut`] for callers that need lower-level control
+/// (e.g. defining imports by name with custom types).
+pub struct EmbedderLinker<'a> {
+    inner: &'a mut Linker<EmbedderState>,
+}
+
+impl<'a> EmbedderLinker<'a> {
+    /// Define a host function import. Delegates directly to
+    /// [`wasmtime::Linker::func_wrap`]; any type that implements
+    /// `wasmtime::WasmRet + wasmtime::WasmParams` is accepted.
+    ///
+    /// Returns an error (mapped to `AfterburnerError::Engine`) if the import
+    /// is already defined or the type is incompatible.
+    pub fn func_wrap<Params, Results, F>(&mut self, module: &str, name: &str, func: F) -> Result<()>
+    where
+        F: wasmtime::IntoFunc<EmbedderState, Params, Results>,
+    {
+        self.inner
+            .func_wrap(module, name, func)
+            .map(|_| ())
+            .map_err(|e| {
+                AfterburnerError::Engine(format!("embedder func_wrap `{module}::{name}`: {e}"))
+            })
+    }
+
+    /// Direct access to the underlying `Linker<EmbedderState>` for callers
+    /// that need to use methods not proxied by `EmbedderLinker` (e.g.
+    /// `linker.define`, `linker.instance`, etc.).
+    pub fn inner_mut(&mut self) -> &mut Linker<EmbedderState> {
+        self.inner
+    }
+}
+
+// ---- compiled module ---------------------------------------------------------
+
+/// A compiled, self-contained Wasm module ready for repeated deterministic
+/// execution. Produced by [`EmbedderVm::compile`]; the underlying native
+/// code is shared across every [`EmbedderVm::run`] call.
+///
+/// `EmbedderModule` is `Send + Sync`: the `Arc<InstancePre<EmbedderState>>`
+/// wraps a wasmtime type that is itself `Send + Sync`, and the engine is
+/// cloned cheaply (reference-counted).
+pub struct EmbedderModule {
+    engine: Engine,
+    // Shared compiled artifact. Per-call cost: one `Store::new` + one
+    // `InstancePre::instantiate` - no linker re-walk, no import typecheck.
+    instance_pre: Arc<InstancePre<EmbedderState>>,
+    wasi: bool,
+}
+
+// Safety: wasmtime::InstancePre<T> is Send + Sync when T: Send.
+// EmbedderState holds only owned types (WasiP1Ctx + MemoryOutputPipe), both Send.
+// EmbedderModule holds only Arc + Engine (both Send + Sync) and bool.
+// The auto-derive would work if wasmtime derived the bounds; we assert manually.
+unsafe impl Send for EmbedderModule {}
+unsafe impl Sync for EmbedderModule {}
+
+// ---- output ------------------------------------------------------------------
+
+/// Result of one [`EmbedderVm::run`] call.
+#[derive(Debug, Clone)]
+pub struct EmbedderRunOutput {
+    /// The i64 value returned by the named export.
+    pub result: i64,
+    /// Bytes written to stdout during execution. Non-empty only when the
+    /// module was compiled with `wasi: true` and actually wrote to stdout.
+    pub stdout: Vec<u8>,
+}
+
+// ---- VM ----------------------------------------------------------------------
+
+/// Generic embedder-driven Wasm VM. Holds one `Engine` (shared across all
+/// compiled modules from this VM) and exposes `compile` + `run`.
+///
+/// ## Example
+///
+/// ```no_run
+/// use afterburner_wasi::embedder_vm::EmbedderVm;
+///
+/// let vm = EmbedderVm::new().unwrap();
+/// let wat = br#"
+///   (module
+///     (import "host" "value" (func $v (result i64)))
+///     (func (export "run") (result i64)
+///       call $v
+///       i64.const 2
+///       i64.mul
+///       i64.const 1
+///       i64.add))
+/// "#;
+/// let module = vm.compile(wat, false, |linker| {
+///     linker.func_wrap("host", "value", || -> i64 { 21 })
+/// }).unwrap();
+/// let out = vm.run(&module, "run", None).unwrap();
+/// assert_eq!(out.result, 43);
+/// ```
+pub struct EmbedderVm {
+    engine: Engine,
+}
+
+// EmbedderVm holds only a wasmtime::Engine, which is Send + Sync.
+unsafe impl Send for EmbedderVm {}
+unsafe impl Sync for EmbedderVm {}
+
+impl EmbedderVm {
+    /// Create a new VM with the deterministic engine profile.
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            engine: deterministic_engine()?,
+        })
+    }
+
+    /// Compile `wasm` (raw `.wasm` bytes or WAT text) into a reusable
+    /// [`EmbedderModule`].
+    ///
+    /// `wasi` - when `true`, a sealed WASI preview1 context is wired into
+    /// every run, making `wasi_snapshot_preview1` imports available (stdout
+    /// is captured; no filesystem, no env, no stdin). When `false`, any
+    /// module that imports from `wasi_snapshot_preview1` fails to
+    /// instantiate unless the `setup` callback supplies those imports itself.
+    ///
+    /// `setup` - a callback that receives an [`EmbedderLinker`] and may
+    /// define any number of host imports via `linker.func_wrap`. Called once
+    /// at compile time; the linker is not shared across calls. Any import
+    /// left unsatisfied causes `AfterburnerError::Engine` when
+    /// `instantiate_pre` runs (wasmtime names the missing import in the
+    /// error). The callback returns `afterburner_core::Result<()>`.
+    ///
+    /// Content-identical bytes compiled twice produce two independent
+    /// `EmbedderModule` values (no global cache at this layer). Callers
+    /// that reuse a module across many calls should keep the
+    /// `EmbedderModule` alive and call `run` on it repeatedly.
+    pub fn compile<F>(&self, wasm: &[u8], wasi: bool, setup: F) -> Result<EmbedderModule>
+    where
+        F: FnOnce(&mut EmbedderLinker<'_>) -> Result<()>,
+    {
+        let module = Module::new(&self.engine, wasm)
+            .map_err(|e| AfterburnerError::CompileFailed(format!("embedder compile: {e}")))?;
+
+        let mut raw_linker: Linker<EmbedderState> = Linker::new(&self.engine);
+
+        if wasi {
+            // Wire the WASI preview1 shim. The accessor extracts the
+            // `WasiP1Ctx` from `EmbedderState::wasi`; the unwrap is safe
+            // because WASI imports are only resolved for modules compiled
+            // with `wasi: true`, and every such run builds a `WasiStateInner`.
+            add_to_linker_sync(&mut raw_linker, |s| {
+                s.wasi
+                    .as_mut()
+                    .map(|w| &mut w.ctx)
+                    .expect("WASI import reached non-WASI store")
+            })
+            .map_err(|e| AfterburnerError::Engine(format!("embedder wasi linker: {e}")))?;
+        }
+
+        // Embedder-supplied imports wired after WASI so the callback can
+        // override WASI definitions if needed (unusual but not forbidden).
+        let mut linker_ref = EmbedderLinker {
+            inner: &mut raw_linker,
+        };
+        setup(&mut linker_ref)?;
+
+        let instance_pre = raw_linker
+            .instantiate_pre(&module)
+            .map_err(|e| AfterburnerError::Engine(format!("embedder instantiate_pre: {e}")))?;
+
+        Ok(EmbedderModule {
+            engine: self.engine.clone(),
+            instance_pre: Arc::new(instance_pre),
+            wasi,
+        })
+    }
+
+    /// Execute the named export of `module`, returning its i64 result and
+    /// any stdout bytes the module wrote.
+    ///
+    /// A fresh `Store` is created for every call so runs are fully isolated.
+    /// The `InstancePre` inside `module` is shared (reference-counted), so
+    /// repeated calls reuse the compiled native code without re-linking.
+    ///
+    /// `export` - the name of the exported function to call. It must accept
+    /// no parameters and return exactly one i64. Any other signature
+    /// surfaces as `AfterburnerError::Engine`.
+    ///
+    /// `fuel` - optional instruction budget. `None` uses
+    /// [`DEFAULT_FUEL`]. Pass `Some(u64::MAX)` for an effectively unlimited
+    /// budget (production callers should supply an explicit bound so runaway
+    /// modules surface as `FuelExhausted` rather than hanging the thread).
+    pub fn run(
+        &self,
+        module: &EmbedderModule,
+        export: &str,
+        fuel: Option<u64>,
+    ) -> Result<EmbedderRunOutput> {
+        let stdout_pipe = if module.wasi {
+            Some(MemoryOutputPipe::new(1024 * 1024))
+        } else {
+            None
+        };
+
+        let state = if module.wasi {
+            let pipe = stdout_pipe.as_ref().unwrap().clone();
+            let ctx = WasiCtxBuilder::new().stdout(pipe).build_p1();
+            EmbedderState {
+                wasi: Some(WasiStateInner {
+                    ctx,
+                    stdout: stdout_pipe.as_ref().unwrap().clone(),
+                }),
+            }
+        } else {
+            EmbedderState { wasi: None }
+        };
+
+        let mut store = Store::new(&module.engine, state);
+        store
+            .set_fuel(fuel.unwrap_or(DEFAULT_FUEL))
+            .map_err(|e| AfterburnerError::Engine(format!("embedder set_fuel: {e}")))?;
+
+        let instance = module
+            .instance_pre
+            .instantiate(&mut store)
+            .map_err(|e| AfterburnerError::Engine(format!("embedder instantiate: {e}")))?;
+
+        let func = instance
+            .get_typed_func::<(), i64>(&mut store, export)
+            .map_err(|e| {
+                AfterburnerError::Engine(format!(
+                    "embedder export `{export}`: {e} \
+                     (must exist and have signature () -> i64)"
+                ))
+            })?;
+
+        let result = func.call(&mut store, ()).map_err(|trap| {
+            if let Some(t) = trap.downcast_ref::<Trap>() {
+                return match t {
+                    Trap::OutOfFuel => AfterburnerError::FuelExhausted,
+                    Trap::Interrupt => AfterburnerError::Timeout,
+                    other => AfterburnerError::WasmTrap(format!("embedder trap: {other}")),
+                };
+            }
+            AfterburnerError::WasmTrap(format!("embedder trap: {trap}"))
+        })?;
+
+        let stdout = match store.into_data().wasi {
+            Some(w) => w.stdout.contents().to_vec(),
+            None => Vec::new(),
+        };
+
+        Ok(EmbedderRunOutput { result, stdout })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Compile a WAT snippet to bytes inline - no external toolchain.
+    fn wat(src: &str) -> Vec<u8> {
+        wat::parse_str(src).expect("WAT parse")
+    }
+
+    /// The primary fixture: imports `host.value` (returns i64), exports
+    /// `run` computing `value() * 2 + 1`. Used by determinism and
+    /// correctness tests.
+    fn value_doubler_wat() -> Vec<u8> {
+        wat(r#"
+          (module
+            (import "host" "value" (func $v (result i64)))
+            (func (export "run") (result i64)
+              call $v
+              i64.const 2
+              i64.mul
+              i64.const 1
+              i64.add))
+        "#)
+    }
+
+    // ---- core correctness --------------------------------------------------
+
+    /// Embedder supplies host.value -> 21; module computes 21*2+1 = 43.
+    #[test]
+    fn embedder_host_import_value_computed_correctly() {
+        let vm = EmbedderVm::new().unwrap();
+        let module = vm
+            .compile(&value_doubler_wat(), false, |linker| {
+                linker.func_wrap("host", "value", || -> i64 { 21 })
+            })
+            .unwrap();
+        let out = vm.run(&module, "run", None).unwrap();
+        assert_eq!(out.result, 43);
+    }
+
+    // ---- determinism -------------------------------------------------------
+
+    /// Two calls with the same import produce byte-identical results.
+    #[test]
+    fn same_import_value_deterministic() {
+        let vm = EmbedderVm::new().unwrap();
+        let module = vm
+            .compile(&value_doubler_wat(), false, |linker| {
+                linker.func_wrap("host", "value", || -> i64 { 21 })
+            })
+            .unwrap();
+        let out1 = vm.run(&module, "run", None).unwrap().result;
+        let out2 = vm.run(&module, "run", None).unwrap().result;
+        assert_eq!(out1, out2, "identical import must produce identical output");
+        assert_eq!(out1, 43);
+    }
+
+    /// Different import value produces a different result (non-vacuous check:
+    /// the module is actually wired to the import, not returning a constant).
+    #[test]
+    fn different_import_value_produces_different_result() {
+        let vm = EmbedderVm::new().unwrap();
+
+        let mod21 = vm
+            .compile(&value_doubler_wat(), false, |linker| {
+                linker.func_wrap("host", "value", || -> i64 { 21 })
+            })
+            .unwrap();
+
+        let mod22 = vm
+            .compile(&value_doubler_wat(), false, |linker| {
+                linker.func_wrap("host", "value", || -> i64 { 22 })
+            })
+            .unwrap();
+
+        let r21 = vm.run(&mod21, "run", None).unwrap().result;
+        let r22 = vm.run(&mod22, "run", None).unwrap().result;
+
+        assert_eq!(r21, 43, "value 21 -> 43");
+        assert_eq!(r22, 45, "value 22 -> 45");
+        assert_ne!(r21, r22, "different imports must produce different results");
+    }
+
+    // ---- unsatisfied import ------------------------------------------------
+
+    /// A module whose import is not supplied by the embedder must fail loud
+    /// with a clear `AfterburnerError::Engine`, not silently succeed or panic.
+    #[test]
+    fn unsupplied_import_fails_loud() {
+        let vm = EmbedderVm::new().unwrap();
+        // Compile without wiring `host.value` - the linker callback is a no-op.
+        let result = vm.compile(&value_doubler_wat(), false, |_linker| Ok(()));
+        match result {
+            Err(AfterburnerError::Engine(msg)) => {
+                // wasmtime's instantiate_pre error names the missing import.
+                assert!(
+                    msg.contains("host") || msg.contains("value") || msg.contains("import"),
+                    "error message should name the missing import, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected Engine error, got: {other:?}"),
+            Ok(_) => panic!("expected error for unsatisfied import"),
+        }
+    }
+
+    // ---- fuel exhaustion ---------------------------------------------------
+
+    /// A module that loops forever is bounded by fuel, not by the OS.
+    #[test]
+    fn fuel_exhaustion_surfaces_as_typed_error() {
+        let vm = EmbedderVm::new().unwrap();
+        let module = vm
+            .compile(
+                &wat(r#"
+                  (module
+                    (func (export "run") (result i64)
+                      (loop $forever
+                        br $forever)
+                      i64.const 0))
+                "#),
+                false,
+                |_| Ok(()),
+            )
+            .unwrap();
+        let err = vm.run(&module, "run", Some(10_000)).unwrap_err();
+        assert!(
+            matches!(err, AfterburnerError::FuelExhausted),
+            "expected FuelExhausted, got {err:?}"
+        );
+    }
+
+    // ---- WASI stdout -------------------------------------------------------
+
+    /// A module compiled with `wasi: true` can write to stdout and have
+    /// the bytes returned in `EmbedderRunOutput::stdout`.
+    #[test]
+    fn wasi_stdout_captured() {
+        // Module writes "hello" to fd 1 (stdout) via the WASI fd_write import,
+        // then returns 0. We compose the write manually in WAT:
+        // memory[0..5] = "hello"; iov[8..16] = ptr(0), len(5); fd_write(1, iov_ptr=8, 1, nwritten_ptr=16)
+        let vm = EmbedderVm::new().unwrap();
+        let module = vm
+            .compile(
+                &wat(r#"
+                  (module
+                    (import "wasi_snapshot_preview1" "fd_write"
+                      (func $fd_write (param i32 i32 i32 i32) (result i32)))
+                    (memory (export "memory") 1)
+                    (data (i32.const 0) "hello")
+                    (func (export "run") (result i64)
+                      ;; iovec: buf=0, buf_len=5 at offset 8
+                      i32.const 8   i32.const 0   i32.store
+                      i32.const 12  i32.const 5   i32.store
+                      ;; fd_write(fd=1, iovs_ptr=8, iovs_len=1, nwritten_ptr=16)
+                      i32.const 1
+                      i32.const 8
+                      i32.const 1
+                      i32.const 16
+                      call $fd_write
+                      drop
+                      i64.const 0))
+                "#),
+                true,
+                |_| Ok(()),
+            )
+            .unwrap();
+        let out = vm.run(&module, "run", None).unwrap();
+        assert_eq!(out.result, 0);
+        assert_eq!(out.stdout, b"hello");
+    }
+}
