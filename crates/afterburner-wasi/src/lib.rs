@@ -37,6 +37,7 @@ pub mod daemon_shard_pool;
 pub mod daemon_tls;
 pub mod daemon_workers;
 pub mod embedder_vm;
+pub mod emscripten_abi;
 pub mod host;
 pub mod host_imports;
 pub mod intake;
