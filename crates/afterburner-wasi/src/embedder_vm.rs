@@ -35,6 +35,7 @@
 //! concurrent calls never share mutable state. `EmbedderVm` is `Send + Sync`.
 
 use crate::emscripten_fs::InMemFs;
+use crate::emscripten_sidemodule::SideModuleRegistry;
 use afterburner_core::{AfterburnerError, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -199,6 +200,9 @@ pub struct EmbedderState {
     /// `__syscall_stat64`. Used to identify which module CPython was looking for
     /// when the uncaught exception escaped.
     pub fs_path_log: std::collections::VecDeque<String>,
+    /// Pre-loaded SIDE_MODULE instances (numpy `.so` files).
+    /// Populated before Python runs; `_dlopen_js` looks handles up here.
+    pub side_modules: SideModuleRegistry,
 }
 
 impl EmbedderState {
@@ -216,6 +220,7 @@ impl EmbedderState {
             cxa_throw_count: 0,
             cxa_throw_log: Vec::new(),
             fs_path_log: std::collections::VecDeque::new(),
+            side_modules: SideModuleRegistry::new(),
         }
     }
 
@@ -245,6 +250,7 @@ impl EmbedderState {
             cxa_throw_count: 0,
             cxa_throw_log: Vec::new(),
             fs_path_log: std::collections::VecDeque::new(),
+            side_modules: SideModuleRegistry::new(),
         }
     }
 
@@ -268,6 +274,7 @@ impl EmbedderState {
             cxa_throw_count: 0,
             cxa_throw_log: Vec::new(),
             fs_path_log: std::collections::VecDeque::new(),
+            side_modules: SideModuleRegistry::new(),
         }
     }
 
@@ -507,6 +514,7 @@ impl EmbedderVm {
                 cxa_throw_count: 0,
                 cxa_throw_log: Vec::new(),
                 fs_path_log: std::collections::VecDeque::new(),
+                side_modules: SideModuleRegistry::new(),
             }
         } else {
             EmbedderState {
@@ -520,6 +528,7 @@ impl EmbedderVm {
                 cxa_throw_count: 0,
                 cxa_throw_log: Vec::new(),
                 fs_path_log: std::collections::VecDeque::new(),
+                side_modules: SideModuleRegistry::new(),
             }
         };
 
@@ -635,6 +644,7 @@ impl EmbedderVm {
             cxa_throw_count: 0,
             cxa_throw_log: Vec::new(),
             fs_path_log: std::collections::VecDeque::new(),
+            side_modules: SideModuleRegistry::new(),
         };
 
         let mut store = Store::new(&module.engine, state);

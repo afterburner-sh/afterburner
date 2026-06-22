@@ -44,6 +44,7 @@ pub mod emscripten_invoke;
 pub mod emscripten_jsffi;
 pub mod emscripten_mechanical;
 pub mod emscripten_runtime;
+pub mod emscripten_sidemodule;
 pub mod emscripten_syscall;
 pub mod emscripten_wasi;
 pub mod host;

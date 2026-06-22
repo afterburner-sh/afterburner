@@ -552,20 +552,10 @@ pub(crate) fn wire_mechanical_env_funcs(
         });
     }
 
-    // ---- dlopen / dlsym stubs -----------------------------------------------
-
-    def!("_dlopen_js", |_: Caller<'_, EmbedderState>,
-                        _ptr: i32|
-     -> i32 { 0 });
-    def!("_dlsym_js", |_: Caller<'_, EmbedderState>,
-                       _h: i32,
-                       _s: i32,
-                       _j: i32|
-     -> i32 { 0 });
-    def!(
-        "_emscripten_dlopen_js",
-        |_: Caller<'_, EmbedderState>, _h: i32, _ok: i32, _err: i32, _ud: i32| {}
-    );
+    // ---- dlopen / dlsym - backed by the pre-loaded SideModuleRegistry ----------
+    // Implementations live in emscripten_sidemodule::wire_dlopen_dlsym to keep
+    // this file under 1000 lines.
+    crate::emscripten_sidemodule::wire_dlopen_dlsym(linker)?;
 
     // ---- EM_ASM / promise / keepalive stubs ---------------------------------
 

@@ -1,0 +1,578 @@
+// SPDX-License-Identifier: BUSL-1.1
+// Copyright (c) 2026 vertexclique
+// Licensed under the Business Source License 1.1.
+// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+
+//! Pre-loading and dispatch for Emscripten SIDE_MODULE `.so` files.
+//!
+//! ## Approach
+//!
+//! Emscripten SIDE_MODULEs are `.wasm` binaries that import all Python C API
+//! functions from `env.*` (provided by the main `pyodide.asm.wasm` instance)
+//! and share the main module's `env.memory` and `env.__indirect_function_table`.
+//!
+//! In a JS host, loading is async: packages are pre-loaded before Python runs
+//! via `loadPackage()`. Headless, we replicate this synchronously:
+//!
+//! 1. After the main pyodide instance is created (all its functions are available
+//!    as Wasmtime exports), call [`pre_load_side_module`] for each `.so` file.
+//! 2. This compiles and instantiates the SIDE_MODULE, wiring its `env.*` imports
+//!    from the main pyodide instance's exports.
+//! 3. The resulting [`SideModuleHandle`] is stored in
+//!    [`EmbedderState::side_modules`] keyed by the WASM-side path.
+//! 4. When `_dlopen_js` is called during Python's `import numpy`, it reads the
+//!    DSO path from the struct pointer, finds the pre-loaded handle, and returns
+//!    a non-zero opaque handle integer.
+//! 5. When `_dlsym_js` is called to look up `PyInit__multiarray_umath`, it finds
+//!    the function in the pre-loaded instance's exports and returns its table slot.
+//!
+//! ## Memory layout for SIDE_MODULEs
+//!
+//! Each SIDE_MODULE is allocated:
+//! - A `memory_base` at the next aligned position after the previous module.
+//! - A `table_base` at the next available table slot.
+//!
+//! Both are passed as `env.__memory_base` and `env.__table_base` imports.
+//! The shared `env.memory` and `env.__indirect_function_table` are the same
+//! objects created by `wire_env_memory_and_table_in_store`.
+
+use std::collections::HashMap;
+
+use afterburner_core::{AfterburnerError, Result};
+use wasmtime::{
+    Caller, Engine, ExternType, FuncType, Global, GlobalType, Instance, Linker, Module, Mutability,
+    Store, Val, ValType,
+};
+
+use crate::embedder_vm::EmbedderState;
+
+/// Table slot occupied by a pre-loaded SIDE_MODULE's `PyInit_*` function.
+/// Used by `_dlsym_js` to return the callable table index.
+#[derive(Debug, Clone)]
+pub struct SideModuleHandle {
+    /// Instance in the shared store.
+    pub instance: Instance,
+    /// Table slot of this module's element segment start. All exported function
+    /// pointers are offsets from `table_base`. The `PyInit_*` export is
+    /// available via `instance.get_func(store, "PyInit_*")` and its table slot
+    /// is recorded here for O(1) lookup by `_dlsym_js`.
+    /// Maps export name -> table slot (from the element segment placement).
+    pub func_table_slots: HashMap<String, u32>,
+}
+
+/// Registry of pre-loaded SIDE_MODULEs.
+///
+/// Keyed by the guest-visible path string (e.g.
+/// `"numpy/_core/_multiarray_umath.cpython-313-wasm32-emscripten.so"`).
+/// Handle integers (1-based) are the `Vec` index + 1.
+#[derive(Default)]
+pub struct SideModuleRegistry {
+    // Ordered so handle integer = index + 1.
+    handles: Vec<(String, SideModuleHandle)>,
+}
+
+impl SideModuleRegistry {
+    pub fn new() -> Self {
+        Self {
+            handles: Vec::new(),
+        }
+    }
+
+    /// Register a pre-loaded handle. Returns the opaque handle integer (1-based).
+    pub fn insert(&mut self, path: String, handle: SideModuleHandle) -> u32 {
+        self.handles.push((path, handle));
+        self.handles.len() as u32
+    }
+
+    /// Look up a handle by path (any suffix match, e.g. just the basename).
+    pub fn find_by_path(&self, path: &str) -> Option<(u32, &SideModuleHandle)> {
+        for (i, (p, h)) in self.handles.iter().enumerate() {
+            if p == path || p.ends_with(path) || path.ends_with(p.as_str()) {
+                return Some((i as u32 + 1, h));
+            }
+        }
+        None
+    }
+
+    /// Look up a handle by integer (1-based).
+    pub fn get_by_handle(&self, handle: u32) -> Option<&SideModuleHandle> {
+        let idx = handle as usize;
+        if idx == 0 || idx > self.handles.len() {
+            return None;
+        }
+        Some(&self.handles[idx - 1].1)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.handles.is_empty()
+    }
+}
+
+/// Pre-load a SIDE_MODULE `.wasm` binary into the shared store and table.
+///
+/// `wasm_bytes` - raw bytes of the `.so` (which is a `.wasm` SIDE_MODULE).
+/// `path` - the path the guest will pass to `dlopen`, used as the registry key.
+/// `memory_base` - where this module's static data starts in the shared linear memory.
+/// `table_base` - where this module's function table starts in the shared table.
+/// `main_instance` - the already-instantiated `pyodide.asm.wasm` instance whose
+///   exports provide all Python C API functions.
+///
+/// Returns the handle (1-based integer) and the allocated `table_base_next` for
+/// the caller to update for the next module.
+///
+/// vertexia: grows the shared table by the module's table_size; upgrade path is
+/// tracking exact dylink.0 size + per-module GOT resolution.
+pub fn pre_load_side_module(
+    engine: &Engine,
+    store: &mut Store<EmbedderState>,
+    main_instance: &Instance,
+    wasm_bytes: &[u8],
+    path: &str,
+    memory_base: u32,
+    table_base: u32,
+) -> Result<(SideModuleHandle, u32, u32)> {
+    eprintln!(
+        "[sidemodule] compiling {} ({} bytes) memory_base={:#x} table_base={}",
+        path,
+        wasm_bytes.len(),
+        memory_base,
+        table_base
+    );
+
+    let module = Module::new(engine, wasm_bytes)
+        .map_err(|e| AfterburnerError::Engine(format!("side module compile {path}: {e}")))?;
+
+    // Before wiring, grow the shared table so the active element segment can
+    // place funcrefs at [table_base .. table_base + element_count).
+    // Without growth, instantiation traps with "undefined element: out of bounds
+    // table access" when the element segment index exceeds the current table size.
+    let table_size_needed = table_base.saturating_add(estimate_table_size(wasm_bytes));
+    {
+        let Some(tbl) = store.data().pyodide_table else {
+            return Err(AfterburnerError::Engine(
+                "pre_load_side_module: pyodide_table not set in store".into(),
+            ));
+        };
+        let current = tbl.size(&*store) as u32;
+        if current < table_size_needed {
+            let delta = table_size_needed - current;
+            tbl.grow(&mut *store, delta as u64, wasmtime::Ref::Func(None))
+                .map_err(|e| {
+                    AfterburnerError::Engine(format!(
+                        "sidemodule table grow by {delta}: {e}"
+                    ))
+                })?;
+            eprintln!(
+                "[sidemodule] {path}: grew table {current} -> {} (delta {delta})",
+                tbl.size(&*store)
+            );
+        }
+    }
+
+    // Build a linker for the SIDE_MODULE.
+    let mut linker: Linker<EmbedderState> = Linker::new(engine);
+    linker.allow_shadowing(true);
+
+    // Wire shared env.memory from the store state.
+    // `define` takes `impl AsContext` (shared ref) so we can read from store.data().
+    if let Some(mem) = store.data().pyodide_memory {
+        linker
+            .define(&mut *store, "env", "memory", mem)
+            .map_err(|e| AfterburnerError::Engine(format!("sidemodule memory: {e}")))?;
+    } else {
+        return Err(AfterburnerError::Engine(
+            "pre_load_side_module: pyodide_memory not set in store".into(),
+        ));
+    }
+
+    // Wire shared __indirect_function_table.
+    if let Some(tbl) = store.data().pyodide_table {
+        linker
+            .define(&mut *store, "env", "__indirect_function_table", tbl)
+            .map_err(|e| AfterburnerError::Engine(format!("sidemodule table: {e}")))?;
+    } else {
+        return Err(AfterburnerError::Engine(
+            "pre_load_side_module: pyodide_table not set in store".into(),
+        ));
+    }
+
+    // env.__memory_base: this module's offset in shared memory.
+    let mb_ty = GlobalType::new(ValType::I32, Mutability::Const);
+    let mb_val = Global::new(&mut *store, mb_ty.clone(), Val::I32(memory_base as i32))
+        .map_err(|e| AfterburnerError::Engine(format!("sidemodule __memory_base: {e}")))?;
+    linker
+        .define(&mut *store, "env", "__memory_base", mb_val)
+        .map_err(|e| AfterburnerError::Engine(format!("define sidemodule __memory_base: {e}")))?;
+
+    // env.__table_base: this module's table slot offset.
+    let tb_val = Global::new(&mut *store, mb_ty.clone(), Val::I32(table_base as i32))
+        .map_err(|e| AfterburnerError::Engine(format!("sidemodule __table_base: {e}")))?;
+    linker
+        .define(&mut *store, "env", "__table_base", tb_val)
+        .map_err(|e| AfterburnerError::Engine(format!("define sidemodule __table_base: {e}")))?;
+
+    // env.__stack_pointer: shared mutable i32 stack pointer.
+    // Provided by main instance as an export, or use the main store's GOT.
+    let sp_ty = GlobalType::new(ValType::I32, Mutability::Var);
+    // vertexia: use a dummy stack pointer if not exported by pyodide; upgrade
+    // path is reading __stack_pointer from the main module's GOT.mem global.
+    if let Some(sp_ext) = main_instance.get_global(&mut *store, "__stack_pointer") {
+        linker
+            .define(&mut *store, "env", "__stack_pointer", sp_ext)
+            .map_err(|e| {
+                AfterburnerError::Engine(format!("define sidemodule __stack_pointer: {e}"))
+            })?;
+    } else {
+        // Provide a stub stack pointer at the Pyodide stack base.
+        let sp_val = Global::new(
+            &mut *store,
+            sp_ty,
+            Val::I32(crate::emscripten_runtime::PYODIDE_STACK_BASE as i32),
+        )
+        .map_err(|e| AfterburnerError::Engine(format!("sidemodule stub __stack_pointer: {e}")))?;
+        linker
+            .define(&mut *store, "env", "__stack_pointer", sp_val)
+            .map_err(|e| {
+                AfterburnerError::Engine(format!("define sidemodule stub __stack_pointer: {e}"))
+            })?;
+    }
+
+    // Wire GOT.func and GOT.mem with zero-valued mutable i32 globals for now.
+    // vertexia: per-module GOT resolution; upgrade path is calling fill_got_table_slots
+    // for each SIDE_MODULE with its own name->slot map.
+    let got_ty = GlobalType::new(ValType::I32, Mutability::Var);
+    // Collect GOT imports first to avoid repeated borrow conflicts.
+    let got_imports: Vec<(String, String)> = module
+        .imports()
+        .filter_map(|imp| {
+            let m = imp.module();
+            if m != "GOT.func" && m != "GOT.mem" {
+                return None;
+            }
+            Some((m.to_owned(), imp.name().to_owned()))
+        })
+        .collect();
+
+    for (m, name) in &got_imports {
+        if linker.get(&mut *store, m.as_str(), name.as_str()).is_ok() {
+            continue;
+        }
+        let g = Global::new(&mut *store, got_ty.clone(), Val::I32(0)).map_err(|e| {
+            AfterburnerError::Engine(format!("GOT stub for sidemodule {m}.{name}: {e}"))
+        })?;
+        linker
+            .define(&mut *store, m.as_str(), name.as_str(), g)
+            .map_err(|e| {
+                AfterburnerError::Engine(format!("define sidemodule GOT {m}.{name}: {e}"))
+            })?;
+    }
+
+    // Wire all env.* function imports from the main pyodide instance's exports.
+    // For any env.* the main instance doesn't export, wire a typed no-op.
+    let env_func_types: HashMap<String, FuncType> = module
+        .imports()
+        .filter_map(|imp| {
+            if imp.module() != "env" {
+                return None;
+            }
+            if let ExternType::Func(ft) = imp.ty() {
+                Some((imp.name().to_owned(), ft))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut from_main = 0u32;
+    let mut from_stub = 0u32;
+
+    for (name, ft) in &env_func_types {
+        // Skip already-defined (memory, table, __memory_base, etc.).
+        if linker.get(&mut *store, "env", name.as_str()).is_ok() {
+            continue;
+        }
+
+        if let Some(func) = main_instance.get_func(&mut *store, name.as_str()) {
+            linker
+                .define(&mut *store, "env", name.as_str(), func)
+                .map_err(|e| {
+                    AfterburnerError::Engine(format!("sidemodule wire env.{name} from main: {e}"))
+                })?;
+            from_main += 1;
+        } else {
+            // Not exported by main - wire a typed no-op stub.
+            let ft2 = ft.clone();
+            linker
+                .func_new("env", name.as_str(), ft2, |_, _, results| {
+                    for r in results.iter_mut() {
+                        *r = match *r {
+                            Val::I32(_) => Val::I32(0),
+                            Val::I64(_) => Val::I64(0),
+                            Val::F32(_) => Val::F32(0),
+                            Val::F64(_) => Val::F64(0),
+                            other => other,
+                        };
+                    }
+                    Ok(())
+                })
+                .map_err(|e| {
+                    AfterburnerError::Engine(format!("sidemodule wire stub env.{name}: {e}"))
+                })?;
+            from_stub += 1;
+        }
+    }
+    eprintln!("[sidemodule] {path}: env imports: {from_main} from main, {from_stub} stubs");
+
+    // Instantiate the SIDE_MODULE.
+    let instance = linker
+        .instantiate(&mut *store, &module)
+        .map_err(|e| AfterburnerError::Engine(format!("sidemodule instantiate {path}: {e}")))?;
+    eprintln!("[sidemodule] {path}: instantiated");
+
+    // Collect exported function -> table slot mapping.
+    // vertexia: sequential slot assignment from table_base; upgrade path is
+    // parsing the dylink.0 element segment to get exact per-export slots.
+    let func_table_slots = collect_export_table_slots(&mut *store, &instance, table_base);
+    eprintln!(
+        "[sidemodule] {path}: {} export table slots collected",
+        func_table_slots.len()
+    );
+
+    // Call __wasm_apply_data_relocs if present.
+    if let Some(reloc_fn) = instance.get_func(&mut *store, "__wasm_apply_data_relocs") {
+        reloc_fn.call(&mut *store, &[], &mut []).map_err(|e| {
+            AfterburnerError::Engine(format!("sidemodule __wasm_apply_data_relocs {path}: {e}"))
+        })?;
+        eprintln!("[sidemodule] {path}: __wasm_apply_data_relocs OK");
+    }
+
+    // Call __wasm_call_ctors if present.
+    if let Some(ctors_fn) = instance.get_func(&mut *store, "__wasm_call_ctors") {
+        ctors_fn.call(&mut *store, &[], &mut []).map_err(|e| {
+            AfterburnerError::Engine(format!("sidemodule __wasm_call_ctors {path}: {e}"))
+        })?;
+        eprintln!("[sidemodule] {path}: __wasm_call_ctors OK");
+    }
+
+    // Estimate the next memory_base and table_base using the module's element count.
+    // vertexia: dylink.0 size fields for exact bounds; upgrade path is parsing them.
+    let table_size_estimate = estimate_table_size(wasm_bytes);
+    let mem_size_estimate = estimate_mem_size(wasm_bytes);
+    let next_memory_base = memory_base
+        .saturating_add(mem_size_estimate)
+        .next_power_of_two();
+    let next_table_base = table_base.saturating_add(table_size_estimate);
+
+    Ok((
+        SideModuleHandle {
+            instance,
+            func_table_slots,
+        },
+        next_memory_base,
+        next_table_base,
+    ))
+}
+
+/// Collect exported function -> table slot mapping.
+///
+/// For Emscripten SIDE_MODULEs, functions are placed into the shared table
+/// starting at `table_base` in element-segment order. Since `wasmtime::Func`
+/// does not implement `PartialEq`, we assign slots sequentially to exported
+/// functions starting at `table_base`, which matches Emscripten's layout.
+///
+/// vertexia: sequential slot assignment; upgrade path is parsing the dylink.0
+/// section's element-segment to get exact per-export slots.
+fn collect_export_table_slots(
+    store: &mut Store<EmbedderState>,
+    instance: &Instance,
+    table_base: u32,
+) -> HashMap<String, u32> {
+    let mut out = HashMap::new();
+    let mut slot = table_base;
+    for export in instance.exports(&mut *store) {
+        let name = export.name().to_owned();
+        if export.into_func().is_none() {
+            continue;
+        }
+        out.insert(name, slot);
+        slot = slot.saturating_add(1);
+    }
+    out
+}
+
+/// Estimate the table size from the element section of a SIDE_MODULE.
+///
+/// Returns the number of function slots this module places in the table.
+/// Falls back to 512 if parsing fails.
+fn estimate_table_size(wasm_bytes: &[u8]) -> u32 {
+    use wasmparser::{ElementItems, ElementKind, Parser, Payload};
+    let mut total = 0u32;
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        let Ok(payload) = payload else { break };
+        if let Payload::ElementSection(reader) = payload {
+            for elem in reader.into_iter().flatten() {
+                if matches!(elem.kind, ElementKind::Active { .. }) {
+                    match elem.items {
+                        ElementItems::Functions(fs) => {
+                            total += fs.into_iter().count() as u32;
+                        }
+                        ElementItems::Expressions(_, exprs) => {
+                            total += exprs.into_iter().count() as u32;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if total == 0 { 512 } else { total }
+}
+
+/// Estimate the memory footprint of a SIDE_MODULE from its data segments.
+///
+/// Sums the uncompressed sizes of all data segments. Falls back to 1 MiB.
+fn estimate_mem_size(wasm_bytes: &[u8]) -> u32 {
+    use wasmparser::{DataKind, Parser, Payload};
+    let mut total = 0u32;
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        let Ok(payload) = payload else { break };
+        if let Payload::DataSection(reader) = payload {
+            for data in reader.into_iter().flatten() {
+                if matches!(data.kind, DataKind::Active { .. }) {
+                    total += data.data.len() as u32;
+                }
+            }
+        }
+    }
+    if total == 0 { 1024 * 1024 } else { total }
+}
+
+/// Wire `env._dlopen_js`, `env._dlsym_js`, and `env._emscripten_dlopen_js`
+/// against the [`SideModuleRegistry`] stored in [`EmbedderState::side_modules`].
+///
+/// Called from `emscripten_mechanical::wire_mechanical_env_funcs`. Extracted
+/// here to keep that file under 1000 lines.
+///
+/// ## ABI
+///
+/// `_dlopen_js(handle_struct_ptr: i32) -> i32`
+///   - `handle_struct_ptr` points to the Emscripten LDSO handle struct.
+///   - The filename C string pointer is at `struct + 36` (wasm32, from
+///     `pyodide.asm.js`: `UTF8ToString(handle+36)`).
+///   - Returns the 1-based opaque handle integer, or 0 on failure.
+///
+/// `_dlsym_js(handle: i32, sym_ptr: i32, sym_idx_ptr: i32) -> i32`
+///   - `handle` is the value returned by `_dlopen_js`.
+///   - `sym_ptr` points to the null-terminated symbol name.
+///   - `sym_idx_ptr` receives the export index (same as slot).
+///   - Returns the table slot (non-zero = success).
+pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
+    linker.allow_shadowing(true);
+
+    linker
+        .func_wrap(
+            "env",
+            "_dlopen_js",
+            |caller: Caller<'_, EmbedderState>, handle_struct_ptr: i32| -> i32 {
+                // Filename pointer at struct offset +36 (from pyodide.asm.js).
+                let name_ptr = {
+                    let Some(mem) = caller.data().pyodide_memory else {
+                        eprintln!("[dlopen_js] pyodide_memory not set");
+                        return 0;
+                    };
+                    let base = handle_struct_ptr as u32 as usize;
+                    let data = mem.data(&caller);
+                    if base + 40 > data.len() {
+                        eprintln!("[dlopen_js] struct ptr {handle_struct_ptr:#x} out of bounds");
+                        return 0;
+                    }
+                    i32::from_le_bytes(data[base + 36..base + 40].try_into().unwrap_or([0; 4]))
+                };
+                let Some(name) = read_cstr_sidemodule(&caller, name_ptr) else {
+                    eprintln!("[dlopen_js] cannot read filename at {name_ptr:#x}");
+                    return 0;
+                };
+                eprintln!("[dlopen_js] looking up '{name}'");
+                match caller.data().side_modules.find_by_path(&name) {
+                    Some((handle, _)) => {
+                        eprintln!("[dlopen_js] found handle={handle} for '{name}'");
+                        handle as i32
+                    }
+                    None => {
+                        eprintln!("[dlopen_js] MISS: '{name}' not pre-loaded");
+                        0
+                    }
+                }
+            },
+        )
+        .map_err(|e| AfterburnerError::Engine(format!("wire _dlopen_js: {e}")))?;
+
+    linker
+        .func_wrap(
+            "env",
+            "_dlsym_js",
+            |mut caller: Caller<'_, EmbedderState>,
+             handle: i32,
+             sym_ptr: i32,
+             sym_idx_ptr: i32|
+             -> i32 {
+                let sym_name = match read_cstr_sidemodule(&caller, sym_ptr) {
+                    Some(s) => s,
+                    None => {
+                        eprintln!("[dlsym_js] cannot read symbol at {sym_ptr:#x}");
+                        return 0;
+                    }
+                };
+                eprintln!("[dlsym_js] handle={handle} symbol='{sym_name}'");
+                let slot_opt: Option<u32> = caller
+                    .data()
+                    .side_modules
+                    .get_by_handle(handle as u32)
+                    .and_then(|h| h.func_table_slots.get(&sym_name).copied());
+                let Some(slot) = slot_opt else {
+                    eprintln!("[dlsym_js] MISS: handle={handle} has no export '{sym_name}'");
+                    return 0;
+                };
+                if sym_idx_ptr != 0
+                    && let Some(mem) = caller.data().pyodide_memory
+                {
+                    let data = mem.data_mut(&mut caller);
+                    let off = sym_idx_ptr as u32 as usize;
+                    if off + 4 <= data.len() {
+                        data[off..off + 4].copy_from_slice(&slot.to_le_bytes());
+                    }
+                }
+                eprintln!("[dlsym_js] resolved '{sym_name}' -> table slot {slot}");
+                slot as i32
+            },
+        )
+        .map_err(|e| AfterburnerError::Engine(format!("wire _dlsym_js: {e}")))?;
+
+    // Async dlopen variant: fire no callbacks (we pre-loaded everything).
+    linker
+        .func_wrap(
+            "env",
+            "_emscripten_dlopen_js",
+            |_: Caller<'_, EmbedderState>, _h: i32, _ok: i32, _err: i32, _ud: i32| {},
+        )
+        .map_err(|e| AfterburnerError::Engine(format!("wire _emscripten_dlopen_js: {e}")))?;
+
+    Ok(())
+}
+
+/// Read a NUL-terminated C string from guest memory using `EmbedderState::pyodide_memory`.
+///
+/// Private to this module; mirrors `emscripten_mechanical::read_cstr` to avoid
+/// a circular import (both crates need the same helper in opposite directions).
+fn read_cstr_sidemodule(caller: &Caller<'_, EmbedderState>, ptr: i32) -> Option<String> {
+    let mem = caller.data().pyodide_memory?;
+    let data = mem.data(caller);
+    let start = ptr as u32 as usize;
+    if start >= data.len() {
+        return None;
+    }
+    let end = data[start..]
+        .iter()
+        .position(|&b| b == 0)
+        .map(|n| start + n)?;
+    Some(String::from_utf8_lossy(&data[start..end]).into_owned())
+}
