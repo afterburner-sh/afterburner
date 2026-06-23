@@ -647,6 +647,80 @@ pub fn fill_unknown_imports_as_noops(
     auto_filled
 }
 
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+    use wasmtime::ValType;
+
+    // ---- MechCallLog -------------------------------------------------------
+
+    /// Ring drops oldest when capacity is exceeded; tail returns the last `n`.
+    #[test]
+    fn mech_call_log_ring_capacity() {
+        const CAP: usize = 64;
+        let log = MechCallLog::new();
+        for i in 0..CAP + 1 {
+            log.push("x", i as i32, 0);
+        }
+        assert_eq!(log.len(), CAP, "ring must cap at 64");
+        let tail = log.tail(1);
+        assert_eq!(tail[0].arg0, CAP as i32, "tail must be the last pushed");
+    }
+
+    /// Push "a", "b", "c"; tail(2) returns ["b", "c"] in order.
+    #[test]
+    fn mech_call_log_push_tail_ordering() {
+        let log = MechCallLog::new();
+        log.push("a", 0, 0);
+        log.push("b", 0, 0);
+        log.push("c", 0, 0);
+        let tail = log.tail(2);
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].name, "b");
+        assert_eq!(tail[1].name, "c");
+    }
+
+    // ---- JsFfiCallLog ------------------------------------------------------
+
+    /// record + snapshot: sorted output; total_calls counts all including repeats.
+    #[test]
+    fn jsffi_call_log_record_snapshot() {
+        let log = JsFfiCallLog::new();
+        log.record("foo");
+        log.record("foo");
+        log.record("foo");
+        log.record("bar");
+        let snap = log.snapshot();
+        assert!(snap.contains(&"bar".to_string()));
+        assert!(snap.contains(&"foo".to_string()));
+        assert_eq!(log.total_calls(), 4);
+    }
+
+    // ---- default_val_for ---------------------------------------------------
+
+    /// I32 type yields Val::I32(0).
+    #[test]
+    fn default_val_for_i32() {
+        let v = default_val_for(&ValType::I32);
+        assert!(matches!(v, Val::I32(0)));
+    }
+
+    /// EXTERNREF type yields Val::ExternRef(None).
+    #[test]
+    fn default_val_for_externref() {
+        let v = default_val_for(&ValType::EXTERNREF);
+        assert!(matches!(v, Val::ExternRef(None)));
+    }
+
+    /// FUNCREF type yields a null funcref (Val::FuncRef(None)).
+    #[test]
+    fn default_val_for_funcref() {
+        let v = default_val_for(&ValType::FUNCREF);
+        assert!(matches!(v, Val::FuncRef(None)));
+    }
+}
+
 ///
 /// Call after [`add_pyodide_imports`] and [`wire_env_memory_and_table_in_store`]
 /// so only truly unknown functions get auto-filled.

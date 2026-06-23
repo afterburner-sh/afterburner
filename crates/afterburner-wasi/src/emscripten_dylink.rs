@@ -889,3 +889,8 @@ pub(crate) const GOT_FUNC_NAMES: &[&str] = &[
     "emscripten_glCompressedTexSubImage2D",
     "emscripten_glCompressedTexImage2D",
 ];
+
+// ---- unit tests ------------------------------------------------------------
+
+#[cfg(test)]
+mod tests;

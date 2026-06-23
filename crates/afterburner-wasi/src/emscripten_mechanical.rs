@@ -932,3 +932,7 @@ pub fn wire_pyodide028_env_stubs(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "emscripten_mechanical/tests.rs"]
+mod tests;

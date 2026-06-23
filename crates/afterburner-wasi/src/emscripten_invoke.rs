@@ -15,6 +15,9 @@ use wasmtime::{Engine, FuncType, Linker, ValType};
 
 use crate::{embedder_vm::EmbedderState, emscripten_runtime::invoke_dispatch};
 
+#[cfg(test)]
+mod tests;
+
 /// Wire all table-dispatch trampolines into `linker`:
 ///
 /// - `_PyEM_TrampolineCall_JS`            (i32, i32, i32, i32) -> i32

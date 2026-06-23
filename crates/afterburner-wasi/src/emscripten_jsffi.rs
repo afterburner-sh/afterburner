@@ -417,3 +417,53 @@ pub(crate) fn wire_jsffi_stubs(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::embedder_vm::{EmbedderState, deterministic_engine};
+    use crate::emscripten_runtime::JsFfiCallLog;
+    use wasmtime::Linker;
+
+    use super::wire_jsffi_stubs;
+
+    // ---- wire succeeds -----------------------------------------------------
+
+    /// wire_jsffi_stubs must register all stubs without error.
+    #[test]
+    fn jsffi_stubs_wire_without_error() {
+        let engine = deterministic_engine().unwrap();
+        let mut linker: Linker<EmbedderState> = Linker::new(&engine);
+        let log = JsFfiCallLog::new();
+        wire_jsffi_stubs(&engine, &mut linker, log).unwrap();
+    }
+
+    // ---- JsFfiCallLog record -----------------------------------------------
+
+    /// Record calls and verify snapshot + total_calls.
+    #[test]
+    fn jsffi_log_records_calls() {
+        let log = JsFfiCallLog::new();
+        log.record("JsvArray_New");
+        log.record("JsvArray_Check");
+        log.record("JsvArray_New");
+        let snap = log.snapshot();
+        assert!(snap.contains(&"JsvArray_New".to_string()));
+        assert!(snap.contains(&"JsvArray_Check".to_string()));
+        assert_eq!(log.total_calls(), 3);
+    }
+
+    // ---- default_val_for externref (re-export check) -----------------------
+
+    /// default_val_for returns ExternRef(None) for EXTERNREF - the fix for the
+    /// ref-type mismatch that caused jsffi stubs to return wrong Val types.
+    #[test]
+    fn default_val_for_externref_via_jsffi_module() {
+        use crate::emscripten_runtime::default_val_for;
+        use wasmtime::{Val, ValType};
+        let v = default_val_for(&ValType::EXTERNREF);
+        assert!(
+            matches!(v, Val::ExternRef(None)),
+            "EXTERNREF must default to ExternRef(None), got {v:?}"
+        );
+    }
+}

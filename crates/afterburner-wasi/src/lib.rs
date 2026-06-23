@@ -52,6 +52,7 @@ pub mod host_imports;
 pub mod intake;
 pub mod manifold_codec;
 pub mod nozzle;
+pub mod pyodide_runner;
 pub mod test_support;
 pub mod wasm_engine;
 pub mod wasm_loader;

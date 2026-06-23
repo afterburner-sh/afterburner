@@ -22,6 +22,9 @@ use crate::{
     emscripten_runtime::MechCallLog,
 };
 
+#[cfg(test)]
+mod tests;
+
 /// Log a stat syscall result: path, rc, and (if found) st_mode + st_size.
 #[inline]
 fn log_stat(tag: &str, abs: &str, rc: i32, mode_size: Option<(u32, u64)>) {

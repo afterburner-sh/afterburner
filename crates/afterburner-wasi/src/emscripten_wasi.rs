@@ -48,6 +48,9 @@ use wasmtime::{Caller, Linker};
 
 use crate::{embedder_vm::EmbedderState, emscripten_abi::VIRTUAL_EPOCH_NS};
 
+#[cfg(test)]
+mod tests;
+
 // ---- WASI errno constants (wasi_snapshot_preview1 values) -------------------
 //
 // WASI errno values are POSITIVE integers (unlike Linux -errno).
