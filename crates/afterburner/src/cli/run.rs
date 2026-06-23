@@ -134,8 +134,14 @@ pub fn run_package_or_file(
             let dir = std::path::Path::new(".");
             let (lang, afb_name) = resolve_package_lang_and_output(dir)?;
             match SourceLang::from_str(&lang) {
+                Ok(SourceLang::Python) => {
+                    // Python package: run the source entry directly via the
+                    // Pyodide embedder. No compile step needed.
+                    let entry_path = resolve_package_entry(dir)?;
+                    run_python_source(&entry_path, user_args)
+                }
                 Ok(l) if !l.is_js_family() => {
-                    // Native package: run the compiled .afb via EmbedderVm.
+                    // Other native package: run the compiled .afb via EmbedderVm.
                     let afb_path = dir.join(&afb_name);
                     if !afb_path.exists() {
                         anyhow::bail!(
@@ -279,12 +285,20 @@ fn run_afb(afb_path: &Path, _user_args: &[String]) -> Result<()> {
 /// `.rs` -> `rustc --target wasm32-wasip1`
 /// `.go` -> `GOOS=wasip1 GOARCH=wasm go build`
 /// `.c`  -> `clang --target=wasm32-wasi` (or `emcc`)
-/// `.py` / `.rb` -> honest "runtime not available" error
+/// `.py` / `.pyw` -> Pyodide embedder via `BURN_PYTHON_RUNTIME`
+/// `.rb` -> honest "runtime not available" error
 ///
 /// Sandbox posture: SEALED BY DEFAULT (no fs preopens, no net, no env).
 /// Grants are applied via the standard `--allow-*` / `-A` flags on the CLI.
 #[cfg(feature = "wasm")]
 fn run_native_script(cli: &Cli, path: &Path, user_args: &[String]) -> Result<()> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    if matches!(ext.as_deref(), Some("py" | "pyw")) {
+        return run_python_source(path, user_args);
+    }
     use super::compile::lang::compile_single_file;
     let abs = path
         .canonicalize()
@@ -297,6 +311,64 @@ fn run_native_script(cli: &Cli, path: &Path, user_args: &[String]) -> Result<()>
 fn run_native_script(_cli: &Cli, path: &Path, _user_args: &[String]) -> Result<()> {
     anyhow::bail!(
         "running native source files requires the `wasm` feature \
+         (rebuild with `--features wasm`). File: {}",
+        path.display()
+    )
+}
+
+/// Run a `.py` source file via the Pyodide embedder.
+///
+/// Locates runtime artifacts from the `BURN_PYTHON_RUNTIME` environment
+/// variable (a directory containing `pyodide-exnref.wasm` and
+/// `python_stdlib.zip`). Exits with the Python process exit code.
+///
+/// If `BURN_PYTHON_RUNTIME` is not set, emits an honest error and returns
+/// immediately - no fake success.
+#[cfg(feature = "wasm")]
+fn run_python_source(path: &Path, _user_args: &[String]) -> Result<()> {
+    use afterburner_wasi::pyodide_runner::run_pyodide_source;
+    use std::io::Write;
+
+    let runtime_dir = std::env::var("BURN_PYTHON_RUNTIME").map_err(|_| {
+        anyhow::anyhow!(
+            "python runtime not found; set BURN_PYTHON_RUNTIME=<dir> where <dir> contains \
+             pyodide-exnref.wasm and python_stdlib.zip"
+        )
+    })?;
+
+    let wasm_path = format!("{runtime_dir}/pyodide-exnref.wasm");
+    let stdlib_path = format!("{runtime_dir}/python_stdlib.zip");
+
+    if !std::path::Path::new(&wasm_path).exists() {
+        anyhow::bail!(
+            "python runtime not found; {wasm_path} does not exist. \
+             Set BURN_PYTHON_RUNTIME to a directory containing pyodide-exnref.wasm \
+             and python_stdlib.zip"
+        );
+    }
+
+    let source = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+
+    let out = run_pyodide_source(&wasm_path, &stdlib_path, &source)
+        .map_err(|e| anyhow::anyhow!("python runtime error: {e}"))?;
+
+    if !out.stdout.is_empty() {
+        std::io::stdout()
+            .write_all(&out.stdout)
+            .context("writing python stdout")?;
+    }
+
+    if out.exit_code != 0 {
+        std::process::exit(out.exit_code);
+    }
+    Ok(())
+}
+
+/// Python source runner when the `wasm` feature is absent: honest error.
+#[cfg(not(feature = "wasm"))]
+fn run_python_source(path: &Path, _user_args: &[String]) -> Result<()> {
+    anyhow::bail!(
+        "running Python source files requires the `wasm` feature \
          (rebuild with `--features wasm`). File: {}",
         path.display()
     )
