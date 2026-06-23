@@ -312,6 +312,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "wasm-encoder 0.252.0",
  "wasmparser 0.252.0",
  "wasmtime",
  "wasmtime-wasi",
@@ -6086,6 +6087,16 @@ checksum = "5a879a421bd17c528b74721b2abf4c62e8f1d1889c2ba8c3c50d02deaf2ce395"
 dependencies = [
  "leb128fmt",
  "wasmparser 0.251.0",
+]
+
+[[package]]
+name = "wasm-encoder"
+version = "0.252.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8185ae345fa5687c054626ff9a50e7089797a343d9904d1dc9820eb4c4d3196f"
+dependencies = [
+ "leb128fmt",
+ "wasmparser 0.252.0",
 ]
 
 [[package]]

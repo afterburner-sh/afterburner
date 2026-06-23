@@ -34,7 +34,7 @@ use crate::{
     emscripten_invoke::wire_invoke_trampolines,
     emscripten_mechanical::wire_pyodide028_env_stubs,
     emscripten_runtime::{
-        MechCallLog, NoopCallLog, WASM_STACK_BASE, fill_unknown_imports_as_noops,
+        MainModuleLayout, MechCallLog, NoopCallLog, fill_unknown_imports_as_noops,
         wire_env_memory_and_table_in_store, wire_wasi_only,
     },
     emscripten_syscall::wire_fs_env_funcs,
@@ -79,6 +79,7 @@ fn boot_pyodide_instance(
         .map_err(|e| AfterburnerError::Engine(format!("read {wasm_path}: {e}")))?;
 
     let name_to_slot = parse_got_name_to_slot(&wasm_bytes, 1);
+    let layout = MainModuleLayout::from_main_wasm(&wasm_bytes);
 
     let engine = deterministic_engine()?;
     let module = Module::new(&engine, &wasm_bytes)
@@ -115,8 +116,7 @@ fn boot_pyodide_instance(
         .set_fuel(PYODIDE_FUEL)
         .map_err(|e| AfterburnerError::Engine(format!("set_fuel: {e}")))?;
 
-    let got_globals =
-        wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, 1, WASM_STACK_BASE)?;
+    let got_globals = wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, &layout)?;
 
     // Native-EH tags: env.__c_longjmp and env.__cpp_exception.
     let tag_func_ty = FuncType::new(&engine, [ValType::I32], []);
@@ -175,6 +175,7 @@ fn boot_pyodide_instance(
         &got_globals,
         &name_to_slot,
         &module,
+        layout.host_got_base(),
     )?;
 
     if let Some(f) = instance.get_func(&mut store, "__wasm_apply_data_relocs") {

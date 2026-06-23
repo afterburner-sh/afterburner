@@ -64,6 +64,7 @@ use crate::embedder_vm::EmbedderState;
 use crate::emscripten_runtime::{WASM_TABLE_INITIAL_SIZE, default_val_for};
 
 /// Memory size declared in `pyodide.asm.wasm`'s `dylink.0` section (bytes).
+#[allow(dead_code)]
 const DYLINK_MEMORY_SIZE: u32 = 4_632_232;
 
 /// Stack region size. The payload links CPython with `-sSTACK_SIZE=10MB`. The C
@@ -110,12 +111,17 @@ pub type GotGlobalMap = HashMap<String, Global>;
 /// Called from `wire_env_memory_and_table_in_store` after creating the globals
 /// so that any code reading a GOT.func slot before `fill_got_table_slots` sees
 /// a non-zero index (pointing to a null funcref slot rather than the trap slot 0).
+///
+/// `host_got_base` is the first table slot reserved for host GOT.func stubs,
+/// derived from the main module's `dylink.0` layout via
+/// [`MainModuleLayout::host_got_base`](crate::emscripten_runtime::MainModuleLayout::host_got_base).
 pub fn prefill_got_func_globals(
     store: &mut Store<EmbedderState>,
     got_globals: &GotGlobalMap,
+    host_got_base: u32,
 ) -> Result<()> {
     for (idx, name) in GOT_FUNC_NAMES.iter().enumerate() {
-        let slot = got_func_slot(idx) as i32;
+        let slot = host_got_base.saturating_add(idx as u32) as i32;
         let key = format!("GOT.func::{name}");
         if let Some(&g) = got_globals.get(&key) {
             g.set(&mut *store, Val::I32(slot))
@@ -127,23 +133,21 @@ pub fn prefill_got_func_globals(
 
 /// Write the known symbol addresses into every `GOT.mem.*` global.
 ///
-/// - `__heap_base` = `memory_base` + dylink.0 memory_size + stack size (the
-///   heap starts past the stack region, never overlapping it).
-/// - `__stack_high` = `stack_high` (= WASM_STACK_BASE).
-/// - `__stack_low`  = `stack_high` - `WASM_STACK_SIZE`.
+/// - `__heap_base` = derived from `layout` (memory_base + memory_size + stack_size).
+/// - `__stack_high` = top of the stack region (layout.stack_high()).
+/// - `__stack_low`  = bottom of the stack region (layout.stack_low()).
+///
+/// Layout is: static data | stack | heap. The heap must start past both the
+/// static data and the stack so they never overlap.
 pub fn prefill_got_mem_globals(
     store: &mut Store<EmbedderState>,
     got_globals: &GotGlobalMap,
     memory_base: u32,
-    stack_high: u32,
+    layout: &crate::emscripten_runtime::MainModuleLayout,
 ) -> Result<()> {
-    // Layout is: static data | stack | heap. The heap base must therefore be
-    // past BOTH the data and the stack region. The earlier formula stopped at
-    // the data end, which is exactly __stack_low - so malloc and the descending
-    // stack shared one region (~4.6-15.1 MB) and overwrote each other under
-    // load (deep recursion + a large heap), corrupting freshly-built data.
-    let heap_base = memory_base + DYLINK_MEMORY_SIZE + WASM_STACK_SIZE;
-    let stack_low = stack_high.saturating_sub(WASM_STACK_SIZE);
+    let heap_base = layout.heap_base(memory_base);
+    let stack_low = layout.stack_low();
+    let stack_high = layout.stack_high();
 
     let pairs: &[(&str, u32)] = &[
         ("__heap_base", heap_base),
@@ -563,6 +567,7 @@ pub fn fill_got_table_slots(
     got_globals: &GotGlobalMap,
     name_to_slot: &HashMap<String, u32>,
     module: &Module,
+    host_got_base: u32,
 ) -> Result<GotResolutionReport> {
     // The table is a host-defined import; retrieve it from the linker.
     let table = linker
@@ -620,7 +625,7 @@ pub fn fill_got_table_slots(
         }
 
         // Path 2: module export by name.
-        let stub_slot = got_func_slot(idx) as u64;
+        let stub_slot = host_got_base.saturating_add(idx as u32) as u64;
         if let Some(func) = instance.get_func(&mut *store, name) {
             if *name == "emscripten_out" || *name == "emscripten_err" {
                 eprintln!("[GOT Path2] {name} -> stub_slot={stub_slot} (module export)");

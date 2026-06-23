@@ -52,7 +52,7 @@ use afterburner_wasi::emscripten_dylink::{
 };
 use afterburner_wasi::emscripten_fs::mount_zip_into_fs;
 use afterburner_wasi::emscripten_runtime::{
-    JsFfiCallLog, PYODIDE_STACK_BASE, add_pyodide_imports, fill_unknown_imports_as_traps,
+    JsFfiCallLog, MainModuleLayout, add_pyodide_imports, fill_unknown_imports_as_traps,
     wire_env_memory_and_table_in_store,
 };
 
@@ -118,6 +118,7 @@ fn run_probe() -> String {
         "[probe] parsed {} name->table_slot entries",
         name_to_slot.len()
     );
+    let layout = MainModuleLayout::from_main_wasm(&wasm_bytes);
 
     // ---- build the deterministic engine -------------------------------------
 
@@ -169,8 +170,7 @@ fn run_probe() -> String {
         &mut store,
         &mut linker,
         /* memory_base */ 0,
-        /* table_base */ 1,
-        /* stack_base */ PYODIDE_STACK_BASE,
+        /* layout */ &layout,
     ) {
         Ok(g) => g,
         Err(e) => return format!("MEMORY/TABLE SETUP FAILED: {e}"),
@@ -281,6 +281,7 @@ fn run_probe() -> String {
         &got_globals,
         &name_to_slot,
         &module,
+        layout.host_got_base(),
     ) {
         Ok(report) => {
             eprintln!(

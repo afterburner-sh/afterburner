@@ -56,7 +56,7 @@ use afterburner_wasi::emscripten_fs::mount_zip_into_fs;
 use afterburner_wasi::emscripten_invoke::wire_invoke_trampolines;
 use afterburner_wasi::emscripten_mechanical::wire_pyodide028_env_stubs;
 use afterburner_wasi::emscripten_runtime::{
-    JsFfiCallLog, MechCallLog, NoopCallLog, PYODIDE_STACK_BASE, fill_unknown_imports_as_noops,
+    JsFfiCallLog, MainModuleLayout, MechCallLog, NoopCallLog, fill_unknown_imports_as_noops,
     wire_env_memory_and_table_in_store, wire_wasi_only,
 };
 use afterburner_wasi::emscripten_syscall::wire_fs_env_funcs;
@@ -187,6 +187,7 @@ fn step1_succeeded(
     wasm_bytes: &[u8],
     name_to_slot: &std::collections::HashMap<String, u32>,
 ) -> String {
+    let layout = MainModuleLayout::from_main_wasm(wasm_bytes);
     eprintln!("[probe] attempting Module::new with native-EH engine...");
     let module = match Module::new(&engine, wasm_bytes) {
         Ok(m) => m,
@@ -272,12 +273,11 @@ fn step1_succeeded(
         .set_fuel(PROBE_FUEL)
         .expect("set_fuel on consume_fuel engine");
 
-    let got_globals =
-        match wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, 1, PYODIDE_STACK_BASE)
-        {
-            Ok(g) => g,
-            Err(e) => return format!("MEMORY/TABLE SETUP FAILED: {e}"),
-        };
+    let got_globals = match wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, &layout)
+    {
+        Ok(g) => g,
+        Err(e) => return format!("MEMORY/TABLE SETUP FAILED: {e}"),
+    };
 
     // Wire the 2 native-EH exception tags: (i32) -> ().
     // Wasmtime handles throw/catch natively once the tags are defined.
@@ -397,6 +397,7 @@ fn step1_succeeded(
         &got_globals,
         name_to_slot,
         &module,
+        layout.host_got_base(),
     ) {
         Ok(r) => eprintln!(
             "[probe] GOT: {} elem, {} export, {} stub, {} mem",

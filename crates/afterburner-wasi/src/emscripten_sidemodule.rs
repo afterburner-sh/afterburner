@@ -548,6 +548,7 @@ where
             from_side += 1;
         } else {
             // Not exported by main or any side module - wire a typed no-op stub.
+            eprintln!("[sidemodule-stub] {path}: env.{name}");
             let ft2 = ft.clone();
             let result_tys: Vec<ValType> = ft2.results().collect();
             linker

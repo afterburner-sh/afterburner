@@ -119,9 +119,11 @@ rand.workspace = true
 # Compile WAT (WebAssembly text format) to bytes inside tests so we
 # don't have to hand-encode binary fixtures.
 wat.workspace = true
-# B7 tls — generate self-signed certs in unit tests for the
+# B7 tls -- generate self-signed certs in unit tests for the
 # server-config builder.
 rcgen = { workspace = true }
+# Binary instrumentation for wasm rewrite probes (e.g. instrument_sp).
+wasm-encoder = { version = "0.252", features = ["wasmparser"] }
 
 [build-dependencies]
 sha2.workspace = true

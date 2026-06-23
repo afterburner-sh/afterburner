@@ -15,7 +15,7 @@
 //! - 169 `GOT.func.*` globals (i32 mutable, zero-initialized)
 //! - 3 `GOT.mem.*` globals (`__heap_base`, `__stack_low`, `__stack_high`)
 //! - 1 `env.memory` linear memory (320 initial pages, 32768 max)
-//! - 1 `env.__indirect_function_table` funcref table (6642 initial)
+//! - 1 `env.__indirect_function_table` funcref table (initial size derived from the main module's dylink.0)
 //!
 //! ## Cross-store constraint
 //!
@@ -52,8 +52,7 @@ use std::{
 use crate::{
     embedder_vm::EmbedderState,
     emscripten_dylink::{
-        GOT_FUNC_NAMES, GotGlobalMap, WASM_TABLE_WITH_GOT_SIZE, prefill_got_func_globals,
-        prefill_got_mem_globals,
+        GOT_FUNC_NAMES, GotGlobalMap, prefill_got_func_globals, prefill_got_mem_globals,
     },
     emscripten_jsffi::wire_jsffi_stubs,
     emscripten_mechanical::wire_mechanical_env_funcs,
@@ -203,8 +202,21 @@ const DEFAULT_MEMORY_INITIAL_BYTES: u64 = 31_457_280; // 30 MiB
 /// The payload was built with MAXIMUM=4GB so this matches the expected upper bound.
 const DEFAULT_MEMORY_MAX_BYTES: u64 = WASM32_MAX_BYTES;
 
-/// Default stack size: 10 MiB, matching the payload build flag `-sSTACK_SIZE=10MB`.
-const DEFAULT_STACK_SIZE_BYTES: u64 = 10_485_760; // 10 MiB
+/// Default stack size: 32 MiB. Pyodide builds with `-sSTACK_SIZE=10MB`, but
+/// afterburner runs the exnref-translated wasm, whose eval frames consume more
+/// C-stack per frame than the browser's legacy-EH code, so deep import
+/// recursions (e.g. numpy) overflow a 10 MiB stack here where the browser does
+/// not. 32 MiB imports numpy; the heap relocates above the stack, so the only
+/// cost is committed memory.
+/// vertexia: reduce the exnref per-frame C-stack overhead to return to 10 MiB.
+const DEFAULT_STACK_SIZE_BYTES: u64 = 33_554_432; // 32 MiB
+
+/// Initial malloc-heap headroom reserved above the C stack, in bytes. The linear
+/// memory's initial size is derived as `heap_base + this`, where `heap_base`
+/// comes from the module's dylink.0 `memory_size` plus the configured stack, so
+/// the initial memory always covers the stack and an initial heap regardless of
+/// the Pyodide version or stack size. The heap still grows on demand beyond this.
+const HEAP_INITIAL_ALLOWANCE_BYTES: u64 = 31_457_280; // 30 MiB
 
 /// Validate and convert three byte values into a [`WasmMemoryConfig`].
 ///
@@ -288,6 +300,88 @@ pub struct WasmMemoryConfig {
     pub max_pages: u32,
     /// Stack region size in bytes.
     pub stack_size_bytes: u32,
+}
+
+/// Layout of the MAIN Emscripten module, derived from its `dylink.0` section.
+///
+/// Pyodide ships its `memory_size`, `table_size`, and (by Emscripten convention)
+/// a `table_base` of 1 inside the main `pyodide.asm.wasm` `dylink.0` custom
+/// section. These differ between Pyodide releases (0.26.4 vs 0.28.3), so they
+/// must be read from the loaded binary rather than hardcoded: the wrong
+/// `memory_size` mislays the C stack and heap and corrupts live frames.
+///
+/// All addresses assume the standard single-main-module layout
+/// `[memory_base .. memory_base + memory_size)` static data, then the descending
+/// C stack of `stack_size` bytes, then the malloc heap.
+#[derive(Clone, Copy, Debug)]
+pub struct MainModuleLayout {
+    /// Static-data region size in bytes (dylink.0 `memory_size`).
+    pub memory_size: u32,
+    /// First table slot the module's element segment uses (Emscripten reserves
+    /// slot 0 as the null/trap slot, so this is conventionally 1).
+    pub table_base: u32,
+    /// Table slots the module's element segment fills (dylink.0 `table_size`).
+    pub table_size: u32,
+    /// C-stack region size in bytes (from `wasm_memory_config`, default 10 MiB).
+    pub stack_size: u32,
+}
+
+impl MainModuleLayout {
+    /// Derive the layout from the main module's `dylink.0` section and the
+    /// configured stack size. `table_base` follows the Emscripten convention (1).
+    ///
+    /// Falls back to the conservative `parse_dylink0_mem_info` default if the
+    /// section is absent, and to the default 10 MiB stack if the env config is
+    /// unreadable.
+    pub fn from_main_wasm(wasm_bytes: &[u8]) -> Self {
+        let dylink = crate::emscripten_sidemodule::parse_dylink0_mem_info(wasm_bytes);
+        let stack_size = wasm_memory_config()
+            .map(|c| c.stack_size_bytes)
+            .unwrap_or(DEFAULT_STACK_SIZE_BYTES as u32);
+        Self {
+            memory_size: dylink.mem_size,
+            table_base: 1,
+            table_size: dylink.table_size,
+            stack_size,
+        }
+    }
+
+    /// Initial size of the indirect function table: the module's element segment
+    /// occupies `[table_base .. table_base + table_size)`.
+    pub fn table_initial_size(&self) -> u32 {
+        self.table_base.saturating_add(self.table_size)
+    }
+
+    /// First table slot reserved for host GOT.func stub entries (immediately
+    /// above the module's element segment, no gap).
+    pub fn host_got_base(&self) -> u32 {
+        self.table_initial_size()
+    }
+
+    /// Total table size to create: module element region + host GOT.func slots.
+    pub fn table_with_got_size(&self) -> u32 {
+        self.host_got_base()
+            .saturating_add(crate::emscripten_dylink::GOT_FUNC_HOST_SLOTS)
+    }
+
+    /// Top of the C-stack region (`__stack_high`) and initial `__stack_pointer`:
+    /// the stack sits directly above the static data and descends from here.
+    pub fn stack_high(&self) -> u32 {
+        self.memory_size.saturating_add(self.stack_size)
+    }
+
+    /// Bottom of the C-stack region (`__stack_low`).
+    pub fn stack_low(&self) -> u32 {
+        self.stack_high().saturating_sub(self.stack_size)
+    }
+
+    /// Heap base (`__heap_base`): malloc starts past both the static data and
+    /// the stack region so they never overlap.
+    pub fn heap_base(&self, memory_base: u32) -> u32 {
+        memory_base
+            .saturating_add(self.memory_size)
+            .saturating_add(self.stack_size)
+    }
 }
 
 // ---- generic named constants -------------------------------------------------
@@ -413,9 +507,9 @@ pub fn add_pyodide_imports_no_jsffi(
 ///
 /// Memory size is driven by the env vars `BURN_WASM_MEMORY_INITIAL_BYTES` and
 /// `BURN_WASM_MEMORY_MAX_BYTES` (see [`wasm_memory_config`]). The table is
-/// sized to `WASM_TABLE_WITH_GOT_SIZE` (module slots + host-GOT slots) so that
-/// `fill_got_table_slots` can place host funcrefs into the pre-reserved host
-/// slots after instantiation.
+/// sized to `layout.table_with_got_size()` (module element slots + host-GOT slots)
+/// so that `fill_got_table_slots` can place host funcrefs into the pre-reserved
+/// host slots after instantiation.
 ///
 /// GOT.func globals are pre-filled with their pre-assigned table slot indices
 /// (not zero) and GOT.mem globals are pre-filled with the known symbol
@@ -434,12 +528,20 @@ pub fn wire_env_memory_and_table_in_store(
     store: &mut wasmtime::Store<EmbedderState>,
     linker: &mut Linker<EmbedderState>,
     memory_base: u32,
-    table_base: u32,
-    stack_base: u32,
+    layout: &MainModuleLayout,
 ) -> Result<GotGlobalMap> {
     let mem_cfg = wasm_memory_config()
         .map_err(|e| AfterburnerError::Engine(format!("wasm memory config: {e}")))?;
-    let mem_ty = MemoryType::new(mem_cfg.initial_pages, Some(mem_cfg.max_pages));
+    // Derive the minimum initial linear memory from the module layout so the C
+    // stack always fits: the memory must cover [0 .. heap_base + initial heap].
+    // heap_base = memory_base + dylink memory_size + stack_size, so this scales
+    // automatically with the Pyodide version and the configured stack size. The
+    // env-configured initial (BURN_WASM_MEMORY_INITIAL_BYTES) can only raise it.
+    let required_initial_bytes =
+        layout.heap_base(memory_base) as u64 + HEAP_INITIAL_ALLOWANCE_BYTES;
+    let required_pages = required_initial_bytes.div_ceil(WASM_PAGE_BYTES) as u32;
+    let initial_pages = mem_cfg.initial_pages.max(required_pages);
+    let mem_ty = MemoryType::new(initial_pages, Some(mem_cfg.max_pages));
     let memory = wasmtime::Memory::new(&mut *store, mem_ty)
         .map_err(|e| AfterburnerError::Engine(format!("wasm memory: {e}")))?;
     // Store the handle in EmbedderState so custom WASI shims can access
@@ -457,9 +559,13 @@ pub fn wire_env_memory_and_table_in_store(
 
     // Size = module element region + pre-reserved host GOT slots.
     // The active element segment fires at instantiation and fills slots
-    // [table_base .. table_base + 6642); host GOT slots follow at
-    // [WASM_TABLE_INITIAL_SIZE .. WASM_TABLE_WITH_GOT_SIZE).
-    let tbl_ty = TableType::new(wasmtime::RefType::FUNCREF, WASM_TABLE_WITH_GOT_SIZE, None);
+    // [table_base .. table_base + table_size); host GOT slots follow at
+    // [host_got_base .. table_with_got_size).
+    let tbl_ty = TableType::new(
+        wasmtime::RefType::FUNCREF,
+        layout.table_with_got_size(),
+        None,
+    );
     let table = Table::new(&mut *store, tbl_ty, wasmtime::Ref::Func(None))
         .map_err(|e| AfterburnerError::Engine(format!("pyodide table: {e}")))?;
     // Store the handle in EmbedderState so invoke_dispatch can reach the table
@@ -497,7 +603,7 @@ pub fn wire_env_memory_and_table_in_store(
     let tb = Global::new(
         &mut *store,
         GlobalType::new(ValType::I32, Mutability::Const),
-        Val::I32(table_base as i32),
+        Val::I32(layout.table_base as i32),
     )
     .map_err(|e| AfterburnerError::Engine(format!("__table_base global: {e}")))?;
     linker
@@ -513,7 +619,7 @@ pub fn wire_env_memory_and_table_in_store(
     let sp = Global::new(
         &mut *store,
         GlobalType::new(ValType::I32, Mutability::Var),
-        Val::I32(stack_base as i32),
+        Val::I32(layout.stack_high() as i32),
     )
     .map_err(|e| AfterburnerError::Engine(format!("__stack_pointer global: {e}")))?;
     linker
@@ -549,8 +655,8 @@ pub fn wire_env_memory_and_table_in_store(
 
     // Pre-fill GOT.func with pre-assigned table slot indices (not zero).
     // Pre-fill GOT.mem with known symbol addresses.
-    prefill_got_func_globals(store, &got_globals)?;
-    prefill_got_mem_globals(store, &got_globals, memory_base, stack_base)?;
+    prefill_got_func_globals(store, &got_globals, layout.host_got_base())?;
+    prefill_got_mem_globals(store, &got_globals, memory_base, layout)?;
 
     Ok(got_globals)
 }
@@ -628,59 +734,22 @@ pub(crate) fn invoke_dispatch(
         })
         .collect();
 
-    // Emscripten legacy JS EH semantics (invoke_<sig> contract):
+    // Native wasm EH (-fwasm-exceptions / -sSUPPORT_LONGJMP=wasm): the callee may
+    // throw a native wasm exception (a C++ __cpp_exception, or a wasm-SjLj
+    // __c_longjmp raised by longjmp). It MUST propagate up so the wasm caller's
+    // try_table landing pad catches it and restores the C stack itself.
     //
-    //   var sp = stackSave();
-    //   try { return callee(args); }
-    //   catch(e) { stackRestore(sp); if (e !== e+0) throw e; setThrew(1,0); }
-    //
-    // Step 1: save the stack pointer via the module export.
-    let saved_sp: i32 = if let Some(wasmtime::Extern::Func(f)) =
-        caller.get_export("emscripten_stack_get_current")
-    {
-        let mut sp_out = [Val::I32(0)];
-        if f.call(&mut caller, &[], &mut sp_out).is_ok() {
-            match sp_out[0] {
-                Val::I32(v) => v,
-                _ => 0,
-            }
-        } else {
-            0
-        }
-    } else {
-        0
-    };
-
-    // Step 2: call the callee; handle a trap as a caught C++ exception.
-    // vertexia: trap-based EH - destructors in intervening wasm frames do NOT
-    // run (no stack unwinding). This is correct for CPython's EH boundary
-    // (the exception is re-raised inside the interpreter loop), but C++
-    // objects allocated between the invoke_ site and the throw site may leak.
-    // Upgrade path: compile with Emscripten Wasm EH (-fwasm-exceptions) for
-    // proper zero-cost EH with destructor support.
-    let call_result = func.call(&mut caller, &call_params, results);
-    if call_result.is_err() {
-        // Step 3a: restore the stack pointer.
-        if saved_sp != 0
-            && let Some(wasmtime::Extern::Func(f)) = caller.get_export("_emscripten_stack_restore")
-        {
-            let _ = f.call(&mut caller, &[Val::I32(saved_sp)], &mut []);
-        }
-        // Step 3b: call setThrew(1, 0) to signal an exception was thrown.
-        if let Some(wasmtime::Extern::Func(f)) = caller.get_export("setThrew") {
-            let _ = f.call(&mut caller, &[Val::I32(1), Val::I32(0)], &mut []);
-        }
-        // Step 3c: fill results with the default zero for each DECLARED return
-        // type (from the callee's type), then return Ok so the landing pad can
-        // run. wasmtime pre-fills the result slots with a null funcref
-        // placeholder regardless of type, so keying off the slot value returned
-        // a funcref for an i32 result ("expected i32, found (ref null nofunc)");
-        // key off func_ty.results() instead.
-        for (r, vt) in results.iter_mut().zip(func_ty.results()) {
-            *r = default_val_for(&vt);
-        }
-        return Ok(());
-    }
+    // The legacy JS-EH invoke_<sig> contract (save sp; on throw: stackRestore +
+    // setThrew(1,0) + return 0) is WRONG for this wasm: swallowing the exception
+    // here loses it, so the callee yields its zero/NULL result with no exception
+    // delivered to any handler. That is exactly how numpy's MachArLike "returned
+    // NULL without setting an exception" - a thrown exnref was eaten by this
+    // trampoline. Pyodide is built with native wasm EH (816 native throws;
+    // __c_longjmp / __cpp_exception tags imported), so the correct behavior is to
+    // let wasmtime propagate the exception through this host trampoline to the
+    // caller's landing pad. Propagate, never swallow. Direct (non-trampolined)
+    // calls already propagate natively; this makes the trampolined path match.
+    func.call(&mut caller, &call_params, results)?;
     Ok(())
 }
 
@@ -844,6 +913,34 @@ mod tests {
     fn default_val_for_funcref() {
         let v = default_val_for(&ValType::FUNCREF);
         assert!(matches!(v, Val::FuncRef(None)));
+    }
+
+    // ---- MainModuleLayout -------------------------------------------------
+
+    /// Derived layout math matches the documented `static data | stack | heap`
+    /// arrangement and places host GOT slots directly above the element segment.
+    #[test]
+    fn main_module_layout_derived_math() {
+        let layout = MainModuleLayout {
+            memory_size: 3_565_204,
+            table_base: 1,
+            table_size: 6073,
+            stack_size: 10 * 1024 * 1024,
+        };
+        assert_eq!(layout.table_initial_size(), 6074, "table_base + table_size");
+        assert_eq!(
+            layout.host_got_base(),
+            6074,
+            "host GOT starts above element segment"
+        );
+        assert_eq!(layout.stack_high(), 3_565_204 + 10 * 1024 * 1024);
+        assert_eq!(layout.stack_low(), 3_565_204);
+        assert_eq!(layout.heap_base(0), 3_565_204 + 10 * 1024 * 1024);
+        // table_with_got_size = host_got_base + GOT_FUNC_HOST_SLOTS.
+        assert_eq!(
+            layout.table_with_got_size(),
+            6074 + crate::emscripten_dylink::GOT_FUNC_HOST_SLOTS
+        );
     }
 
     // ---- wasm_memory_config_from (pure, no env mutation) ----------------------
