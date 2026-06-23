@@ -65,8 +65,10 @@ use crate::emscripten_runtime::PYODIDE_TABLE_INITIAL_SIZE;
 /// Memory size declared in `pyodide.asm.wasm`'s `dylink.0` section (bytes).
 const DYLINK_MEMORY_SIZE: u32 = 4_632_232;
 
-/// Stack region size (same as used in PYODIDE_STACK_BASE calculation).
-pub const PYODIDE_STACK_SIZE: u32 = 5 * 1024 * 1024;
+/// Stack region size. Pyodide 0.28 links CPython with `-sSTACK_SIZE=10MB`
+/// (Makefile.envs). The C stack overflows below `__stack_low` with a
+/// MemoryOutOfBounds trap when this is set smaller than the actual build value.
+pub const PYODIDE_STACK_SIZE: u32 = 10 * 1024 * 1024;
 
 /// Number of host-slot entries: one per GOT.func symbol.
 pub const GOT_FUNC_HOST_SLOTS: u32 = GOT_FUNC_NAMES.len() as u32;

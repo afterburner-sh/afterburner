@@ -204,11 +204,14 @@ pub const PYODIDE_MEMORY_MAX_PAGES: u32 = 32768;
 /// table must be at least `table_base + table_size = 1 + 6642 = 6643`.
 pub const PYODIDE_TABLE_INITIAL_SIZE: u32 = 6643;
 
-/// Stack base for the CPython stack. Top of dylink.0 data segment plus 5 MiB.
+/// Stack base (= `__stack_high`) for CPython. Top of dylink.0 data segment
+/// plus 10 MiB. Pyodide 0.28 links CPython with `-sSTACK_SIZE=10MB`
+/// (pyodide/Makefile.envs:171). A smaller value causes MemoryOutOfBounds when
+/// typing's deep generic-alias machinery exhausts the C stack.
 ///
 /// vertexia: fixed stack base; upgrade path is to read `__stack_pointer`
 /// export after data-reloc to get the actual initial value.
-pub const PYODIDE_STACK_BASE: u32 = 4_632_232 + 5 * 1024 * 1024;
+pub const PYODIDE_STACK_BASE: u32 = 4_632_232 + 10 * 1024 * 1024;
 
 // ---- public API --------------------------------------------------------------
 

@@ -603,12 +603,10 @@ fn run_probe() -> String {
 
 /// Python code passed as the `-c` argument to `__main_argc_argv`.
 ///
-/// TEST A: sum=4950 -> pre-load fine.
-/// TEST B: stdlib-only crashed. Now bisect: which of collections.abc / string / typing traps?
-/// This code tries each in sequence and writes a checkpoint after each success.
-/// The last checkpoint in pyout.txt tells us which import crashed. NUL-terminated.
+/// Runs the full markupsafe test: import markupsafe, write escape result to
+/// `/tmp/pyout.txt`. NUL-terminated.
 const PYTHON_CODE: &[u8] =
-    b"f=open('/tmp/pyout.txt','w')\nf.write('start\\n')\nf.flush()\nimport collections.abc as cabc\nf.write('cabc_ok\\n')\nf.flush()\nimport string\nf.write('string_ok\\n')\nf.flush()\nimport typing as t\nf.write('typing_ok\\n')\nf.flush()\nf.close()\n\0";
+    b"import markupsafe\nopen('/tmp/pyout.txt','w').write('escape '+str(markupsafe.escape('<b>'))+'\\n')\n\0";
 
 /// Guest path where Python writes its output.
 const PYOUT_PATH: &str = "/tmp/pyout.txt";
@@ -898,14 +896,11 @@ fn run_python_phase(
                 "[markupsafe_probe P5] {PYOUT_PATH} ({} bytes):\n{pyout_text}",
                 pyout_bytes.len()
             );
-            let milestone = if pyout_text.contains("markupsafe_version")
-                && pyout_text.contains("escape_result")
-                && pyout_text.contains("&lt;b&gt;")
-            {
-                "MILESTONE MET: markupsafe imported and escape('<b>') -> '&lt;b&gt;' via MEMFS"
+            let milestone = if pyout_text.contains("escape") && pyout_text.contains("&lt;b&gt;") {
+                "MILESTONE MET: markupsafe imported and escape('<b>') -> '&lt;b&gt;'"
             } else if !pyout_bytes.is_empty() {
-                "PARTIAL: /tmp/pyout.txt has content but expected strings missing"
-            } else if wasi_text.contains("markupsafe") || wasi_text.contains("hello") {
+                "PARTIAL: /tmp/pyout.txt has content but escape result missing"
+            } else if !wasi_text.is_empty() {
                 "PARTIAL: output in wasi_stdout but not in /tmp/pyout.txt"
             } else {
                 "NO OUTPUT: run_main returned but /tmp/pyout.txt is absent or empty"
@@ -941,6 +936,10 @@ fn run_python_phase(
                 .map(|b| b.to_vec())
                 .unwrap_or_default();
             let pyout_text = String::from_utf8_lossy(&pyout_bytes).into_owned();
+            let trap_kind = e
+                .downcast_ref::<wasmtime::Trap>()
+                .map(|t| format!("{t:?}"))
+                .unwrap_or_else(|| "(not a Trap)".to_owned());
             format!(
                 "{ctors_summary}\n\
                  --- phase 5: __main_argc_argv + {run_entry_name} ---\n\
@@ -948,6 +947,7 @@ fn run_python_phase(
                  pymain_run_python={has_pymain}\n\
                  __main_argc_argv exitcode: {main_exitcode}\n\
                  TRAPPED in {run_entry_name}: {e}\n\
+                 Trap kind: {trap_kind}\n\
                  Fuel consumed: {total_fuel}\n\
                  JS-FFI calls: {}\n\
                  C++ throws: {throw_count}\n\
