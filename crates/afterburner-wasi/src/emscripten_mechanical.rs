@@ -833,6 +833,47 @@ pub fn wire_pyodide028_env_stubs(
         };
     }
 
+    // ---- heap resize / heap max -----------------------------------------------
+    //
+    // emscripten_resize_heap and emscripten_get_heap_max have pure i32 types
+    // (no externref involvement), so they are safe to wire here even for the
+    // exnref-translated Pyodide 0.28 binary. They must NOT live in
+    // wire_mechanical_env_funcs for the exnref path because that function also
+    // wires JS-FFI stubs with the old i32 signatures, which conflict with the
+    // externref signatures in the exnref-translated binary.
+    //
+    // emscripten_resize_heap(requested_size: i32) -> i32
+    //   Grows linear memory to at least `requested_size` bytes. Returns 1 on
+    //   success, 0 if the grow is refused. Uses EmbedderState::pyodide_memory
+    //   because Emscripten modules import (not export) their memory.
+    def!(
+        "emscripten_resize_heap",
+        |mut caller: Caller<'_, EmbedderState>, requested: i32| -> i32 {
+            let Some(memory) = caller.data().pyodide_memory else {
+                return 0;
+            };
+            let current = memory.data_size(&caller);
+            let wanted = requested as u32 as usize;
+            if wanted <= current {
+                return 1;
+            }
+            let pages = (wanted - current).div_ceil(65_536) as u64;
+            match memory.grow(&mut caller, pages) {
+                Ok(_) => 1,
+                Err(_) => 0,
+            }
+        }
+    );
+    // emscripten_get_heap_max() -> i32
+    //   Returns the maximum byte size the heap may grow to. Used by the
+    //   Emscripten allocator to decide whether to attempt a grow.
+    def!(
+        "emscripten_get_heap_max",
+        |_: Caller<'_, EmbedderState>| -> i32 {
+            (PYODIDE_MEMORY_MAX_PAGES as u64 * 65_536u64) as i32
+        }
+    );
+
     // ---- output capture: emscripten_out / emscripten_err ---------------------
     //
     // In Pyodide 0.28 these are imported as GOT.func globals, not as env.*
