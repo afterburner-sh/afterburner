@@ -373,7 +373,7 @@ pub fn pre_load_side_module(
         let sp_val = Global::new(
             &mut *store,
             sp_ty,
-            Val::I32(crate::emscripten_runtime::PYODIDE_STACK_BASE as i32),
+            Val::I32(crate::emscripten_runtime::WASM_STACK_BASE as i32),
         )
         .map_err(|e| AfterburnerError::Engine(format!("sidemodule stub __stack_pointer: {e}")))?;
         linker

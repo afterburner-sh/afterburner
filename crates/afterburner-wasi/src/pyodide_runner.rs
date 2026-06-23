@@ -33,7 +33,7 @@ use crate::{
     emscripten_invoke::wire_invoke_trampolines,
     emscripten_mechanical::wire_pyodide028_env_stubs,
     emscripten_runtime::{
-        MechCallLog, NoopCallLog, PYODIDE_STACK_BASE, fill_unknown_imports_as_noops,
+        MechCallLog, NoopCallLog, WASM_STACK_BASE, fill_unknown_imports_as_noops,
         wire_env_memory_and_table_in_store, wire_wasi_only,
     },
     emscripten_syscall::wire_fs_env_funcs,
@@ -100,7 +100,7 @@ pub fn boot_pyodide(wasm_path: &str, stdlib_zip_path: &str) -> Result<PyodideBoo
         .map_err(|e| AfterburnerError::Engine(format!("set_fuel: {e}")))?;
 
     let got_globals =
-        wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, 1, PYODIDE_STACK_BASE)?;
+        wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, 1, WASM_STACK_BASE)?;
 
     // Native-EH tags: env.__c_longjmp and env.__cpp_exception.
     let tag_func_ty = FuncType::new(&engine, [ValType::I32], []);

@@ -15,11 +15,24 @@ use crate::{
     emscripten_abi::{VIRTUAL_EPOCH_MS, VIRTUAL_NOW_MS},
     emscripten_invoke::wire_invoke_trampolines,
     emscripten_runtime::MechCallLog,
-    emscripten_runtime::PYODIDE_MEMORY_MAX_PAGES,
+    emscripten_runtime::wasm_memory_config,
     emscripten_syscall::wire_fs_env_funcs,
 };
 
 type WtResult<T> = wasmtime::Result<T>;
+
+/// Return the configured maximum heap size in bytes as an i32 for Emscripten's
+/// `emscripten_get_heap_max` ABI. Reads the env-driven config at call time so
+/// the value tracks `BURN_WASM_MEMORY_MAX_BYTES` if set.
+fn heap_max_bytes() -> i32 {
+    // On parse failure fall back to the wasm32 ceiling (4 GiB).
+    let cfg = wasm_memory_config().unwrap_or(crate::emscripten_runtime::WasmMemoryConfig {
+        initial_pages: 480,
+        max_pages: 65_536,
+        stack_size_bytes: 10 * 1024 * 1024,
+    });
+    (cfg.max_pages as u64 * 65_536u64) as i32
+}
 
 /// Read a null-terminated C string from guest memory at `ptr`.
 ///
@@ -204,7 +217,7 @@ pub(crate) fn wire_mechanical_env_funcs(
         >|
               -> i32 {
             _log.push("emscripten_get_heap_max", 0, 0);
-            (PYODIDE_MEMORY_MAX_PAGES as u64 * 65536u64) as i32
+            heap_max_bytes()
         });
     }
     {
@@ -865,12 +878,10 @@ pub fn wire_pyodide028_env_stubs(
     // emscripten_get_heap_max() -> i32
     //   Returns the maximum byte size the heap may grow to. Used by the
     //   Emscripten allocator to decide whether to attempt a grow.
-    def!(
-        "emscripten_get_heap_max",
-        |_: Caller<'_, EmbedderState>| -> i32 {
-            (PYODIDE_MEMORY_MAX_PAGES as u64 * 65_536u64) as i32
-        }
-    );
+    fn get_heap_max_stub(_: Caller<'_, EmbedderState>) -> i32 {
+        heap_max_bytes()
+    }
+    def!("emscripten_get_heap_max", get_heap_max_stub);
 
     // ---- output capture: emscripten_out / emscripten_err ---------------------
     //

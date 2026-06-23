@@ -24,7 +24,7 @@
 //!     symbols are internal module functions not exported by name; they are only
 //!     reachable via this path.
 //!   - Each GOT.func global is pre-assigned a stub table slot at
-//!     `PYODIDE_TABLE_INITIAL_SIZE + index` before instantiation so that any
+//!     `WASM_TABLE_INITIAL_SIZE + index` before instantiation so that any
 //!     `call_indirect` that fires before `fill_got_table_slots` lands on a
 //!     defined (stub) entry rather than the null slot.
 //!   - After instantiation, `fill_got_table_slots` overwrites the GOT global with
@@ -60,31 +60,39 @@ use wasmtime::{
 };
 
 use crate::embedder_vm::EmbedderState;
-use crate::emscripten_runtime::PYODIDE_TABLE_INITIAL_SIZE;
+use crate::emscripten_runtime::WASM_TABLE_INITIAL_SIZE;
 
 /// Memory size declared in `pyodide.asm.wasm`'s `dylink.0` section (bytes).
 const DYLINK_MEMORY_SIZE: u32 = 4_632_232;
 
-/// Stack region size. Pyodide 0.28 links CPython with `-sSTACK_SIZE=10MB`
-/// (Makefile.envs). The C stack overflows below `__stack_low` with a
-/// MemoryOutOfBounds trap when this is set smaller than the actual build value.
-pub const PYODIDE_STACK_SIZE: u32 = 10 * 1024 * 1024;
+/// Stack region size. The payload links CPython with `-sSTACK_SIZE=10MB`. The C
+/// stack overflows below `__stack_low` with a MemoryOutOfBounds trap when this is
+/// set smaller than the actual build value.
+///
+/// Use `wasm_memory_config().stack_size_bytes` for the runtime-configurable value.
+pub const WASM_STACK_SIZE: u32 = 10 * 1024 * 1024;
 
 /// Number of host-slot entries: one per GOT.func symbol.
 pub const GOT_FUNC_HOST_SLOTS: u32 = GOT_FUNC_NAMES.len() as u32;
 
 /// Total table size that must be created: module region + host GOT slots.
 ///
-/// Pass this to `TableType::new` instead of `PYODIDE_TABLE_INITIAL_SIZE` so
+/// Pass this to `TableType::new` instead of `WASM_TABLE_INITIAL_SIZE` so
 /// the host slots exist before instantiation fires the active element segment.
-pub const PYODIDE_TABLE_WITH_GOT_SIZE: u32 = PYODIDE_TABLE_INITIAL_SIZE + GOT_FUNC_HOST_SLOTS;
+pub const WASM_TABLE_WITH_GOT_SIZE: u32 = WASM_TABLE_INITIAL_SIZE + GOT_FUNC_HOST_SLOTS;
 
 /// Pre-assigned table slot index for GOT.func entry at position `idx`
 /// in `GOT_FUNC_NAMES`.
 #[inline]
 pub fn got_func_slot(idx: usize) -> u32 {
-    PYODIDE_TABLE_INITIAL_SIZE + idx as u32
+    WASM_TABLE_INITIAL_SIZE + idx as u32
 }
+
+// Backward-compatible aliases so existing callers continue to compile.
+#[doc(hidden)]
+pub const PYODIDE_STACK_SIZE: u32 = WASM_STACK_SIZE;
+#[doc(hidden)]
+pub const PYODIDE_TABLE_WITH_GOT_SIZE: u32 = WASM_TABLE_WITH_GOT_SIZE;
 
 // ---- GOT global handles passed between wiring and resolution -----------------
 
@@ -119,8 +127,8 @@ pub fn prefill_got_func_globals(
 /// Write the known symbol addresses into every `GOT.mem.*` global.
 ///
 /// - `__heap_base` = `memory_base` + dylink.0 memory_size.
-/// - `__stack_high` = `stack_high` (= PYODIDE_STACK_BASE).
-/// - `__stack_low`  = `stack_high` - `PYODIDE_STACK_SIZE`.
+/// - `__stack_high` = `stack_high` (= WASM_STACK_BASE).
+/// - `__stack_low`  = `stack_high` - `WASM_STACK_SIZE`.
 pub fn prefill_got_mem_globals(
     store: &mut Store<EmbedderState>,
     got_globals: &GotGlobalMap,
@@ -128,7 +136,7 @@ pub fn prefill_got_mem_globals(
     stack_high: u32,
 ) -> Result<()> {
     let heap_base = memory_base + DYLINK_MEMORY_SIZE;
-    let stack_low = stack_high.saturating_sub(PYODIDE_STACK_SIZE);
+    let stack_low = stack_high.saturating_sub(WASM_STACK_SIZE);
 
     let pairs: &[(&str, u32)] = &[
         ("__heap_base", heap_base),
@@ -731,7 +739,7 @@ fn make_typed_stub(store: &mut Store<EmbedderState>, ft: &FuncType) -> Func {
 // ---- GOT.func symbol names ---------------------------------------------------
 //
 // 169 entries from `pyodide.asm.wasm` (0.26.4) GOT.func imports.
-// Slot index = PYODIDE_TABLE_INITIAL_SIZE + position in this list.
+// Slot index = WASM_TABLE_INITIAL_SIZE + position in this list.
 
 pub(crate) const GOT_FUNC_NAMES: &[&str] = &[
     "__cxa_end_catch",

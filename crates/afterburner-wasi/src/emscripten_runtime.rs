@@ -52,7 +52,7 @@ use std::{
 use crate::{
     embedder_vm::EmbedderState,
     emscripten_dylink::{
-        GOT_FUNC_NAMES, GotGlobalMap, PYODIDE_TABLE_WITH_GOT_SIZE, prefill_got_func_globals,
+        GOT_FUNC_NAMES, GotGlobalMap, WASM_TABLE_WITH_GOT_SIZE, prefill_got_func_globals,
         prefill_got_mem_globals,
     },
     emscripten_jsffi::wire_jsffi_stubs,
@@ -189,11 +189,122 @@ impl JsFfiCallLog {
 
 // ---- sizes / constants -------------------------------------------------------
 
-/// Initial memory size in pages for pyodide.asm.wasm (from dylink.0 mem-info).
-pub const PYODIDE_MEMORY_INITIAL_PAGES: u32 = 320;
+/// Wasm page size: 64 KiB.
+const WASM_PAGE_BYTES: u64 = 65_536;
 
-/// Maximum memory pages allowed (32768 = 2 GiB, Pyodide's declared max).
-pub const PYODIDE_MEMORY_MAX_PAGES: u32 = 32768;
+/// Hard ceiling imposed by the wasm32 address space: 4 GiB.
+const WASM32_MAX_BYTES: u64 = 4_294_967_296;
+
+/// Default initial linear memory: 30 MiB (480 pages), matching the payload's
+/// dylink.0 mem-info rounded up to page granularity.
+const DEFAULT_MEMORY_INITIAL_BYTES: u64 = 31_457_280; // 30 MiB
+
+/// Default maximum linear memory: 4 GiB - the wasm32 address-space ceiling.
+/// The payload was built with MAXIMUM=4GB so this matches the expected upper bound.
+const DEFAULT_MEMORY_MAX_BYTES: u64 = WASM32_MAX_BYTES;
+
+/// Default stack size: 10 MiB, matching the payload build flag `-sSTACK_SIZE=10MB`.
+const DEFAULT_STACK_SIZE_BYTES: u64 = 10_485_760; // 10 MiB
+
+/// Validate and convert three byte values into a [`WasmMemoryConfig`].
+///
+/// All three values are in bytes. Validation rules:
+/// - initial > 0, max > 0, stack > 0
+/// - max <= 4 GiB (wasm32 limit)
+/// - initial <= max
+///
+/// This is the pure core used by [`wasm_memory_config`] (which reads from env)
+/// and by unit tests (which call with explicit byte values directly).
+pub fn wasm_memory_config_from(
+    initial_bytes: u64,
+    max_bytes: u64,
+    stack_bytes: u64,
+) -> std::result::Result<WasmMemoryConfig, String> {
+    if initial_bytes == 0 {
+        return Err("BURN_WASM_MEMORY_INITIAL_BYTES must be > 0".to_owned());
+    }
+    if max_bytes == 0 {
+        return Err("BURN_WASM_MEMORY_MAX_BYTES must be > 0".to_owned());
+    }
+    if stack_bytes == 0 {
+        return Err("BURN_WASM_STACK_SIZE_BYTES must be > 0".to_owned());
+    }
+    if max_bytes > WASM32_MAX_BYTES {
+        return Err(format!(
+            "BURN_WASM_MEMORY_MAX_BYTES={max_bytes} exceeds wasm32 limit ({WASM32_MAX_BYTES})"
+        ));
+    }
+    if initial_bytes > max_bytes {
+        return Err(format!(
+            "BURN_WASM_MEMORY_INITIAL_BYTES={initial_bytes} > BURN_WASM_MEMORY_MAX_BYTES={max_bytes}"
+        ));
+    }
+    // Convert bytes to pages, rounding up.
+    let initial_pages = initial_bytes.div_ceil(WASM_PAGE_BYTES) as u32;
+    let max_pages = max_bytes.div_ceil(WASM_PAGE_BYTES) as u32;
+    Ok(WasmMemoryConfig {
+        initial_pages,
+        max_pages,
+        stack_size_bytes: stack_bytes as u32,
+    })
+}
+
+/// Parse `BURN_WASM_MEMORY_INITIAL_BYTES`, `BURN_WASM_MEMORY_MAX_BYTES`, and
+/// `BURN_WASM_STACK_SIZE_BYTES` from the environment and return validated page
+/// counts and a byte-size stack value.
+///
+/// Validation rules (all return `Err` with a human-readable message on failure):
+/// - initial > 0, max > 0, stack > 0
+/// - max <= 4 GiB (wasm32 limit)
+/// - initial <= max
+///
+/// Env vars absent or empty fall back to the documented defaults.
+pub fn wasm_memory_config() -> std::result::Result<WasmMemoryConfig, String> {
+    fn parse_env(name: &str, default: u64) -> std::result::Result<u64, String> {
+        match std::env::var(name) {
+            Ok(s) if !s.is_empty() => s
+                .trim()
+                .parse::<u64>()
+                .map_err(|e| format!("{name}={s:?} is not a valid u64: {e}")),
+            _ => Ok(default),
+        }
+    }
+
+    let initial_bytes = parse_env(
+        "BURN_WASM_MEMORY_INITIAL_BYTES",
+        DEFAULT_MEMORY_INITIAL_BYTES,
+    )?;
+    let max_bytes = parse_env("BURN_WASM_MEMORY_MAX_BYTES", DEFAULT_MEMORY_MAX_BYTES)?;
+    let stack_bytes = parse_env("BURN_WASM_STACK_SIZE_BYTES", DEFAULT_STACK_SIZE_BYTES)?;
+    wasm_memory_config_from(initial_bytes, max_bytes, stack_bytes)
+}
+
+/// Resolved and validated wasm memory configuration.
+#[derive(Clone, Copy, Debug)]
+pub struct WasmMemoryConfig {
+    /// Initial linear memory size in 64-KiB pages.
+    pub initial_pages: u32,
+    /// Maximum linear memory size in 64-KiB pages.
+    pub max_pages: u32,
+    /// Stack region size in bytes.
+    pub stack_size_bytes: u32,
+}
+
+// ---- generic named constants -------------------------------------------------
+//
+// These express the same values as the legacy PYODIDE_* names but are generic
+// and are used wherever a compile-time constant is needed. Callers that need the
+// runtime-configurable values should call `wasm_memory_config()` instead.
+
+/// Initial linear memory in pages (compile-time default: 480 pages = ~30 MiB).
+///
+/// Use `wasm_memory_config().initial_pages` for the env-driven value.
+pub const WASM_MEMORY_INITIAL_PAGES: u32 = 480; // 30 MiB / 64 KiB
+
+/// Maximum linear memory in pages (compile-time default: 65536 = 4 GiB).
+///
+/// Use `wasm_memory_config().max_pages` for the env-driven value.
+pub const WASM_MEMORY_MAX_PAGES: u32 = 65_536; // 4 GiB / 64 KiB
 
 /// Initial size of the indirect function table.
 ///
@@ -202,16 +313,33 @@ pub const PYODIDE_MEMORY_MAX_PAGES: u32 = 32768;
 /// host provides this as a global). With `table_base = 1` (the standard
 /// Emscripten convention that reserves index 0 as a null/trap slot), the
 /// table must be at least `table_base + table_size = 1 + 6642 = 6643`.
-pub const PYODIDE_TABLE_INITIAL_SIZE: u32 = 6643;
+pub const WASM_TABLE_INITIAL_SIZE: u32 = 6643;
 
 /// Stack base (= `__stack_high`) for CPython. Top of dylink.0 data segment
-/// plus 10 MiB. Pyodide 0.28 links CPython with `-sSTACK_SIZE=10MB`
-/// (pyodide/Makefile.envs:171). A smaller value causes MemoryOutOfBounds when
-/// typing's deep generic-alias machinery exhausts the C stack.
+/// plus the default stack region (10 MiB). A smaller value causes
+/// MemoryOutOfBounds when deep generic-alias machinery exhausts the C stack.
+///
+/// Use `wasm_memory_config().stack_size_bytes` to get the runtime-configurable
+/// stack size; the base address is `DYLINK_MEMORY_SIZE + stack_size_bytes`.
 ///
 /// vertexia: fixed stack base; upgrade path is to read `__stack_pointer`
 /// export after data-reloc to get the actual initial value.
-pub const PYODIDE_STACK_BASE: u32 = 4_632_232 + 10 * 1024 * 1024;
+pub const WASM_STACK_BASE: u32 = 4_632_232 + 10 * 1024 * 1024;
+
+// Backward-compatible aliases so callers that import by the old names still
+// compile without changes. These will be removed in a follow-up cleanup.
+#[doc(hidden)]
+#[allow(non_upper_case_globals)]
+pub const PYODIDE_MEMORY_INITIAL_PAGES: u32 = WASM_MEMORY_INITIAL_PAGES;
+#[doc(hidden)]
+#[allow(non_upper_case_globals)]
+pub const PYODIDE_MEMORY_MAX_PAGES: u32 = WASM_MEMORY_MAX_PAGES;
+#[doc(hidden)]
+#[allow(non_upper_case_globals)]
+pub const PYODIDE_TABLE_INITIAL_SIZE: u32 = WASM_TABLE_INITIAL_SIZE;
+#[doc(hidden)]
+#[allow(non_upper_case_globals)]
+pub const PYODIDE_STACK_BASE: u32 = WASM_STACK_BASE;
 
 // ---- public API --------------------------------------------------------------
 
@@ -283,9 +411,11 @@ pub fn add_pyodide_imports_no_jsffi(
 /// Everything is created in `store` to satisfy wasmtime's same-store
 /// requirement. Must be called with the exact store passed to instantiate.
 ///
-/// The table is sized to `PYODIDE_TABLE_WITH_GOT_SIZE` (module slots +
-/// host-GOT slots) so that `fill_got_table_slots` can place host funcrefs
-/// into the pre-reserved host slots after instantiation.
+/// Memory size is driven by the env vars `BURN_WASM_MEMORY_INITIAL_BYTES` and
+/// `BURN_WASM_MEMORY_MAX_BYTES` (see [`wasm_memory_config`]). The table is
+/// sized to `WASM_TABLE_WITH_GOT_SIZE` (module slots + host-GOT slots) so that
+/// `fill_got_table_slots` can place host funcrefs into the pre-reserved host
+/// slots after instantiation.
 ///
 /// GOT.func globals are pre-filled with their pre-assigned table slot indices
 /// (not zero) and GOT.mem globals are pre-filled with the known symbol
@@ -307,9 +437,11 @@ pub fn wire_env_memory_and_table_in_store(
     table_base: u32,
     stack_base: u32,
 ) -> Result<GotGlobalMap> {
-    let mem_ty = MemoryType::new(PYODIDE_MEMORY_INITIAL_PAGES, Some(PYODIDE_MEMORY_MAX_PAGES));
+    let mem_cfg = wasm_memory_config()
+        .map_err(|e| AfterburnerError::Engine(format!("wasm memory config: {e}")))?;
+    let mem_ty = MemoryType::new(mem_cfg.initial_pages, Some(mem_cfg.max_pages));
     let memory = wasmtime::Memory::new(&mut *store, mem_ty)
-        .map_err(|e| AfterburnerError::Engine(format!("pyodide memory: {e}")))?;
+        .map_err(|e| AfterburnerError::Engine(format!("wasm memory: {e}")))?;
     // Store the handle in EmbedderState so custom WASI shims can access
     // guest linear memory without relying on a "memory" export (which
     // Emscripten modules do not provide - they import, not export, memory).
@@ -326,12 +458,8 @@ pub fn wire_env_memory_and_table_in_store(
     // Size = module element region + pre-reserved host GOT slots.
     // The active element segment fires at instantiation and fills slots
     // [table_base .. table_base + 6642); host GOT slots follow at
-    // [PYODIDE_TABLE_INITIAL_SIZE .. PYODIDE_TABLE_WITH_GOT_SIZE).
-    let tbl_ty = TableType::new(
-        wasmtime::RefType::FUNCREF,
-        PYODIDE_TABLE_WITH_GOT_SIZE,
-        None,
-    );
+    // [WASM_TABLE_INITIAL_SIZE .. WASM_TABLE_WITH_GOT_SIZE).
+    let tbl_ty = TableType::new(wasmtime::RefType::FUNCREF, WASM_TABLE_WITH_GOT_SIZE, None);
     let table = Table::new(&mut *store, tbl_ty, wasmtime::Ref::Func(None))
         .map_err(|e| AfterburnerError::Engine(format!("pyodide table: {e}")))?;
     // Store the handle in EmbedderState so invoke_dispatch can reach the table
@@ -718,6 +846,71 @@ mod tests {
     fn default_val_for_funcref() {
         let v = default_val_for(&ValType::FUNCREF);
         assert!(matches!(v, Val::FuncRef(None)));
+    }
+
+    // ---- wasm_memory_config_from (pure, no env mutation) ----------------------
+
+    /// Default byte values produce the documented page counts.
+    #[test]
+    fn wasm_memory_config_from_defaults() {
+        // 30 MiB initial -> 480 pages; 4 GiB max -> 65536 pages; 10 MiB stack.
+        let cfg = wasm_memory_config_from(31_457_280, 4_294_967_296, 10_485_760)
+            .expect("default byte values must parse");
+        assert_eq!(cfg.initial_pages, 480, "initial pages mismatch");
+        assert_eq!(cfg.max_pages, 65_536, "max pages mismatch");
+        assert_eq!(
+            cfg.stack_size_bytes,
+            10 * 1024 * 1024,
+            "stack size mismatch"
+        );
+    }
+
+    /// 2 GiB max produces 32768 pages.
+    #[test]
+    fn wasm_memory_config_from_2gib_max() {
+        // 2 GiB = 2_147_483_648 bytes = 32768 pages
+        let cfg = wasm_memory_config_from(31_457_280, 2_147_483_648, 10_485_760)
+            .expect("2GiB max must parse");
+        assert_eq!(cfg.max_pages, 32_768, "2GiB should be 32768 pages");
+    }
+
+    /// initial > max returns Err.
+    #[test]
+    fn wasm_memory_config_from_initial_gt_max_is_err() {
+        // 2 pages initial, 1 page max.
+        let result = wasm_memory_config_from(131_072, 65_536, 10_485_760);
+        assert!(result.is_err(), "initial > max must return Err");
+    }
+
+    /// max > 4 GiB returns Err.
+    #[test]
+    fn wasm_memory_config_from_max_exceeds_wasm32_is_err() {
+        let result = wasm_memory_config_from(65_536, 4_294_967_297, 10_485_760);
+        assert!(result.is_err(), "max > 4GiB must return Err");
+    }
+
+    /// zero initial returns Err.
+    #[test]
+    fn wasm_memory_config_from_zero_initial_is_err() {
+        let result = wasm_memory_config_from(0, 4_294_967_296, 10_485_760);
+        assert!(result.is_err(), "zero initial must return Err");
+    }
+
+    /// 1 byte initial rounds up to 1 page.
+    #[test]
+    fn wasm_memory_config_from_bytes_round_up_to_pages() {
+        let cfg =
+            wasm_memory_config_from(1, 65_536, 10_485_760).expect("1-byte initial must parse");
+        assert_eq!(cfg.initial_pages, 1, "1 byte should round up to 1 page");
+    }
+
+    /// Exactly one page initial stays at 1 page (no rounding needed).
+    #[test]
+    fn wasm_memory_config_from_exact_page_no_roundup() {
+        let cfg =
+            wasm_memory_config_from(65_536, 65_536, 10_485_760).expect("exact page must parse");
+        assert_eq!(cfg.initial_pages, 1);
+        assert_eq!(cfg.max_pages, 1);
     }
 }
 

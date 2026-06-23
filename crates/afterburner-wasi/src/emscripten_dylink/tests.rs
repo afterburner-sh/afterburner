@@ -4,23 +4,23 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 use super::*;
-use crate::emscripten_runtime::PYODIDE_TABLE_INITIAL_SIZE;
+use crate::emscripten_runtime::WASM_TABLE_INITIAL_SIZE;
 
 // ---- got_func_slot math -----------------------------------------------------
 
-/// got_func_slot(0) must equal PYODIDE_TABLE_INITIAL_SIZE (the first host slot).
+/// got_func_slot(0) must equal WASM_TABLE_INITIAL_SIZE (the first host slot).
 #[test]
 fn got_func_slot_zero_equals_table_initial_size() {
-    assert_eq!(got_func_slot(0), PYODIDE_TABLE_INITIAL_SIZE);
+    assert_eq!(got_func_slot(0), WASM_TABLE_INITIAL_SIZE);
 }
 
-/// got_func_slot(n) must equal PYODIDE_TABLE_INITIAL_SIZE + n.
+/// got_func_slot(n) must equal WASM_TABLE_INITIAL_SIZE + n.
 #[test]
 fn got_func_slot_monotone() {
     for i in 0..GOT_FUNC_NAMES.len() {
         assert_eq!(
             got_func_slot(i),
-            PYODIDE_TABLE_INITIAL_SIZE + i as u32,
+            WASM_TABLE_INITIAL_SIZE + i as u32,
             "got_func_slot({i}) mismatch"
         );
     }
@@ -46,12 +46,12 @@ fn got_func_host_slots_equals_names_len() {
     assert_eq!(GOT_FUNC_HOST_SLOTS as usize, GOT_FUNC_NAMES.len());
 }
 
-/// PYODIDE_TABLE_WITH_GOT_SIZE must equal TABLE_INITIAL_SIZE + GOT_FUNC_HOST_SLOTS.
+/// WASM_TABLE_WITH_GOT_SIZE must equal TABLE_INITIAL_SIZE + GOT_FUNC_HOST_SLOTS.
 #[test]
 fn table_with_got_size_is_sum() {
     assert_eq!(
-        PYODIDE_TABLE_WITH_GOT_SIZE,
-        PYODIDE_TABLE_INITIAL_SIZE + GOT_FUNC_HOST_SLOTS
+        WASM_TABLE_WITH_GOT_SIZE,
+        WASM_TABLE_INITIAL_SIZE + GOT_FUNC_HOST_SLOTS
     );
 }
 
@@ -78,7 +78,7 @@ fn got_func_names_contains_known_symbols() {
 /// The heap_base / stack_low math matches the documented formulae.
 ///
 /// `__heap_base` = memory_base + DYLINK_MEMORY_SIZE (4_632_232).
-/// `__stack_low` = stack_high - PYODIDE_STACK_SIZE (10 * 1024 * 1024).
+/// `__stack_low` = stack_high - WASM_STACK_SIZE (10 * 1024 * 1024).
 ///
 /// We extract the arithmetic from `prefill_got_mem_globals` and assert it
 /// directly, since the actual function requires a `Store`.
@@ -94,23 +94,23 @@ fn prefill_got_mem_heap_base_formula() {
 #[test]
 fn prefill_got_mem_stack_low_formula() {
     let stack_high: u32 = 0x2000_0000;
-    let stack_low = stack_high.saturating_sub(PYODIDE_STACK_SIZE);
+    let stack_low = stack_high.saturating_sub(WASM_STACK_SIZE);
     // 10 MiB = 10 * 1024 * 1024 = 0x00A0_0000
     assert_eq!(stack_low, stack_high - 10 * 1024 * 1024);
 }
 
-/// `saturating_sub` must not underflow even when stack_high < PYODIDE_STACK_SIZE.
+/// `saturating_sub` must not underflow even when stack_high < WASM_STACK_SIZE.
 #[test]
 fn prefill_got_mem_stack_low_saturates() {
     let stack_high: u32 = 100; // smaller than 10 MiB
-    let stack_low = stack_high.saturating_sub(PYODIDE_STACK_SIZE);
+    let stack_low = stack_high.saturating_sub(WASM_STACK_SIZE);
     assert_eq!(stack_low, 0, "saturating_sub must not underflow");
 }
 
-/// PYODIDE_STACK_SIZE must be exactly 10 MiB.
+/// WASM_STACK_SIZE must be exactly 10 MiB.
 #[test]
-fn pyodide_stack_size_is_10mib() {
-    assert_eq!(PYODIDE_STACK_SIZE, 10 * 1024 * 1024);
+fn wasm_stack_size_is_10mib() {
+    assert_eq!(WASM_STACK_SIZE, 10 * 1024 * 1024);
 }
 
 // ---- parse_got_name_to_slot (pure parsing) ----------------------------------
