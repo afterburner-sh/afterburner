@@ -471,20 +471,31 @@ pub(crate) fn invoke_dispatch(
             params.len()
         )));
     };
-    // Emscripten's C ABI allows function-pointer casts that mismatch arity;
-    // callers may pass more arguments than the callee declares. Wasmtime
-    // enforces strict arity, so truncate the forwarded args to the funcref's
-    // declared parameter count rather than letting the call fail with a type
-    // error. Extra args from the trampoline side are silently dropped, matching
-    // the C calling-convention semantics Emscripten assumes.
+    // Emscripten's C ABI allows function-pointer casts that mismatch arity.
+    // Wasmtime enforces strict arity, so we must call the callee with EXACTLY
+    // its declared parameter count N:
+    //   - if N < provided: truncate (extra trampoline args dropped, C ABI semantics).
+    //   - if N > provided: pad with the zero/null default for each undeclared param.
+    //
+    // This is the CPython 3.13 emscripten trampoline pad-to-arity contract:
+    // `wasmTable.get(func)(arg1, arg2, arg3)` in JS pads missing args with 0;
+    // we replicate that here for the headless (no-reflection) path.
+    // METH_FASTCALL|METH_KEYWORDS C functions take 4 i32 params (self, args, nargs,
+    // kwnames); the trampoline is wired (i32,i32,i32,i32)->i32 and provides only
+    // 3 forwarded args, so we pad the 4th with Val::I32(0). This fixes `import
+    // typing` which uses such functions in `_typing`.
     let func_ty = func.ty(&caller);
-    let callee_param_count = func_ty.params().len();
     let forwarded = &params[1..];
-    let call_params = if forwarded.len() > callee_param_count {
-        &forwarded[..callee_param_count]
-    } else {
-        forwarded
-    };
+    let call_params: Vec<Val> = func_ty
+        .params()
+        .enumerate()
+        .map(|(i, vt)| {
+            forwarded
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| default_val_for(&vt))
+        })
+        .collect();
 
     // Emscripten legacy JS EH semantics (invoke_<sig> contract):
     //
@@ -516,7 +527,7 @@ pub(crate) fn invoke_dispatch(
     // objects allocated between the invoke_ site and the throw site may leak.
     // Upgrade path: compile with Emscripten Wasm EH (-fwasm-exceptions) for
     // proper zero-cost EH with destructor support.
-    let call_result = func.call(&mut caller, call_params, results);
+    let call_result = func.call(&mut caller, &call_params, results);
     if call_result.is_err() {
         // Step 3a: restore the stack pointer.
         if saved_sp != 0
