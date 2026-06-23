@@ -677,10 +677,12 @@ impl EmbedderVm {
         let exit_code = match call_result {
             Ok(_) => 0i64,
             Err(ref e) => {
-                // proc_exit(N) produces I32Exit(N) wrapped inside an anyhow
-                // chain with wasm-backtrace context. downcast_ref only checks
-                // the outermost type, so traverse the full chain.
-                let i32_exit = e.chain().find_map(|cause| cause.downcast_ref::<I32Exit>());
+                // proc_exit(N) produces I32Exit(N). Depending on the wasmtime
+                // version, I32Exit may be the outermost error (direct downcast)
+                // or buried inside an anyhow context chain; check both.
+                let i32_exit = e
+                    .downcast_ref::<I32Exit>()
+                    .or_else(|| e.chain().find_map(|cause| cause.downcast_ref::<I32Exit>()));
                 if let Some(exit) = i32_exit {
                     exit.0 as i64
                 } else if let Some(t) = e.downcast_ref::<Trap>() {
@@ -929,11 +931,6 @@ mod tests {
     // ---- proc_exit path ----------------------------------------------------
 
     /// A WASI command module that calls proc_exit(5); result must be 5.
-    // KNOWN-FAILING (pre-existing, not introduced by the test suite): run_command
-    // does not surface the WASI `I32Exit(N)` from `proc_exit(N)` as `result == N`
-    // - the I32Exit is not found in the error chain on this Wasmtime/WASI path.
-    // Tracked as a real defect; ignored so the suite stays green until fixed.
-    #[ignore = "pre-existing run_command I32Exit surfacing bug; fix pending"]
     #[test]
     fn proc_exit_exit_code_surfaced() {
         let vm = EmbedderVm::new().unwrap();
@@ -943,6 +940,7 @@ mod tests {
                   (module
                     (import "wasi_snapshot_preview1" "proc_exit"
                       (func $proc_exit (param i32)))
+                    (memory (export "memory") 1)
                     (func (export "_start")
                       i32.const 5
                       call $proc_exit))

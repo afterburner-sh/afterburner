@@ -159,61 +159,84 @@ pub struct SideModuleHandle {
 
 /// Registry of pre-loaded SIDE_MODULEs.
 ///
-/// Keyed by the guest-visible path string (e.g.
-/// `"numpy/_core/_multiarray_umath.cpython-313-wasm32-emscripten.so"`).
-/// Handle integers (1-based) are the `Vec` index + 1.
+/// Pre-loaded modules are stored by path. When `_dlopen_js` is called with a
+/// DSO struct pointer it resolves the path, maps `dso_ptr -> index` in
+/// `by_ptr`, and returns `dso_ptr` - exactly as Emscripten's JS LDSO does
+/// (LDSO.loadedLibsByHandle keyed by the wasm pointer). `_dlsym_js` then
+/// looks up by the same pointer.
 #[derive(Default)]
 pub struct SideModuleRegistry {
-    // Ordered so handle integer = index + 1.
+    /// All pre-loaded modules in insertion order, keyed by path.
     handles: Vec<(String, SideModuleHandle)>,
+    /// dso struct pointer (raw wasm i32, cast to u32) -> Vec index.
+    /// Populated by `map_ptr` when `_dlopen_js` resolves a path.
+    by_ptr: HashMap<u32, usize>,
 }
 
 impl SideModuleRegistry {
     pub fn new() -> Self {
         Self {
             handles: Vec::new(),
+            by_ptr: HashMap::new(),
         }
     }
 
-    /// Register a pre-loaded handle. Returns the opaque handle integer (1-based).
-    pub fn insert(&mut self, path: String, handle: SideModuleHandle) -> u32 {
+    /// Register a pre-loaded handle by path.
+    ///
+    /// Returns the Vec index (for caller reference; not used as a wasm handle).
+    pub fn insert(&mut self, path: String, handle: SideModuleHandle) -> usize {
+        let idx = self.handles.len();
         self.handles.push((path, handle));
-        self.handles.len() as u32
+        idx
     }
 
-    /// Look up a handle by path (any suffix match, e.g. just the basename).
-    pub fn find_by_path(&self, path: &str) -> Option<(u32, &SideModuleHandle)> {
+    /// Record that wasm pointer `dso_ptr` refers to the module at Vec `index`.
+    ///
+    /// Called from `_dlopen_js` after it resolves the path to an index.
+    pub fn map_ptr(&mut self, dso_ptr: u32, idx: usize) {
+        self.by_ptr.insert(dso_ptr, idx);
+    }
+
+    /// Look up a module by path (suffix match).
+    ///
+    /// Returns `(vec_index, &handle)` if found.
+    pub fn find_by_path(&self, path: &str) -> Option<(usize, &SideModuleHandle)> {
         for (i, (p, h)) in self.handles.iter().enumerate() {
             if p == path || p.ends_with(path) || path.ends_with(p.as_str()) {
-                return Some((i as u32 + 1, h));
+                return Some((i, h));
             }
         }
         None
     }
 
-    /// Look up a handle by integer (1-based).
-    pub fn get_by_handle(&self, handle: u32) -> Option<&SideModuleHandle> {
-        let idx = handle as usize;
-        if idx == 0 || idx > self.handles.len() {
-            return None;
+    /// Look up a module by the wasm DSO struct pointer registered via `map_ptr`.
+    pub fn get_by_ptr(&self, dso_ptr: u32) -> Option<&SideModuleHandle> {
+        self.by_ptr
+            .get(&dso_ptr)
+            .and_then(|&idx| self.handles.get(idx).map(|(_, h)| h))
+    }
+
+    /// Look up a mutable module by the wasm DSO struct pointer.
+    pub fn get_by_ptr_mut(&mut self, dso_ptr: u32) -> Option<&mut SideModuleHandle> {
+        if let Some(&idx) = self.by_ptr.get(&dso_ptr) {
+            self.handles.get_mut(idx).map(|(_, h)| h)
+        } else {
+            None
         }
-        Some(&self.handles[idx - 1].1)
     }
 
     pub fn is_empty(&self) -> bool {
         self.handles.is_empty()
     }
 
-    /// Cache a symbol->slot mapping into an already-registered handle (1-based).
+    /// Cache a symbol->slot mapping for a module identified by dso pointer.
     ///
     /// Called by `_dlsym_js` after dynamically inserting a function into the
     /// shared table so that repeat lookups skip the table-grow step.
-    pub fn set_slot(&mut self, handle: u32, name: String, slot: u32) {
-        let idx = handle as usize;
-        if idx == 0 || idx > self.handles.len() {
-            return;
+    pub fn set_slot(&mut self, dso_ptr: u32, name: String, slot: u32) {
+        if let Some(h) = self.get_by_ptr_mut(dso_ptr) {
+            h.func_table_slots.insert(name, slot);
         }
-        self.handles[idx - 1].1.func_table_slots.insert(name, slot);
     }
 }
 
@@ -660,20 +683,31 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
         .func_wrap(
             "env",
             "_dlopen_js",
-            |caller: Caller<'_, EmbedderState>, handle_struct_ptr: i32| -> i32 {
+            |mut caller: Caller<'_, EmbedderState>, handle_struct_ptr: i32| -> i32 {
                 // The filename C string starts directly at handle_struct_ptr+36
-                // (from pyodide.asm.js: `UTF8ToString(handle+36)` - direct string,
-                // not a pointer to a string stored at that offset).
+                // (from emscripten libdylink.js: `UTF8ToString(handle + C_STRUCTS.dso.name)`
+                // where dso.name = 36 - a direct string, not a pointer stored at +36).
                 let name_str_ptr = (handle_struct_ptr as u32).saturating_add(36) as i32;
                 let Some(name) = read_cstr_sidemodule(&caller, name_str_ptr) else {
                     eprintln!("[dlopen_js] cannot read filename at handle+36={name_str_ptr:#x}");
                     return 0;
                 };
                 eprintln!("[dlopen_js] looking up '{name}'");
-                match caller.data().side_modules.find_by_path(&name) {
-                    Some((handle, _)) => {
-                        eprintln!("[dlopen_js] found handle={handle} for '{name}'");
-                        handle as i32
+                let dso_ptr = handle_struct_ptr as u32;
+                // Fast path: already mapped from a prior call.
+                if caller.data().side_modules.get_by_ptr(dso_ptr).is_some() {
+                    eprintln!("[dlopen_js] cached dso_ptr={dso_ptr:#x} for '{name}'");
+                    return handle_struct_ptr;
+                }
+                match caller.data().side_modules.find_by_path(&name).map(|(i, _)| i) {
+                    Some(idx) => {
+                        // Mirror Emscripten LDSO: key = raw DSO struct pointer.
+                        // _dlsym_js will be called with the same pointer.
+                        caller.data_mut().side_modules.map_ptr(dso_ptr, idx);
+                        eprintln!(
+                            "[dlopen_js] mapped dso_ptr={dso_ptr:#x} -> idx={idx} for '{name}'"
+                        );
+                        handle_struct_ptr
                     }
                     None => {
                         eprintln!("[dlopen_js] MISS: '{name}' not pre-loaded");
@@ -700,18 +734,21 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                         return 0;
                     }
                 };
-                eprintln!("[dlsym_js] handle={handle} symbol='{sym_name}'");
+                // handle is the raw DSO struct pointer returned by _dlopen_js,
+                // which is the same pointer Emscripten uses as LDSO.loadedLibsByHandle key.
+                let dso_ptr = handle as u32;
+                eprintln!("[dlsym_js] dso_ptr={dso_ptr:#x} symbol='{sym_name}'");
 
                 // Instance and table are Copy; snapshot them before any mut borrow.
                 let instance_opt = caller
                     .data()
                     .side_modules
-                    .get_by_handle(handle as u32)
+                    .get_by_ptr(dso_ptr)
                     .map(|h| h.instance);
                 let table_opt = caller.data().pyodide_table;
 
                 let (Some(instance), Some(table)) = (instance_opt, table_opt) else {
-                    eprintln!("[dlsym_js] MISS: handle={handle} not found or table absent");
+                    eprintln!("[dlsym_js] MISS: dso_ptr={dso_ptr:#x} not found or table absent");
                     return 0;
                 };
 
@@ -719,7 +756,7 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                 let pre_slot = caller
                     .data()
                     .side_modules
-                    .get_by_handle(handle as u32)
+                    .get_by_ptr(dso_ptr)
                     .and_then(|h| h.func_table_slots.get(&sym_name).copied());
 
                 if let Some(slot) = pre_slot {
@@ -753,7 +790,7 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                 caller
                     .data_mut()
                     .side_modules
-                    .set_slot(handle as u32, sym_name.clone(), slot);
+                    .set_slot(dso_ptr, sym_name.clone(), slot);
 
                 write_sym_idx(&mut caller, sym_idx_ptr, slot);
                 eprintln!("[dlsym_js] inserted '{sym_name}' -> table slot {slot}");

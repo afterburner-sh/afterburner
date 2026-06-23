@@ -498,11 +498,11 @@ fn run_probe() -> String {
             Err(e) => return format!("SIDE_MODULE LOAD FAILED for {MARKUPSAFE_SO}: {e}"),
         };
 
-    let handle_int = store
+    let idx = store
         .data_mut()
         .side_modules
         .insert(MARKUPSAFE_SO.to_owned(), handle);
-    eprintln!("[markupsafe_probe] markupsafe SIDE_MODULE pre-loaded, handle={handle_int}");
+    eprintln!("[markupsafe_probe] markupsafe SIDE_MODULE pre-loaded, idx={idx}");
 
     let ctors_summary: String;
     if let Some(func) = instance.get_func(&mut store, "__wasm_call_ctors") {

@@ -447,11 +447,11 @@ fn run_probe() -> String {
         Err(e) => return format!("SIDE_MODULE LOAD FAILED for {NUMPY_CORE_SO}: {e}"),
     };
 
-    let handle_int = store
+    let idx = store
         .data_mut()
         .side_modules
         .insert(NUMPY_CORE_SO.to_owned(), handle);
-    eprintln!("[numpy_probe] numpy SIDE_MODULE pre-loaded, handle={handle_int}");
+    eprintln!("[numpy_probe] numpy SIDE_MODULE pre-loaded, idx={idx} (dso_ptr mapped by _dlopen_js at runtime)");
 
     // Boot CPython.
     if let Some(func) = instance.get_func(&mut store, "__wasm_call_ctors") {
