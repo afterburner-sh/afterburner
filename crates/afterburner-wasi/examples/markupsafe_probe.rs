@@ -412,7 +412,9 @@ fn run_probe() -> String {
                 .fs
                 .insert_file(STDLIB_ZIP_MOUNT_PATH, zip_bytes.clone());
             match mount_zip_into_fs(&mut store.data_mut().fs, STDLIB_MOUNT_PREFIX, &zip_bytes) {
-                Ok(n) => eprintln!("[markupsafe_probe] mounted {n} stdlib files at {STDLIB_MOUNT_PREFIX}"),
+                Ok(n) => eprintln!(
+                    "[markupsafe_probe] mounted {n} stdlib files at {STDLIB_MOUNT_PREFIX}"
+                ),
                 Err(e) => eprintln!("[markupsafe_probe] WARN: stdlib mount error: {e}"),
             }
         }
@@ -567,12 +569,19 @@ fn run_probe() -> String {
                      Fuel consumed: {total_fuel}\n\
                      JS-FFI calls: {}\n\
                      C++ throws: {throw_count}\n\
-                     Last 12 FS paths: {fs_paths:?}\n\
+                     FS path log ({} entries):\n{}\n\
                      WASI stdout ({} bytes): {wasi_text:?}\n\
                      Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
                      Noop stubs called ({} unique): {noop_calls:?}\n\
                      Finding: {finding}",
                     log.total_calls(),
+                    fs_paths.len(),
+                    fs_paths
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| format!("  [{i}] {p}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                     wasi_out.len(),
                     noop_calls.len()
                 );
@@ -594,11 +603,12 @@ fn run_probe() -> String {
 
 /// Python code passed as the `-c` argument to `__main_argc_argv`.
 ///
-/// Exercises `markupsafe.escape('<b>')` and writes output to `/tmp/pyout.txt`.
-/// Uses try/except so any ImportError or exception is captured in the file.
-/// NUL-terminated.
-const PYTHON_CODE: &[u8] = b"import traceback\ntry:\n    import markupsafe\n    ver=markupsafe.__version__\n    escaped=str(markupsafe.escape('<b>'))\n    f=open('/tmp/pyout.txt','w')\n    f.write('markupsafe_version '+ver+'\\n')\n    f.write('escape_result '+escaped+'\\n')\n    f.close()\nexcept Exception:\n    f=open('/tmp/pyout.txt','w')\n    f.write(traceback.format_exc())\n    f.close()\n\0";
-
+/// TEST A: sum=4950 -> pre-load fine.
+/// TEST B: stdlib-only crashed. Now bisect: which of collections.abc / string / typing traps?
+/// This code tries each in sequence and writes a checkpoint after each success.
+/// The last checkpoint in pyout.txt tells us which import crashed. NUL-terminated.
+const PYTHON_CODE: &[u8] =
+    b"f=open('/tmp/pyout.txt','w')\nf.write('start\\n')\nf.flush()\nimport collections.abc as cabc\nf.write('cabc_ok\\n')\nf.flush()\nimport string\nf.write('string_ok\\n')\nf.flush()\nimport typing as t\nf.write('typing_ok\\n')\nf.flush()\nf.close()\n\0";
 
 /// Guest path where Python writes its output.
 const PYOUT_PATH: &str = "/tmp/pyout.txt";
@@ -941,13 +951,20 @@ fn run_python_phase(
                  Fuel consumed: {total_fuel}\n\
                  JS-FFI calls: {}\n\
                  C++ throws: {throw_count}\n\
-                 Last 12 FS paths: {fs_paths:?}\n\
+                 FS path log ({} entries):\n{}\n\
                  Noop stubs called ({} unique): {noop_calls:?}\n\
                  Last {MECH_TRACE_TAIL} mech calls:\n{mech_trace}\
                  WASI stdout ({} bytes):\n{wasi_text}\n\
                  {PYOUT_PATH} ({} bytes):\n{pyout_text}\n\
                  Finding: {finding}",
                 log.total_calls(),
+                fs_paths.len(),
+                fs_paths
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| format!("  [{i}] {p}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
                 noop_calls.len(),
                 wasi_out.len(),
                 pyout_bytes.len()
