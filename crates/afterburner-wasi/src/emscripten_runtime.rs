@@ -670,16 +670,14 @@ pub(crate) fn invoke_dispatch(
         if let Some(wasmtime::Extern::Func(f)) = caller.get_export("setThrew") {
             let _ = f.call(&mut caller, &[Val::I32(1), Val::I32(0)], &mut []);
         }
-        // Step 3c: fill results with the default zero for each return type,
-        // then return Ok so the wasm caller (the landing pad) can run.
-        for r in results.iter_mut() {
-            *r = match &*r {
-                Val::I32(_) => Val::I32(0),
-                Val::I64(_) => Val::I64(0),
-                Val::F32(_) => Val::F32(0),
-                Val::F64(_) => Val::F64(0),
-                other => *other,
-            };
+        // Step 3c: fill results with the default zero for each DECLARED return
+        // type (from the callee's type), then return Ok so the landing pad can
+        // run. wasmtime pre-fills the result slots with a null funcref
+        // placeholder regardless of type, so keying off the slot value returned
+        // a funcref for an i32 result ("expected i32, found (ref null nofunc)");
+        // key off func_ty.results() instead.
+        for (r, vt) in results.iter_mut().zip(func_ty.results()) {
+            *r = default_val_for(&vt);
         }
         return Ok(());
     }

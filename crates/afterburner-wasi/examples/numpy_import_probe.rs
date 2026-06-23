@@ -409,6 +409,10 @@ fn run_probe() -> String {
     };
     eprintln!("[numpy_probe] instantiated");
 
+    // Store the main instance so _dlopen_js can wire env.* imports for
+    // on-demand side modules.
+    store.data_mut().main_instance = Some(instance);
+
     match fill_got_table_slots(
         &mut store,
         &linker,
@@ -431,15 +435,15 @@ fn run_probe() -> String {
         eprintln!("[numpy_probe] __wasm_apply_data_relocs OK");
     }
 
-    // Pre-load the numpy SIDE_MODULE now that the main instance exists.
-    // This must happen BEFORE __wasm_call_ctors so the dlopen shim can find it.
-    //
-    // memory_base is derived from the module's dylink.0 mem_size via malloc on
-    // the main instance. table_base is the current table size before growing.
+    // Pre-load the numpy core SIDE_MODULE before ctors - CPython's import
+    // machinery expects it available from the first dlopen() call.
+    // All other .so files (linalg, fft, random, ...) are loaded on-demand
+    // when Python calls _dlopen_js; the wheel is already mounted in FS.
     let (handle, _next_mem, _next_tbl) = match pre_load_side_module(
         &engine,
         &mut store,
         &instance,
+        &[],
         &numpy_so_bytes,
         NUMPY_CORE_SO,
     ) {
@@ -451,9 +455,7 @@ fn run_probe() -> String {
         .data_mut()
         .side_modules
         .insert(NUMPY_CORE_SO.to_owned(), handle);
-    eprintln!(
-        "[numpy_probe] numpy SIDE_MODULE pre-loaded, idx={idx} (dso_ptr mapped by _dlopen_js at runtime)"
-    );
+    eprintln!("[numpy_probe] numpy core SIDE_MODULE pre-loaded, idx={idx}");
 
     // Boot CPython.
     if let Some(func) = instance.get_func(&mut store, "__wasm_call_ctors") {

@@ -41,12 +41,13 @@ use std::collections::HashMap;
 use afterburner_core::{AfterburnerError, Result};
 use wasmparser::{KnownCustom, Parser, Payload};
 use wasmtime::{
-    Caller, Engine, ExternType, FuncType, Global, GlobalType, Instance, Linker, Module, Mutability,
-    Store, Val, ValType,
+    AsContext, AsContextMut, Caller, Engine, ExternType, FuncType, Global, GlobalType, Instance,
+    Linker, Module, Mutability, Val, ValType,
 };
 
 use crate::embedder_vm::EmbedderState;
 use crate::emscripten_dylink::{parse_got_name_to_slot, resolve_got_mem};
+use crate::emscripten_runtime::default_val_for;
 
 /// Memory requirements declared in a SIDE_MODULE's `dylink.0` custom section.
 #[derive(Debug, Clone, Copy)]
@@ -101,17 +102,20 @@ pub fn parse_dylink0_mem_info(wasm_bytes: &[u8]) -> Dylink0MemInfo {
 ///
 /// Calls the main instance's exported `malloc(size)` and rounds the result up to
 /// the required alignment. Returns the aligned guest pointer.
-fn malloc_in_main(
-    store: &mut Store<EmbedderState>,
+fn malloc_in_main<S>(
+    store: &mut S,
     main_instance: &Instance,
     size: u32,
     align: u32,
     path: &str,
-) -> Result<u32> {
+) -> Result<u32>
+where
+    S: AsContextMut<Data = EmbedderState>,
+{
     // Allocate with enough padding to guarantee alignment: size + (align - 1).
     let alloc_size = size.saturating_add(align.saturating_sub(1));
     let malloc_fn = main_instance
-        .get_func(&mut *store, "malloc")
+        .get_func(store.as_context_mut(), "malloc")
         .ok_or_else(|| {
             AfterburnerError::Engine(format!(
                 "sidemodule {path}: main instance has no 'malloc' export"
@@ -119,7 +123,11 @@ fn malloc_in_main(
         })?;
     let mut result = [Val::I32(0)];
     malloc_fn
-        .call(&mut *store, &[Val::I32(alloc_size as i32)], &mut result)
+        .call(
+            store.as_context_mut(),
+            &[Val::I32(alloc_size as i32)],
+            &mut result,
+        )
         .map_err(|e| AfterburnerError::Engine(format!("malloc({alloc_size}) for {path}: {e}")))?;
     let raw = match result[0] {
         Val::I32(v) => v as u32,
@@ -229,6 +237,15 @@ impl SideModuleRegistry {
         self.handles.is_empty()
     }
 
+    /// Return all loaded side module instances in insertion order.
+    ///
+    /// Used by `pre_load_side_module` to resolve `env.*` imports of a new
+    /// side module against already-loaded side modules (e.g. `_umath_linalg`
+    /// importing symbols exported by `_multiarray_umath`).
+    pub fn all_instances(&self) -> Vec<Instance> {
+        self.handles.iter().map(|(_, h)| h.instance).collect()
+    }
+
     /// Cache a symbol->slot mapping for a module identified by dso pointer.
     ///
     /// Called by `_dlsym_js` after dynamically inserting a function into the
@@ -246,6 +263,8 @@ impl SideModuleRegistry {
 /// `path` - the path the guest will pass to `dlopen`, used as the registry key.
 /// `main_instance` - the already-instantiated `pyodide.asm.wasm` instance whose
 ///   exports provide all Python C API functions and the Emscripten heap allocator.
+/// `side_instances` - already-loaded side module instances to resolve cross-module
+///   `env.*` imports (e.g. `_umath_linalg` importing symbols from `_multiarray_umath`).
 ///
 /// Memory layout is derived from the module's `dylink.0` custom section:
 /// `__memory_base` is allocated via the main module's `malloc(mem_size)` so the
@@ -255,15 +274,23 @@ impl SideModuleRegistry {
 /// Returns the [`SideModuleHandle`], the next available `memory_base` (pointer
 /// after the allocated region), and the next available `table_base`.
 ///
+/// Accepts any context implementing [`AsContextMut<Data = EmbedderState>`] so
+/// it can be called both with a `&mut Store<EmbedderState>` and from within a
+/// `func_wrap` host call passing `&mut Caller<EmbedderState>`.
+///
 /// vertexia: per-module GOT slot resolution; upgrade path is parsing the element
 /// segment to get exact per-export table slots.
-pub fn pre_load_side_module(
+pub fn pre_load_side_module<S>(
     engine: &Engine,
-    store: &mut Store<EmbedderState>,
+    store: &mut S,
     main_instance: &Instance,
+    side_instances: &[Instance],
     wasm_bytes: &[u8],
     path: &str,
-) -> Result<(SideModuleHandle, u32, u32)> {
+) -> Result<(SideModuleHandle, u32, u32)>
+where
+    S: AsContextMut<Data = EmbedderState>,
+{
     // Parse dylink.0 for exact memory and table requirements.
     let dylink = parse_dylink0_mem_info(wasm_bytes);
     eprintln!(
@@ -297,20 +324,24 @@ pub fn pre_load_side_module(
 
     // table_base = current table size; grow by dylink.0 table_size to reserve slots.
     let table_base = {
-        let Some(tbl) = store.data().pyodide_table else {
+        let Some(tbl) = store.as_context().data().pyodide_table else {
             return Err(AfterburnerError::Engine(
                 "pre_load_side_module: pyodide_table not set in store".into(),
             ));
         };
-        let current = tbl.size(&*store) as u32;
+        let current = tbl.size(store.as_context()) as u32;
         let table_size = dylink.table_size.max(1);
-        tbl.grow(&mut *store, table_size as u64, wasmtime::Ref::Func(None))
-            .map_err(|e| {
-                AfterburnerError::Engine(format!("sidemodule table grow by {table_size}: {e}"))
-            })?;
+        tbl.grow(
+            store.as_context_mut(),
+            table_size as u64,
+            wasmtime::Ref::Func(None),
+        )
+        .map_err(|e| {
+            AfterburnerError::Engine(format!("sidemodule table grow by {table_size}: {e}"))
+        })?;
         eprintln!(
             "[sidemodule] {path}: grew table {current} -> {} (table_base={current}, delta={table_size})",
-            tbl.size(&*store)
+            tbl.size(store.as_context())
         );
         current
     };
@@ -321,9 +352,9 @@ pub fn pre_load_side_module(
 
     // Wire shared env.memory from the store state.
     // `define` takes `impl AsContext` (shared ref) so we can read from store.data().
-    if let Some(mem) = store.data().pyodide_memory {
+    if let Some(mem) = store.as_context().data().pyodide_memory {
         linker
-            .define(&mut *store, "env", "memory", mem)
+            .define(store.as_context_mut(), "env", "memory", mem)
             .map_err(|e| AfterburnerError::Engine(format!("sidemodule memory: {e}")))?;
     } else {
         return Err(AfterburnerError::Engine(
@@ -332,9 +363,14 @@ pub fn pre_load_side_module(
     }
 
     // Wire shared __indirect_function_table.
-    if let Some(tbl) = store.data().pyodide_table {
+    if let Some(tbl) = store.as_context().data().pyodide_table {
         linker
-            .define(&mut *store, "env", "__indirect_function_table", tbl)
+            .define(
+                store.as_context_mut(),
+                "env",
+                "__indirect_function_table",
+                tbl,
+            )
             .map_err(|e| AfterburnerError::Engine(format!("sidemodule table: {e}")))?;
     } else {
         return Err(AfterburnerError::Engine(
@@ -344,17 +380,25 @@ pub fn pre_load_side_module(
 
     // env.__memory_base: this module's offset in shared memory.
     let mb_ty = GlobalType::new(ValType::I32, Mutability::Const);
-    let mb_val = Global::new(&mut *store, mb_ty.clone(), Val::I32(memory_base as i32))
-        .map_err(|e| AfterburnerError::Engine(format!("sidemodule __memory_base: {e}")))?;
+    let mb_val = Global::new(
+        store.as_context_mut(),
+        mb_ty.clone(),
+        Val::I32(memory_base as i32),
+    )
+    .map_err(|e| AfterburnerError::Engine(format!("sidemodule __memory_base: {e}")))?;
     linker
-        .define(&mut *store, "env", "__memory_base", mb_val)
+        .define(store.as_context_mut(), "env", "__memory_base", mb_val)
         .map_err(|e| AfterburnerError::Engine(format!("define sidemodule __memory_base: {e}")))?;
 
     // env.__table_base: this module's table slot offset.
-    let tb_val = Global::new(&mut *store, mb_ty.clone(), Val::I32(table_base as i32))
-        .map_err(|e| AfterburnerError::Engine(format!("sidemodule __table_base: {e}")))?;
+    let tb_val = Global::new(
+        store.as_context_mut(),
+        mb_ty.clone(),
+        Val::I32(table_base as i32),
+    )
+    .map_err(|e| AfterburnerError::Engine(format!("sidemodule __table_base: {e}")))?;
     linker
-        .define(&mut *store, "env", "__table_base", tb_val)
+        .define(store.as_context_mut(), "env", "__table_base", tb_val)
         .map_err(|e| AfterburnerError::Engine(format!("define sidemodule __table_base: {e}")))?;
 
     // env.__stack_pointer: shared mutable i32 stack pointer.
@@ -362,22 +406,22 @@ pub fn pre_load_side_module(
     let sp_ty = GlobalType::new(ValType::I32, Mutability::Var);
     // vertexia: use a dummy stack pointer if not exported by pyodide; upgrade
     // path is reading __stack_pointer from the main module's GOT.mem global.
-    if let Some(sp_ext) = main_instance.get_global(&mut *store, "__stack_pointer") {
+    if let Some(sp_ext) = main_instance.get_global(store.as_context_mut(), "__stack_pointer") {
         linker
-            .define(&mut *store, "env", "__stack_pointer", sp_ext)
+            .define(store.as_context_mut(), "env", "__stack_pointer", sp_ext)
             .map_err(|e| {
                 AfterburnerError::Engine(format!("define sidemodule __stack_pointer: {e}"))
             })?;
     } else {
         // Provide a stub stack pointer at the Pyodide stack base.
         let sp_val = Global::new(
-            &mut *store,
+            store.as_context_mut(),
             sp_ty,
             Val::I32(crate::emscripten_runtime::WASM_STACK_BASE as i32),
         )
         .map_err(|e| AfterburnerError::Engine(format!("sidemodule stub __stack_pointer: {e}")))?;
         linker
-            .define(&mut *store, "env", "__stack_pointer", sp_val)
+            .define(store.as_context_mut(), "env", "__stack_pointer", sp_val)
             .map_err(|e| {
                 AfterburnerError::Engine(format!("define sidemodule stub __stack_pointer: {e}"))
             })?;
@@ -416,10 +460,13 @@ pub fn pre_load_side_module(
     let mut got_mem_globals: Vec<(String, Global)> = Vec::new();
     let mut got_func_globals: Vec<(String, Global)> = Vec::new();
     for (m, name) in &got_imports {
-        if linker.get(&mut *store, m.as_str(), name.as_str()).is_ok() {
+        if linker
+            .get(store.as_context_mut(), m.as_str(), name.as_str())
+            .is_ok()
+        {
             continue;
         }
-        let g = Global::new(&mut *store, got_ty.clone(), Val::I32(0)).map_err(|e| {
+        let g = Global::new(store.as_context_mut(), got_ty.clone(), Val::I32(0)).map_err(|e| {
             AfterburnerError::Engine(format!("GOT stub for sidemodule {m}.{name}: {e}"))
         })?;
         if m == "GOT.mem" {
@@ -428,7 +475,7 @@ pub fn pre_load_side_module(
             got_func_globals.push((name.clone(), g));
         }
         linker
-            .define(&mut *store, m.as_str(), name.as_str(), g)
+            .define(store.as_context_mut(), m.as_str(), name.as_str(), g)
             .map_err(|e| {
                 AfterburnerError::Engine(format!("define sidemodule GOT {m}.{name}: {e}"))
             })?;
@@ -467,34 +514,48 @@ pub fn pre_load_side_module(
         .collect();
 
     let mut from_main = 0u32;
+    let mut from_side = 0u32;
     let mut from_stub = 0u32;
 
     for (name, ft) in &env_func_types {
         // Skip already-defined (memory, table, __memory_base, etc.).
-        if linker.get(&mut *store, "env", name.as_str()).is_ok() {
+        if linker
+            .get(store.as_context_mut(), "env", name.as_str())
+            .is_ok()
+        {
             continue;
         }
 
-        if let Some(func) = main_instance.get_func(&mut *store, name.as_str()) {
+        if let Some(func) = main_instance.get_func(store.as_context_mut(), name.as_str()) {
+            // Resolution path 1: main (pyodide) module.
             linker
-                .define(&mut *store, "env", name.as_str(), func)
+                .define(store.as_context_mut(), "env", name.as_str(), func)
                 .map_err(|e| {
                     AfterburnerError::Engine(format!("sidemodule wire env.{name} from main: {e}"))
                 })?;
             from_main += 1;
-        } else {
-            // Not exported by main - wire a typed no-op stub.
-            let ft2 = ft.clone();
+        } else if let Some(func) = side_instances
+            .iter()
+            .find_map(|si| si.get_func(store.as_context_mut(), name.as_str()))
+        {
+            // Resolution path 2: already-loaded side modules (e.g. `_umath_linalg`
+            // importing C-API symbols exported by `_multiarray_umath`).
             linker
-                .func_new("env", name.as_str(), ft2, |_, _, results| {
-                    for r in results.iter_mut() {
-                        *r = match *r {
-                            Val::I32(_) => Val::I32(0),
-                            Val::I64(_) => Val::I64(0),
-                            Val::F32(_) => Val::F32(0),
-                            Val::F64(_) => Val::F64(0),
-                            other => other,
-                        };
+                .define(store.as_context_mut(), "env", name.as_str(), func)
+                .map_err(|e| {
+                    AfterburnerError::Engine(format!("sidemodule wire env.{name} from side: {e}"))
+                })?;
+            from_side += 1;
+        } else {
+            // Not exported by main or any side module - wire a typed no-op stub.
+            let ft2 = ft.clone();
+            let result_tys: Vec<ValType> = ft2.results().collect();
+            linker
+                .func_new("env", name.as_str(), ft2, move |_, _, results| {
+                    // Zero each result by its DECLARED type (see default_val_for):
+                    // the slot pre-fill is a null funcref regardless of type.
+                    for (r, vt) in results.iter_mut().zip(&result_tys) {
+                        *r = default_val_for(vt);
                     }
                     Ok(())
                 })
@@ -504,13 +565,16 @@ pub fn pre_load_side_module(
             from_stub += 1;
         }
     }
-    eprintln!("[sidemodule] {path}: env imports: {from_main} from main, {from_stub} stubs");
+    eprintln!(
+        "[sidemodule] {path}: env imports: {from_main} from main, {from_side} from side, \
+         {from_stub} stubs"
+    );
 
     // Instantiate the SIDE_MODULE. The active element segment fires here and
     // places the side module's own functions into the shared table at slots
     // [table_base .. table_base + table_size).
     let instance = linker
-        .instantiate(&mut *store, &module)
+        .instantiate(store.as_context_mut(), &module)
         .map_err(|e| AfterburnerError::Engine(format!("sidemodule instantiate {path}: {e}")))?;
     eprintln!("[sidemodule] {path}: instantiated");
 
@@ -541,11 +605,12 @@ pub fn pre_load_side_module(
     // PyTypeObject.tp_traverse), the globals hold valid table slot indices
     // rather than 0 (which would write garbage/null into the type objects).
     let mut got_func_from_elem = 0u32;
+    let mut got_func_from_self = 0u32;
     let mut got_func_from_side = 0u32;
     let mut got_func_from_main = 0u32;
     let mut got_func_zero = 0u32;
 
-    let Some(tbl) = store.data().pyodide_table else {
+    let Some(tbl) = store.as_context().data().pyodide_table else {
         return Err(AfterburnerError::Engine(
             "pre_load_side_module: pyodide_table missing for updateGOT".into(),
         ));
@@ -554,45 +619,80 @@ pub fn pre_load_side_module(
     for (name, g) in &got_func_globals {
         // Path 1: side module's own element segment.
         if let Some(&slot) = name_to_slot.get(name.as_str()) {
-            let _ = g.set(&mut *store, Val::I32(slot as i32));
+            let _ = g.set(store.as_context_mut(), Val::I32(slot as i32));
             got_func_from_elem += 1;
             continue;
         }
 
-        // Path 2: side module's own exported function (not in element segment).
-        if let Some(func) = instance.get_func(&mut *store, name.as_str()) {
-            let slot = tbl.size(&*store) as u32;
-            if tbl.grow(&mut *store, 1, wasmtime::Ref::Func(None)).is_ok()
+        // Path 2: this side module's own exported function (not in element segment).
+        if let Some(func) = instance.get_func(store.as_context_mut(), name.as_str()) {
+            let slot = tbl.size(store.as_context()) as u32;
+            if tbl
+                .grow(store.as_context_mut(), 1, wasmtime::Ref::Func(None))
+                .is_ok()
                 && tbl
-                    .set(&mut *store, slot as u64, wasmtime::Ref::Func(Some(func)))
+                    .set(
+                        store.as_context_mut(),
+                        slot as u64,
+                        wasmtime::Ref::Func(Some(func)),
+                    )
                     .is_ok()
             {
-                let _ = g.set(&mut *store, Val::I32(slot as i32));
+                let _ = g.set(store.as_context_mut(), Val::I32(slot as i32));
+                got_func_from_self += 1;
+                continue;
+            }
+        }
+
+        // Path 3: already-loaded side modules (cross-module GOT resolution).
+        if let Some(func) = side_instances
+            .iter()
+            .find_map(|si| si.get_func(store.as_context_mut(), name.as_str()))
+        {
+            let slot = tbl.size(store.as_context()) as u32;
+            if tbl
+                .grow(store.as_context_mut(), 1, wasmtime::Ref::Func(None))
+                .is_ok()
+                && tbl
+                    .set(
+                        store.as_context_mut(),
+                        slot as u64,
+                        wasmtime::Ref::Func(Some(func)),
+                    )
+                    .is_ok()
+            {
+                let _ = g.set(store.as_context_mut(), Val::I32(slot as i32));
                 got_func_from_side += 1;
                 continue;
             }
         }
 
-        // Path 3: main module's exported function.
-        if let Some(func) = main_instance.get_func(&mut *store, name.as_str()) {
-            let slot = tbl.size(&*store) as u32;
-            if tbl.grow(&mut *store, 1, wasmtime::Ref::Func(None)).is_ok()
+        // Path 4: main module's exported function.
+        if let Some(func) = main_instance.get_func(store.as_context_mut(), name.as_str()) {
+            let slot = tbl.size(store.as_context()) as u32;
+            if tbl
+                .grow(store.as_context_mut(), 1, wasmtime::Ref::Func(None))
+                .is_ok()
                 && tbl
-                    .set(&mut *store, slot as u64, wasmtime::Ref::Func(Some(func)))
+                    .set(
+                        store.as_context_mut(),
+                        slot as u64,
+                        wasmtime::Ref::Func(Some(func)),
+                    )
                     .is_ok()
             {
-                let _ = g.set(&mut *store, Val::I32(slot as i32));
+                let _ = g.set(store.as_context_mut(), Val::I32(slot as i32));
                 got_func_from_main += 1;
                 continue;
             }
         }
 
-        // Path 4: unresolved - leave at 0 (traps loudly on indirect call).
+        // Path 5: unresolved - leave at 0 (traps loudly on indirect call).
         got_func_zero += 1;
     }
     eprintln!(
-        "[sidemodule] {path}: updateGOT: elem={got_func_from_elem} side={got_func_from_side} \
-         main={got_func_from_main} zero={got_func_zero}"
+        "[sidemodule] {path}: updateGOT: elem={got_func_from_elem} self={got_func_from_self} \
+         side={got_func_from_side} main={got_func_from_main} zero={got_func_zero}"
     );
 
     // Build func_table_slots for every exported function:
@@ -609,7 +709,7 @@ pub fn pre_load_side_module(
     //
     // Exports that are internal helpers (__wasm_call_ctors, etc.) also get
     // table slots here; they may be needed by indirect calls during ctors.
-    let Some(tbl) = store.data().pyodide_table else {
+    let Some(tbl) = store.as_context().data().pyodide_table else {
         return Err(AfterburnerError::Engine(
             "pre_load_side_module: pyodide_table missing for func_table_slots".into(),
         ));
@@ -634,15 +734,22 @@ pub fn pre_load_side_module(
             continue;
         }
         // Phase B: not in element segment - insert into the shared table now.
-        let Some(func) = instance.get_func(&mut *store, name.as_str()) else {
+        let Some(func) = instance.get_func(store.as_context_mut(), name.as_str()) else {
             continue;
         };
-        let slot = tbl.size(&*store) as u32;
-        if tbl.grow(&mut *store, 1, wasmtime::Ref::Func(None)).is_err() {
+        let slot = tbl.size(store.as_context()) as u32;
+        if tbl
+            .grow(store.as_context_mut(), 1, wasmtime::Ref::Func(None))
+            .is_err()
+        {
             continue;
         }
         if tbl
-            .set(&mut *store, slot as u64, wasmtime::Ref::Func(Some(func)))
+            .set(
+                store.as_context_mut(),
+                slot as u64,
+                wasmtime::Ref::Func(Some(func)),
+            )
             .is_err()
         {
             continue;
@@ -662,18 +769,22 @@ pub fn pre_load_side_module(
 
     // Call __wasm_apply_data_relocs AFTER updateGOT so it reads correct slot
     // indices when filling fn-ptr-in-data fields (PyTypeObject slots, etc.).
-    if let Some(reloc_fn) = instance.get_func(&mut *store, "__wasm_apply_data_relocs") {
-        reloc_fn.call(&mut *store, &[], &mut []).map_err(|e| {
-            AfterburnerError::Engine(format!("sidemodule __wasm_apply_data_relocs {path}: {e}"))
-        })?;
+    if let Some(reloc_fn) = instance.get_func(store.as_context_mut(), "__wasm_apply_data_relocs") {
+        reloc_fn
+            .call(store.as_context_mut(), &[], &mut [])
+            .map_err(|e| {
+                AfterburnerError::Engine(format!("sidemodule __wasm_apply_data_relocs {path}: {e}"))
+            })?;
         eprintln!("[sidemodule] {path}: __wasm_apply_data_relocs OK");
     }
 
     // Call __wasm_call_ctors if present.
-    if let Some(ctors_fn) = instance.get_func(&mut *store, "__wasm_call_ctors") {
-        ctors_fn.call(&mut *store, &[], &mut []).map_err(|e| {
-            AfterburnerError::Engine(format!("sidemodule __wasm_call_ctors {path}: {e}"))
-        })?;
+    if let Some(ctors_fn) = instance.get_func(store.as_context_mut(), "__wasm_call_ctors") {
+        ctors_fn
+            .call(store.as_context_mut(), &[], &mut [])
+            .map_err(|e| {
+                AfterburnerError::Engine(format!("sidemodule __wasm_call_ctors {path}: {e}"))
+            })?;
         eprintln!("[sidemodule] {path}: __wasm_call_ctors OK");
     }
 
@@ -738,23 +849,78 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                     eprintln!("[dlopen_js] cached dso_ptr={dso_ptr:#x} for '{name}'");
                     return handle_struct_ptr;
                 }
-                match caller
+                // Check if the path was already pre-loaded (just needs ptr mapping).
+                if let Some(idx) = caller
                     .data()
                     .side_modules
                     .find_by_path(&name)
                     .map(|(i, _)| i)
                 {
-                    Some(idx) => {
-                        // Mirror Emscripten LDSO: key = raw DSO struct pointer.
-                        // _dlsym_js will be called with the same pointer.
+                    caller.data_mut().side_modules.map_ptr(dso_ptr, idx);
+                    eprintln!(
+                        "[dlopen_js] mapped dso_ptr={dso_ptr:#x} -> idx={idx} for '{name}'"
+                    );
+                    return handle_struct_ptr;
+                }
+                // On-demand load: read .so bytes from the in-memory FS, compile and
+                // instantiate the SIDE_MODULE into the shared store, then register it.
+                // This handles any .so CPython requests that was not pre-loaded.
+                let so_bytes: Vec<u8> = {
+                    // Build the full guest path: site-packages prefix + relative name.
+                    // `name` is the basename as seen by CPython (e.g. "numpy/linalg/_umath_linalg...so").
+                    // Try the name directly, then under SITE_PACKAGES, then common prefixes.
+                    let candidates = [
+                        name.clone(),
+                        format!("/lib/python3.13/site-packages/{name}"),
+                        format!("/lib/python3.12/site-packages/{name}"),
+                        format!("/usr/lib/python3/site-packages/{name}"),
+                    ];
+                    let mut found = None;
+                    for p in &candidates {
+                        if let Some(b) = caller.data().fs.read_file(p.as_str()) {
+                            found = Some(b.to_vec());
+                            eprintln!("[dlopen_js] found '{name}' at '{p}'");
+                            break;
+                        }
+                    }
+                    match found {
+                        Some(b) => b,
+                        None => {
+                            eprintln!(
+                                "[dlopen_js] FS miss for '{name}' (tried {} paths)",
+                                candidates.len()
+                            );
+                            return 0;
+                        }
+                    }
+                };
+                let engine = caller.engine().clone();
+                let main_instance = match caller.data().main_instance {
+                    Some(i) => i,
+                    None => {
+                        eprintln!("[dlopen_js] main_instance not set in store for '{name}'");
+                        return 0;
+                    }
+                };
+                let side_instances = caller.data().side_modules.all_instances();
+                match pre_load_side_module(
+                    &engine,
+                    &mut caller,
+                    &main_instance,
+                    &side_instances,
+                    &so_bytes,
+                    &name,
+                ) {
+                    Ok((handle, _, _)) => {
+                        let idx = caller.data_mut().side_modules.insert(name.clone(), handle);
                         caller.data_mut().side_modules.map_ptr(dso_ptr, idx);
                         eprintln!(
-                            "[dlopen_js] mapped dso_ptr={dso_ptr:#x} -> idx={idx} for '{name}'"
+                            "[dlopen_js] on-demand loaded '{name}' -> idx={idx} dso_ptr={dso_ptr:#x}"
                         );
                         handle_struct_ptr
                     }
-                    None => {
-                        eprintln!("[dlopen_js] MISS: '{name}' not pre-loaded");
+                    Err(e) => {
+                        eprintln!("[dlopen_js] on-demand load FAILED for '{name}': {e}");
                         0
                     }
                 }

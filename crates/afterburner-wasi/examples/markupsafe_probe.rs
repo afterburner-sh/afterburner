@@ -460,6 +460,9 @@ fn run_probe() -> String {
     };
     eprintln!("[markupsafe_probe] instantiation succeeded");
 
+    // Store main instance for on-demand _dlopen_js side module loading.
+    store.data_mut().main_instance = Some(instance);
+
     let fuel_after_inst = store.get_fuel().unwrap_or(0);
     eprintln!(
         "[markupsafe_probe] fuel consumed by instantiation: {}",
@@ -492,11 +495,17 @@ fn run_probe() -> String {
 
     // Pre-load the markupsafe SIDE_MODULE before __wasm_call_ctors so the
     // dlopen shim can find it when CPython imports the extension.
-    let (handle, _next_mem, _next_tbl) =
-        match pre_load_side_module(&engine, &mut store, &instance, &so_bytes, MARKUPSAFE_SO) {
-            Ok(r) => r,
-            Err(e) => return format!("SIDE_MODULE LOAD FAILED for {MARKUPSAFE_SO}: {e}"),
-        };
+    let (handle, _next_mem, _next_tbl) = match pre_load_side_module(
+        &engine,
+        &mut store,
+        &instance,
+        &[],
+        &so_bytes,
+        MARKUPSAFE_SO,
+    ) {
+        Ok(r) => r,
+        Err(e) => return format!("SIDE_MODULE LOAD FAILED for {MARKUPSAFE_SO}: {e}"),
+    };
 
     let idx = store
         .data_mut()

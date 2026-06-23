@@ -241,6 +241,10 @@ pub struct EmbedderState {
     /// Pre-loaded SIDE_MODULE instances (numpy `.so` files).
     /// Populated before Python runs; `_dlopen_js` looks handles up here.
     pub side_modules: SideModuleRegistry,
+    /// The main (pyodide) wasm instance. Set after instantiation so that
+    /// on-demand `_dlopen_js` loading can wire env.* imports of new side
+    /// modules against both the main instance and already-loaded side modules.
+    pub main_instance: Option<wasmtime::Instance>,
 }
 
 impl EmbedderState {
@@ -259,6 +263,7 @@ impl EmbedderState {
             cxa_throw_log: Vec::new(),
             fs_path_log: std::collections::VecDeque::new(),
             side_modules: SideModuleRegistry::new(),
+            main_instance: None,
         }
     }
 
@@ -289,6 +294,7 @@ impl EmbedderState {
             cxa_throw_log: Vec::new(),
             fs_path_log: std::collections::VecDeque::new(),
             side_modules: SideModuleRegistry::new(),
+            main_instance: None,
         }
     }
 
@@ -313,6 +319,7 @@ impl EmbedderState {
             cxa_throw_log: Vec::new(),
             fs_path_log: std::collections::VecDeque::new(),
             side_modules: SideModuleRegistry::new(),
+            main_instance: None,
         }
     }
 
@@ -553,6 +560,7 @@ impl EmbedderVm {
                 cxa_throw_log: Vec::new(),
                 fs_path_log: std::collections::VecDeque::new(),
                 side_modules: SideModuleRegistry::new(),
+                main_instance: None,
             }
         } else {
             EmbedderState {
@@ -567,6 +575,7 @@ impl EmbedderVm {
                 cxa_throw_log: Vec::new(),
                 fs_path_log: std::collections::VecDeque::new(),
                 side_modules: SideModuleRegistry::new(),
+                main_instance: None,
             }
         };
 
@@ -698,6 +707,7 @@ impl EmbedderVm {
             cxa_throw_log: Vec::new(),
             fs_path_log: std::collections::VecDeque::new(),
             side_modules: SideModuleRegistry::new(),
+            main_instance: None,
         };
 
         let mut store = Store::new(&module.engine, state);

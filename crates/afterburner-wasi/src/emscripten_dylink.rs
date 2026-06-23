@@ -56,11 +56,12 @@ use std::collections::HashMap;
 use afterburner_core::{AfterburnerError, Result};
 use wasmparser::{ElementItems, ElementKind, ExternalKind, Name, Operator, Parser, Payload};
 use wasmtime::{
-    ExternType, Func, FuncType, Global, Instance, Linker, Module, Mutability, Ref, Store, Val,
+    AsContext, AsContextMut, ExternType, Func, FuncType, Global, Instance, Linker, Module,
+    Mutability, Ref, Store, Val, ValType,
 };
 
 use crate::embedder_vm::EmbedderState;
-use crate::emscripten_runtime::WASM_TABLE_INITIAL_SIZE;
+use crate::emscripten_runtime::{WASM_TABLE_INITIAL_SIZE, default_val_for};
 
 /// Memory size declared in `pyodide.asm.wasm`'s `dylink.0` section (bytes).
 const DYLINK_MEMORY_SIZE: u32 = 4_632_232;
@@ -176,25 +177,28 @@ pub fn prefill_got_mem_globals(
 /// Returns `(resolved, zero)` where `resolved` is the count of entries whose
 /// value was set to a non-zero address and `zero` is all others (symbol not
 /// exported, mutable global export, or zero address).
-pub fn resolve_got_mem(
-    store: &mut Store<EmbedderState>,
+pub fn resolve_got_mem<S>(
+    store: &mut S,
     instance: &Instance,
     entries: &[(&str, Global)],
-) -> (u32, u32) {
+) -> (u32, u32)
+where
+    S: AsContextMut<Data = EmbedderState>,
+{
     let mut resolved = 0u32;
     let mut zero = 0u32;
     for (name, g) in entries {
         let addr = instance
-            .get_global(&mut *store, name)
-            .filter(|eg| eg.ty(&*store).mutability() == Mutability::Const)
-            .and_then(|eg| match eg.get(&mut *store) {
+            .get_global(store.as_context_mut(), name)
+            .filter(|eg| eg.ty(store.as_context()).mutability() == Mutability::Const)
+            .and_then(|eg| match eg.get(store.as_context_mut()) {
                 Val::I32(v) if v != 0 => Some(v),
                 _ => None,
             });
         match addr {
             Some(v) => {
                 // Ignore set errors: the global may be read-only in edge cases.
-                let _ = g.set(&mut *store, Val::I32(v));
+                let _ = g.set(store.as_context_mut(), Val::I32(v));
                 resolved += 1;
             }
             None => {
@@ -494,11 +498,13 @@ pub fn wire_got_func_stubs_from_module(
                     AfterburnerError::Engine(format!("GOT stub terminal env.{name_owned}: {e}"))
                 })?;
         } else {
+            let result_tys: Vec<ValType> = ft.results().collect();
             linker
                 .func_new("env", name_owned, ft.clone(), move |_, _, results| {
-                    // Fill results with zero/false/null defaults.
-                    for r in results.iter_mut() {
-                        *r = zero_val_for(r);
+                    // Zero each result by its DECLARED type (see default_val_for):
+                    // the slot's pre-fill is a null funcref regardless of type.
+                    for (r, vt) in results.iter_mut().zip(&result_tys) {
+                        *r = default_val_for(vt);
                     }
                     Ok(())
                 })
@@ -507,20 +513,6 @@ pub fn wire_got_func_stubs_from_module(
         wired += 1;
     }
     Ok(wired)
-}
-
-/// Return a type-appropriate zero value for a `Val` slot.
-///
-/// `val` already holds the correct `Val` variant (set by wasmtime before
-/// calling the host function); we overwrite its numeric payload with zero.
-fn zero_val_for(val: &Val) -> Val {
-    match val {
-        Val::I32(_) => Val::I32(0),
-        Val::I64(_) => Val::I64(0),
-        Val::F32(_) => Val::F32(0),
-        Val::F64(_) => Val::F64(0),
-        _ => *val,
-    }
 }
 
 // ---- post-instantiation: resolve GOT.func globals ---------------------------
@@ -728,15 +720,15 @@ pub fn fill_got_table_slots(
 /// Create a no-op `Func` with the given type, filling all result slots with
 /// a type-appropriate zero. Used for Path-4 table stubs.
 fn make_typed_stub(store: &mut Store<EmbedderState>, ft: &FuncType) -> Func {
-    Func::new(&mut *store, ft.clone(), |_, _, results| {
-        for r in results.iter_mut() {
-            *r = match *r {
-                Val::I32(_) => Val::I32(0),
-                Val::I64(_) => Val::I64(0),
-                Val::F32(_) => Val::F32(0),
-                Val::F64(_) => Val::F64(0),
-                other => other,
-            };
+    // Set each result from its DECLARED type. wasmtime initialises the `results`
+    // slice to a null-funcref placeholder regardless of the declared type, so
+    // matching on the runtime value (the old approach) returned a funcref for an
+    // i32 result: "function attempted to return an incompatible value: expected
+    // i32, found (ref null nofunc)". Drive the zero value off `ft.results()`.
+    let results_ty: Vec<ValType> = ft.results().collect();
+    Func::new(&mut *store, ft.clone(), move |_, _, results| {
+        for (r, ty) in results.iter_mut().zip(&results_ty) {
+            *r = default_val_for(ty);
         }
         Ok(())
     })
