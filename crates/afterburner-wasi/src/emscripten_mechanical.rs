@@ -31,7 +31,13 @@ fn heap_max_bytes() -> i32 {
         max_pages: 65_536,
         stack_size_bytes: 10 * 1024 * 1024,
     });
-    (cfg.max_pages as u64 * 65_536u64) as i32
+    let max_bytes = cfg.max_pages as u64 * 65_536u64;
+    // Stay one wasm page short of 4 GiB. A full 4 GiB byte count is 0x1_0000_0000,
+    // which truncates to 0 in this i32 ABI - and 0 breaks every consumer that
+    // treats the heap max as a size. This mirrors the runtime's own getHeapMax,
+    // which caps at `min(max, FOUR_GB - WASM_PAGE_SIZE)` for exactly this reason.
+    const FOUR_GB_MINUS_PAGE: u64 = 4_294_967_296 - 65_536; // 0xFFFF_0000
+    (max_bytes.min(FOUR_GB_MINUS_PAGE) as u32) as i32
 }
 
 /// Read a null-terminated C string from guest memory at `ptr`.
