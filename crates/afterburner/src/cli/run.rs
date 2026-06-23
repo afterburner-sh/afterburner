@@ -33,9 +33,13 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use super::args::Cli;
 use super::daemon::{execute, script_label};
+
+// Import the SourceLang type for language-dispatch in `run_package_or_file`.
+use super::compile::lang::SourceLang;
 
 /// Recover a script's `process.argv[2..]` straight from the raw process
 /// argv, slicing everything after the FILE token.
@@ -89,22 +93,165 @@ pub fn eval_args_from_argv(code: &str) -> Vec<String> {
 
 /// `burn run` dispatch: run an explicit FILE, or - when none is given -
 /// the current package's entry resolved from `afb.toml` (cargo-style).
+///
+/// When the package declares a native source language (Rust/Go/C/Python),
+/// the compiled `.afb` is located, the `precompiled/wasm32-wasip1/main.wasm`
+/// member is extracted, and the module is executed via
+/// `EmbedderVm::run_command` as a WASI command. A clear error is emitted
+/// when no `.afb` exists yet (directing the user to `burn compile` first).
+///
+/// JS/TS packages follow the existing daemon/eval path unchanged.
 pub fn run_package_or_file(
     cli: &Cli,
     file: Option<&std::path::Path>,
     user_args: &[String],
 ) -> Result<()> {
     match file {
-        Some(p) => run_file(cli, &p.to_path_buf(), user_args),
+        Some(p) => {
+            // An explicit .afb file: run the WASM inside it directly.
+            if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("afb")) {
+                return run_afb(p, user_args);
+            }
+            run_file(cli, &p.to_path_buf(), user_args)
+        }
         None => {
             let dir = std::path::Path::new(".");
-            let entry = resolve_package_entry(dir)?;
-            // cargo builds on `cargo run`; burn links missing [npm] deps on
-            // `burn run` (no-op when node_modules exists or none declared).
-            super::registry::ensure_npm_linked(dir)?;
-            run_file(cli, &entry, user_args)
+            let (lang, afb_name) = resolve_package_lang_and_output(dir)?;
+            match SourceLang::from_str(&lang) {
+                Ok(l) if !l.is_js_family() => {
+                    // Native package: run the compiled .afb via EmbedderVm.
+                    let afb_path = dir.join(&afb_name);
+                    if !afb_path.exists() {
+                        anyhow::bail!(
+                            "no compiled package found at {}; \
+                             run `burn compile` first to build the native WASM",
+                            afb_path.display()
+                        );
+                    }
+                    run_afb(&afb_path, user_args)
+                }
+                _ => {
+                    // JS/TS or unrecognized: existing path.
+                    let entry = resolve_package_entry(dir)?;
+                    // cargo builds on `cargo run`; burn links missing [npm] deps on
+                    // `burn run` (no-op when node_modules exists or none declared).
+                    super::registry::ensure_npm_linked(dir)?;
+                    run_file(cli, &entry, user_args)
+                }
+            }
         }
     }
+}
+
+/// Resolve `([package] language, output_filename)` from the `afb.toml` in `dir`.
+///
+/// Returns `("js", <default_output>)` when the language field is absent.
+fn resolve_package_lang_and_output(dir: &Path) -> Result<(String, String)> {
+    let manifest_path = dir.join("afb.toml");
+    if !manifest_path.exists() {
+        anyhow::bail!(
+            "no afb.toml in the current directory - `burn run` with no FILE \
+             runs the current package's entry. Pass a file (`burn run script.js`) \
+             or run inside a package (`burn init` to create one)."
+        );
+    }
+    let text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("reading {}", manifest_path.display()))?;
+    let doc: toml::Value =
+        toml::from_str(&text).with_context(|| format!("parsing {}", manifest_path.display()))?;
+    let lang = doc
+        .get("package")
+        .and_then(|p| p.get("language"))
+        .and_then(|l| l.as_str())
+        .unwrap_or("js")
+        .to_string();
+    let name = doc
+        .get("package")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("package");
+    let namespace = doc
+        .get("package")
+        .and_then(|p| p.get("namespace"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("local");
+    let version = doc
+        .get("package")
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.1.0");
+    let afb_name = format!("{namespace}-{name}-{version}.afb");
+    Ok((lang, afb_name))
+}
+
+/// Run a compiled `.afb` by extracting its `precompiled/wasm32-wasip1/main.wasm`
+/// and executing it as a WASI command module via `EmbedderVm::run_command`.
+///
+/// The stdout of the WASM module is forwarded to the process stdout.
+/// A clear error is returned when the `.afb` has no precompiled WASM member
+/// (e.g. it is a source-only package), directing the user to `burn compile`.
+#[cfg(feature = "wasm")]
+fn run_afb(afb_path: &Path, user_args: &[String]) -> Result<()> {
+    use afterburner_cloud::afterburner_afb::Afb;
+    use afterburner_wasi::embedder_vm::{EmbedderVm, WasiCommandOpts};
+
+    let bytes = fs::read(afb_path).with_context(|| format!("reading {}", afb_path.display()))?;
+    let afb =
+        Afb::from_bytes(&bytes).with_context(|| format!("parsing .afb {}", afb_path.display()))?;
+
+    // Find the WASI command WASM. Prefer the plain (non-dyn, non-batch, non-columnar) target.
+    let wasm_bytes = afb
+        .precompiled
+        .iter()
+        .find(|(k, _)| k.as_str() == "precompiled/wasm32-wasip1/main.wasm")
+        .map(|(_, v)| v.as_slice())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} has no precompiled/wasm32-wasip1/main.wasm; \
+                 run `burn compile` to produce a native WASM package",
+                afb_path.display()
+            )
+        })?;
+
+    let vm = EmbedderVm::new().context("creating EmbedderVm")?;
+    let module = vm
+        .compile(wasm_bytes, true, |_| Ok(()))
+        .context("compiling WASM module")?;
+
+    let mut args = vec![afb_path.to_string_lossy().into_owned()];
+    args.extend_from_slice(user_args);
+    let opts = WasiCommandOpts::new().args(args);
+
+    let output = vm
+        .run_command(&module, opts, None)
+        .context("running WASM command")?;
+
+    // Forward stdout to the process stdout.
+    if !output.stdout.is_empty() {
+        use std::io::Write;
+        std::io::stdout()
+            .write_all(&output.stdout)
+            .context("writing WASM stdout")?;
+    }
+
+    // Propagate the WASM exit code. EmbedderRunOutput.result holds the exit
+    // code as i64 (0 = success). Non-zero exits are POSIX convention: not an
+    // error in Rust's sense, but we mirror it to the process exit code.
+    let exit_code = output.result as i32;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "wasm"))]
+fn run_afb(afb_path: &Path, _user_args: &[String]) -> Result<()> {
+    anyhow::bail!(
+        "running native WASM packages requires the `wasm` feature (rebuild with `--features wasm`). \
+         Package: {}",
+        afb_path.display()
+    )
 }
 
 /// Resolve the entry file of the package rooted at `dir` from its

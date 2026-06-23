@@ -21,8 +21,15 @@
 //! `crypto.createHash` call is denied under a sealed Manifold and granted
 //! under one with `crypto: true`.
 //!
-//! `javy` is required only here - the runtime never shells to it.
+//! For non-JS/TS packages (`language = "rust"`, `"go"`, `"c"`, `"python"`),
+//! the language-native toolchain is invoked to produce a `wasm32-wasip1`
+//! WASI command module. The language is read exclusively from
+//! `[package] language` in `afb.toml` - no file-extension auto-detection.
+//!
+//! `javy` is required only for JS/TS - the runtime never shells to it.
 //! Required version: 8.1.1.
+
+pub mod lang;
 
 use afterburner_cloud::afterburner_afb::Afb;
 use afterburner_cloud::afterburner_afb::digest::{digest, hex};
@@ -34,6 +41,9 @@ use afterburner_node_compat::PLENUM_BUNDLE;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+
+use lang::SourceLang;
 
 use super::registry::{coord_str, print_digest, transpile_ts_sources};
 use super::style;
@@ -250,17 +260,131 @@ fn resolve_one_dep(
     Ok(())
 }
 
-/// `burn compile [dir] -o <out>` entry point. Always source-bearing (source + precompiled).
+/// Language-dispatching compile entry point shared by `burn compile` and
+/// `burn package --compile`/`--wasm-only`.
+///
+/// Reads `[package] language` from `local.manifest` and dispatches:
+/// - JS/TS: transpile TS (no-op for plain JS), then the Javy path.
+/// - Rust/Go/C/Python: native toolchain -> WASM -> `.afb`.
+///
+/// `wasm_only` controls whether source members are included in the output
+/// `.afb`. Pass `true` for `--wasm-only` (FullWasm mode), `false` otherwise.
+pub fn dispatch_compile(
+    dir: &Path,
+    mut local: pkg::LocalPackage,
+    out_path: &Path,
+    wasm_only: bool,
+) -> Result<()> {
+    let lang = SourceLang::from_str(&local.manifest.package.language)
+        .with_context(|| format!("invalid [package] language in {}/afb.toml", dir.display()))?;
+
+    if lang.is_js_family() {
+        transpile_ts_sources(&mut local)?;
+        compile_with_local_package(local, out_path, wasm_only)
+    } else {
+        let entry = local.manifest.package.entry.clone();
+        let pkg_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        compile_native_to_afb(local, lang, &pkg_dir, &entry, out_path, wasm_only)
+    }
+}
+
+/// `burn compile [dir] -o <out>` entry point.
+///
+/// Reads `[package] language` from the manifest to determine the compile
+/// backend. JS/TS use the Javy path (source + precompiled). All other
+/// languages use the native-to-WASM path (`compile_native` in `lang.rs`),
+/// which produces a `wasm32-wasip1` WASI command module bundled into the
+/// `.afb` with `[runtime] target = "wasm32-wasip1"`.
+///
+/// The `language` field is the only dispatch criterion - no auto-detection
+/// from file extensions.
 pub fn compile(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
     let dir = dir.unwrap_or_else(|| Path::new("."));
-    let mut local = pkg::LocalPackage::load(dir)?;
-    transpile_ts_sources(&mut local)?;
-
+    let local = pkg::LocalPackage::load(dir)?;
     let out_path = out
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(local.output_filename()));
+    dispatch_compile(dir, local, &out_path, false)
+}
 
-    compile_with_local_package(local, &out_path, false)
+/// Compile a native language (Rust/Go/C/Python) package to a `.afb`.
+///
+/// Invokes the language toolchain, reads the produced WASM bytes, and
+/// bundles them into a `.afb` with `[runtime] target = "wasm32-wasip1"`.
+/// The source files are included unless `wasm_only` is true.
+fn compile_native_to_afb(
+    local: LocalPackage,
+    lang: SourceLang,
+    pkg_dir: &Path,
+    entry: &str,
+    out_path: &Path,
+    wasm_only: bool,
+) -> Result<()> {
+    let coord = coord_str(&local);
+    let lang_name = match lang {
+        SourceLang::Rust => "Rust",
+        SourceLang::Go => "Go",
+        SourceLang::C => "C",
+        SourceLang::Python => "Python",
+        SourceLang::Js | SourceLang::Ts => unreachable!("JS/TS not handled here"),
+    };
+
+    // Build the source-only .afb first (for the manifest + manifold).
+    let (source_bytes, _) =
+        style::spin("packing source", || local.build()).context("building source .afb")?;
+    let afb = Afb::from_bytes(&source_bytes).context("reparsing source .afb (this is a bug)")?;
+
+    // Compile to WASM via the native toolchain.
+    let wasm_bytes = style::spin(&format!("compiling {lang_name} to wasm"), || {
+        lang::compile_native(lang, pkg_dir, entry)
+    })?;
+
+    // Bundle the WASM into the .afb.
+    bundle_wasm_into_afb(&afb, wasm_bytes, out_path, &coord, wasm_only)
+}
+
+/// Bundle a WASM binary into a `.afb` archive with `[runtime] target =
+/// "wasm32-wasip1"`.
+///
+/// This is the shared helper used by both the native compile path and
+/// (potentially) other paths that produce a WASI command module.
+/// Source members from `afb` are included; `[runtime] target` is set to
+/// `"wasm32-wasip1"` so `burn run` dispatches to `EmbedderVm::run_command`.
+pub fn bundle_wasm_into_afb(
+    afb: &Afb,
+    wasm_bytes: Vec<u8>,
+    out_path: &Path,
+    coord: &str,
+    wasm_only: bool,
+) -> Result<()> {
+    let mut manifest = afb.manifest.clone();
+    manifest.runtime.target = Some("wasm32-wasip1".into());
+
+    let mut b = Builder::new(manifest, afb.manifold.clone());
+    if !wasm_only {
+        for (path, data) in &afb.source {
+            b = b.source(path.clone(), data.clone());
+        }
+    }
+    b = b.precompiled("precompiled/wasm32-wasip1/main.wasm", wasm_bytes);
+
+    let (bytes, bundle_digest) = style::spin("packing", || b.build()).context("building .afb")?;
+
+    std::fs::write(out_path, &bytes).with_context(|| format!("writing {}", out_path.display()))?;
+
+    println!(
+        "{} {} {}",
+        style::ok("compiled"),
+        style::accent(coord),
+        style::gold("(precompiled wasm32-wasip1)")
+    );
+    print_digest(bytes.len() as u64, &hex(&bundle_digest));
+    println!(
+        "  {} {}",
+        style::muted("->"),
+        style::value(&out_path.display().to_string())
+    );
+    Ok(())
 }
 
 /// Compile a local package to a precompiled `.afb`, writing to `out_path`.

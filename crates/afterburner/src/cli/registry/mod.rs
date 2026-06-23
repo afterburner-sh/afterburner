@@ -21,6 +21,7 @@ use afterburner_cloud::{
 };
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 pub fn login(token: Option<&str>, registry: Option<&str>) -> Result<()> {
     let base = match config::resolve(registry, None) {
@@ -140,6 +141,7 @@ fn scaffold_opts(cli: &Cli, a: &ScaffoldArgs) -> ScaffoldOpts {
         vcs_git: a.vcs.as_deref() == Some("git"),
         force: a.force,
         ts: a.ts,
+        lang: a.lang.clone(),
     }
 }
 
@@ -189,13 +191,15 @@ pub fn package(
     do_compile: bool,
     wasm_only: bool,
 ) -> Result<()> {
+    use super::compile::lang::SourceLang;
+
     let dir = dir.unwrap_or_else(|| Path::new("."));
-    let mut local = pkg::LocalPackage::load(dir)?;
-    // TypeScript is build-time only: transpile every `.ts/.mts/.cts`
-    // source to `.js` here so the published `.afb` is always plain JS and
-    // the runtime sandbox never needs a transpiler. The package entry is
-    // rewritten to the `.js` path. (Pure-JS packages are untouched.)
-    transpile_ts_sources(&mut local)?;
+    let local = pkg::LocalPackage::load(dir)?;
+
+    // Read language early so we can gate source-only mode for native languages.
+    let lang = SourceLang::from_str(&local.manifest.package.language)
+        .with_context(|| format!("invalid [package] language in {}/afb.toml", dir.display()))?;
+
     let coord = coord_str(&local);
     let out_path = out
         .map(Path::to_path_buf)
@@ -220,12 +224,29 @@ pub fn package(
     };
 
     match mode {
-        PackageMode::FullWasm => super::compile::compile_with_local_package(local, &out_path, true),
-        PackageMode::SourceBased if do_compile || wasm_only => {
-            // wasm_only is handled above; do_compile -> compile+source.
-            super::compile::compile_with_local_package(local, &out_path, false)
+        PackageMode::FullWasm => {
+            // Route through dispatch_compile with wasm_only=true so native
+            // languages (Rust/Go/C) use their toolchain, not the JS engine path.
+            super::compile::dispatch_compile(dir, local, &out_path, true)
+        }
+        PackageMode::SourceBased if do_compile => {
+            // --compile: compile+source for all languages via dispatch_compile.
+            super::compile::dispatch_compile(dir, local, &out_path, false)
         }
         PackageMode::SourceBased => {
+            // Plain source-based packaging. Native languages (Rust/Go/C) have
+            // no source interpreter, so shipping source-only produces an
+            // unrunnable .afb. Reject early with a clear message.
+            if !lang.is_interpretable() {
+                anyhow::bail!(
+                    "a {lang_name} package compiles to wasm and cannot ship as source; \
+                     run `burn package --compile`",
+                    lang_name = format!("{lang:?}").to_lowercase(),
+                );
+            }
+            // JS/TS/Python source-based path: transpile TS first.
+            let mut local = local;
+            transpile_ts_sources(&mut local)?;
             let (bytes, digest) = style::spin("packing", || local.build())?;
             std::fs::write(&out_path, &bytes)
                 .with_context(|| format!("writing {}", out_path.display()))?;

@@ -46,7 +46,12 @@ pub struct ScaffoldOpts {
     pub vcs_git: bool,
     pub force: bool,
     /// Scaffold a TypeScript package (`source/main.ts` + tsconfig).
+    /// Shorthand for `lang = Some("typescript")`.
     pub ts: bool,
+    /// Explicit source language (e.g. `"rust"`, `"go"`, `"typescript"`).
+    /// When `Some`, overrides the `ts` bool.
+    /// Validated by the caller; the scaffold writes it verbatim into `afb.toml`.
+    pub lang: Option<String>,
 }
 
 /// What a scaffold produced (for the CLI to report).
@@ -215,6 +220,79 @@ fn test_js(template: &str, name: &str) -> String {
     format!("{header}{body}")
 }
 
+/// Resolve the effective language string and whether it is TypeScript.
+///
+/// Priority: `lang` field > `ts` bool > default `"js"`.
+fn resolved_lang(o: &ScaffoldOpts) -> (String, bool) {
+    if let Some(ref l) = o.lang {
+        let norm = l.trim().to_ascii_lowercase();
+        let is_ts = matches!(norm.as_str(), "ts" | "typescript");
+        (norm, is_ts)
+    } else if o.ts {
+        ("typescript".into(), true)
+    } else {
+        ("js".into(), false)
+    }
+}
+
+/// Return the default `source/` entry path for a given language string.
+fn default_entry_for_lang(lang: &str) -> String {
+    match lang {
+        "ts" | "typescript" => "source/main.ts".into(),
+        "rust" => "source/main.rs".into(),
+        "go" | "golang" => "source/main.go".into(),
+        "c" => "source/main.c".into(),
+        "python" | "py" => "source/main.py".into(),
+        _ => "source/main.js".into(),
+    }
+}
+
+/// Whether a language string names a non-JS/TS (native) language.
+fn is_native_lang(lang: &str) -> bool {
+    matches!(lang, "rust" | "go" | "golang" | "c" | "python" | "py")
+}
+
+/// Stub source file for a native language scaffold.
+fn native_main_stub(lang: &str, namespace: &str, name: &str) -> String {
+    match lang {
+        "rust" => format!(
+            "// {namespace}/{name}: an Afterburner package (Rust -> wasm32-wasip1).\n\
+             fn main() {{\n    // Compute 1+2+...+100\n    let sum: u32 = (1..=100).sum();\n    println!(\"{{sum}}\");\n}}\n"
+        ),
+        "go" | "golang" => format!(
+            "// {namespace}/{name}: an Afterburner package (Go -> wasm32-wasip1).\n\
+             package main\n\nfunc main() {{\n\t// Compute 1+2+...+100\n\tsum := 0\n\tfor i := 1; i <= 100; i++ {{\n\t\tsum += i\n\t}}\n\tprintln(sum)\n}}\n"
+        ),
+        "c" => format!(
+            "/* {namespace}/{name}: an Afterburner package (C -> wasm32-wasi). */\n\
+             #include <stdio.h>\nint main(void) {{\n    int sum = 0;\n    for (int i = 1; i <= 100; i++) sum += i;\n    printf(\"%d\\n\", sum);\n    return 0;\n}}\n"
+        ),
+        "python" | "py" => format!(
+            "# {namespace}/{name}: an Afterburner package (Python -> wasm32-wasip1).\n\
+             print(sum(range(1, 101)))\n"
+        ),
+        _ => format!("// {namespace}/{name}\n"),
+    }
+}
+
+/// Optional build file (Cargo.toml or go.mod) for a native scaffold.
+/// Returns `(filename, content)` or `None`.
+fn native_build_file(lang: &str, name: &str) -> Option<(&'static str, String)> {
+    match lang {
+        "rust" => Some((
+            "Cargo.toml",
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"{name}\"\npath = \"source/main.rs\"\n"
+            ),
+        )),
+        "go" | "golang" => Some((
+            "go.mod",
+            format!("module {name}\n\ngo 1.21\n"),
+        )),
+        _ => None,
+    }
+}
+
 fn is_ident(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
@@ -297,6 +375,9 @@ fn scaffold(
         )));
     }
 
+    // Resolve the effective language: explicit `lang` > `--ts` shorthand > default `js`.
+    let (eff_lang, eff_is_ts) = resolved_lang(o);
+
     let manifest = Manifest {
         format: Format {
             version: "1.0".into(),
@@ -306,16 +387,8 @@ fn scaffold(
             name: name.to_string(),
             namespace: namespace.to_string(),
             version: o.version.clone().unwrap_or_else(|| "0.1.0".into()),
-            language: if o.ts {
-                "typescript".into()
-            } else {
-                "js".into()
-            },
-            entry: if o.ts {
-                "source/main.ts".into()
-            } else {
-                "source/main.js".into()
-            },
+            language: eff_lang.clone(),
+            entry: default_entry_for_lang(&eff_lang),
             description: o.description.clone(),
             homepage: None,
             license: Some(o.license.clone().unwrap_or_else(|| "Apache-2.0".into())),
@@ -355,7 +428,7 @@ fn scaffold(
         format!("{manifold_json}\n").as_bytes(),
         o.force,
     )?;
-    if o.ts {
+    if eff_is_ts {
         write_new_file(
             &dir.join("source/main.ts"),
             main_ts(&template, namespace, name).as_bytes(),
@@ -367,6 +440,18 @@ fn scaffold(
             o.force,
         )?;
         write_new_file(&dir.join("tsconfig.json"), TSCONFIG.as_bytes(), o.force)?;
+    } else if is_native_lang(&eff_lang) {
+        // Native languages: scaffold a minimal source file and Cargo.toml / go.mod.
+        let entry_path = default_entry_for_lang(&eff_lang);
+        let src = native_main_stub(&eff_lang, namespace, name);
+        write_new_file(&dir.join(&entry_path), src.as_bytes(), o.force)?;
+        if let Some(build_file) = native_build_file(&eff_lang, name) {
+            write_new_file(
+                &dir.join(build_file.0),
+                build_file.1.as_bytes(),
+                o.force,
+            )?;
+        }
     } else {
         write_new_file(
             &dir.join("source/main.js"),

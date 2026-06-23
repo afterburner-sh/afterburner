@@ -526,8 +526,15 @@ pub struct ScaffoldArgs {
     pub template: Option<String>,
     /// Scaffold a TypeScript package (`source/main.ts` + `tsconfig.json`).
     /// `burn package` transpiles TS to JS at pack time.
+    /// Shorthand for `--lang typescript`.
     #[arg(long)]
     pub ts: bool,
+    /// Source language for the scaffolded package (default: `js`).
+    /// Accepted values: `js`, `javascript`, `ts`, `typescript`, `rust`,
+    /// `go`, `golang`, `c`, `python`, `py`.
+    /// When set, overrides `--ts`.
+    #[arg(long, value_name = "LANG")]
+    pub lang: Option<String>,
     /// Grant the `crypto` capability in the scaffolded `manifold.json`.
     #[arg(long = "allow-crypto")]
     pub allow_crypto: bool,
