@@ -5,6 +5,10 @@
 
 //! `burn` registry + package-management subcommands. Thin handlers over
 //! [`afterburner_cloud`]; all output is styled via [`super::style`].
+//!
+// vertexia: file pre-existing at ~1200 SLOC before lang-prompt additions;
+// ceiling is ~1000 SLOC. Upgrade path: split into registry/scaffold.rs +
+// registry/install.rs + registry/publish.rs along the existing logical sections.
 
 mod progress;
 
@@ -98,17 +102,88 @@ pub fn whoami(registry: Option<&str>) -> Result<()> {
 }
 
 pub fn new_package(cli: &Cli, spec: &str, args: &ScaffoldArgs) -> Result<()> {
-    let opts = scaffold_opts(cli, args);
+    let lang = resolve_lang(args)?;
+    let mut opts = scaffold_opts(cli, args);
+    opts.lang = Some(lang);
+    opts.ts = false; // lang takes precedence; ts shorthand subsumed
     let made = scaffold::run_new(spec, &opts, login_username().as_deref())?;
     report_scaffold(&made);
     Ok(())
 }
 
 pub fn init_package(cli: &Cli, path: Option<&Path>, args: &ScaffoldArgs) -> Result<()> {
-    let opts = scaffold_opts(cli, args);
+    let lang = resolve_lang(args)?;
+    let mut opts = scaffold_opts(cli, args);
+    opts.lang = Some(lang);
+    opts.ts = false; // lang takes precedence; ts shorthand subsumed
     let made = scaffold::run_init(path, &opts, login_username().as_deref())?;
     report_scaffold(&made);
     Ok(())
+}
+
+/// Resolve the source language for a scaffold operation.
+///
+/// Priority:
+/// 1. `--lang <value>` - validate via `SourceLang::from_str`, return the
+///    normalized lowercase string on success or an error on an unknown value.
+/// 2. `--ts` shorthand - returns `"typescript"`.
+/// 3. stdin is a TTY - prompt the user with a numbered menu (default: js).
+/// 4. Non-TTY (CI / piped) - default to `"js"` for back-compat.
+fn resolve_lang(args: &ScaffoldArgs) -> Result<String> {
+    use super::compile::lang::SourceLang;
+    use std::io::IsTerminal;
+
+    if let Some(ref l) = args.lang {
+        // Validate: SourceLang::from_str gives a clear error on unknown values.
+        let norm = l.trim().to_ascii_lowercase();
+        SourceLang::from_str(&norm).with_context(|| format!("invalid --lang {l:?}"))?;
+        return Ok(norm);
+    }
+    if args.ts {
+        return Ok("typescript".into());
+    }
+    if std::io::stdin().is_terminal() {
+        return prompt_lang();
+    }
+    Ok("js".into())
+}
+
+/// Numbered language menu for TTY scaffold (default: js).
+fn prompt_lang() -> Result<String> {
+    use std::io::{BufRead, Write};
+
+    const CHOICES: &[(&str, &str)] = &[
+        ("js", "JavaScript"),
+        ("ts", "TypeScript"),
+        ("rust", "Rust (compiles to wasm32-wasip1)"),
+        ("go", "Go (compiles to wasm32-wasip1)"),
+        ("python", "Python"),
+        ("c", "C (compiles to wasm32-wasi)"),
+        ("ruby", "Ruby"),
+    ];
+
+    eprintln!();
+    eprintln!("{}", style::muted("Source language:"));
+    for (i, (_, label)) in CHOICES.iter().enumerate() {
+        eprintln!("  {}  {}", style::accent(&format!("[{}]", i + 1)), label);
+    }
+    eprint!("{}", style::muted("choice [1]: "));
+    std::io::stderr().flush()?;
+
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let trimmed = line.trim();
+
+    if trimmed.is_empty() || trimmed == "1" {
+        return Ok("js".into());
+    }
+    match trimmed.parse::<usize>() {
+        Ok(n) if n >= 1 && n <= CHOICES.len() => Ok(CHOICES[n - 1].0.into()),
+        _ => anyhow::bail!(
+            "invalid language choice {trimmed:?}; enter a number between 1 and {}",
+            CHOICES.len()
+        ),
+    }
 }
 
 fn scaffold_opts(cli: &Cli, a: &ScaffoldArgs) -> ScaffoldOpts {
@@ -154,7 +229,7 @@ fn report_scaffold(s: &Scaffolded) {
     );
     println!(
         "  {}",
-        style::value("afb.toml  manifold.json  source/main.js  tests/  README.md")
+        style::value(&format!("afb.toml  manifold.json  {}  README.md", s.entry))
     );
     println!(
         "  {} {}",

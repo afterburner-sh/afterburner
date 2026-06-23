@@ -64,6 +64,10 @@ pub struct Scaffolded {
     pub capabilities: Vec<String>,
     /// True when the namespace fell back to the placeholder (CLI should nudge).
     pub namespace_is_placeholder: bool,
+    /// The scaffolded entry source path (e.g. `source/main.rs`).
+    pub entry: String,
+    /// The effective language string stored in afb.toml.
+    pub lang: String,
 }
 
 /// Build a [`Manifold`] from the capability flags (sealed when none are given).
@@ -243,13 +247,17 @@ fn default_entry_for_lang(lang: &str) -> String {
         "go" | "golang" => "source/main.go".into(),
         "c" => "source/main.c".into(),
         "python" | "py" => "source/main.py".into(),
+        "ruby" | "rb" => "source/main.rb".into(),
         _ => "source/main.js".into(),
     }
 }
 
 /// Whether a language string names a non-JS/TS (native) language.
 fn is_native_lang(lang: &str) -> bool {
-    matches!(lang, "rust" | "go" | "golang" | "c" | "python" | "py")
+    matches!(
+        lang,
+        "rust" | "go" | "golang" | "c" | "python" | "py" | "ruby" | "rb"
+    )
 }
 
 /// Stub source file for a native language scaffold.
@@ -271,6 +279,10 @@ fn native_main_stub(lang: &str, namespace: &str, name: &str) -> String {
             "# {namespace}/{name}: an Afterburner package (Python -> wasm32-wasip1).\n\
              print(sum(range(1, 101)))\n"
         ),
+        "ruby" | "rb" => format!(
+            "# {namespace}/{name}: an Afterburner package (Ruby).\n\
+             puts (1..100).sum\n"
+        ),
         _ => format!("// {namespace}/{name}\n"),
     }
 }
@@ -285,10 +297,7 @@ fn native_build_file(lang: &str, name: &str) -> Option<(&'static str, String)> {
                 "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"{name}\"\npath = \"source/main.rs\"\n"
             ),
         )),
-        "go" | "golang" => Some((
-            "go.mod",
-            format!("module {name}\n\ngo 1.21\n"),
-        )),
+        "go" | "golang" => Some(("go.mod", format!("module {name}\n\ngo 1.21\n"))),
         _ => None,
     }
 }
@@ -446,11 +455,7 @@ fn scaffold(
         let src = native_main_stub(&eff_lang, namespace, name);
         write_new_file(&dir.join(&entry_path), src.as_bytes(), o.force)?;
         if let Some(build_file) = native_build_file(&eff_lang, name) {
-            write_new_file(
-                &dir.join(build_file.0),
-                build_file.1.as_bytes(),
-                o.force,
-            )?;
+            write_new_file(&dir.join(build_file.0), build_file.1.as_bytes(), o.force)?;
         }
     } else {
         write_new_file(
@@ -476,6 +481,8 @@ fn scaffold(
         template,
         capabilities: caps,
         namespace_is_placeholder: is_placeholder,
+        entry: default_entry_for_lang(&eff_lang),
+        lang: eff_lang,
     })
 }
 

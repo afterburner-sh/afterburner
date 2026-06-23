@@ -32,6 +32,7 @@ pub enum SourceLang {
     Go,
     C,
     Python,
+    Ruby,
 }
 
 impl FromStr for SourceLang {
@@ -46,6 +47,7 @@ impl FromStr for SourceLang {
     /// - `go`/`golang` -> `Go`
     /// - `c` -> `C`
     /// - `python`/`py` -> `Python`
+    /// - `ruby`/`rb` -> `Ruby`
     ///
     /// Any other value is a clear error naming the supported identifiers.
     fn from_str(s: &str) -> Result<Self> {
@@ -56,9 +58,10 @@ impl FromStr for SourceLang {
             "go" | "golang" => Ok(Self::Go),
             "c" => Ok(Self::C),
             "python" | "py" => Ok(Self::Python),
+            "ruby" | "rb" => Ok(Self::Ruby),
             other => anyhow::bail!(
                 "unsupported [package] language {other:?}; \
-                 supported values: js, javascript, ts, typescript, rust, go, golang, c, python, py"
+                 supported values: js, javascript, ts, typescript, rust, go, golang, c, python, py, ruby, rb"
             ),
         }
     }
@@ -71,11 +74,11 @@ impl SourceLang {
     }
 
     /// Whether this language can be shipped as source and interpreted at
-    /// runtime (JS/TS via the JS engine, Python via the CPython-WASI runtime).
+    /// runtime (JS/TS via the JS engine, Python and Ruby via WASI runtimes).
     /// Rust, Go, and C compile to WASM and have no source interpreter - they
     /// must be precompiled before packaging.
     pub fn is_interpretable(self) -> bool {
-        matches!(self, Self::Js | Self::Ts | Self::Python)
+        matches!(self, Self::Js | Self::Ts | Self::Python | Self::Ruby)
     }
 }
 
@@ -95,6 +98,7 @@ pub fn compile_native(lang: SourceLang, pkg_dir: &Path, entry: &str) -> Result<V
         SourceLang::Go => compile_go(pkg_dir, entry),
         SourceLang::C => compile_c(pkg_dir, entry),
         SourceLang::Python => compile_python(pkg_dir, entry),
+        SourceLang::Ruby => compile_ruby(pkg_dir, entry),
     }
 }
 
@@ -367,6 +371,22 @@ fn compile_python(_pkg_dir: &Path, _entry: &str) -> Result<Vec<u8>> {
     )
 }
 
+/// Ruby compile backend.
+///
+/// Ruby-WASM packaging requires the ruby.wasm runtime bundle (a WASM build
+/// of the CRuby interpreter). This payload is not yet bundled in
+/// afterburner. This function emits an honest, actionable error.
+///
+/// The structure is wired so that when the payload lands, only this function
+/// needs to change.
+fn compile_ruby(_pkg_dir: &Path, _entry: &str) -> Result<Vec<u8>> {
+    anyhow::bail!(
+        "Ruby packaging needs the ruby.wasm runtime payload (pending). \
+         Ruby-to-WASM support is wired but the ruby.wasm bundle \
+         is not yet included. Contributions welcome."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,12 +411,36 @@ mod tests {
 
     #[test]
     fn unknown_language_gives_clear_error() {
-        let err = SourceLang::from_str("ruby").unwrap_err();
+        let err = SourceLang::from_str("haskell").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("ruby"), "must name the unknown lang: {msg}");
+        assert!(msg.contains("haskell"), "must name the unknown lang: {msg}");
         assert!(msg.contains("rust"), "must list supported langs: {msg}");
         assert!(msg.contains("go"), "must list go: {msg}");
         assert!(msg.contains("python"), "must list python: {msg}");
+    }
+
+    #[test]
+    fn ruby_parses_correctly() {
+        assert_eq!(SourceLang::from_str("ruby").unwrap(), SourceLang::Ruby);
+        assert_eq!(SourceLang::from_str("rb").unwrap(), SourceLang::Ruby);
+        assert_eq!(SourceLang::from_str("Ruby").unwrap(), SourceLang::Ruby);
+    }
+
+    #[test]
+    fn ruby_is_interpretable() {
+        assert!(SourceLang::Ruby.is_interpretable());
+        assert!(!SourceLang::Ruby.is_js_family());
+    }
+
+    #[test]
+    fn ruby_backend_gives_honest_pending_error() {
+        use std::path::Path;
+        let err = compile_ruby(Path::new("/tmp"), "source/main.rb").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pending") || msg.contains("not yet"),
+            "must indicate pending: {msg}"
+        );
     }
 
     #[test]

@@ -326,6 +326,7 @@ fn compile_native_to_afb(
         SourceLang::Go => "Go",
         SourceLang::C => "C",
         SourceLang::Python => "Python",
+        SourceLang::Ruby => "Ruby",
         SourceLang::Js | SourceLang::Ts => unreachable!("JS/TS not handled here"),
     };
 

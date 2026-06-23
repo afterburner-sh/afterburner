@@ -531,7 +531,7 @@ pub struct ScaffoldArgs {
     pub ts: bool,
     /// Source language for the scaffolded package (default: `js`).
     /// Accepted values: `js`, `javascript`, `ts`, `typescript`, `rust`,
-    /// `go`, `golang`, `c`, `python`, `py`.
+    /// `go`, `golang`, `c`, `python`, `py`, `ruby`, `rb`.
     /// When set, overrides `--ts`.
     #[arg(long, value_name = "LANG")]
     pub lang: Option<String>,
