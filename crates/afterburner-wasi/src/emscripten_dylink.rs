@@ -126,7 +126,8 @@ pub fn prefill_got_func_globals(
 
 /// Write the known symbol addresses into every `GOT.mem.*` global.
 ///
-/// - `__heap_base` = `memory_base` + dylink.0 memory_size.
+/// - `__heap_base` = `memory_base` + dylink.0 memory_size + stack size (the
+///   heap starts past the stack region, never overlapping it).
 /// - `__stack_high` = `stack_high` (= WASM_STACK_BASE).
 /// - `__stack_low`  = `stack_high` - `WASM_STACK_SIZE`.
 pub fn prefill_got_mem_globals(
@@ -135,7 +136,12 @@ pub fn prefill_got_mem_globals(
     memory_base: u32,
     stack_high: u32,
 ) -> Result<()> {
-    let heap_base = memory_base + DYLINK_MEMORY_SIZE;
+    // Layout is: static data | stack | heap. The heap base must therefore be
+    // past BOTH the data and the stack region. The earlier formula stopped at
+    // the data end, which is exactly __stack_low - so malloc and the descending
+    // stack shared one region (~4.6-15.1 MB) and overwrote each other under
+    // load (deep recursion + a large heap), corrupting freshly-built data.
+    let heap_base = memory_base + DYLINK_MEMORY_SIZE + WASM_STACK_SIZE;
     let stack_low = stack_high.saturating_sub(WASM_STACK_SIZE);
 
     let pairs: &[(&str, u32)] = &[
