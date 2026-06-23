@@ -41,6 +41,22 @@ use super::daemon::{execute, script_label};
 // Import the SourceLang type for language-dispatch in `run_package_or_file`.
 use super::compile::lang::SourceLang;
 
+#[cfg(feature = "wasm")]
+use afterburner_wasi::embedder_vm::WasiCommandOpts;
+
+/// Extensions that are natively compiled to WASM and run directly,
+/// bypassing the JS engine.
+fn is_native_script(path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    matches!(
+        ext.as_deref(),
+        Some("rs" | "go" | "c" | "py" | "pyw" | "rb")
+    )
+}
+
 /// Recover a script's `process.argv[2..]` straight from the raw process
 /// argv, slicing everything after the FILE token.
 ///
@@ -193,7 +209,7 @@ fn resolve_package_lang_and_output(dir: &Path) -> Result<(String, String)> {
 #[cfg(feature = "wasm")]
 fn run_afb(afb_path: &Path, user_args: &[String]) -> Result<()> {
     use afterburner_cloud::afterburner_afb::Afb;
-    use afterburner_wasi::embedder_vm::{EmbedderVm, WasiCommandOpts};
+    use afterburner_wasi::embedder_vm::EmbedderVm;
 
     let bytes = fs::read(afb_path).with_context(|| format!("reading {}", afb_path.display()))?;
     let afb =
@@ -254,6 +270,152 @@ fn run_afb(afb_path: &Path, _user_args: &[String]) -> Result<()> {
     )
 }
 
+// ---- single-file native script runner ---------------------------------------
+
+/// Compile a bare native source file on-the-fly and run it as a WASI
+/// command module with capabilities derived from the CLI sandbox flags.
+///
+/// The extension declares the language (no afb.toml needed):
+/// `.rs` -> `rustc --target wasm32-wasip1`
+/// `.go` -> `GOOS=wasip1 GOARCH=wasm go build`
+/// `.c`  -> `clang --target=wasm32-wasi` (or `emcc`)
+/// `.py` / `.rb` -> honest "runtime not available" error
+///
+/// Sandbox posture: SEALED BY DEFAULT (no fs preopens, no net, no env).
+/// Grants are applied via the standard `--allow-*` / `-A` flags on the CLI.
+#[cfg(feature = "wasm")]
+fn run_native_script(cli: &Cli, path: &Path, user_args: &[String]) -> Result<()> {
+    use super::compile::lang::compile_single_file;
+    let abs = path
+        .canonicalize()
+        .with_context(|| format!("resolving path {}", path.display()))?;
+    let wasm_bytes = compile_single_file(&abs)?;
+    run_wasm_bytes(cli, &abs, &wasm_bytes, user_args)
+}
+
+#[cfg(not(feature = "wasm"))]
+fn run_native_script(_cli: &Cli, path: &Path, _user_args: &[String]) -> Result<()> {
+    anyhow::bail!(
+        "running native source files requires the `wasm` feature \
+         (rebuild with `--features wasm`). File: {}",
+        path.display()
+    )
+}
+
+/// Execute raw WASM bytes as a WASI command via `EmbedderVm::run_command`,
+/// wiring capabilities from the CLI sandbox flags.
+#[cfg(feature = "wasm")]
+fn run_wasm_bytes(cli: &Cli, path: &Path, wasm_bytes: &[u8], user_args: &[String]) -> Result<()> {
+    use afterburner_wasi::embedder_vm::EmbedderVm;
+
+    let vm = EmbedderVm::new().context("creating EmbedderVm")?;
+    let module = vm
+        .compile(wasm_bytes, true, |_| Ok(()))
+        .context("compiling WASM module")?;
+
+    let mut argv = vec![path.to_string_lossy().into_owned()];
+    argv.extend_from_slice(user_args);
+
+    let opts = wasi_opts_from_cli(cli, WasiCommandOpts::new().args(argv));
+
+    let output = vm
+        .run_command(&module, opts, None)
+        .context("running WASM command")?;
+
+    if !output.stdout.is_empty() {
+        use std::io::Write;
+        std::io::stdout()
+            .write_all(&output.stdout)
+            .context("writing WASM stdout")?;
+    }
+
+    let exit_code = output.result as i32;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
+/// Build `WasiCommandOpts` capability grants from the CLI sandbox flags.
+///
+/// Sealed by default (no grants). Each `--allow-*` flag adds its grant.
+/// `-A` / `--allow-all` grants: filesystem root (rw), current dir (rw),
+/// and inherits all current-process environment variables.
+#[cfg(feature = "wasm")]
+fn wasi_opts_from_cli(cli: &Cli, mut opts: WasiCommandOpts) -> WasiCommandOpts {
+    use super::manifold::parse_allow_list;
+
+    if cli.allow_all {
+        // Full access: preopen host root read-write as guest `/`.
+        // This covers all absolute paths the module might open.
+        // Forward all current-process environment variables too.
+        opts = opts.preopen_rw("/", "/");
+        for (k, v) in std::env::vars() {
+            opts = opts.env_var(k, v);
+        }
+        return opts;
+    }
+
+    // Granular grants from --allow-fs / --allow-fs-read / --allow-fs-write.
+    if let Some(s) = cli.allow_fs.as_deref() {
+        let paths = parse_allow_list(s);
+        let roots: Vec<String> = if paths.is_empty() || paths.iter().any(|p| p == "*") {
+            vec!["/".into()]
+        } else {
+            paths
+        };
+        for root in roots {
+            opts = opts.preopen_rw(&root, &root);
+        }
+    }
+    if let Some(s) = cli.allow_fs_read.as_deref() {
+        let paths = parse_allow_list(s);
+        let roots: Vec<String> = if paths.is_empty() || paths.iter().any(|p| p == "*") {
+            vec!["/".into()]
+        } else {
+            paths
+        };
+        for root in roots {
+            opts = opts.preopen_ro(&root, &root);
+        }
+    }
+    if let Some(s) = cli.allow_fs_write.as_deref() {
+        let paths = parse_allow_list(s);
+        let roots: Vec<String> = if paths.is_empty() || paths.iter().any(|p| p == "*") {
+            vec!["/".into()]
+        } else {
+            paths
+        };
+        for root in roots {
+            opts = opts.preopen_rw(&root, &root);
+        }
+    }
+
+    // --allow-env: forward the named env vars (or all on wildcard).
+    if let Some(s) = cli.allow_env.as_deref() {
+        let vars = parse_allow_list(s);
+        if vars.is_empty() || vars.iter().any(|v| v == "*") {
+            for (k, v) in std::env::vars() {
+                opts = opts.env_var(k, v);
+            }
+        } else {
+            for key in vars {
+                if let Ok(val) = std::env::var(&key) {
+                    opts = opts.env_var(key, val);
+                }
+            }
+        }
+    }
+
+    // NOTE: --allow-net / --allow-listen have no WASI equivalent at the
+    // embedder layer (WASI preview-1 has no network syscalls). Network
+    // access from native WASM would require the WASI sockets proposal
+    // (preview-2+), which is not wired here.
+    // vertexia: network grants for WASI command modules need wasi-sockets (preview-2)
+
+    opts
+}
+
 /// Resolve the entry file of the package rooted at `dir` from its
 /// `afb.toml`. Errors clearly when there is no package here.
 fn resolve_package_entry(dir: &std::path::Path) -> Result<PathBuf> {
@@ -285,6 +447,14 @@ fn resolve_package_entry(dir: &std::path::Path) -> Result<PathBuf> {
 }
 
 pub fn run_file(cli: &Cli, path: &PathBuf, user_args: &[String]) -> Result<()> {
+    // A bare native source file (.rs / .go / .c / .py / .rb) has no
+    // afb.toml: the extension IS the language declaration. Compile
+    // on-the-fly to WASM and run through the embedder with the
+    // capability set derived from the CLI sandbox flags.
+    if is_native_script(path) {
+        return run_native_script(cli, path, user_args);
+    }
+
     // Package-manager internals (npm/yarn/pnpm cli scripts re-entering
     // through the PATH shim) are host tooling, not user code: they need
     // fs/env/net to do their job, and a sealed run would brick `burn

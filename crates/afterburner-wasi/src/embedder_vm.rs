@@ -58,7 +58,14 @@ const DEFAULT_FUEL: u64 = 100_000_000;
 ///
 /// A WASI command module exports `_start` (signature `() -> ()`). It receives
 /// its arguments through `args_get` and its filesystem through preopened
-/// directories. `WasiCommandOpts` encapsulates both.
+/// directories. `WasiCommandOpts` encapsulates all of these plus optional
+/// environment variable grants.
+///
+/// ## Sandbox posture
+///
+/// By default (`WasiCommandOpts::new()`) no preopens are added and no env
+/// vars are forwarded - the module runs sealed: pure compute over stdin/args.
+/// Callers explicitly opt in to each capability.
 ///
 /// ## Example
 ///
@@ -67,21 +74,25 @@ const DEFAULT_FUEL: u64 = 100_000_000;
 ///
 /// let opts = WasiCommandOpts::new()
 ///     .args(["python", "-c", "print('hello from CPython')"])
-///     .preopen("/tmp/stdlib", "/usr/lib/python3.12");
+///     .preopen_ro("/tmp/stdlib", "/usr/lib/python3.12");
 /// ```
 #[derive(Debug, Default, Clone)]
 pub struct WasiCommandOpts {
     /// argv passed to the module via `args_get` / `args_sizes_get`.
     /// The first element is conventionally the program name (argv[0]).
     pub args: Vec<String>,
-    /// Pairs of (host_path, guest_path) preopened read-only into the
-    /// module's filesystem namespace. Python.wasm locates its stdlib
-    /// through a preopened directory.
-    pub preopens: Vec<(PathBuf, String)>,
+    /// Read-only preopens: (host_path, guest_path). Added with
+    /// `DirPerms::READ | FilePerms::READ`.
+    pub preopens_ro: Vec<(PathBuf, String)>,
+    /// Read-write preopens: (host_path, guest_path). Added with
+    /// `DirPerms::all() | FilePerms::all()`.
+    pub preopens_rw: Vec<(PathBuf, String)>,
+    /// Environment variables forwarded as `(key, value)` pairs.
+    pub env_vars: Vec<(String, String)>,
 }
 
 impl WasiCommandOpts {
-    /// Create empty options (no args, no preopens).
+    /// Create empty options (no args, no preopens, no env). Sealed posture.
     pub fn new() -> Self {
         Self::default()
     }
@@ -97,11 +108,38 @@ impl WasiCommandOpts {
         self
     }
 
-    /// Add a preopened directory. `host_path` must exist on the host;
-    /// `guest_path` is the path the module sees (e.g. `"/usr/lib/python3.12"`).
-    /// The directory is opened read-only.
-    pub fn preopen(mut self, host_path: impl Into<PathBuf>, guest_path: impl Into<String>) -> Self {
-        self.preopens.push((host_path.into(), guest_path.into()));
+    /// Add a read-only preopened directory. `host_path` must exist on the
+    /// host; `guest_path` is the path the module sees. The module can list
+    /// and read files but not create or write them.
+    pub fn preopen_ro(
+        mut self,
+        host_path: impl Into<PathBuf>,
+        guest_path: impl Into<String>,
+    ) -> Self {
+        self.preopens_ro.push((host_path.into(), guest_path.into()));
+        self
+    }
+
+    /// Backward-compatible alias: calls [`preopen_ro`][Self::preopen_ro].
+    pub fn preopen(self, host_path: impl Into<PathBuf>, guest_path: impl Into<String>) -> Self {
+        self.preopen_ro(host_path, guest_path)
+    }
+
+    /// Add a read-write preopened directory. The module can create, read,
+    /// and write files under this path.
+    pub fn preopen_rw(
+        mut self,
+        host_path: impl Into<PathBuf>,
+        guest_path: impl Into<String>,
+    ) -> Self {
+        self.preopens_rw.push((host_path.into(), guest_path.into()));
+        self
+    }
+
+    /// Forward an environment variable into the module's WASI env.
+    /// Repeatable; each call appends one `(key, value)` pair.
+    pub fn env_var(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env_vars.push((key.into(), value.into()));
         self
     }
 }
@@ -621,12 +659,27 @@ impl EmbedderVm {
             builder.args(&opts.args);
         }
 
-        for (host_path, guest_path) in &opts.preopens {
+        for (key, val) in &opts.env_vars {
+            builder.env(key, val);
+        }
+
+        for (host_path, guest_path) in &opts.preopens_ro {
             builder
                 .preopened_dir(host_path, guest_path, DirPerms::READ, FilePerms::READ)
                 .map_err(|e| {
                     AfterburnerError::Engine(format!(
-                        "embedder preopen {}: {e}",
+                        "embedder preopen-ro {}: {e}",
+                        host_path.display()
+                    ))
+                })?;
+        }
+
+        for (host_path, guest_path) in &opts.preopens_rw {
+            builder
+                .preopened_dir(host_path, guest_path, DirPerms::all(), FilePerms::all())
+                .map_err(|e| {
+                    AfterburnerError::Engine(format!(
+                        "embedder preopen-rw {}: {e}",
                         host_path.display()
                     ))
                 })?;
@@ -709,306 +762,4 @@ impl EmbedderVm {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Compile a WAT snippet to bytes inline - no external toolchain.
-    fn wat(src: &str) -> Vec<u8> {
-        wat::parse_str(src).expect("WAT parse")
-    }
-
-    /// The primary fixture: imports `host.value` (returns i64), exports
-    /// `run` computing `value() * 2 + 1`. Used by determinism and
-    /// correctness tests.
-    fn value_doubler_wat() -> Vec<u8> {
-        wat(r#"
-          (module
-            (import "host" "value" (func $v (result i64)))
-            (func (export "run") (result i64)
-              call $v
-              i64.const 2
-              i64.mul
-              i64.const 1
-              i64.add))
-        "#)
-    }
-
-    // ---- core correctness --------------------------------------------------
-
-    /// Embedder supplies host.value -> 21; module computes 21*2+1 = 43.
-    #[test]
-    fn embedder_host_import_value_computed_correctly() {
-        let vm = EmbedderVm::new().unwrap();
-        let module = vm
-            .compile(&value_doubler_wat(), false, |linker| {
-                linker.func_wrap("host", "value", || -> i64 { 21 })
-            })
-            .unwrap();
-        let out = vm.run(&module, "run", None).unwrap();
-        assert_eq!(out.result, 43);
-    }
-
-    // ---- determinism -------------------------------------------------------
-
-    /// Two calls with the same import produce byte-identical results.
-    #[test]
-    fn same_import_value_deterministic() {
-        let vm = EmbedderVm::new().unwrap();
-        let module = vm
-            .compile(&value_doubler_wat(), false, |linker| {
-                linker.func_wrap("host", "value", || -> i64 { 21 })
-            })
-            .unwrap();
-        let out1 = vm.run(&module, "run", None).unwrap().result;
-        let out2 = vm.run(&module, "run", None).unwrap().result;
-        assert_eq!(out1, out2, "identical import must produce identical output");
-        assert_eq!(out1, 43);
-    }
-
-    /// Different import value produces a different result (non-vacuous check:
-    /// the module is actually wired to the import, not returning a constant).
-    #[test]
-    fn different_import_value_produces_different_result() {
-        let vm = EmbedderVm::new().unwrap();
-
-        let mod21 = vm
-            .compile(&value_doubler_wat(), false, |linker| {
-                linker.func_wrap("host", "value", || -> i64 { 21 })
-            })
-            .unwrap();
-
-        let mod22 = vm
-            .compile(&value_doubler_wat(), false, |linker| {
-                linker.func_wrap("host", "value", || -> i64 { 22 })
-            })
-            .unwrap();
-
-        let r21 = vm.run(&mod21, "run", None).unwrap().result;
-        let r22 = vm.run(&mod22, "run", None).unwrap().result;
-
-        assert_eq!(r21, 43, "value 21 -> 43");
-        assert_eq!(r22, 45, "value 22 -> 45");
-        assert_ne!(r21, r22, "different imports must produce different results");
-    }
-
-    // ---- unsatisfied import ------------------------------------------------
-
-    /// A module whose import is not supplied by the embedder must fail loud
-    /// with a clear `AfterburnerError::Engine`, not silently succeed or panic.
-    #[test]
-    fn unsupplied_import_fails_loud() {
-        let vm = EmbedderVm::new().unwrap();
-        // Compile without wiring `host.value` - the linker callback is a no-op.
-        let result = vm.compile(&value_doubler_wat(), false, |_linker| Ok(()));
-        match result {
-            Err(AfterburnerError::Engine(msg)) => {
-                // wasmtime's instantiate_pre error names the missing import.
-                assert!(
-                    msg.contains("host") || msg.contains("value") || msg.contains("import"),
-                    "error message should name the missing import, got: {msg}"
-                );
-            }
-            Err(other) => panic!("expected Engine error, got: {other:?}"),
-            Ok(_) => panic!("expected error for unsatisfied import"),
-        }
-    }
-
-    // ---- fuel exhaustion ---------------------------------------------------
-
-    /// A module that loops forever is bounded by fuel, not by the OS.
-    #[test]
-    fn fuel_exhaustion_surfaces_as_typed_error() {
-        let vm = EmbedderVm::new().unwrap();
-        let module = vm
-            .compile(
-                &wat(r#"
-                  (module
-                    (func (export "run") (result i64)
-                      (loop $forever
-                        br $forever)
-                      i64.const 0))
-                "#),
-                false,
-                |_| Ok(()),
-            )
-            .unwrap();
-        let err = vm.run(&module, "run", Some(10_000)).unwrap_err();
-        assert!(
-            matches!(err, AfterburnerError::FuelExhausted),
-            "expected FuelExhausted, got {err:?}"
-        );
-    }
-
-    // ---- deterministic engine config ---------------------------------------
-
-    /// `deterministic_engine()` builds successfully and enforces the expected
-    /// flags: shared memory (requires threads) must fail to compile.
-    #[test]
-    fn deterministic_engine_config() {
-        let engine = deterministic_engine().expect("engine build");
-        // A trivial module must compile and run correctly.
-        let vm = EmbedderVm::new().unwrap();
-        let module = vm
-            .compile(
-                &wat("(module (func (export \"run\") (result i64) i64.const 42))"),
-                false,
-                |_| Ok(()),
-            )
-            .unwrap();
-        let out = vm.run(&module, "run", None).unwrap();
-        assert_eq!(out.result, 42, "trivial module must return 42");
-        // shared memory requires threads, which are disabled in the deterministic
-        // engine. Compilation must fail.
-        let shared_mem_wasm = wat("(module (memory $m 1 1 shared))");
-        let compile_err = wasmtime::Module::new(&engine, &shared_mem_wasm);
-        assert!(
-            compile_err.is_err(),
-            "shared memory module must fail to compile with threads disabled"
-        );
-    }
-
-    // ---- zero-import module ------------------------------------------------
-
-    /// A module with no imports exporting a function returning i64.const 42.
-    #[test]
-    fn zero_import_module_returns_42() {
-        let vm = EmbedderVm::new().unwrap();
-        let module = vm
-            .compile(
-                &wat("(module (func (export \"run\") (result i64) i64.const 42))"),
-                false,
-                |_| Ok(()),
-            )
-            .unwrap();
-        let out = vm.run(&module, "run", None).unwrap();
-        assert_eq!(out.result, 42);
-    }
-
-    // ---- host import substitution ------------------------------------------
-
-    /// A module that calls host.ping (side-effect) and host.value (returns i64).
-    /// Assert the ping counter is incremented and the result is forwarded.
-    #[test]
-    fn host_import_substitution_is_called() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicU32, Ordering},
-        };
-
-        let counter = Arc::new(AtomicU32::new(0));
-        let counter2 = counter.clone();
-
-        let vm = EmbedderVm::new().unwrap();
-        let module = vm
-            .compile(
-                &wat(r#"
-                  (module
-                    (import "host" "ping"  (func $ping))
-                    (import "host" "value" (func $value (result i64)))
-                    (func (export "run") (result i64)
-                      call $ping
-                      call $value))
-                "#),
-                false,
-                move |linker| {
-                    linker.func_wrap("host", "ping", move || {
-                        counter2.fetch_add(1, Ordering::SeqCst);
-                    })?;
-                    linker.func_wrap("host", "value", || -> i64 { 99 })
-                },
-            )
-            .unwrap();
-
-        let out = vm.run(&module, "run", None).unwrap();
-        assert_eq!(out.result, 99, "host.value must return 99");
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            1,
-            "host.ping must be called exactly once"
-        );
-    }
-
-    // ---- proc_exit path ----------------------------------------------------
-
-    /// A WASI command module that calls proc_exit(5); result must be 5.
-    #[test]
-    fn proc_exit_exit_code_surfaced() {
-        let vm = EmbedderVm::new().unwrap();
-        let module = vm
-            .compile(
-                &wat(r#"
-                  (module
-                    (import "wasi_snapshot_preview1" "proc_exit"
-                      (func $proc_exit (param i32)))
-                    (memory (export "memory") 1)
-                    (func (export "_start")
-                      i32.const 5
-                      call $proc_exit))
-                "#),
-                true,
-                |_| Ok(()),
-            )
-            .unwrap();
-        let out = vm
-            .run_command(&module, WasiCommandOpts::new(), None)
-            .unwrap();
-        assert_eq!(out.result, 5, "proc_exit(5) must surface as result == 5");
-    }
-
-    // ---- determinism: same module + fuel -----------------------------------
-
-    /// Two calls with value_doubler_wat and host.value=21 must both return 43.
-    #[test]
-    fn determinism_same_module_twice_identical() {
-        let vm = EmbedderVm::new().unwrap();
-        let module = vm
-            .compile(&value_doubler_wat(), false, |linker| {
-                linker.func_wrap("host", "value", || -> i64 { 21 })
-            })
-            .unwrap();
-        let out1 = vm.run(&module, "run", None).unwrap();
-        let out2 = vm.run(&module, "run", None).unwrap();
-        assert_eq!(out1.result, 43);
-        assert_eq!(out2.result, 43, "second run must be identical to the first");
-    }
-
-    // ---- WASI stdout -------------------------------------------------------
-
-    /// A module compiled with `wasi: true` can write to stdout and have
-    /// the bytes returned in `EmbedderRunOutput::stdout`.
-    #[test]
-    fn wasi_stdout_captured() {
-        // Module writes "hello" to fd 1 (stdout) via the WASI fd_write import,
-        // then returns 0. We compose the write manually in WAT:
-        // memory[0..5] = "hello"; iov[8..16] = ptr(0), len(5); fd_write(1, iov_ptr=8, 1, nwritten_ptr=16)
-        let vm = EmbedderVm::new().unwrap();
-        let module = vm
-            .compile(
-                &wat(r#"
-                  (module
-                    (import "wasi_snapshot_preview1" "fd_write"
-                      (func $fd_write (param i32 i32 i32 i32) (result i32)))
-                    (memory (export "memory") 1)
-                    (data (i32.const 0) "hello")
-                    (func (export "run") (result i64)
-                      ;; iovec: buf=0, buf_len=5 at offset 8
-                      i32.const 8   i32.const 0   i32.store
-                      i32.const 12  i32.const 5   i32.store
-                      ;; fd_write(fd=1, iovs_ptr=8, iovs_len=1, nwritten_ptr=16)
-                      i32.const 1
-                      i32.const 8
-                      i32.const 1
-                      i32.const 16
-                      call $fd_write
-                      drop
-                      i64.const 0))
-                "#),
-                true,
-                |_| Ok(()),
-            )
-            .unwrap();
-        let out = vm.run(&module, "run", None).unwrap();
-        assert_eq!(out.result, 0);
-        assert_eq!(out.stdout, b"hello");
-    }
-}
+mod tests;

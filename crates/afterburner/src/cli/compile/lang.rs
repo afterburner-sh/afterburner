@@ -102,6 +102,110 @@ pub fn compile_native(lang: SourceLang, pkg_dir: &Path, entry: &str) -> Result<V
     }
 }
 
+/// Compile a single bare source file (not a package) to a `wasm32-wasip1`
+/// WASI command module. The file's extension determines the language.
+///
+/// Supported extensions: `.rs` (via `rustc`), `.go` (via `go build`),
+/// `.c` (via `clang`/`emcc`). Returns an honest error for `.py`/`.rb`
+/// (runtime not bundled) and an error for any other extension.
+pub fn compile_single_file(source_path: &Path) -> Result<Vec<u8>> {
+    let ext = source_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("rs") => compile_single_file_rust(source_path),
+        Some("go") => compile_single_file_go(source_path),
+        Some("c") => compile_single_file_c(source_path),
+        Some("py" | "pyw") => anyhow::bail!(
+            "Python runtime not available: the CPython-WASI payload is not bundled. \
+             Install it and re-run, or use a Python package with `burn compile`."
+        ),
+        Some("rb") => anyhow::bail!(
+            "Ruby runtime not available: the ruby.wasm payload is not bundled. \
+             Install it and re-run, or use a Ruby package with `burn compile`."
+        ),
+        other => anyhow::bail!(
+            "cannot compile {:?}: unsupported extension {:?}",
+            source_path.display(),
+            other.unwrap_or("<none>")
+        ),
+    }
+}
+
+/// Compile a single `.rs` file to `wasm32-wasip1` via `rustc`.
+///
+/// Uses `rustc --edition 2021 --target wasm32-wasip1` directly, so no
+/// Cargo project is required. Clear remediation when `wasm32-wasip1` is
+/// not installed: `rustup target add wasm32-wasip1`.
+fn compile_single_file_rust(source_path: &Path) -> Result<Vec<u8>> {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let wasm_out = std::env::temp_dir().join(format!("burn-rs-{}.wasm", std::process::id()));
+
+    let status = std::process::Command::new(&rustc)
+        .args([
+            "--edition",
+            "2021",
+            "--target",
+            "wasm32-wasip1",
+            "-O",
+            source_path.to_str().unwrap_or(""),
+            "-o",
+            wasm_out.to_str().unwrap_or(""),
+        ])
+        .status()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "`rustc` was not found on PATH. \
+                     Install Rust from https://rustup.rs"
+                )
+            } else {
+                anyhow::anyhow!("spawning `rustc`: {e}")
+            }
+        })?;
+
+    if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        anyhow::bail!(
+            "`rustc --target wasm32-wasip1` exited with code {code}. \
+             If the target is missing: rustup target add wasm32-wasip1"
+        );
+    }
+
+    let bytes = std::fs::read(&wasm_out)
+        .with_context(|| format!("reading compiled Rust WASM {}", wasm_out.display()))?;
+    let _ = std::fs::remove_file(&wasm_out);
+    Ok(bytes)
+}
+
+/// Compile a single `.go` file to `wasm32-wasip1` WASM.
+///
+/// The parent directory is treated as the Go package directory so that
+/// local imports within the same directory resolve correctly.
+fn compile_single_file_go(source_path: &Path) -> Result<Vec<u8>> {
+    // The package dir is the directory containing the file.
+    let pkg_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
+    let entry = source_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    compile_go(pkg_dir, entry)
+}
+
+/// Compile a single `.c` file to `wasm32-wasi` WASM.
+///
+/// The parent directory is used as the working directory (for relative
+/// `#include` paths) and the file name as the entry.
+fn compile_single_file_c(source_path: &Path) -> Result<Vec<u8>> {
+    let pkg_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
+    let entry = source_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    compile_c(pkg_dir, entry)
+}
+
 /// Compile a Rust package to `wasm32-wasip1` via Cargo.
 ///
 /// Runs `cargo build --release --target wasm32-wasip1` inside `pkg_dir`.
@@ -472,6 +576,41 @@ mod tests {
         assert!(
             msg.contains("pending") || msg.contains("not yet"),
             "must indicate pending: {msg}"
+        );
+    }
+
+    // ---- compile_single_file dispatch -----------------------------------------
+
+    #[test]
+    fn single_file_py_gives_runtime_not_available() {
+        use std::path::Path;
+        let err = compile_single_file(Path::new("hello.py")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not available") || msg.contains("not bundled"),
+            "must say runtime not available: {msg}"
+        );
+    }
+
+    #[test]
+    fn single_file_rb_gives_runtime_not_available() {
+        use std::path::Path;
+        let err = compile_single_file(Path::new("hello.rb")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not available") || msg.contains("not bundled"),
+            "must say runtime not available: {msg}"
+        );
+    }
+
+    #[test]
+    fn single_file_unknown_extension_gives_clear_error() {
+        use std::path::Path;
+        let err = compile_single_file(Path::new("hello.haskell")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported") || msg.contains("haskell"),
+            "must name the unsupported extension: {msg}"
         );
     }
 }
