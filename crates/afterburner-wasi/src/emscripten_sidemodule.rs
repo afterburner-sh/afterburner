@@ -595,30 +595,69 @@ pub fn pre_load_side_module(
          main={got_func_from_main} zero={got_func_zero}"
     );
 
-    // Intersect name_to_slot with the module's actual exports to build
-    // func_table_slots. Functions not in the element segment (e.g. PyInit_*)
-    // are absent here; _dlsym_js inserts them on demand.
-    let func_table_slots: HashMap<String, u32> = module
+    // Build func_table_slots for every exported function:
+    //
+    // Phase A - element segment: if the export's func_index appears in the
+    //   element segment (via name_to_slot from parse_got_name_to_slot), record
+    //   the pre-placed slot directly.
+    //
+    // Phase B - eager insert: for exports NOT in the element segment (e.g.
+    //   PyInit_* which Emscripten keeps out of the table until dlopen time),
+    //   grow the shared table by 1, place the funcref there, and record the
+    //   slot. This mirrors what _dlsym_js does lazily but done up front so
+    //   path 1 (pre_slot) in _dlsym_js always hits.
+    //
+    // Exports that are internal helpers (__wasm_call_ctors, etc.) also get
+    // table slots here; they may be needed by indirect calls during ctors.
+    let Some(tbl) = store.data().pyodide_table else {
+        return Err(AfterburnerError::Engine(
+            "pre_load_side_module: pyodide_table missing for func_table_slots".into(),
+        ));
+    };
+
+    let exported_funcs: Vec<String> = module
         .exports()
-        .filter(|exp| matches!(exp.ty(), wasmtime::ExternType::Func(_)))
-        .filter_map(|exp| {
-            let name = exp.name().to_owned();
-            name_to_slot.get(&name).map(|&slot| (name, slot))
-        })
+        .filter(|e| matches!(e.ty(), wasmtime::ExternType::Func(_)))
+        .map(|e| e.name().to_owned())
         .collect();
+    let total_exports = exported_funcs.len();
+
+    let mut func_table_slots: HashMap<String, u32> = HashMap::with_capacity(total_exports);
+    let mut from_elem = 0usize;
+    let mut inserted = 0usize;
+
+    for name in &exported_funcs {
+        if let Some(&slot) = name_to_slot.get(name.as_str()) {
+            // Phase A: already placed by the element segment.
+            func_table_slots.insert(name.clone(), slot);
+            from_elem += 1;
+            continue;
+        }
+        // Phase B: not in element segment - insert into the shared table now.
+        let Some(func) = instance.get_func(&mut *store, name.as_str()) else {
+            continue;
+        };
+        let slot = tbl.size(&*store) as u32;
+        if tbl.grow(&mut *store, 1, wasmtime::Ref::Func(None)).is_err() {
+            continue;
+        }
+        if tbl
+            .set(&mut *store, slot as u64, wasmtime::Ref::Func(Some(func)))
+            .is_err()
+        {
+            continue;
+        }
+        func_table_slots.insert(name.clone(), slot);
+        inserted += 1;
+    }
+
     eprintln!(
-        "[sidemodule] {path}: {} export table slots resolved from element segment \
-         ({} exports total, {} not in table)",
+        "[sidemodule] {path}: {} export table slots resolved ({} from element segment, \
+         {} eagerly inserted) ({total_exports} exports total, {} not in table)",
         func_table_slots.len(),
-        module
-            .exports()
-            .filter(|e| matches!(e.ty(), wasmtime::ExternType::Func(_)))
-            .count(),
-        module
-            .exports()
-            .filter(|e| matches!(e.ty(), wasmtime::ExternType::Func(_)))
-            .count()
-            - func_table_slots.len(),
+        from_elem,
+        inserted,
+        total_exports - func_table_slots.len(),
     );
 
     // Call __wasm_apply_data_relocs AFTER updateGOT so it reads correct slot
@@ -699,7 +738,12 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                     eprintln!("[dlopen_js] cached dso_ptr={dso_ptr:#x} for '{name}'");
                     return handle_struct_ptr;
                 }
-                match caller.data().side_modules.find_by_path(&name).map(|(i, _)| i) {
+                match caller
+                    .data()
+                    .side_modules
+                    .find_by_path(&name)
+                    .map(|(i, _)| i)
+                {
                     Some(idx) => {
                         // Mirror Emscripten LDSO: key = raw DSO struct pointer.
                         // _dlsym_js will be called with the same pointer.

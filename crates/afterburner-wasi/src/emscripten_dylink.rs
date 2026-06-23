@@ -54,7 +54,7 @@
 use std::collections::HashMap;
 
 use afterburner_core::{AfterburnerError, Result};
-use wasmparser::{ElementItems, ElementKind, Name, Operator, Parser, Payload};
+use wasmparser::{ElementItems, ElementKind, ExternalKind, Name, Operator, Parser, Payload};
 use wasmtime::{
     ExternType, Func, FuncType, Global, Instance, Linker, Module, Mutability, Ref, Store, Val,
 };
@@ -257,20 +257,27 @@ pub fn resolve_got_func(
 /// Emscripten SIDE_MODULE structure:
 /// - Name section "functions" subsection: `func_index -> name` for every
 ///   function in the module (imports included, starting at index 0).
+/// - Export section: `func_index -> export_name` for exported functions.
+///   Used as a fallback when no name section is present (stripped production
+///   builds omit the name section, but the export section is always present).
 /// - One active element segment targeting table 0 with offset
 ///   `global.get $__table_base` (= `table_base`) followed by a list of function
 ///   indices. Position `k` in the list maps to table slot `table_base + k`.
 ///
-/// Compose: `name -> func_index` (name section) + `func_index -> table_slot`
-/// (element segment, inverted) = `name -> table_slot`.
+/// Compose: `name -> func_index` (name or export section) + `func_index ->
+/// table_slot` (element segment, inverted) = `name -> table_slot`.
+///
+/// The name section wins over the export section when both name a function:
+/// the name section may contain internal (non-exported) functions, while the
+/// export section only covers public exports.
 ///
 /// `table_base` must match the value passed to `wire_env_memory_and_table_in_store`
 /// (conventionally 1 for Emscripten SIDE_MODULEs).
 ///
-/// Resolution is best-effort: names absent from the name section or not placed
-/// in any element segment are not present in the returned map.
+/// Resolution is best-effort: names absent from both the name section and the
+/// export section, or not placed in any element segment, are not in the output.
 pub fn parse_got_name_to_slot(wasm: &[u8], table_base: u32) -> HashMap<String, u32> {
-    // func_index -> name (from name section, subsection 1 = functions).
+    // func_index -> name: name section wins; export section fills missing entries.
     let mut func_names: HashMap<u32, String> = HashMap::new();
     // func_index -> table_slot (inverted element segment).
     let mut func_to_slot: HashMap<u32, u32> = HashMap::new();
@@ -283,6 +290,9 @@ pub fn parse_got_name_to_slot(wasm: &[u8], table_base: u32) -> HashMap<String, u
         match payload {
             Payload::CustomSection(cs) if cs.name() == "name" => {
                 parse_name_section(cs.data(), cs.data_offset(), &mut func_names);
+            }
+            Payload::ExportSection(reader) => {
+                parse_export_section_for_func_names(reader, &mut func_names);
             }
             Payload::ElementSection(reader) => {
                 parse_element_section(reader, table_base, &mut func_to_slot);
@@ -300,6 +310,23 @@ pub fn parse_got_name_to_slot(wasm: &[u8], table_base: u32) -> HashMap<String, u
         }
     }
     out
+}
+
+/// Populate `func_index -> name` from the export section for func exports.
+///
+/// Only fills entries not already present (name section wins). This handles
+/// the common case of stripped side modules that have no name section.
+fn parse_export_section_for_func_names(
+    reader: wasmparser::ExportSectionReader<'_>,
+    out: &mut HashMap<u32, String>,
+) {
+    for export in reader.into_iter().flatten() {
+        if export.kind == ExternalKind::Func {
+            // Name section wins; only insert if not already present.
+            out.entry(export.index)
+                .or_insert_with(|| export.name.to_owned());
+        }
+    }
 }
 
 /// Parse the name-section bytes (already extracted from the custom section).
