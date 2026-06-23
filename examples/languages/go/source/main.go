@@ -1,4 +1,4 @@
-// Polyglot example: Go compiled to wasm32-wasip1.
+// Polyglot example: Go on burn.
 // Prints: "go: sum(1..=100)=5050 fib(20)=6765"
 package main
 

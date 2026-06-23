@@ -1,4 +1,4 @@
-# Polyglot example: Ruby running on ruby.wasm (CRuby compiled to WASI).
+# Polyglot example: Ruby on burn.
 # Prints: "ruby: sum(1..=100)=5050 fib(20)=6765"
 
 def fib(n)
