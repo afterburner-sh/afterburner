@@ -1,5 +1,4 @@
-# SPDX-License-Identifier: BUSL-1.1
-# Polyglot demo - Python running on CPython-WASM.
+# Polyglot example: Python running on CPython-WASM.
 # Prints: "python: sum(1..=100)=5050 fib(20)=6765"
 
 

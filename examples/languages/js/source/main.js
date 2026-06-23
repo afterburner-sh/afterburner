@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
-// Polyglot demo - JavaScript compiled to wasm32-wasip1 via Javy.
+// Polyglot example: JavaScript run via the burn script engine.
 // Prints: "js: sum(1..=100)=5050 fib(20)=6765"
 
 function fib(n) {
@@ -16,5 +15,4 @@ function fib(n) {
 let sum = 0;
 for (let i = 1; i <= 100; i++) sum += i;
 
-const line = `js: sum(1..=100)=${sum} fib(20)=${fib(20)}\n`;
-Javy.IO.writeSync(1, new TextEncoder().encode(line));
+console.log(`js: sum(1..=100)=${sum} fib(20)=${fib(20)}`);

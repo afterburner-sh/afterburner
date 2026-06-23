@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
-// Polyglot demo - Rust compiled to wasm32-wasip1.
+// Polyglot example: Rust compiled to wasm32-wasip1.
 // Prints: "rust: sum(1..=100)=5050 fib(20)=6765"
 
 fn fib(n: u64) -> u64 {

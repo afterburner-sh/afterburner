@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
-// Polyglot demo - Go compiled to wasip1/wasm.
+// Polyglot example: Go compiled to wasm32-wasip1.
 // Prints: "go: sum(1..=100)=5050 fib(20)=6765"
 package main
 
