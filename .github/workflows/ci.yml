@@ -114,6 +114,14 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6]
     steps:
+      # Archive-run needs the source tree (for --workspace-remap) and a
+      # toolchain (cargo drives nextest); the binaries come from the archive,
+      # so nothing is recompiled here.
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip1
+          rustflags: ''
       - uses: actions/download-artifact@v4
         with:
           name: nextest-wasi-archive
@@ -125,6 +133,7 @@ jobs:
         run: >-
           cargo nextest run
           --archive-file ${{ runner.temp }}/nextest-wasi.tar.zst
+          --workspace-remap .
           --partition count:${{ matrix.shard }}/6
           --no-fail-fast
 
@@ -134,6 +143,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip1
+          rustflags: ''
       - uses: actions/download-artifact@v4
         with:
           name: nextest-wasi-archive
@@ -177,6 +191,7 @@ jobs:
         run: >-
           cargo nextest run
           --archive-file ${{ runner.temp }}/nextest-wasi.tar.zst
+          --workspace-remap .
           --run-ignored ignored-only
           -E 'test(/pyodide|integration/)'
           --no-fail-fast
