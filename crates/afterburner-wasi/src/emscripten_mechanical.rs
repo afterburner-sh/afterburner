@@ -846,24 +846,22 @@ pub fn wire_pyodide028_env_stubs(
     //   Grows linear memory to at least `requested_size` bytes. Returns 1 on
     //   success, 0 if the grow is refused. Uses EmbedderState::pyodide_memory
     //   because Emscripten modules import (not export) their memory.
-    def!(
-        "emscripten_resize_heap",
-        |mut caller: Caller<'_, EmbedderState>, requested: i32| -> i32 {
-            let Some(memory) = caller.data().pyodide_memory else {
-                return 0;
-            };
-            let current = memory.data_size(&caller);
-            let wanted = requested as u32 as usize;
-            if wanted <= current {
-                return 1;
-            }
-            let pages = (wanted - current).div_ceil(65_536) as u64;
-            match memory.grow(&mut caller, pages) {
-                Ok(_) => 1,
-                Err(_) => 0,
-            }
+    fn emscripten_resize_heap(mut caller: Caller<'_, EmbedderState>, requested: i32) -> i32 {
+        let Some(memory) = caller.data().pyodide_memory else {
+            return 0;
+        };
+        let current = memory.data_size(&caller);
+        let wanted = requested as u32 as usize;
+        if wanted <= current {
+            return 1;
         }
-    );
+        let pages = (wanted - current).div_ceil(65_536) as u64;
+        match memory.grow(&mut caller, pages) {
+            Ok(_) => 1,
+            Err(_) => 0,
+        }
+    }
+    def!("emscripten_resize_heap", emscripten_resize_heap);
     // emscripten_get_heap_max() -> i32
     //   Returns the maximum byte size the heap may grow to. Used by the
     //   Emscripten allocator to decide whether to attempt a grow.
