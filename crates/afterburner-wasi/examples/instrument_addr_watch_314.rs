@@ -32,10 +32,125 @@ use wasmparser::{GlobalSectionReader, Operator, Parser, Payload, TypeRef};
 
 const DEFAULT_INPUT: &str = "/tmp/pyodide-314-exnref.wasm";
 const DEFAULT_OUTPUT: &str = "/tmp/pyodide-314-addrwatch.wasm";
-const RING: u32 = 0x1B0_0000;
+/// Ring base at 44 MiB, ABOVE the guest heap usage (~31 MiB), so the ring does
+/// not corrupt the live guest heap. Requires the probe to pre-grow memory
+/// (BURN_PREGROW_PAGES) so the address is committed. (Was 0x1B00000, which sat
+/// inside the guest heap and perturbed the very allocations under study.)
+const RING: u32 = 0x2C0_0000;
 const RING_CAP: i32 = 256;
 const G_VAL: u32 = 1426;
 const G_ADDR: u32 = 1427;
+const G_LEN: u32 = 1428;
+/// i64 scratch for round-tripping an `i64.store` value (the 8-byte PyObject
+/// header refcnt+type can be written as one i64.store, which an i32-only watch
+/// misses). Index 1429, appended after the three i32 scratch globals.
+const G_I64: u32 = 1429;
+
+/// Record `(func, tag_or_val, addr)` into the ring for a bulk-memory write whose
+/// destination range intersects the watched window. The ring layout matches the
+/// i32.store path: entry = { func, val, addr }; here `addr` is the bulk dest and
+/// the tag (0xF111_0000 fill / 0xF222_0000 copy) is OR-ed into the val slot.
+fn bulk_record(f: &mut Function, combined_idx: i32, tag: i32, push_val: impl Fn(&mut Function)) {
+    let ma = MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    };
+    // head++
+    f.instruction(&Instruction::I32Const(RING as i32));
+    f.instruction(&Instruction::I32Const(RING as i32));
+    f.instruction(&Instruction::I32Load(ma));
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::I32Store(ma));
+    let entry_base = |f: &mut Function| {
+        f.instruction(&Instruction::I32Const(RING as i32));
+        f.instruction(&Instruction::I32Load(ma));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I32Const(RING_CAP));
+        f.instruction(&Instruction::I32RemU);
+        f.instruction(&Instruction::I32Const(12));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::I32Const(RING as i32 + 8));
+        f.instruction(&Instruction::I32Add);
+    };
+    entry_base(f);
+    f.instruction(&Instruction::I32Const(combined_idx));
+    f.instruction(&Instruction::I32Store(ma));
+    // val slot = tag | (pushed value & 0xFF)
+    entry_base(f);
+    f.instruction(&Instruction::I32Const(tag));
+    push_val(f);
+    f.instruction(&Instruction::I32Const(0xFF));
+    f.instruction(&Instruction::I32And);
+    f.instruction(&Instruction::I32Or);
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
+    // addr slot = G_ADDR (bulk dest)
+    entry_base(f);
+    f.instruction(&Instruction::GlobalGet(G_ADDR));
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 8,
+        align: 2,
+        memory_index: 0,
+    }));
+}
+
+/// Record an `i64.store` whose 8-byte range intersects the window. func slot is
+/// OR-ed with 0x8000_0000 (the i64.store marker); val slot = hi32 of the stored
+/// i64 (the type slot when the store base is obj+0); addr slot = effective addr
+/// (in G_ADDR). G_I64 holds the stored i64 value.
+fn i64_record(f: &mut Function, combined_idx: i32) {
+    let ma = MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    };
+    f.instruction(&Instruction::I32Const(RING as i32));
+    f.instruction(&Instruction::I32Const(RING as i32));
+    f.instruction(&Instruction::I32Load(ma));
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::I32Add);
+    f.instruction(&Instruction::I32Store(ma));
+    let entry_base = |f: &mut Function| {
+        f.instruction(&Instruction::I32Const(RING as i32));
+        f.instruction(&Instruction::I32Load(ma));
+        f.instruction(&Instruction::I32Const(1));
+        f.instruction(&Instruction::I32Sub);
+        f.instruction(&Instruction::I32Const(RING_CAP));
+        f.instruction(&Instruction::I32RemU);
+        f.instruction(&Instruction::I32Const(12));
+        f.instruction(&Instruction::I32Mul);
+        f.instruction(&Instruction::I32Const(RING as i32 + 8));
+        f.instruction(&Instruction::I32Add);
+    };
+    entry_base(f);
+    f.instruction(&Instruction::I32Const(
+        combined_idx | (0x8000_0000u32 as i32),
+    ));
+    f.instruction(&Instruction::I32Store(ma));
+    entry_base(f);
+    f.instruction(&Instruction::GlobalGet(G_I64));
+    f.instruction(&Instruction::I64Const(32));
+    f.instruction(&Instruction::I64ShrU);
+    f.instruction(&Instruction::I32WrapI64);
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 4,
+        align: 2,
+        memory_index: 0,
+    }));
+    entry_base(f);
+    f.instruction(&Instruction::GlobalGet(G_ADDR));
+    f.instruction(&Instruction::I32Store(MemArg {
+        offset: 8,
+        align: 2,
+        memory_index: 0,
+    }));
+}
 
 fn main() {
     let input = std::env::var("BURN_INPUT_WASM").unwrap_or_else(|_| DEFAULT_INPUT.to_owned());
@@ -136,7 +251,13 @@ impl Reencode for AddrWatch {
         while !reader.eof() {
             let op = reader.read().map_err(ReencodeError::ParseError)?;
             match op {
-                Operator::I32Store { memarg } => {
+                // i32.store / store8 / store16: stack [addr_base, value]. All write
+                // at least one byte at addr_base+off; record if eff in [lo,hi). A
+                // byte/halfword store can zero a header field without a full
+                // i32.store, so all three are watched.
+                Operator::I32Store { memarg }
+                | Operator::I32Store8 { memarg }
+                | Operator::I32Store16 { memarg } => {
                     let off = memarg.offset as i32;
                     // stack: [.., addr_base, value] -> stash both into globals.
                     f.instruction(&Instruction::GlobalSet(G_VAL)); // pop value
@@ -197,7 +318,106 @@ impl Reencode for AddrWatch {
                     f.instruction(&Instruction::I32Const(off));
                     f.instruction(&Instruction::I32Sub);
                     f.instruction(&Instruction::GlobalGet(G_VAL));
-                    let enc = self.instruction(Operator::I32Store { memarg })?;
+                    // Re-emit the ORIGINAL op (i32.store / store8 / store16), not a
+                    // hardcoded i32.store, so a byte/halfword store keeps its width.
+                    let enc = self.instruction(op)?;
+                    f.instruction(&enc);
+                    self.instrumented += 1;
+                }
+                // i64.store: stack [addr_base, value(i64)]. Writes 8 bytes at
+                // [addr_base+off .. +8). If the watched window intersects that
+                // range, record (func, 0xF644_0000 | hi32_lowbyte, addr_base+off)
+                // and the full hi/lo via two ring entries. The PyObject header
+                // (refcnt at +0, type at +4) can be written as one i64.store, so
+                // an i32-only watch would miss a type-field write done this way.
+                Operator::I64Store { memarg } => {
+                    let off = memarg.offset as i32;
+                    f.instruction(&Instruction::GlobalSet(G_I64)); // i64 value
+                    f.instruction(&Instruction::GlobalSet(G_ADDR)); // addr_base
+                    // eff = addr_base + off
+                    f.instruction(&Instruction::GlobalGet(G_ADDR));
+                    f.instruction(&Instruction::I32Const(off));
+                    f.instruction(&Instruction::I32Add);
+                    f.instruction(&Instruction::GlobalSet(G_ADDR));
+                    // intersect [eff, eff+8) with [lo,hi): eff < hi && eff+8 > lo
+                    f.instruction(&Instruction::GlobalGet(G_ADDR));
+                    f.instruction(&Instruction::I32Const(self.watch_hi));
+                    f.instruction(&Instruction::I32LtU);
+                    f.instruction(&Instruction::GlobalGet(G_ADDR));
+                    f.instruction(&Instruction::I32Const(8));
+                    f.instruction(&Instruction::I32Add);
+                    f.instruction(&Instruction::I32Const(self.watch_lo));
+                    f.instruction(&Instruction::I32GtU);
+                    f.instruction(&Instruction::I32And);
+                    f.instruction(&Instruction::If(BlockType::Empty));
+                    // record the FULL hi32 of the i64 (= bytes at eff+4, i.e. the
+                    // type slot when eff==obj+0). func is OR-ed with 0x8000_0000 as
+                    // an "i64.store" marker; val slot = hi32; addr slot = eff.
+                    i64_record(&mut f, combined_idx);
+                    f.instruction(&Instruction::End);
+                    // restore [addr_base, value]; addr_base = eff - off
+                    f.instruction(&Instruction::GlobalGet(G_ADDR));
+                    f.instruction(&Instruction::I32Const(off));
+                    f.instruction(&Instruction::I32Sub);
+                    f.instruction(&Instruction::GlobalGet(G_I64));
+                    let enc = self.instruction(op)?;
+                    f.instruction(&enc);
+                    self.instrumented += 1;
+                }
+                // memory.fill: stack [dest, val, len]. If the watched window
+                // intersects [dest, dest+len), record (func, 0xF111_<val8>, dest).
+                // This catches a header field zeroed by a bulk memset, which an
+                // i32.store-only watch misses.
+                Operator::MemoryFill { .. } => {
+                    f.instruction(&Instruction::GlobalSet(G_LEN)); // len
+                    f.instruction(&Instruction::GlobalSet(G_VAL)); // val
+                    f.instruction(&Instruction::GlobalSet(G_ADDR)); // dest
+                    // intersect [dest,dest+len) with [lo,hi):  dest < hi && dest+len > lo
+                    f.instruction(&Instruction::GlobalGet(G_ADDR));
+                    f.instruction(&Instruction::I32Const(self.watch_hi));
+                    f.instruction(&Instruction::I32LtU);
+                    f.instruction(&Instruction::GlobalGet(G_ADDR));
+                    f.instruction(&Instruction::GlobalGet(G_LEN));
+                    f.instruction(&Instruction::I32Add);
+                    f.instruction(&Instruction::I32Const(self.watch_lo));
+                    f.instruction(&Instruction::I32GtU);
+                    f.instruction(&Instruction::I32And);
+                    f.instruction(&Instruction::If(BlockType::Empty));
+                    bulk_record(&mut f, combined_idx, 0xF111_0000u32 as i32, |f| {
+                        f.instruction(&Instruction::GlobalGet(G_VAL));
+                    });
+                    f.instruction(&Instruction::End);
+                    f.instruction(&Instruction::GlobalGet(G_ADDR));
+                    f.instruction(&Instruction::GlobalGet(G_VAL));
+                    f.instruction(&Instruction::GlobalGet(G_LEN));
+                    let enc = self.instruction(op)?;
+                    f.instruction(&enc);
+                    self.instrumented += 1;
+                }
+                // memory.copy: stack [dest, src, len]. If the watched window
+                // intersects [dest, dest+len), record (func, 0xF222_0000, src).
+                Operator::MemoryCopy { .. } => {
+                    f.instruction(&Instruction::GlobalSet(G_LEN)); // len
+                    f.instruction(&Instruction::GlobalSet(G_VAL)); // src
+                    f.instruction(&Instruction::GlobalSet(G_ADDR)); // dest
+                    f.instruction(&Instruction::GlobalGet(G_ADDR));
+                    f.instruction(&Instruction::I32Const(self.watch_hi));
+                    f.instruction(&Instruction::I32LtU);
+                    f.instruction(&Instruction::GlobalGet(G_ADDR));
+                    f.instruction(&Instruction::GlobalGet(G_LEN));
+                    f.instruction(&Instruction::I32Add);
+                    f.instruction(&Instruction::I32Const(self.watch_lo));
+                    f.instruction(&Instruction::I32GtU);
+                    f.instruction(&Instruction::I32And);
+                    f.instruction(&Instruction::If(BlockType::Empty));
+                    bulk_record(&mut f, combined_idx, 0xF222_0000u32 as i32, |f| {
+                        f.instruction(&Instruction::GlobalGet(G_VAL));
+                    });
+                    f.instruction(&Instruction::End);
+                    f.instruction(&Instruction::GlobalGet(G_ADDR));
+                    f.instruction(&Instruction::GlobalGet(G_VAL));
+                    f.instruction(&Instruction::GlobalGet(G_LEN));
+                    let enc = self.instruction(op)?;
                     f.instruction(&enc);
                     self.instrumented += 1;
                 }
@@ -219,7 +439,8 @@ impl Reencode for AddrWatch {
         for g in section {
             self.parse_global(globals, g.map_err(ReencodeError::ParseError)?)?;
         }
-        for _ in 0..2 {
+        // Scratch globals: G_VAL, G_ADDR, G_LEN (i32; 1426-1428) + G_I64 (i64; 1429).
+        for _ in 0..3 {
             globals.global(
                 wasm_encoder::GlobalType {
                     val_type: ValType::I32,
@@ -229,6 +450,14 @@ impl Reencode for AddrWatch {
                 &wasm_encoder::ConstExpr::i32_const(0),
             );
         }
+        globals.global(
+            wasm_encoder::GlobalType {
+                val_type: ValType::I64,
+                mutable: true,
+                shared: false,
+            },
+            &wasm_encoder::ConstExpr::i64_const(0),
+        );
         Ok(())
     }
 }

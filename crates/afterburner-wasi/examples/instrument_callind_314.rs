@@ -37,7 +37,7 @@ const DEFAULT_OUTPUT: &str = "/tmp/pyodide-314-callind.wasm";
 /// Scratch base in guest linear memory. 314 grows memory well past this on a
 /// 480-page (30 MiB) initial; the probe pre-grows enough. Use a high, unused
 /// static address (just below the probe's 0x1C0_0000 store ring).
-const SCRATCH: u32 = 0x1BF_0000;
+const SCRATCH: u32 = 0x2E0_0000;
 const MAGIC: i32 = 0xCA11_1DCAu32 as i32;
 
 /// Appended scratch global index = total globals in the 314 module (280 imported

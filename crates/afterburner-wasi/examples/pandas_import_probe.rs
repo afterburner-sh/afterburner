@@ -601,6 +601,25 @@ fn run_probe() -> String {
         }
     }
 
+    // BURN_PREGROW_PAGES: grow the guest linear memory by N pages right after
+    // instantiation so an instrumentation ring placed at a high fixed address
+    // (well above the guest's actual heap usage, ~31 MiB for `import operator`)
+    // is NOT inside the live guest heap. The guest's allocator tracks its own
+    // break and only grows to what it needs, so these high pages stay unclaimed
+    // and a ring there records faithfully without corrupting guest state.
+    if let Ok(p) = std::env::var("BURN_PREGROW_PAGES")
+        && let Ok(n) = p.trim().parse::<u64>()
+        && let Some(mem) = store.data().pyodide_memory
+    {
+        match mem.grow(&mut store, n) {
+            Ok(prev) => eprintln!(
+                "[pandas_probe] pre-grew memory by {n} pages (prev={prev} -> {} pages)",
+                prev + n
+            ),
+            Err(e) => eprintln!("[pandas_probe] WARN pre-grow {n} pages failed: {e}"),
+        }
+    }
+
     // Initialize the C-stack bookkeeping BEFORE relocs/ctors (see numpy probe).
     if let Some(func) = instance.get_func(&mut store, "emscripten_stack_init") {
         if let Err(e) = func.call(&mut store, &[], &mut []) {
@@ -753,6 +772,34 @@ fn run_probe() -> String {
                 if hits.len() >= 40 { " (capped)" } else { "" },
                 hits
             );
+        }
+    }
+
+    // instrument_bigmalloc_314 ring (head at 0x3000000): sizes of every malloc
+    // request above the threshold. A MemoryError with no real OOM means the guest
+    // asked for an absurd size; this names it. Dumped on BOTH success and failure
+    // paths (a MemoryError surfaces as a clean Python exception, not a trap).
+    if std::env::var("BURN_DUMP_BIGMALLOC").is_ok()
+        && let Some(mem) = store.data().pyodide_memory
+    {
+        let d = mem.data(&store);
+        let rd = |off: usize| -> u32 {
+            if off + 4 <= d.len() {
+                u32::from_le_bytes([d[off], d[off + 1], d[off + 2], d[off + 3]])
+            } else {
+                0
+            }
+        };
+        let ring = 0x300_0000usize;
+        let head = rd(ring);
+        eprintln!("[bigmalloc] {head} large allocation requests:");
+        let cap = 256u32;
+        let shown = head.min(cap);
+        let start = head.saturating_sub(shown);
+        for i in start..head {
+            let slot = (i % cap) as usize;
+            let sz = rd(ring + 8 + slot * 4);
+            eprintln!("  [{i}] malloc size = {sz} ({sz:#x})");
         }
     }
 
@@ -933,6 +980,27 @@ fn run_pandas_phase(
             // records the offending call_indirect index + caller here).
             if let Some(mem) = store.data().pyodide_memory {
                 let d = mem.data(&*store);
+                eprintln!(
+                    "[mem] committed linear memory at trap = {} bytes ({} pages, {:#x})",
+                    d.len(),
+                    d.len() / 65536,
+                    d.len()
+                );
+                // Highest non-zero word, to bound the guest heap extent. Scan from
+                // the top down so diagnostic rings can be placed safely above it.
+                {
+                    let mut hi = 0usize;
+                    let mut a = d.len().saturating_sub(4);
+                    let floor = a.saturating_sub(40 * 1024 * 1024);
+                    while a > floor {
+                        if d[a] != 0 || d[a + 1] != 0 || d[a + 2] != 0 || d[a + 3] != 0 {
+                            hi = a;
+                            break;
+                        }
+                        a -= 4;
+                    }
+                    eprintln!("[mem] highest non-zero word (top 40MiB scan) at {hi:#x}");
+                }
                 let rd = |off: usize| -> u32 {
                     if off + 4 <= d.len() {
                         u32::from_le_bytes([d[off], d[off + 1], d[off + 2], d[off + 3]])
@@ -947,7 +1015,7 @@ fn run_pandas_phase(
                 // {func,val,addr} at +8): the write history of the watched object
                 // header. Shows who last wrote (and zeroed) the corrupt PyObject.
                 {
-                    let ring = 0x1B0_0000usize;
+                    let ring = 0x2C0_0000usize;
                     let head = rd(ring);
                     if head > 0 {
                         let cap = 256u32;
@@ -959,10 +1027,25 @@ fn run_pandas_phase(
                         for i in start..head {
                             let slot = (i % cap) as usize;
                             let e = ring + 8 + slot * 12;
+                            let fraw = rd(e + 4);
+                            let func = rd(e);
+                            // An i64.store is marked by bit 31 of the func slot;
+                            // its val slot holds the FULL hi32 of the stored i64
+                            // (the type word when the store base is obj+0). Bulk
+                            // ops are tagged 0xF111_00xx (fill) / 0xF222_00xx (copy)
+                            // in the val slot (low byte = fill byte / copy src low).
+                            let (kind, func_idx, val) = if func & 0x8000_0000 != 0 {
+                                ("i64.store", func & 0x7FFF_FFFF, fraw)
+                            } else {
+                                let k = match fraw & 0xFFFF_0000 {
+                                    0xF111_0000 => "memory.fill",
+                                    0xF222_0000 => "memory.copy",
+                                    _ => "i32.store",
+                                };
+                                (k, func, fraw)
+                            };
                             eprintln!(
-                                "  [{i}] func={} val={:#x} addr={:#x}",
-                                rd(e),
-                                rd(e + 4),
+                                "  [{i}] func={func_idx} {kind} val={val:#x} addr={:#x}",
                                 rd(e + 8)
                             );
                         }
@@ -984,7 +1067,7 @@ fn run_pandas_phase(
                         }
                     );
                 }
-                let cs = 0x1BF_0000usize;
+                let cs = 0x2E0_0000usize;
                 if rd(cs) == 0xCA11_1DCA {
                     eprintln!(
                         "[callind314] magic set: index={} caller_func={} callsite_ordinal={}",
@@ -1059,6 +1142,136 @@ fn run_pandas_phase(
                         eprintln!("[oob]   obj+488 = {p488:#x}");
                         if p488 != 0 {
                             dump(p488, "obj+488 target");
+                        }
+                    }
+                }
+
+                // instrument_typezero_314 ring (head at 0x1A80000): every write
+                // (i32.store / store8/16 / memory.fill / memory.copy) that touched
+                // the single watched byte, with the storing func index. Names the
+                // exact instruction that zeroes the double-freed object's type.
+                {
+                    let ring = 0x2A0_0000usize;
+                    let head = rd(ring);
+                    if head > 0 {
+                        let cap = 256u32;
+                        let shown = head.min(cap);
+                        let start = head.saturating_sub(shown);
+                        eprintln!("[typezero] {head} writes to watched byte; last {shown}:");
+                        for i in start..head {
+                            let slot = (i % cap) as usize;
+                            let e = ring + 8 + slot * 12;
+                            let tag = rd(e + 4);
+                            let tname = match tag {
+                                1 => "i32.store",
+                                2 => "i64.store",
+                                3 => "i32.store8",
+                                4 => "i32.store16",
+                                5 => "memory.fill",
+                                6 => "memory.copy",
+                                7 => "memory.init",
+                                _ => "?",
+                            };
+                            eprintln!("  [{i}] func={} {tname} val/src={:#x}", rd(e), rd(e + 8));
+                        }
+                    }
+                }
+
+                // instrument_immortal_314 ring (head at 0x1A00000): unified
+                // SetImmortal (kind=1) + Dealloc (kind=2) event log. The last
+                // dealloc is the trapping object; scan the ring to report whether
+                // that exact object was ever immortalized (refcnt -> 0x50000000)
+                // or stayed mortal. Find the FIRST wrong value (Step 1).
+                {
+                    let ring = 0x280_0000usize;
+                    let head = rd(ring);
+                    if head > 0 {
+                        let cap = 4096u32;
+                        let ebytes = 20usize;
+                        let shown = head.min(cap);
+                        let start = head.saturating_sub(shown);
+                        let ev = |i: u32| -> (u32, u32, u32, u32, u32) {
+                            let slot = (i % cap) as usize;
+                            let e = ring + 8 + slot * ebytes;
+                            (rd(e), rd(e + 4), rd(e + 8), rd(e + 12), rd(e + 16))
+                        };
+                        eprintln!(
+                            "[immortal] {head} events ({shown} retained); kind1=SetImmortal kind2=Dealloc"
+                        );
+                        // Identify the trapping object: the LAST dealloc event.
+                        let mut trap_obj = 0u32;
+                        for i in (start..head).rev() {
+                            let (k, obj, _a, _b, _c) = ev(i);
+                            if k == 2 {
+                                trap_obj = obj;
+                                break;
+                            }
+                        }
+                        eprintln!("[immortal] trapping object (last dealloc) = {trap_obj:#x}");
+                        // Full history of the trapping object across the ring.
+                        eprintln!("[immortal] history of object {trap_obj:#x}:");
+                        let mut immortalized = false;
+                        for i in start..head {
+                            let (k, obj, a, b, c) = ev(i);
+                            if obj != trap_obj {
+                                continue;
+                            }
+                            match k {
+                                1 => {
+                                    immortalized = true;
+                                    eprintln!(
+                                        "  [{i}] SetImmortal obj={obj:#x} refcnt_before={a:#x} \
+                                         runtime_ptr={b:#x} interp_ptr={c:#x}"
+                                    );
+                                }
+                                3 => eprintln!(
+                                    "  [{i}] long_dealloc obj={obj:#x} lv_tag={a:#x} \
+                                     immortal_bit={b:#x} ob_type={c:#x}"
+                                ),
+                                _ => eprintln!(
+                                    "  [{i}] Dealloc     obj={obj:#x} ob_type={a:#x} refcnt={b:#x}"
+                                ),
+                            }
+                        }
+                        eprintln!(
+                            "[immortal] VERDICT: trapping object {trap_obj:#x} was {} immortalized",
+                            if immortalized { "EVER" } else { "NEVER" }
+                        );
+                        // The first few SetImmortal events: confirm immortalization
+                        // runs at all + what runtime/interp pointer it reads.
+                        let mut shown_imm = 0;
+                        eprintln!("[immortal] first SetImmortal events (runtime/interp ptr read):");
+                        for i in start..head {
+                            let (k, obj, a, b, c) = ev(i);
+                            if k == 1 {
+                                eprintln!(
+                                    "  [{i}] obj={obj:#x} refcnt_before={a:#x} runtime_ptr={b:#x} interp_ptr={c:#x}"
+                                );
+                                shown_imm += 1;
+                                if shown_imm >= 8 {
+                                    break;
+                                }
+                            }
+                        }
+                        let imm_total = (start..head).filter(|&i| ev(i).0 == 1).count();
+                        let deal_total = (start..head).filter(|&i| ev(i).0 == 2).count();
+                        eprintln!(
+                            "[immortal] totals (retained window): SetImmortal={imm_total} Dealloc={deal_total}"
+                        );
+                        // Tail of events around the trap (last 24).
+                        eprintln!("[immortal] last 24 events before trap:");
+                        let tail_start = head.saturating_sub(24);
+                        for i in tail_start..head {
+                            let (k, obj, a, b, c) = ev(i);
+                            match k {
+                                1 => eprintln!(
+                                    "  [{i}] IMM  obj={obj:#x} rc_before={a:#x} rt={b:#x} interp={c:#x}"
+                                ),
+                                3 => eprintln!(
+                                    "  [{i}] LDEA obj={obj:#x} lv_tag={a:#x} imm_bit={b:#x} type={c:#x}"
+                                ),
+                                _ => eprintln!("  [{i}] FREE obj={obj:#x} type={a:#x} rc={b:#x}"),
+                            }
                         }
                     }
                 }
