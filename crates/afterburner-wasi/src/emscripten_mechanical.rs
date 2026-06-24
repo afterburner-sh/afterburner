@@ -435,51 +435,14 @@ pub(crate) fn wire_mechanical_env_funcs(
         Err(wasmtime::Trap::UnreachableCodeReached.into())
     });
 
-    // ---- mmap / munmap (i64 offset - not expressible via def_syscall!) ------
-
-    linker
-        .func_wrap(
-            "env",
-            "_mmap_js",
-            |_: Caller<'_, EmbedderState>,
-             _l: i32,
-             _p: i32,
-             _f: i32,
-             _fd: i32,
-             _o: i64,
-             _al: i32,
-             _a: i32|
-             -> i32 { -1 },
-        )
-        .map_err(|e| AfterburnerError::Engine(format!("_mmap_js: {e}")))?;
-    linker
-        .func_wrap(
-            "env",
-            "_munmap_js",
-            |_: Caller<'_, EmbedderState>,
-             _a: i32,
-             _l: i32,
-             _p: i32,
-             _f: i32,
-             _fd: i32,
-             _o: i64|
-             -> i32 { -1 },
-        )
-        .map_err(|e| AfterburnerError::Engine(format!("_munmap_js: {e}")))?;
-    linker
-        .func_wrap(
-            "env",
-            "_msync_js",
-            |_: Caller<'_, EmbedderState>,
-             _a: i32,
-             _l: i32,
-             _p: i32,
-             _f: i32,
-             _fd: i32,
-             _o: i64|
-             -> i32 { -1 },
-        )
-        .map_err(|e| AfterburnerError::Engine(format!("_msync_js: {e}")))?;
+    // ---- libffi (ctypes) + mmap host functions ------------------------------
+    //
+    // `_mmap_js` / `_munmap_js` / `_msync_js` (i64 offset, not expressible via
+    // def_syscall!) and the five `ffi_*` imports share ONE implementation in
+    // `emscripten_ffi`. Wiring here keeps this bring-up path (used by the import
+    // probes) in sync with the production `pyodide_runner` boot path, which calls
+    // `wire_emscripten_ffi` directly. One canonical libffi/mmap host bridge.
+    crate::emscripten_ffi::wire_emscripten_ffi(engine, linker)?;
 
     // ---- time/locale stubs --------------------------------------------------
 
@@ -732,28 +695,7 @@ pub(crate) fn wire_mechanical_env_funcs(
         });
     }
 
-    // ---- libffi JS bridge ---------------------------------------------------
-
-    def!("ffi_call_js", |_: Caller<'_, EmbedderState>,
-                         _cif: i32,
-                         _fn: i32,
-                         _rv: i32,
-                         _av: i32| {});
-    def!("ffi_closure_alloc_js", |_: Caller<'_, EmbedderState>,
-                                  _sz: i32,
-                                  _code: i32|
-     -> i32 { 0 });
-    def!(
-        "ffi_closure_free_js",
-        |_: Caller<'_, EmbedderState>, _ptr: i32| {}
-    );
-    def!("ffi_prep_closure_loc_js", |_: Caller<'_, EmbedderState>,
-                                     _c: i32,
-                                     _cif: i32,
-                                     _fun: i32,
-                                     _u: i32,
-                                     _loc: i32|
-     -> i32 { 1 });
+    // ---- libffi JS bridge: wired above via emscripten_ffi -------------------
 
     // ---- hiwire / proxy cache (non-externref variants) ----------------------
 

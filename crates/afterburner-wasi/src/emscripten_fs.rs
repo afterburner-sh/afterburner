@@ -628,6 +628,35 @@ impl InMemFs {
         }
     }
 
+    /// Write `src` at `offset` into the file referenced by `fd`, WITHOUT
+    /// advancing the fd's offset (positional write, like pwrite(2)). Extends the
+    /// file with zero fill if `offset` is past the current end. Returns bytes
+    /// written, or a negative errno. Used by `msync` to flush a writable
+    /// file-backed mapping back to its file.
+    pub fn pwrite(&mut self, fd: i32, src: &[u8], offset: u64) -> i32 {
+        let fd_usize = fd as usize;
+        if fd_usize >= self.fds.len() {
+            return EBADF;
+        }
+        let path = match &self.fds[fd_usize] {
+            None => return EBADF,
+            Some(e) => e.path.clone(),
+        };
+        match self.nodes.get_mut(&path) {
+            None => ENOENT,
+            Some(FsNode::Dir) => EISDIR,
+            Some(FsNode::File(data)) => {
+                let start = offset as usize;
+                let end = start + src.len();
+                if end > data.len() {
+                    data.resize(end, 0);
+                }
+                data[start..end].copy_from_slice(src);
+                src.len() as i32
+            }
+        }
+    }
+
     /// Return true if `fd` is a valid open fd referencing a filesystem node
     /// (i.e. fd >= 3 and has an entry). Used by WASI shims to decide whether
     /// to delegate to the MEMFS or handle as stdin/stdout/stderr.

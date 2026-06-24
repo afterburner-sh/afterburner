@@ -332,6 +332,13 @@ pub struct EmbedderState {
     /// on-demand `_dlopen_js` loading can wire env.* imports of new side
     /// modules against both the main instance and already-loaded side modules.
     pub main_instance: Option<wasmtime::Instance>,
+    /// Indirect-function-table slot indices freed by `ffi_closure_free_js`,
+    /// reused by `ffi_closure_alloc_js` before growing the table. Mirrors
+    /// Emscripten libffi's `freeTableIndexes` (see [`crate::emscripten_ffi`]): a
+    /// closure's trampoline table slot is recycled, not leaked, so repeated
+    /// ctypes closure alloc/free cycles do not grow the table without bound.
+    /// A plain `Vec` is correct here: the store is single-threaded.
+    pub ffi_free_slots: Vec<u32>,
 }
 
 impl EmbedderState {
@@ -355,6 +362,7 @@ impl EmbedderState {
             fs_path_log: std::collections::VecDeque::new(),
             side_modules: SideModuleRegistry::new(),
             main_instance: None,
+            ffi_free_slots: Vec::new(),
         }
     }
 
@@ -390,6 +398,7 @@ impl EmbedderState {
             fs_path_log: std::collections::VecDeque::new(),
             side_modules: SideModuleRegistry::new(),
             main_instance: None,
+            ffi_free_slots: Vec::new(),
         }
     }
 
@@ -419,6 +428,7 @@ impl EmbedderState {
             fs_path_log: std::collections::VecDeque::new(),
             side_modules: SideModuleRegistry::new(),
             main_instance: None,
+            ffi_free_slots: Vec::new(),
         }
     }
 
@@ -669,6 +679,7 @@ impl EmbedderVm {
                 fs_path_log: std::collections::VecDeque::new(),
                 side_modules: SideModuleRegistry::new(),
                 main_instance: None,
+                ffi_free_slots: Vec::new(),
             }
         } else {
             EmbedderState {
@@ -688,6 +699,7 @@ impl EmbedderVm {
                 fs_path_log: std::collections::VecDeque::new(),
                 side_modules: SideModuleRegistry::new(),
                 main_instance: None,
+                ffi_free_slots: Vec::new(),
             }
         };
 
@@ -838,6 +850,7 @@ impl EmbedderVm {
             fs_path_log: std::collections::VecDeque::new(),
             side_modules: SideModuleRegistry::new(),
             main_instance: None,
+            ffi_free_slots: Vec::new(),
         };
 
         let mut store = Store::new(&module.engine, state);

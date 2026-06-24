@@ -40,6 +40,7 @@ pub mod embedder_vm;
 pub mod emscripten_abi;
 pub mod emscripten_dylink;
 pub mod emscripten_exnref;
+pub mod emscripten_ffi;
 pub mod emscripten_fs;
 pub mod emscripten_invoke;
 pub mod emscripten_jsffi;

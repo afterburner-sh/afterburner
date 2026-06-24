@@ -240,6 +240,12 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
             };
             pyo_trace!("[fd_write] fd={fd} iov[{i}] buf_ptr={buf_ptr:#x} buf_len={buf_len}");
             if fd == 1 || fd == 2 {
+                // Opt-in: mirror guest stdout/stderr to the host so a fatal error
+                // that traps before the runner reads back wasi_stdout is still
+                // visible. Diagnostic only; gated off by default.
+                if std::env::var_os("BURN_GUEST_ECHO").is_some() {
+                    eprint!("{}", String::from_utf8_lossy(&chunk));
+                }
                 caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
             } else if caller.data().fs.is_fs_fd(fd) {
                 // Write to the MEMFS file opened by __syscall_openat.

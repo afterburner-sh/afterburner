@@ -54,15 +54,14 @@ const PYODIDE_FUEL: u64 = 500_000_000_000;
 /// Guest mount paths for the Python stdlib, derived from the interpreter's
 /// `X.Y` version (e.g. `"3.14"` -> `/lib/python314.zip` + `/lib/python3.14`).
 ///
-/// The version comes from `BURN_PYTHON_STDLIB_VER` (default `3.13`, the Pyodide
-/// 0.28.x interpreter) so a single boot path serves any Pyodide release: CPython
-/// searches `sys.prefix/lib/pythonXY.zip` and `sys.prefix/lib/pythonX.Y/`, so the
-/// stdlib must be mounted under the exact version directory the binary was built
-/// for. The version is external knowledge (which Pyodide release), not derivable
-/// from the flat stdlib zip, so it is a parameter rather than a hardcoded
-/// constant.
-fn python_stdlib_mount_paths() -> (String, String) {
-    let ver = std::env::var("BURN_PYTHON_STDLIB_VER").unwrap_or_else(|_| "3.13".to_owned());
+/// The version comes from the runtime descriptor (`PyRuntime::python_xy`), so a
+/// 3.14 runtime mounts the 3.14 stdlib automatically with no configuration:
+/// CPython searches `sys.prefix/lib/pythonXY.zip` and `sys.prefix/lib/pythonX.Y/`,
+/// so the stdlib must be mounted under the exact version directory the binary was
+/// built for. `BURN_PYTHON_STDLIB_VER` stays as an explicit override for a custom
+/// runtime whose stdlib version differs from the descriptor.
+fn python_stdlib_mount_paths(python_xy: &str) -> (String, String) {
+    let ver = std::env::var("BURN_PYTHON_STDLIB_VER").unwrap_or_else(|_| python_xy.to_owned());
     let flat = ver.replace('.', "");
     (
         format!("/lib/python{flat}.zip"),
@@ -368,6 +367,11 @@ fn boot_pyodide_instance(
     let mech_log = MechCallLog::new();
     wire_fs_env_funcs(&mut linker, mech_log)?;
     wire_pyodide028_env_stubs(&engine, &mut linker)?;
+    // libffi (ctypes) + file-backed mmap host functions. Wired before the no-op
+    // fill so ctypes-linking modules (`_ctypes`, used by polars._cpu_check,
+    // numpy._core._internal, pandas) get a working ffi_closure_alloc / ffi_call
+    // instead of a NULL-returning no-op stub (which surfaces as MemoryError).
+    crate::emscripten_ffi::wire_emscripten_ffi(&engine, &mut linker)?;
 
     // sentinel stubs (exnref-translated binary).
     let is_ty = FuncType::new(&engine, [ValType::EXTERNREF], [ValType::I32]);
@@ -440,7 +444,7 @@ fn boot_pyodide_instance(
 
     // Mount stdlib zip under the interpreter's version-specific guest paths.
     if let Ok(zip_bytes) = std::fs::read(&rt.stdlib_path) {
-        let (zip_mount, dir_mount) = python_stdlib_mount_paths();
+        let (zip_mount, dir_mount) = python_stdlib_mount_paths(&rt.python_xy);
         store
             .data_mut()
             .fs
@@ -831,6 +835,15 @@ fn run_pyodide_core(
         wasmtime::Val::I32(v) => v,
         _ => -99,
     };
+
+    // Determinism probe: print fuel consumed (set budget minus remaining) when
+    // BURN_FUEL_REPORT is set. The engine runs with consume_fuel(true), so this
+    // is an exact, reproducible instruction count for a deterministic run.
+    if std::env::var_os("BURN_FUEL_REPORT").is_some()
+        && let Ok(remaining) = store.get_fuel()
+    {
+        eprintln!("[fuel] consumed={}", PYODIDE_FUEL.saturating_sub(remaining));
+    }
 
     Ok(PyodideRunOutput {
         stdout: captured_stdout(&store),
