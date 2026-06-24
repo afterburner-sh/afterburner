@@ -46,8 +46,8 @@ pub fn run(_cli: &Cli) -> Result<()> {
     use super::{Flow, read_loop};
     use std::cell::RefCell;
 
-    let runtime = afterburner_wasi::pyodide_runner::resolve_runtime()
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let runtime =
+        afterburner_wasi::pyodide_runner::resolve_runtime().map_err(|e| anyhow::anyhow!("{e}"))?;
     style::repl_banner_lang(env!("CARGO_PKG_VERSION"), "python");
     eprintln!(
         "  {}",
@@ -138,8 +138,8 @@ pub fn run(_cli: &Cli) -> Result<()> {
 #[cfg(feature = "wasm")]
 fn run_program(rt: &afterburner_wasi::pyodide_runner::PyRuntime, program: &str) -> Result<String> {
     use afterburner_wasi::pyodide_runner::run_pyodide_with;
-    let out = run_pyodide_with(rt, program)
-        .map_err(|e| anyhow::anyhow!("python runtime error: {e}"))?;
+    let out =
+        run_pyodide_with(rt, program).map_err(|e| anyhow::anyhow!("python runtime error: {e}"))?;
     // A non-zero exit means the program raised; surface its stderr-shaped
     // output (CPython writes tracebacks to stdout under `-c` here) as an error.
     if out.exit_code != 0 {
