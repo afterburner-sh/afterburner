@@ -1206,7 +1206,12 @@ fn plugin_cwasm_cache_path(engine: &Engine) -> Option<std::path::PathBuf> {
 /// cannot be created or (on Unix) is not a directory we own with the
 /// expected mode - in which case the caller cold-compiles instead of
 /// trusting a directory it cannot vouch for.
-fn private_cache_dir() -> Option<std::path::PathBuf> {
+///
+/// `pub(crate)` so the one secure-cache-dir policy is shared: both the
+/// plugin `.cwasm` cache here and the deterministic embedder's on-disk
+/// wasmtime compile cache (see [`crate::embedder_vm::deterministic_engine`])
+/// root in the *same* owner-only directory rather than each rolling its own.
+pub(crate) fn private_cache_dir() -> Option<std::path::PathBuf> {
     let base = std::env::temp_dir();
     if base.as_os_str().is_empty() {
         return None;

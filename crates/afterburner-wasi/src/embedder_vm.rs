@@ -36,7 +36,8 @@
 
 use crate::emscripten_fs::InMemFs;
 use crate::emscripten_sidemodule::SideModuleRegistry;
-use afterburner_core::{AfterburnerError, Result};
+use afterburner_core::log::Level;
+use afterburner_core::{AfterburnerError, Result, ab_event};
 use std::path::PathBuf;
 use std::sync::Arc;
 use wasmtime::{
@@ -164,6 +165,28 @@ impl WasiCommandOpts {
 ///   path hosts short-lived modules with embedder-supplied imports, not the
 ///   long-lived plugin. Fuel is sufficient and simpler; pooling is worth the
 ///   configuration cost only for the plugin's large linear-memory image.
+///
+/// ## On-disk compile cache (determinism-neutral)
+///
+/// Wasmtime's built-in compilation cache ([`Config::cache`]) is installed
+/// rooted at the owner-only [`crate::wasm_engine::private_cache_dir`]. The
+/// first compile of a runtime module (the ~25-34 MiB CRuby / Pyodide wasm, or
+/// any numpy `.so` side module) runs Cranelift and writes the native artifact;
+/// every later compile of byte-identical input reuses it and skips Cranelift,
+/// turning the multi-second cold compile into a near-instant load. So a repeat
+/// `burn run x.rb` / `x.py` pays the compile once, not every run.
+///
+/// This changes nothing about execution. The cache is keyed by the module
+/// bytes **plus this exact `Config` plus the wasmtime version** (wasmtime folds
+/// all three into the entry key), so any change to a deterministic flag above,
+/// or a wasmtime bump, lands on a fresh key and the old entry is simply never
+/// read - no manual invalidation. The stored artifact is the same native code
+/// Cranelift would emit cold; NaN canonicalization, threads-off, relaxed-SIMD
+/// determinism, and fuel metering are all inputs to the key, not things the
+/// cache can alter. A warm run is therefore byte-identical (output and fuel) to
+/// a cold one. Cache init failure is downgraded to a warning and the engine
+/// runs without it - the cache is an optimisation, never a correctness
+/// dependency, and never a determinism one.
 pub fn deterministic_engine() -> Result<Engine> {
     let mut cfg = Config::new();
     cfg.cranelift_opt_level(OptLevel::Speed)
@@ -192,7 +215,47 @@ pub fn deterministic_engine() -> Result<Engine> {
         .wasm_exceptions(true)
         // Always capture Wasm backtraces so the probe can print trap frames.
         .wasm_backtrace_details(WasmBacktraceDetails::Enable);
+
+    // On-disk compile cache (see the doc above). Added strictly after the
+    // deterministic flags so they are part of the cache key, never altered by
+    // it. Mirrors `wasm_engine::build_engine`'s wiring; failure is a warning,
+    // the engine runs cache-less rather than failing the run.
+    install_compile_cache(&mut cfg);
+
     Engine::new(&cfg).map_err(|e| AfterburnerError::Engine(format!("embedder engine: {e}")))
+}
+
+/// Install wasmtime's on-disk compilation cache on `cfg`, rooted at the
+/// owner-only [`crate::wasm_engine::private_cache_dir`].
+///
+/// Best-effort: if no private cache directory is available, or the cache fails
+/// to initialise, the engine simply compiles cold every time. The cache is an
+/// optimisation, never a correctness or determinism dependency, so every
+/// failure path is a warning, not an error. Sharing `private_cache_dir` keeps
+/// one owner-only cache root for the whole crate (the plugin `.cwasm` cache
+/// uses the same directory).
+fn install_compile_cache(cfg: &mut Config) {
+    let Some(dir) = crate::wasm_engine::private_cache_dir() else {
+        ab_event!(
+            Level::Debug,
+            "embedder.compile_cache_disabled",
+            "reason" => "no private cache directory",
+        );
+        return;
+    };
+    let mut cache_config = wasmtime::CacheConfig::new();
+    cache_config.with_directory(&dir);
+    match wasmtime::Cache::new(cache_config) {
+        Ok(cache) => {
+            cfg.cache(Some(cache));
+        }
+        Err(e) => ab_event!(
+            Level::Warn,
+            "embedder.compile_cache_disabled",
+            "dir" => dir.display().to_string(),
+            "error" => e.to_string(),
+        ),
+    }
 }
 
 // ---- internal store-data type ------------------------------------------------

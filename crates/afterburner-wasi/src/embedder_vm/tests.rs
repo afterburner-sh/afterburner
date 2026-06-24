@@ -396,3 +396,106 @@ fn env_var_forwarded_into_wasm_module() {
         "env var must be present in opts.env_vars"
     );
 }
+
+// ---- on-disk compile cache: determinism-neutral ------------------------
+
+/// Build the exact deterministic `Config` of [`deterministic_engine`] but root
+/// the on-disk compile cache at `dir` instead of the shared per-uid directory.
+/// Lets a test populate, then hit, a cache hermetically (its own tempdir) and
+/// prove a cache hit executes byte-identically to a cold compile.
+///
+/// Mirrors `deterministic_engine`'s flags one-for-one; if that profile changes,
+/// this must change with it (the test would otherwise compile a different
+/// module than production and stop guarding the real artifact).
+fn engine_with_cache_dir(dir: &std::path::Path) -> Engine {
+    let mut cfg = Config::new();
+    cfg.cranelift_opt_level(OptLevel::Speed)
+        .cranelift_nan_canonicalization(true)
+        .wasm_relaxed_simd(true)
+        .relaxed_simd_deterministic(true)
+        .wasm_threads(false)
+        .consume_fuel(true)
+        .wasm_function_references(true)
+        .wasm_gc(true)
+        .wasm_exceptions(true)
+        .wasm_backtrace_details(WasmBacktraceDetails::Enable);
+    let mut cache_config = wasmtime::CacheConfig::new();
+    cache_config.with_directory(dir);
+    let cache = wasmtime::Cache::new(cache_config).expect("build cache at tempdir");
+    cfg.cache(Some(cache));
+    Engine::new(&cfg).expect("engine with cache")
+}
+
+/// Compile `wasm` on `engine`, run its `run` export (host.value -> 21) with a
+/// fixed fuel budget, and return `(result, fuel_consumed)`. The fuel consumed
+/// is `budget - remaining`, so it is the exact instruction count the compiled
+/// code burned - the sharpest determinism signal we can read.
+fn run_and_measure_fuel(engine: &Engine, wasm: &[u8], budget: u64) -> (i64, u64) {
+    let module = Module::new(engine, wasm).expect("compile module");
+    let mut linker: Linker<EmbedderState> = Linker::new(engine);
+    linker
+        .func_wrap("host", "value", || -> i64 { 21 })
+        .expect("wire host.value");
+    let instance_pre = linker.instantiate_pre(&module).expect("instantiate_pre");
+
+    let mut store = Store::new(engine, EmbedderState::headless());
+    store.set_fuel(budget).expect("set_fuel");
+    let instance = instance_pre.instantiate(&mut store).expect("instantiate");
+    let func = instance
+        .get_typed_func::<(), i64>(&mut store, "run")
+        .expect("typed run");
+    let result = func.call(&mut store, ()).expect("call run");
+    let remaining = store.get_fuel().expect("get_fuel");
+    (result, budget - remaining)
+}
+
+/// The on-disk compile cache must be determinism-neutral: a warm run (the
+/// module loaded from a cached native artifact) produces output and a fuel
+/// count byte-identical to a cold run (the module freshly Cranelift-compiled).
+///
+/// Method: two independent engines share one hermetic tempdir cache. The first
+/// engine compiles cold and populates the cache; the second loads the cached
+/// artifact (a different `Engine`, same compatibility key, so it is a hit -
+/// the cache is keyed by module bytes + `Config` + wasmtime version, all
+/// identical here). If the cached code path differed in any observable way the
+/// result or the fuel count would diverge; we assert both match exactly.
+#[test]
+fn compile_cache_is_determinism_neutral() {
+    const FUEL: u64 = 1_000_000;
+    let wasm = value_doubler_wat();
+    let dir = tempfile::tempdir().expect("tempdir for cache");
+
+    // Cold: this engine Cranelift-compiles and writes the artifact.
+    let cold_engine = engine_with_cache_dir(dir.path());
+    let (cold_result, cold_fuel) = run_and_measure_fuel(&cold_engine, &wasm, FUEL);
+
+    // Warm: a fresh engine over the SAME cache dir loads the cached artifact.
+    let warm_engine = engine_with_cache_dir(dir.path());
+    let (warm_result, warm_fuel) = run_and_measure_fuel(&warm_engine, &wasm, FUEL);
+
+    assert_eq!(cold_result, 43, "value_doubler: 21*2+1 == 43");
+    assert_eq!(
+        warm_result, cold_result,
+        "cached run output must be byte-identical to the cold run"
+    );
+    assert_eq!(
+        warm_fuel, cold_fuel,
+        "cached run must burn the exact same fuel as the cold run \
+         (cache stores the native artifact only; execution semantics are unchanged)"
+    );
+}
+
+/// `deterministic_engine` builds and works whether or not a shared private
+/// cache directory is available: the cache is best-effort, never a hard
+/// dependency. A module compiled on it still runs correctly.
+#[test]
+fn deterministic_engine_runs_with_shared_cache() {
+    let vm = EmbedderVm::new().expect("EmbedderVm::new wires deterministic_engine + cache");
+    let module = vm
+        .compile(&value_doubler_wat(), false, |linker| {
+            linker.func_wrap("host", "value", || -> i64 { 21 })
+        })
+        .expect("compile");
+    let out = vm.run(&module, "run", None).expect("run");
+    assert_eq!(out.result, 43, "cache wiring must not change the result");
+}
