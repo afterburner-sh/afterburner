@@ -578,6 +578,7 @@
     color: #fff; flex-shrink: 0;
     letter-spacing: -0.02em;
   }
+  .lang-matrix .glyph svg { width: 16px; height: 16px; fill: currentColor; display: block; }
   .lang-matrix .state {
     margin-left: auto;
     font-family: var(--font-mono);
@@ -585,6 +586,16 @@
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--color-vibrant-orange);
+  }
+
+  /* a language label always carries its mark: 1em inline icon, brand-tinted */
+  .lang-ico {
+    width: 1em;
+    height: 1em;
+    vertical-align: -0.125em;
+    margin-right: 0.4em;
+    fill: currentColor;
+    flex-shrink: 0;
   }
 
   /* per-language tabbed code panel */
@@ -1028,6 +1039,23 @@
 </head>
 <body>
 
+<!-- ============= LANGUAGE ICON SPRITE =============
+     Defined once, reused everywhere via <use href="#lang-XX"/> so a language
+     label always carries its mark (matrix, support table, hello-world tabs,
+     per-language guide headings, sidebar nav). Single currentColor paths so
+     each mark tints to its tile or the surrounding text. Go is the gopher
+     (one evenodd silhouette: ears, eyes + snout cut out). -->
+<svg aria-hidden="true" style="display:none" width="0" height="0">
+  <symbol id="lang-rust" viewBox="0 0 24 24"><path d="M23.835 11.703l-1.008-.623.028-.226.866-.808a.349.349 0 00-.115-.578l-1.105-.414a8.793 8.793 0 00-.073-.225l.69-.96a.349.349 0 00-.226-.55l-1.166-.19a9.038 9.038 0 00-.137-.213l.49-1.072a.349.349 0 00-.329-.495l-1.184.041a6.79 6.79 0 00-.185-.185l.04-1.184a.346.346 0 00-.494-.328l-1.072.49-.213-.138-.19-1.166a.349.349 0 00-.55-.226l-.96.69a8.967 8.967 0 00-.225-.072L15.106.927a.349.349 0 00-.578-.115l-.808.866-.226-.028L12.871.642a.349.349 0 00-.581 0l-.623 1.008-.226-.028-.808-.866a.349.349 0 00-.578.115l-.414 1.105-.225.072-.96-.69a.349.349 0 00-.55.226l-.19 1.166-.213.138-1.072-.49a.346.346 0 00-.494.328l.04 1.184a6.79 6.79 0 00-.185.185l-1.184-.041a.349.349 0 00-.329.495l.49 1.072a9.038 9.038 0 00-.137.213l-1.166.19a.349.349 0 00-.226.55l.69.96a8.793 8.793 0 00-.073.225l-1.105.414a.349.349 0 00-.115.578l.866.808-.028.226-1.008.623a.349.349 0 000 .581l1.008.623-.028.226-.866.808a.349.349 0 00.115.578l1.105.414.073.225-.69.96a.349.349 0 00.226.55l1.166.19.137.213-.49 1.072a.346.346 0 00.329.495l1.184-.041.185.185-.04 1.184a.349.349 0 00.494.328l1.072-.49.213.138.19 1.166a.349.349 0 00.55.226l.96-.69.225.073.414 1.104a.35.35 0 00.578.115l.808-.866.226.028.623 1.008a.349.349 0 00.581 0l.623-1.008.226-.028.808.866a.35.35 0 00.578-.115l.414-1.104.225-.073.96.69a.349.349 0 00.55-.226l.19-1.166.213-.138 1.072.49a.346.346 0 00.494-.328l-.04-1.184.185-.185 1.184.041a.349.349 0 00.329-.495l-.49-1.072.137-.213 1.166-.19a.349.349 0 00.226-.55l-.69-.96.073-.225 1.105-.414a.349.349 0 00.115-.578l-.866-.808.028-.226 1.008-.623a.349.349 0 000-.581zm-6.742 8.355a.714.714 0 01.299-1.396.714.714 0 01-.3 1.396zm-.342-2.314a.65.65 0 00-.771.5l-.358 1.669a8.18 8.18 0 01-3.385.72 8.18 8.18 0 01-3.45-.756l-.358-1.669a.65.65 0 00-.772-.5l-1.473.317a8.18 8.18 0 01-.761-.898h7.167c.081 0 .136-.014.136-.088v-2.536c0-.074-.055-.088-.136-.088h-2.096v-1.608h2.268c.207 0 1.106.059 1.393 1.209.09.353.288 1.503.424 1.871.134.412.683 1.234 1.268 1.234h3.572a.726.726 0 00.125-.013 8.207 8.207 0 01-.811.95zm-9.733 2.297a.714.714 0 11-.3-1.396.714.714 0 01.3 1.396zM5.367 8.95a.714.714 0 11-.3 1.396.714.714 0 01.3-1.396zm-.821 1.951l1.534-.682a.65.65 0 00.33-.858l-.316-.715h1.244v5.602H4.99a8.222 8.222 0 01-.265-3.135zm5.62-.452v-1.65h2.957c.153 0 1.08.177 1.08.87 0 .575-.71.781-1.296.781zm10.757 1.501c0 .218-.008.434-.024.648h-.901c-.09 0-.127.059-.127.147v.413c0 .973-.548 1.184-1.029 1.238-.457.052-.964-.191-1.027-.472-.27-1.518-.72-1.842-1.43-2.403.882-.56 1.799-1.387 1.799-2.494 0-1.195-.82-1.947-1.379-2.318-.784-.516-1.651-.62-1.886-.62H5.197a8.215 8.215 0 014.598-2.593l1.028 1.078a.65.65 0 00.918.021l1.15-1.1a8.216 8.216 0 015.624 4.003l-.788 1.78a.65.65 0 00.33.858l1.616.718c.028.285.043.573.043.864zM11.733 3.36a.714.714 0 11.991 1.028.714.714 0 01-.991-1.028zm9.13 7.342a.714.714 0 11.989-1.026.714.714 0 01-.989 1.026z"/></symbol>
+  <symbol id="lang-go" viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M8.2 4.05A1.6 1.6 0 0 0 5.4 5.65c0 .42.16.8.43 1.09A6.85 6.85 0 0 0 4.05 11.1v3.25c0 3.5 3.56 5.85 7.95 5.85s7.95-2.35 7.95-5.85V11.1a6.85 6.85 0 0 0-1.78-4.36c.27-.29.43-.67.43-1.09a1.6 1.6 0 0 0-2.8-1.6A8.6 8.6 0 0 0 12 3.95c-1.34 0-2.62.04-3.8.1Zm1.1 4.05a2.05 2.05 0 1 0 0 4.1 2.05 2.05 0 0 0 0-4.1Zm0 1.15a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8Zm5.4-1.15a2.05 2.05 0 1 0 0 4.1 2.05 2.05 0 0 0 0-4.1Zm0 1.15a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8Zm-3.52 4.25h1.64a.6.6 0 0 1 .58.74l-.2.85a.8.8 0 0 1-1.56 0l-.2-.85a.6.6 0 0 1 .58-.74Z"/></symbol>
+  <symbol id="lang-ts" viewBox="0 0 24 24"><path d="M1.125 0C.502 0 0 .502 0 1.125v21.75C0 23.498.502 24 1.125 24h21.75c.623 0 1.125-.502 1.125-1.125V1.125C24 .502 23.498 0 22.875 0zm17.363 9.75c.612 0 1.154.037 1.627.111a6.38 6.38 0 0 1 1.306.34v2.458a3.95 3.95 0 0 0-.643-.361 5.093 5.093 0 0 0-.717-.26 5.453 5.453 0 0 0-1.426-.2c-.3 0-.573.028-.819.086a2.1 2.1 0 0 0-.623.242c-.17.104-.3.229-.393.374a.888.888 0 0 0-.14.49c0 .196.053.373.156.529.104.156.252.304.443.444s.423.276.696.41c.273.135.582.274.926.416.47.197.892.407 1.266.628.374.222.695.473.963.753.268.279.472.598.614.957.142.359.214.776.214 1.253 0 .657-.125 1.21-.373 1.656a3.033 3.033 0 0 1-1.012 1.085 4.38 4.38 0 0 1-1.487.596c-.566.12-1.163.18-1.79.18a9.916 9.916 0 0 1-1.84-.164 5.544 5.544 0 0 1-1.512-.493v-2.63a5.033 5.033 0 0 0 3.237 1.2c.333 0 .624-.03.872-.09.249-.06.456-.144.623-.25.166-.108.29-.234.373-.38a1 1 0 0 0 .125-.493c0-.237-.067-.444-.2-.621-.135-.177-.318-.339-.55-.484a5.61 5.61 0 0 0-.831-.443 30.6 30.6 0 0 0-1.05-.45c-.918-.383-1.602-.852-2.053-1.405-.45-.553-.676-1.222-.676-2.005 0-.614.123-1.141.369-1.582.246-.441.58-.804 1.004-1.089a4.494 4.494 0 0 1 1.47-.629 7.536 7.536 0 0 1 1.77-.201zm-15.113.188h9.563v2.166H9.506v9.646H6.789v-9.646H3.375z"/></symbol>
+  <symbol id="lang-c" viewBox="0 0 24 24"><path d="M16.5921 9.1962s-.354-3.298-3.627-3.39c-3.2741-.09-4.9552 2.474-4.9552 6.14 0 3.6651 1.857 6.5972 5.0451 6.5972 3.184 0 3.5381-3.665 3.5381-3.665l6.1041.365s.36 3.31-2.196 5.836c-2.552 2.5241-5.6901 2.9371-7.8762 2.9201-2.19-.017-5.0281.034-7.8662-2.838-2.834-2.8711-3.518-5.5292-3.518-9.4842 0-3.9601 1.0061-6.8472 3.5371-9.3563 1.852-1.8351 4.464-2.8401 7.4172-2.8401 2.953 0 6.5161 1.0911 8.5252 3.766 1.825 2.4291 1.751 4.9182 1.751 4.9182z"/></symbol>
+  <symbol id="lang-cpp" viewBox="0 0 24 24"><path d="M22.394 6c-.167-.29-.398-.543-.652-.69L12.926.22c-.509-.294-1.34-.294-1.848 0L2.26 5.31c-.508.293-.923 1.013-.923 1.6v10.18c0 .294.104.62.271.91.167.29.398.543.652.69l8.816 5.09c.508.293 1.34.293 1.848 0l8.816-5.09c.254-.147.485-.4.652-.69.167-.29.27-.616.27-.91V6.91c.003-.294-.1-.62-.268-.91zM12 19.11c-3.92 0-7.109-3.19-7.109-7.11 0-3.92 3.19-7.11 7.11-7.11a7.13 7.13 0 016.156 3.553l-3.076 1.78a3.567 3.567 0 00-3.08-1.78A3.56 3.56 0 008.444 12 3.56 3.56 0 0012 15.555a3.57 3.57 0 003.08-1.778l3.078 1.78A7.135 7.135 0 0112 19.11zm7.11-6.715h-.79v.79h-.79v-.79h-.79v-.79h.79v-.79h.79v.79h.79zm2.962 0h-.79v.79h-.79v-.79h-.79v-.79h.79v-.79h.79v.79h.79z"/></symbol>
+  <symbol id="lang-js" viewBox="0 0 24 24"><path d="M0 0h24v24H0V0zm22.034 18.276c-.175-1.095-.888-2.015-3.003-2.873-.736-.345-1.554-.585-1.797-1.14-.091-.33-.105-.51-.046-.705.15-.646.915-.84 1.515-.66.39.12.75.42.976.9 1.034-.676 1.034-.676 1.755-1.125-.27-.42-.404-.601-.586-.78-.63-.705-1.469-1.065-2.834-1.034l-.705.089c-.676.165-1.32.525-1.71 1.005-1.14 1.291-.811 3.541.569 4.471 1.365 1.02 3.361 1.244 3.616 2.205.24 1.17-.87 1.545-1.966 1.41-.811-.18-1.26-.586-1.755-1.336l-1.83 1.051c.21.48.45.689.81 1.109 1.74 1.756 6.09 1.666 6.871-1.004.029-.09.24-.705.074-1.65l.046.067zm-8.983-7.245h-2.248c0 1.938-.009 3.864-.009 5.805 0 1.232.063 2.363-.138 2.711-.33.689-1.18.601-1.566.48-.396-.196-.597-.466-.83-.855-.063-.105-.11-.196-.127-.196l-1.825 1.125c.305.63.75 1.172 1.324 1.517.855.51 2.004.675 3.207.405.783-.226 1.458-.691 1.811-1.411.51-.93.402-2.07.397-3.346.012-2.054 0-4.109 0-6.179l.004-.056z"/></symbol>
+  <symbol id="lang-python" viewBox="0 0 24 24"><path d="M14.25.18l.9.2.73.26.59.3.45.32.34.34.25.34.16.33.1.3.04.26.02.2-.01.13V8.5l-.05.63-.13.55-.21.46-.26.38-.3.31-.33.25-.35.19-.35.14-.33.1-.3.07-.26.04-.21.02H8.77l-.69.05-.59.14-.5.22-.41.27-.33.32-.27.35-.2.36-.15.37-.1.35-.07.32-.04.27-.02.21v3.06H3.17l-.21-.03-.28-.07-.32-.12-.35-.18-.36-.26-.36-.36-.35-.46-.32-.59-.28-.73-.21-.88-.14-1.05-.05-1.23.06-1.22.16-1.04.24-.87.32-.71.36-.57.4-.44.42-.33.42-.24.4-.16.36-.1.32-.05.24-.01h.16l.06.01h8.16v-.83H6.18l-.01-2.75-.02-.37.05-.34.11-.31.17-.28.25-.26.31-.23.38-.2.44-.18.51-.15.58-.12.64-.1.71-.06.77-.04.84-.02 1.27.05zm-6.3 1.98l-.23.33-.08.41.08.41.23.34.33.22.41.09.41-.09.33-.22.23-.34.08-.41-.08-.41-.23-.33-.33-.22-.41-.09-.41.09zM21.1 6.11l.28.06.32.12.35.18.36.27.36.35.35.47.32.59.28.73.21.88.14 1.04.05 1.23-.06 1.23-.16 1.04-.24.86-.32.71-.36.57-.4.45-.42.33-.42.24-.4.16-.36.09-.32.05-.24.02-.16-.01h-8.22v.82h5.84l.01 2.76.02.36-.05.34-.11.31-.17.29-.25.25-.31.24-.38.2-.44.17-.51.15-.58.13-.64.09-.71.07-.77.04-.84.01-1.27-.04-1.07-.14-.9-.2-.73-.25-.59-.3-.45-.33-.34-.34-.25-.34-.16-.33-.1-.3-.04-.25-.02-.2.01-.13v-5.34l.05-.64.13-.54.21-.46.26-.38.3-.32.33-.24.35-.2.35-.14.33-.1.3-.06.26-.04.21-.02.13-.01h5.84l.69-.05.59-.14.5-.21.41-.28.33-.32.27-.35.2-.36.15-.36.1-.35.07-.32.04-.28.02-.21V6.07h2.09l.14.01zm-6.47 14.25l-.23.33-.08.41.08.41.23.33.33.23.41.08.41-.08.33-.23.23-.33.08-.41-.08-.41-.23-.33-.33-.23-.41-.08-.41.08z"/></symbol>
+  <symbol id="lang-ruby" viewBox="0 0 24 24"><path d="M20.156.083c3.033.525 3.893 2.598 3.829 4.77L24 4.822 22.635 22.71 4.89 23.926h.016C3.433 23.864.15 23.729 0 19.139l1.645-3 2.819 6.586.503 1.172 2.805-9.144-.03.007.016-.03 9.255 2.956-1.396-5.431-.99-3.9 8.82-.569-.615-.499L16.5 2.114 20.159.073l-.003.01zM0 19.089zm5.13-9.165c2.745-2.722 6.286-4.335 7.647-2.96 1.358 1.374-.087 4.704-2.834 7.424-2.746 2.72-6.243 4.418-7.601 3.043-1.36-1.373.039-4.789 2.785-7.51l.003.003z"/></symbol>
+</svg>
+
 <!-- ============= NAV ============= -->
 <nav class="nav">
   <div class="nav__inner">
@@ -1085,15 +1113,15 @@
     </div>
     <div class="sb-section">
       <h4>Languages</h4>
-      <a class="sb-link" href="#languages">The 8 languages</a>
-      <a class="sb-link" href="#lang-js">JavaScript</a>
-      <a class="sb-link" href="#lang-ts">TypeScript</a>
-      <a class="sb-link" href="#lang-rust">Rust</a>
-      <a class="sb-link" href="#lang-go">Go</a>
-      <a class="sb-link" href="#lang-c">C</a>
-      <a class="sb-link" href="#lang-cpp">C++</a>
-      <a class="sb-link" href="#lang-python">Python <span class="tag tag--pending">partial</span></a>
-      <a class="sb-link" href="#lang-ruby">Ruby <span class="tag tag--pending">pending</span></a>
+      <a class="sb-link" href="#languages">Supported languages</a>
+      <a class="sb-link" href="#lang-js"><svg class="lang-ico"><use href="#lang-js"/></svg>JavaScript</a>
+      <a class="sb-link" href="#lang-ts"><svg class="lang-ico"><use href="#lang-ts"/></svg>TypeScript</a>
+      <a class="sb-link" href="#lang-rust"><svg class="lang-ico"><use href="#lang-rust"/></svg>Rust</a>
+      <a class="sb-link" href="#lang-go"><svg class="lang-ico"><use href="#lang-go"/></svg>Go</a>
+      <a class="sb-link" href="#lang-c"><svg class="lang-ico"><use href="#lang-c"/></svg>C</a>
+      <a class="sb-link" href="#lang-cpp"><svg class="lang-ico"><use href="#lang-cpp"/></svg>C++</a>
+      <a class="sb-link" href="#lang-python"><svg class="lang-ico"><use href="#lang-python"/></svg>Python <span class="tag tag--pending">partial</span></a>
+      <a class="sb-link" href="#lang-ruby"><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby <span class="tag tag--pending">pending</span></a>
     </div>
     <div class="sb-section">
       <h4>Core concepts</h4>
@@ -1149,11 +1177,11 @@
 
     <h1 class="doc-title">Afterburner Docs.</h1>
     <p class="doc-lede">
-      One sandboxed, deterministic runtime for eight languages. Write C, C++, Rust, Go, TypeScript, JavaScript, Python, or Ruby; <code class="mono">burn</code> compiles each to WebAssembly and runs it under the same hard resource limits and the same capability gates. Every limit, every door, configurable. Sealed by default.
+      One sandboxed, deterministic runtime for every language. Write C, C++, Rust, Go, TypeScript, JavaScript, Python, or Ruby; <code class="mono">burn</code> compiles each to WebAssembly and runs it under the same hard resource limits and the same capability gates. Every limit, every door, configurable. Sealed by default.
     </p>
     <div class="doc-meta">
       <span class="pill"><span class="pill__dot"></span>v0.1 · polyglot</span>
-      <span class="pill">8 languages</span>
+      <span class="pill">every language</span>
       <span class="pill">WASM everywhere</span>
       <span class="pill">MSRV 1.90 · 2024 edition</span>
       <span class="pill">Apache-2.0</span>
@@ -1163,8 +1191,8 @@
     <div class="hero-card">
       <div class="hero-card__inner">
         <div>
-          <h2>Eight languages.<br/>One <em>WASM</em> sandbox.</h2>
-          <p>Afterburner ships a <code>burn</code> CLI that runs any of the eight languages, plus an embeddable Rust crate behind one ergonomic builder. Everything compiles to WebAssembly and executes in a single deterministic, capability-sealed runtime. The defaults are safe; the limits are yours.</p>
+          <h2>Every language.<br/>One <em>WASM</em> sandbox.</h2>
+          <p>Afterburner ships a <code>burn</code> CLI that runs any supported language, plus an embeddable Rust crate behind one ergonomic builder. Everything compiles to WebAssembly and executes in a single deterministic, capability-sealed runtime. The defaults are safe; the limits are yours.</p>
           <div class="install" id="installCmd">
             <span class="dollar">$</span>
             <span style="color: var(--accent);">curl -fsSL https://afterburner.sh</span>
@@ -1181,20 +1209,20 @@
 
       <h2 id="introduction"><span class="anchor">#</span>Introduction</h2>
       <p>
-        Afterburner is a <strong>polyglot runtime</strong>. You give it a source file or a package in one of eight languages - C, C++, Rust, Go, TypeScript, JavaScript, Python, or Ruby - and it compiles that code to <strong>WebAssembly</strong> and runs it inside a single sandbox. No matter the language, the same three guarantees hold: execution is <strong>deterministic</strong> (a NaN is a NaN on every host, threads are off, work is fuel-metered), the sandbox is <strong>capability-sealed</strong> by default (no network, no filesystem, no environment until you grant it), and resource limits are <strong>hard</strong> (memory, fuel, wall-clock).
+        Afterburner is a <strong>polyglot runtime</strong>. You give it a source file or a package in any supported language - C, C++, Rust, Go, TypeScript, JavaScript, Python, or Ruby - and it compiles that code to <strong>WebAssembly</strong> and runs it inside a single sandbox. No matter the language, the same three guarantees hold: execution is <strong>deterministic</strong> (a NaN is a NaN on every host, threads are off, work is fuel-metered), the sandbox is <strong>capability-sealed</strong> by default (no network, no filesystem, no environment until you grant it), and resource limits are <strong>hard</strong> (memory, fuel, wall-clock).
       </p>
       <p>
         There are two ways to build on it. The fast path is the <code>burn</code> CLI: <code>burn run app.go</code> runs a Go file, <code>burn run main.rs</code> a Rust file, <code>burn repl --lang python</code> opens an interactive session, and <code>burn compile</code> packs a project into a single content-addressed <code>.afb</code> you can publish to a registry. The other path is the embeddable <code>afterburner</code> crate, which exposes the same engine to your own Rust program behind one builder (see the <a href="#programmatic" style="color: var(--action);">Programmatic API</a>).
       </p>
       <p>
-        New here? <a href="#installation" style="color: var(--action);">Install</a>, then <a href="#run" style="color: var(--action);">run a file in any language</a>. To author a publishable unit, read <a href="#first-package" style="color: var(--action);">Your first package</a> and the per-language guide under <a href="#languages" style="color: var(--action);">The 8 languages</a>.
+        New here? <a href="#installation" style="color: var(--action);">Install</a>, then <a href="#run" style="color: var(--action);">run a file in any language</a>. To author a publishable unit, read <a href="#first-package" style="color: var(--action);">Your first package</a> and the per-language guide under <a href="#languages" style="color: var(--action);">Supported languages</a>.
       </p>
 
       <div class="callout callout--note">
         <div class="callout__icon">i</div>
         <div>
           <strong>Honest status.</strong>
-          <p>JavaScript, TypeScript, Rust, Go, C, and C++ run and package end to end. Python runs in the REPL on the bundled Pyodide runtime (numpy and pandas import and execute), but Python <em>packaging</em> needs a runtime payload that is not yet bundled. Ruby compile and REPL are pending the <code>ruby.wasm</code> payload. Every pending path fails loudly with an actionable message - never a fake green. Each language's section says exactly what works today.</p>
+          <p>JavaScript, TypeScript, Rust, Go, C, and C++ run and package end to end. Python runs in the REPL (numpy and pandas import and execute), but Python <em>packaging</em> needs a runtime payload that is not yet bundled. Ruby compile and REPL are pending its runtime payload. Every pending path fails loudly with an actionable message - never a fake green. Each language's section says exactly what works today.</p>
         </div>
       </div>
 
@@ -1249,7 +1277,7 @@ $ <span class="tok-mod">cargo install</span> afterburner --features bin       <s
         <div class="callout__icon">i</div>
         <div>
           <strong>What you need at runtime, what you need to compile.</strong>
-          <p>The prebuilt binary is self-contained: nothing external is required to <em>run</em> JavaScript, TypeScript, or Python. <strong>Compiling</strong> a native language reaches for that language's own toolchain on your <code>$PATH</code>: <code>cargo</code> (Rust), <code>go</code> (Go), <code>clang</code> with a WASI sysroot (C / C++), and <code>javy</code> for the precompiled JS/TS path. See each language's section for the exact tool.</p>
+          <p>The prebuilt binary is self-contained: nothing external is required to <em>run</em> JavaScript, TypeScript, or Python. <strong>Compiling</strong> a native language reaches for that language's own toolchain on your <code>$PATH</code>: <code>cargo</code> (Rust), <code>go</code> (Go), and <code>clang</code> with a WASI sysroot (C / C++). The optional JS/TS precompile path uses a build-time tool that is never required at runtime. See each language's section for the exact tool.</p>
         </div>
       </div>
 
@@ -1260,10 +1288,10 @@ $ <span class="tok-mod">cargo install</span> afterburner --features bin       <s
         <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
 <pre>$ <span class="tok-mod">burn</span> run app.js          <span class="tok-com"># JavaScript</span>
 $ <span class="tok-mod">burn</span> run app.ts          <span class="tok-com"># TypeScript (types stripped via oxc)</span>
-$ <span class="tok-mod">burn</span> run main.rs         <span class="tok-com"># Rust   -> rustc --target wasm32-wasip1</span>
-$ <span class="tok-mod">burn</span> run main.go         <span class="tok-com"># Go     -> GOOS=wasip1 GOARCH=wasm go build</span>
-$ <span class="tok-mod">burn</span> run main.c          <span class="tok-com"># C      -> clang --target=wasm32-wasip1</span>
-$ <span class="tok-mod">burn</span> run main.cpp        <span class="tok-com"># C++    -> clang++ --target=wasm32-wasip1</span>
+$ <span class="tok-mod">burn</span> run main.rs         <span class="tok-com"># Rust</span>
+$ <span class="tok-mod">burn</span> run main.go         <span class="tok-com"># Go</span>
+$ <span class="tok-mod">burn</span> run main.c          <span class="tok-com"># C</span>
+$ <span class="tok-mod">burn</span> run main.cpp        <span class="tok-com"># C++</span>
 
 <span class="tok-com"># Run the current package's entry (from afb.toml) - no file argument</span>
 $ <span class="tok-mod">burn</span> run
@@ -1276,7 +1304,7 @@ $ <span class="tok-mod">burn</span> run main.go --name world</pre>
         <div class="callout__icon">!</div>
         <div>
           <strong>Single-file Python and Ruby.</strong>
-          <p>A bare <code>burn run main.py</code> / <code>burn run main.rb</code> reports an honest error today: the CPython-WASI and <code>ruby.wasm</code> runtime payloads are not bundled into the single-file path. Python is fully usable through <a href="#repl" style="color: var(--action);"><code>burn repl --lang python</code></a> (which boots the Pyodide runtime) and through Python packages once the payload is present. Ruby is wired but pending. See <a href="#lang-python" style="color: var(--action);">Python</a> and <a href="#lang-ruby" style="color: var(--action);">Ruby</a>.</p>
+          <p>A bare <code>burn run main.py</code> / <code>burn run main.rb</code> reports an honest error today: the Python and Ruby runtime payloads are not bundled into the single-file path. Python is fully usable through <a href="#repl" style="color: var(--action);"><code>burn repl --lang python</code></a> and through Python packages once the payload is present. Ruby is wired but pending. See <a href="#lang-python" style="color: var(--action);">Python</a> and <a href="#lang-ruby" style="color: var(--action);">Ruby</a>.</p>
         </div>
       </div>
 
@@ -1290,7 +1318,7 @@ $ <span class="tok-mod">burn</span> bench perf.js --iters 10000 --workers 8</pre
       </div>
 
       <h2 id="repl"><span class="anchor">#</span>The REPL</h2>
-      <p>An interactive read-eval-print loop for any supported language. The default is JavaScript; <code>--lang</code> selects another. JS and TypeScript run on the engine; Rust, Go, C, and C++ compile and run each line (honest about the per-line compile cost and the toolchain it needs); Python runs over the bundled Pyodide runtime.</p>
+      <p>An interactive read-eval-print loop for any supported language. The default is JavaScript; <code>--lang</code> selects another. JS and TypeScript run on the engine; Rust, Go, C, and C++ compile and run each line (honest about the per-line compile cost and the toolchain it needs); Python runs over the bundled Python runtime.</p>
 
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
@@ -1300,7 +1328,7 @@ $ <span class="tok-mod">burn</span> repl --lang rust      <span class="tok-com">
 $ <span class="tok-mod">burn</span> repl --lang go        <span class="tok-com"># compile-and-run per line (needs go)</span>
 $ <span class="tok-mod">burn</span> repl --lang c         <span class="tok-com"># compile-and-run per line (needs clang + WASI sysroot)</span>
 $ <span class="tok-mod">burn</span> repl --lang cpp       <span class="tok-com"># compile-and-run per line</span>
-$ <span class="tok-mod">burn</span> repl --lang python    <span class="tok-com"># line REPL over the Pyodide runtime</span></pre>
+$ <span class="tok-mod">burn</span> repl --lang python    <span class="tok-com"># line REPL over the Python runtime</span></pre>
       </div>
 
       <p>Accepted <code>--lang</code> values (aliases included): <code>js</code>, <code>javascript</code>, <code>ts</code>, <code>typescript</code>, <code>rust</code>, <code>go</code>, <code>golang</code>, <code>c</code>, <code>cpp</code>, <code>c++</code>, <code>cxx</code>, <code>cc</code>, <code>python</code>, <code>py</code>, <code>ruby</code>, <code>rb</code>. The default is <code>js</code>.</p>
@@ -1309,7 +1337,7 @@ $ <span class="tok-mod">burn</span> repl --lang python    <span class="tok-com">
         <div class="callout__icon">i</div>
         <div>
           <strong>How the Python REPL stays stateful.</strong>
-          <p>The Pyodide runtime runs a fresh CPython per call, so the session accumulates the lines you have entered and re-runs the whole program each line, showing only the new output suffix. Assignments, <code>def</code>, and <code>import</code> persist for free; pure compute is exact. The runtime is located via <code>BURN_PYTHON_RUNTIME=&lt;dir&gt;</code>; when it is unset the REPL prints a clear, actionable error and exits rather than faking a prompt. <code>burn repl --lang ruby</code> reports a pending state until <code>ruby.wasm</code> is bundled.</p>
+          <p>The Python runtime runs a fresh interpreter per call, so the session accumulates the lines you have entered and re-runs the whole program each line, showing only the new output suffix. Assignments, <code>def</code>, and <code>import</code> persist for free; pure compute is exact. The runtime is located via <code>BURN_PYTHON_RUNTIME=&lt;dir&gt;</code>; when it is unset the REPL prints a clear, actionable error and exits rather than faking a prompt. <code>burn repl --lang ruby</code> reports a pending state until its runtime payload is bundled.</p>
         </div>
       </div>
 
@@ -1339,20 +1367,20 @@ $ <span class="tok-mod">burn</span> new nyquist/widget                          
 $ <span class="tok-mod">burn</span> compile       <span class="tok-com"># build nyquist-greeter-0.1.0.afb (content-addressed)</span>
 $ <span class="tok-mod">burn</span> publish       <span class="tok-com"># upload to the registry</span></pre>
       </div>
-      <p>That is the whole loop. It is <strong>sealed by default</strong>: the scaffolded <code>manifold.json</code> grants nothing, so the code cannot touch network, filesystem, or environment until you open a door. The <a href="#packages" style="color: var(--action);">Packages</a> section is the full authoring reference; <a href="#languages" style="color: var(--action);">The 8 languages</a> covers each language's source layout and how multi-module works.</p>
+      <p>That is the whole loop. It is <strong>sealed by default</strong>: the scaffolded <code>manifold.json</code> grants nothing, so the code cannot touch network, filesystem, or environment until you open a door. The <a href="#packages" style="color: var(--action);">Packages</a> section is the full authoring reference; <a href="#languages" style="color: var(--action);">Supported languages</a> covers each language's source layout and how multi-module works.</p>
 
-      <h2 id="languages"><span class="anchor">#</span>The 8 languages</h2>
-      <p>Every language compiles to a <code>wasm32-wasip1</code> module and runs in the same sandbox. The table is the at-a-glance status; each language has its own guide below. Jump to one:</p>
+      <h2 id="languages"><span class="anchor">#</span>Supported languages</h2>
+      <p>Every language compiles to a <code>WebAssembly</code> module and runs in the same sandbox. The table is the at-a-glance status; each language has its own guide below. Jump to one:</p>
 
       <div class="lang-matrix">
-        <a href="#lang-js"><span class="glyph" style="background:#d6a915;">JS</span>JavaScript</a>
-        <a href="#lang-ts"><span class="glyph" style="background:#2f74c0;">TS</span>TypeScript</a>
-        <a href="#lang-rust"><span class="glyph" style="background:#b7410e;">Rs</span>Rust</a>
-        <a href="#lang-go"><span class="glyph" style="background:#00add8;">Go</span>Go</a>
-        <a href="#lang-c"><span class="glyph" style="background:#5c6bc0;">C</span>C</a>
-        <a href="#lang-cpp"><span class="glyph" style="background:#00599c;">C++</span>C++</a>
-        <a href="#lang-python"><span class="glyph" style="background:#3776ab;">Py</span>Python<span class="state">partial</span></a>
-        <a href="#lang-ruby"><span class="glyph" style="background:#cc342d;">Rb</span>Ruby<span class="state">pending</span></a>
+        <a href="#lang-js"><span class="glyph" style="background:#d6a915;"><svg aria-hidden="true"><use href="#lang-js"/></svg></span>JavaScript</a>
+        <a href="#lang-ts"><span class="glyph" style="background:#2f74c0;"><svg aria-hidden="true"><use href="#lang-ts"/></svg></span>TypeScript</a>
+        <a href="#lang-rust"><span class="glyph" style="background:#b7410e;"><svg aria-hidden="true"><use href="#lang-rust"/></svg></span>Rust</a>
+        <a href="#lang-go"><span class="glyph" style="background:#00add8;"><svg aria-hidden="true"><use href="#lang-go"/></svg></span>Go</a>
+        <a href="#lang-c"><span class="glyph" style="background:#5c6bc0;"><svg aria-hidden="true"><use href="#lang-c"/></svg></span>C</a>
+        <a href="#lang-cpp"><span class="glyph" style="background:#00599c;"><svg aria-hidden="true"><use href="#lang-cpp"/></svg></span>C++</a>
+        <a href="#lang-python"><span class="glyph" style="background:#3776ab;"><svg aria-hidden="true"><use href="#lang-python"/></svg></span>Python<span class="state">partial</span></a>
+        <a href="#lang-ruby"><span class="glyph" style="background:#cc342d;"><svg aria-hidden="true"><use href="#lang-ruby"/></svg></span>Ruby<span class="state">pending</span></a>
       </div>
 
       <div class="table-scroll"><table class="doc-table">
@@ -1360,14 +1388,14 @@ $ <span class="tok-mod">burn</span> publish       <span class="tok-com"># upload
           <tr><th>Language</th><th><code>language</code> value</th><th>Entry</th><th>Run a file</th><th>REPL</th><th>Compile / package</th></tr>
         </thead>
         <tbody>
-          <tr><td>JavaScript</td><td><code>js</code> · <code>javascript</code></td><td><code>source/main.js</code></td><td>Yes</td><td>Yes</td><td>Yes (engine; <code>javy</code> for precompiled)</td></tr>
-          <tr><td>TypeScript</td><td><code>ts</code> · <code>typescript</code></td><td><code>source/main.ts</code></td><td>Yes</td><td>Yes</td><td>Yes (oxc strips types)</td></tr>
-          <tr><td>Rust</td><td><code>rust</code></td><td><code>source/main.rs</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>cargo</code> / <code>rustc</code>)</td></tr>
-          <tr><td>Go</td><td><code>go</code> · <code>golang</code></td><td><code>source/main.go</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>go build</code>)</td></tr>
-          <tr><td>C</td><td><code>c</code></td><td><code>source/main.c</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>clang</code> + WASI)</td></tr>
-          <tr><td>C++</td><td><code>cpp</code> · <code>c++</code> · <code>cxx</code> · <code>cc</code></td><td><code>source/main.cpp</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>clang++</code> + WASI)</td></tr>
-          <tr><td>Python</td><td><code>python</code> · <code>py</code></td><td><code>source/main.py</code></td><td>REPL only</td><td>Yes (Pyodide)</td><td><strong>Pending</strong> (payload not bundled)</td></tr>
-          <tr><td>Ruby</td><td><code>ruby</code> · <code>rb</code></td><td><code>source/main.rb</code></td><td><strong>Pending</strong></td><td><strong>Pending</strong></td><td><strong>Pending</strong> (ruby.wasm)</td></tr>
+          <tr><td><svg class="lang-ico"><use href="#lang-js"/></svg>JavaScript</td><td><code>js</code> · <code>javascript</code></td><td><code>source/main.js</code></td><td>Yes</td><td>Yes</td><td>Yes (engine; precompile optional)</td></tr>
+          <tr><td><svg class="lang-ico"><use href="#lang-ts"/></svg>TypeScript</td><td><code>ts</code> · <code>typescript</code></td><td><code>source/main.ts</code></td><td>Yes</td><td>Yes</td><td>Yes (oxc strips types)</td></tr>
+          <tr><td><svg class="lang-ico"><use href="#lang-rust"/></svg>Rust</td><td><code>rust</code></td><td><code>source/main.rs</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>cargo</code> / <code>rustc</code>)</td></tr>
+          <tr><td><svg class="lang-ico"><use href="#lang-go"/></svg>Go</td><td><code>go</code> · <code>golang</code></td><td><code>source/main.go</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>go build</code>)</td></tr>
+          <tr><td><svg class="lang-ico"><use href="#lang-c"/></svg>C</td><td><code>c</code></td><td><code>source/main.c</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>clang</code> + WASI)</td></tr>
+          <tr><td><svg class="lang-ico"><use href="#lang-cpp"/></svg>C++</td><td><code>cpp</code> · <code>c++</code> · <code>cxx</code> · <code>cc</code></td><td><code>source/main.cpp</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>clang++</code> + WASI)</td></tr>
+          <tr><td><svg class="lang-ico"><use href="#lang-python"/></svg>Python</td><td><code>python</code> · <code>py</code></td><td><code>source/main.py</code></td><td>REPL only</td><td>Yes</td><td><strong>Pending</strong> (payload not bundled)</td></tr>
+          <tr><td><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby</td><td><code>ruby</code> · <code>rb</code></td><td><code>source/main.rb</code></td><td><strong>Pending</strong></td><td><strong>Pending</strong></td><td><strong>Pending</strong> (ruby.wasm)</td></tr>
         </tbody>
       </table></div>
 
@@ -1375,14 +1403,14 @@ $ <span class="tok-mod">burn</span> publish       <span class="tok-com"># upload
 
       <div class="langtabs" id="hello-tabs">
         <div class="langtabs__bar" role="tablist" aria-label="Hello-world per language">
-          <button class="langtabs__tab active" data-tab="js" role="tab">JavaScript</button>
-          <button class="langtabs__tab" data-tab="ts" role="tab">TypeScript</button>
-          <button class="langtabs__tab" data-tab="rust" role="tab">Rust</button>
-          <button class="langtabs__tab" data-tab="go" role="tab">Go</button>
-          <button class="langtabs__tab" data-tab="c" role="tab">C</button>
-          <button class="langtabs__tab" data-tab="cpp" role="tab">C++</button>
-          <button class="langtabs__tab" data-tab="py" role="tab">Python</button>
-          <button class="langtabs__tab" data-tab="rb" role="tab">Ruby</button>
+          <button class="langtabs__tab active" data-tab="js" role="tab"><svg class="lang-ico"><use href="#lang-js"/></svg>JavaScript</button>
+          <button class="langtabs__tab" data-tab="ts" role="tab"><svg class="lang-ico"><use href="#lang-ts"/></svg>TypeScript</button>
+          <button class="langtabs__tab" data-tab="rust" role="tab"><svg class="lang-ico"><use href="#lang-rust"/></svg>Rust</button>
+          <button class="langtabs__tab" data-tab="go" role="tab"><svg class="lang-ico"><use href="#lang-go"/></svg>Go</button>
+          <button class="langtabs__tab" data-tab="c" role="tab"><svg class="lang-ico"><use href="#lang-c"/></svg>C</button>
+          <button class="langtabs__tab" data-tab="cpp" role="tab"><svg class="lang-ico"><use href="#lang-cpp"/></svg>C++</button>
+          <button class="langtabs__tab" data-tab="py" role="tab"><svg class="lang-ico"><use href="#lang-python"/></svg>Python</button>
+          <button class="langtabs__tab" data-tab="rb" role="tab"><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby</button>
         </div>
 
         <div class="langtabs__panel active" data-tab="js">
@@ -1530,17 +1558,17 @@ total = (1..100).<span class="tok-fn">sum</span>
       </div>
 
       <!-- ===== per-language guides ===== -->
-      <h3 id="lang-js">JavaScript</h3>
-      <p><code>language = "js"</code> (alias <code>javascript</code>), entry <code>source/main.js</code>. JavaScript runs on the engine directly - no external toolchain to run it. <code>burn compile</code> can additionally precompile to WASM via <code>javy</code> for sub-millisecond cold starts. A package's entry assigns its export with <code>module.exports</code>; sibling files are plain <code>require('./lib/util')</code>, and npm packages declared under <code>[npm]</code> are imported by bare specifier. See <a href="#node-compat" style="color: var(--action);">the Node compat surface</a> for the built-in module list.</p>
+      <h3 id="lang-js"><svg class="lang-ico"><use href="#lang-js"/></svg>JavaScript</h3>
+      <p><code>language = "js"</code> (alias <code>javascript</code>), entry <code>source/main.js</code>. JavaScript runs on the engine directly - no external toolchain to run it. <code>burn compile</code> can additionally precompile to WASM for sub-millisecond cold starts. A package's entry assigns its export with <code>module.exports</code>; sibling files are plain <code>require('./lib/util')</code>, and npm packages declared under <code>[npm]</code> are imported by bare specifier. See <a href="#node-compat" style="color: var(--action);">the Node compat surface</a> for the built-in module list.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
 <pre>$ <span class="tok-mod">burn</span> run app.js
 $ <span class="tok-mod">burn</span> repl
 $ <span class="tok-mod">burn</span> init ./pkg --namespace ns --name app          <span class="tok-com"># js is the default</span>
-$ <span class="tok-mod">burn</span> compile                                       <span class="tok-com"># .afb (+ javy precompiled, opt-in)</span></pre>
+$ <span class="tok-mod">burn</span> compile                                       <span class="tok-com"># .afb (+ precompiled WASM, opt-in)</span></pre>
       </div>
 
-      <h3 id="lang-ts">TypeScript</h3>
+      <h3 id="lang-ts"><svg class="lang-ico"><use href="#lang-ts"/></svg>TypeScript</h3>
       <p><code>language = "typescript"</code> (alias <code>ts</code>), entry <code>source/main.ts</code>. Types are stripped to JavaScript with <a href="https://oxc.rs" style="color: var(--action);">oxc</a> at compile time (type-stripping, not a full <code>tsc</code> type-check), so the published module is plain WASM-bound JS. Everything from the JavaScript guide applies; scaffold with <code>--ts</code> (shorthand for <code>--lang typescript</code>), which also writes a <code>tsconfig.json</code>.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
@@ -1549,8 +1577,8 @@ $ <span class="tok-mod">burn</span> repl --lang ts
 $ <span class="tok-mod">burn</span> init ./pkg --namespace ns --name app --ts</pre>
       </div>
 
-      <h3 id="lang-rust">Rust</h3>
-      <p><code>language = "rust"</code>, entry <code>source/main.rs</code>. Compiles with <code>cargo build --release --target wasm32-wasip1</code> (a single bare file goes through <code>rustc</code>) to a WASI command module. Multi-module is <strong>Cargo-resolved</strong>: a standalone <code>Cargo.toml</code> at the package root points <code>[[bin]] path</code> at <code>source/main.rs</code>, and the usual <code>mod</code> system resolves the tree under <code>source/</code> - sibling files (<code>source/geometry.rs</code> via <code>mod geometry;</code>) and directory modules (<code>source/stats/mod.rs</code> via <code>mod stats;</code>).</p>
+      <h3 id="lang-rust"><svg class="lang-ico"><use href="#lang-rust"/></svg>Rust</h3>
+      <p><code>language = "rust"</code>, entry <code>source/main.rs</code>. Compiles to WebAssembly with <code>cargo build</code> (a single bare file goes through <code>rustc</code>) to a WASI command module. Multi-module is <strong>Cargo-resolved</strong>: a standalone <code>Cargo.toml</code> at the package root points <code>[[bin]] path</code> at <code>source/main.rs</code>, and the usual <code>mod</code> system resolves the tree under <code>source/</code> - sibling files (<code>source/geometry.rs</code> via <code>mod geometry;</code>) and directory modules (<code>source/stats/mod.rs</code> via <code>mod stats;</code>).</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">Cargo.toml (package root, beside afb.toml)</span><button class="copy-btn">Copy</button></div>
 <pre><span class="tok-com"># Its own [workspace] root detaches it from any enclosing cargo workspace.</span>
@@ -1580,11 +1608,11 @@ path = <span class="tok-str">"source/main.rs"</span></pre>
         <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
 <pre>$ <span class="tok-mod">burn</span> run main.rs            <span class="tok-com"># single file via rustc</span>
 $ <span class="tok-mod">burn</span> repl --lang rust       <span class="tok-com"># compile-and-run per line</span>
-$ <span class="tok-mod">burn</span> compile                <span class="tok-com"># package -> wasm32-wasip1 module in the .afb</span></pre>
+$ <span class="tok-mod">burn</span> compile                <span class="tok-com"># package -> WebAssembly module in the .afb</span></pre>
       </div>
 
-      <h3 id="lang-go">Go</h3>
-      <p><code>language = "go"</code> (alias <code>golang</code>), entry <code>source/main.go</code>. Compiles with <code>GOOS=wasip1 GOARCH=wasm go build</code> to a WASI command module. Multi-module uses <strong>Go modules</strong>: a <code>go.mod</code> at the package root names the module, and a second package lives in a subdirectory (<code>source/geometry/geometry.go</code>) imported by its module path. Go's capitalized-identifier rule is the export boundary.</p>
+      <h3 id="lang-go"><svg class="lang-ico"><use href="#lang-go"/></svg>Go</h3>
+      <p><code>language = "go"</code> (alias <code>golang</code>), entry <code>source/main.go</code>. Compiles to WebAssembly with <code>go build</code> to a WASI command module. Multi-module uses <strong>Go modules</strong>: a <code>go.mod</code> at the package root names the module, and a second package lives in a subdirectory (<code>source/geometry/geometry.go</code>) imported by its module path. Go's capitalized-identifier rule is the export boundary.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">go.mod (package root)</span><button class="copy-btn">Copy</button></div>
 <pre><span class="tok-kw">module</span> go-multimodule
@@ -1613,8 +1641,8 @@ $ <span class="tok-mod">burn</span> repl --lang go
 $ <span class="tok-mod">burn</span> compile</pre>
       </div>
 
-      <h3 id="lang-c">C</h3>
-      <p><code>language = "c"</code>, entry <code>source/main.c</code>. Compiles with <code>clang --target=wasm32-wasip1 --sysroot=&lt;wasi-sdk&gt;</code> (a <code>Makefile</code> or <code>CMakeLists.txt</code> in the package is honored when present). Multi-file C is just several translation units plus a shared header, all under <code>source/</code>: <code>burn</code> compiles every <code>.c</code> it finds and links them. <code>static</code> functions keep internal linkage as the encapsulation boundary.</p>
+      <h3 id="lang-c"><svg class="lang-ico"><use href="#lang-c"/></svg>C</h3>
+      <p><code>language = "c"</code>, entry <code>source/main.c</code>. Compiles to WebAssembly with <code>clang</code> against the wasi-sdk sysroot (a <code>Makefile</code> or <code>CMakeLists.txt</code> in the package is honored when present). Multi-file C is just several translation units plus a shared header, all under <code>source/</code>: <code>burn</code> compiles every <code>.c</code> it finds and links them. <code>static</code> functions keep internal linkage as the encapsulation boundary.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">source/ layout</span><button class="copy-btn">Copy</button></div>
 <pre>source/
@@ -1642,8 +1670,8 @@ $ <span class="tok-mod">burn</span> repl --lang c
 $ <span class="tok-mod">burn</span> compile</pre>
       </div>
 
-      <h3 id="lang-cpp">C++</h3>
-      <p><code>language = "cpp"</code> (aliases <code>c++</code>, <code>cxx</code>, <code>cc</code>), entry <code>source/main.cpp</code>. Compiles with <code>clang++ --target=wasm32-wasip1</code> (with an <code>emcc</code> fallback). Multi-file C++ mirrors C: translation units plus a header under <code>source/</code>, with a <code>namespace</code> and an anonymous-namespace boundary for the private helpers.</p>
+      <h3 id="lang-cpp"><svg class="lang-ico"><use href="#lang-cpp"/></svg>C++</h3>
+      <p><code>language = "cpp"</code> (aliases <code>c++</code>, <code>cxx</code>, <code>cc</code>), entry <code>source/main.cpp</code>. Compiles to WebAssembly with <code>clang++</code>. Multi-file C++ mirrors C: translation units plus a header under <code>source/</code>, with a <code>namespace</code> and an anonymous-namespace boundary for the private helpers.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">source/main.cpp</span><button class="copy-btn">Copy</button></div>
 <pre><span class="tok-com">#include &lt;cstdio&gt;</span>
@@ -1664,23 +1692,23 @@ $ <span class="tok-mod">burn</span> repl --lang cpp
 $ <span class="tok-mod">burn</span> compile</pre>
       </div>
 
-      <h3 id="lang-python">Python <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-vibrant-orange);text-transform:uppercase;letter-spacing:0.08em;">partial</span></h3>
-      <p><code>language = "python"</code> (alias <code>py</code>), entry <code>source/main.py</code>. Python runs on the bundled <strong>Pyodide</strong> (CPython-WASI) runtime through the REPL, and <strong>numpy and pandas import and execute</strong> on it - their compiled extension <code>.so</code> files load as Emscripten side modules, so <code>pandas.DataFrame({'a':[1,2,3]}).sum()</code> works. What is honest about the current state:</p>
+      <h3 id="lang-python"><svg class="lang-ico"><use href="#lang-python"/></svg>Python <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-vibrant-orange);text-transform:uppercase;letter-spacing:0.08em;">partial</span></h3>
+      <p><code>language = "python"</code> (alias <code>py</code>), entry <code>source/main.py</code>. Python runs on a bundled WebAssembly runtime through the REPL, and <strong>numpy and pandas import and execute</strong> on it, so <code>pandas.DataFrame({'a':[1,2,3]}).sum()</code> works. What is honest about the current state:</p>
       <ul>
-        <li><strong>REPL: works.</strong> <code>burn repl --lang python</code> boots Pyodide. The runtime is located via <code>BURN_PYTHON_RUNTIME=&lt;dir&gt;</code> (holding <code>pyodide-exnref.wasm</code> and <code>python_stdlib.zip</code>); when it is unset, the REPL prints an actionable error and exits rather than faking a prompt.</li>
-        <li><strong>Single-file <code>burn run main.py</code>: not yet.</strong> The single-file path returns a clear error - the CPython-WASI payload is not bundled into it.</li>
-        <li><strong>Packaging (<code>burn compile</code> a Python package): pending.</strong> It returns an honest error: the <code>afterburner-python</code> payload (the CPython-WASI bundle) is not yet included. The wiring exists; the payload does not.</li>
+        <li><strong>REPL: works.</strong> <code>burn repl --lang python</code> boots the Python runtime. It is located via <code>BURN_PYTHON_RUNTIME=&lt;dir&gt;</code>; when that is unset, the REPL prints an actionable error and exits rather than faking a prompt.</li>
+        <li><strong>Single-file <code>burn run main.py</code>: not yet.</strong> The single-file path returns a clear error - the Python runtime payload is not bundled into it.</li>
+        <li><strong>Packaging (<code>burn compile</code> a Python package): pending.</strong> It returns an honest error: the Python runtime payload is not yet included. The wiring exists; the payload does not.</li>
       </ul>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
-<pre>$ <span class="tok-mod">export</span> BURN_PYTHON_RUNTIME=/path/to/pyodide-runtime
+<pre>$ <span class="tok-mod">export</span> BURN_PYTHON_RUNTIME=/path/to/python-runtime
 $ <span class="tok-mod">burn</span> repl --lang python
 &gt;&gt;&gt; <span class="tok-kw">import</span> numpy <span class="tok-kw">as</span> np; np.<span class="tok-fn">arange</span>(5).<span class="tok-fn">sum</span>()
 10
 &gt;&gt;&gt; <span class="tok-kw">import</span> pandas <span class="tok-kw">as</span> pd; pd.<span class="tok-fn">DataFrame</span>({<span class="tok-str">'a'</span>: [1, 2, 3]}).<span class="tok-fn">sum</span>()</pre>
       </div>
 
-      <h3 id="lang-ruby">Ruby <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-vibrant-orange);text-transform:uppercase;letter-spacing:0.08em;">pending</span></h3>
+      <h3 id="lang-ruby"><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-vibrant-orange);text-transform:uppercase;letter-spacing:0.08em;">pending</span></h3>
       <p><code>language = "ruby"</code> (alias <code>rb</code>), entry <code>source/main.rb</code>. Ruby-to-WASM is <strong>wired but pending the <code>ruby.wasm</code> runtime payload</strong>, which is not yet bundled. Today, single-file run, the REPL, and packaging all report an honest pending state - never a silent pass. The example package and manifest layout are in place so the path is ready the moment the payload lands.</p>
       <div class="callout callout--pending">
         <div class="callout__icon">!</div>
@@ -1691,7 +1719,7 @@ $ <span class="tok-mod">burn</span> repl --lang python
       </div>
 
       <h2 id="wasm-everywhere"><span class="anchor">#</span>WASM everywhere</h2>
-      <p>The unifying idea: <strong>every language is compiled to WebAssembly</strong> (the <code>wasm32-wasip1</code> target) and run on one engine. C, C++, Rust, and Go become self-contained WASI command modules through their own toolchains; JavaScript and TypeScript run on an embedded engine (and can be precompiled to WASM with <code>javy</code>); Python runs on the Pyodide WASM build. Because the execution substrate is the same for all of them, the sandbox and determinism guarantees below apply uniformly - there is no per-language carve-out.</p>
+      <p>The unifying idea: <strong>every language is compiled to WebAssembly</strong> and run on one engine. C, C++, Rust, and Go become self-contained WASI command modules through their own toolchains; JavaScript and TypeScript run on an embedded engine (and can be precompiled to WASM ahead of time); Python runs on a bundled WebAssembly build. Because the execution substrate is the same for all of them, the sandbox and determinism guarantees below apply uniformly - there is no per-language carve-out.</p>
       <p>WASI gives the program a small, explicit host interface: stdin, stdout, stderr, and the capabilities you grant. There is no ambient access to the host - a module cannot open a socket or read a file unless the <a href="#sandbox" style="color: var(--action);">capability sandbox</a> hands it that door.</p>
 
       <h2 id="determinism"><span class="anchor">#</span>Deterministic execution</h2>
@@ -1699,7 +1727,7 @@ $ <span class="tok-mod">burn</span> repl --lang python
       <div class="table-scroll"><table class="doc-table">
         <thead><tr><th>Property</th><th>Setting</th><th>What it guarantees</th></tr></thead>
         <tbody>
-          <tr><td>Canonical NaN</td><td><code>cranelift_nan_canonicalization(true)</code></td><td>NaN bit patterns are canonicalized, so floating-point results are identical across CPUs that would otherwise emit different NaN payloads. (Relaxed-SIMD is pinned deterministic too.)</td></tr>
+          <tr><td>Canonical NaN</td><td>NaN canonicalization on</td><td>NaN bit patterns are canonicalized, so floating-point results are identical across CPUs that would otherwise emit different NaN payloads. (Relaxed-SIMD is pinned deterministic too.)</td></tr>
           <tr><td>Threads off</td><td><code>wasm_threads(false)</code></td><td>Shared-memory multi-threading is disabled. A module that uses <code>shared</code> memories or <code>wait</code> / <code>notify</code> is refused at compile time, so there is no data-race nondeterminism inside a module.</td></tr>
           <tr><td>Fuel metering</td><td><code>consume_fuel(true)</code></td><td>Every run is bounded by an instruction budget. A tight loop trips the gauge in deterministic op-time, not wall-clock time, so the cutoff is reproducible.</td></tr>
         </tbody>
@@ -1707,7 +1735,7 @@ $ <span class="tok-mod">burn</span> repl --lang python
       <p>This engine lives in <code>afterburner-wasi</code> (<code>deterministic_engine()</code>). Fuel instrumentation is unconditional - it taxes even an unlimited-budget call, roughly a measured 19% on guest-CPU-bound work - because determinism is not an opt-in here.</p>
 
       <h2 id="sandbox"><span class="anchor">#</span>The capability sandbox</h2>
-      <p>The runtime is <strong>sealed by default</strong>. A module - in any of the eight languages - starts with zero host capabilities: no filesystem, no network, no environment, no subprocess, no inbound listening. You open exactly the doors the code needs, and nothing widens by accident. The capability set is a <code>Manifold</code> (the library's <code>Manifold::sealed()</code> is the default, and the test in the source asserts <code>Manifold::default() == Manifold::sealed()</code>).</p>
+      <p>The runtime is <strong>sealed by default</strong>. A module - in any supported language - starts with zero host capabilities: no filesystem, no network, no environment, no subprocess, no inbound listening. You open exactly the doors the code needs, and nothing widens by accident. The capability set is a <code>Manifold</code> (the library's <code>Manifold::sealed()</code> is the default, and the test in the source asserts <code>Manifold::default() == Manifold::sealed()</code>).</p>
 
       <div class="table-scroll"><table class="doc-table">
         <thead><tr><th>Capability</th><th>Field</th><th>Sealed default</th><th>Variants</th></tr></thead>
@@ -1767,7 +1795,7 @@ $ <span class="tok-mod">burn</span> --fuel 50000000 --memory 268435456 --timeout
       </div>
 
       <h2 id="tiers"><span class="anchor">#</span>Adaptive execution (Flying Start)</h2>
-      <p>For JavaScript, the default mode boots fast and then settles into the safer path without you noticing: the first call runs on the native engine for sub-microsecond first-call latency, a background thread compiles the same script to WASM, and subsequent calls switch to the sandboxed Wasmtime path.</p>
+      <p>For JavaScript, the default mode boots fast and then settles into the safer path without you noticing: the first call runs on the native engine for sub-microsecond first-call latency, a background thread compiles the same script to WASM, and subsequent calls switch to the sandboxed WASM path.</p>
       <div class="arch-mini">
         <div class="row"><div class="bar" style="background: var(--accent);"></div><div class="nm">Cold start</div><div class="ds">Sub-millisecond ignition path optimised for first-call latency.</div></div>
         <div class="row"><div class="bar" style="background: var(--action);"></div><div class="nm">Warm path</div><div class="ds">Fully sandboxed WASM execution with bytecode cached across calls.</div></div>
@@ -1809,7 +1837,7 @@ module.exports = () =&gt; ({ hits, seen });</pre>
       <p>A <code>.afb</code> is a single content-addressed, compressed package: a manifest (<code>afb.toml</code>), a capability grant (<code>manifold.json</code>), and your <code>source/</code> (plus an optional precompiled WASM module). Packages publish to a registry and resolve dependencies the way Cargo does - declared, version-resolved, digest-pinned, and cached - not vendored into your artifact.</p>
 
       <h3 id="packages-anatomy">Package anatomy</h3>
-      <p>Every package is a directory. <code>burn compile</code> compresses it deterministically into a single <code>.afb</code> named for its SHA-256 content digest. The shape is the same across all eight languages - only the entry extension and any language build file (a root <code>Cargo.toml</code> or <code>go.mod</code>) differ.</p>
+      <p>Every package is a directory. <code>burn compile</code> compresses it deterministically into a single <code>.afb</code> named for its SHA-256 content digest. The shape is the same across every language - only the entry extension and any language build file (a root <code>Cargo.toml</code> or <code>go.mod</code>) differ.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">text</span><button class="copy-btn">Copy</button></div>
 <pre>my-pkg/
@@ -1925,7 +1953,7 @@ $ <span class="tok-mod">burn</span> yank nyquist/widget@0.1.0       <span class=
       <p>Two lockfiles exist, both TOML and content-addressed: <code>burn.lock</code> sits beside <code>afb.toml</code> and pins the project's resolved closure for reproducible installs; <code>afb.lock</code> records the resolved closure inside a built <code>.afb</code>. A built <code>.afb</code> always carries resolved <code>sha256:</code> pins, so what you tested is what ships.</p>
 
       <h3 id="packages-precompiled">Precompiled WASM packaging</h3>
-      <p><code>burn compile</code> packs the <code>.afb</code> and, for the interpreted languages, can additionally ahead-of-time compile <code>source/</code> to a WASM module stored at <code>precompiled/wasm32-wasip1/main.wasm</code> inside the archive (the JS/TS path uses <code>javy</code>, an opt-in build-time tool that is never needed at runtime). The runtime loads that module directly, skipping the per-call compile pass, so cold starts stay sub-millisecond. The compiled languages (C/C++/Rust/Go) <em>are</em> their WASM module by construction. The <code>.afb</code> retains <code>source/</code> as a fallback for readers that do not consume the precompiled artifact.</p>
+      <p><code>burn compile</code> packs the <code>.afb</code> and, for the interpreted languages, can additionally ahead-of-time compile <code>source/</code> to a WASM module stored at <code>precompiled/wasm32-wasip1/main.wasm</code> inside the archive (the JS/TS path uses an opt-in build-time tool that is never needed at runtime). The runtime loads that module directly, skipping the per-call compile pass, so cold starts stay sub-millisecond. The compiled languages (C/C++/Rust/Go) <em>are</em> their WASM module by construction. The <code>.afb</code> retains <code>source/</code> as a fallback for readers that do not consume the precompiled artifact.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
 <pre>$ <span class="tok-mod">burn</span> package                  <span class="tok-com"># source-based .afb (runtime compiles on first load)</span>
@@ -2052,7 +2080,7 @@ $ <span class="tok-mod">burn</span> compile -o ./dist/        <span class="tok-c
           <tr><td><code>add &lt;ns/name&gt;</code></td><td>Add a registry package to <code>[dependencies]</code>, pinned by digest. (Edit <code>[npm]</code> directly for npm deps.)</td></tr>
           <tr><td><code>install [pkg]</code></td><td>Resolve + cache the dependency graph and write <code>burn.lock</code>. With no <code>pkg</code>, installs the current package's deps. <code>--locked</code> reuses the lockfile; <code>--jobs N</code> sets concurrency.</td></tr>
           <tr><td><code>test [dir]</code></td><td>Run every file under <code>tests/</code> through the sandbox.</td></tr>
-          <tr><td><code>package [dir]</code> · <code>-o</code></td><td>Build a deterministic, content-addressed <code>.afb</code>. <code>--compile</code> precompiles (JS/TS via <code>javy</code>); <code>--wasm-only</code> emits a WASM-only archive with no source.</td></tr>
+          <tr><td><code>package [dir]</code> · <code>-o</code></td><td>Build a deterministic, content-addressed <code>.afb</code>. <code>--compile</code> precompiles JS/TS to WASM; <code>--wasm-only</code> emits a WASM-only archive with no source.</td></tr>
           <tr><td><code>compile [dir]</code> · <code>-o</code></td><td>Like <code>package</code>, but also AOT-compiles to a WASM module under <code>precompiled/</code> so the runtime loads it directly. Honors the package's Manifold; keeps <code>source/</code> as a fallback.</td></tr>
           <tr><td><code>publish [afb]</code></td><td>Build (or upload a prebuilt <code>.afb</code>) to the registry. <code>--registry</code>, <code>--token</code>, <code>--compile</code> / <code>--no-compile</code>.</td></tr>
           <tr><td><code>clean [dir]</code></td><td>Remove build artifacts. <code>--cache</code> also clears the shared caches under <code>~/.cache/burn</code>.</td></tr>
@@ -2200,7 +2228,7 @@ $ <span class="tok-mod">burn</span> agent uninstall --all         <span class="t
         <tbody>
           <tr><td><code>AFTERBURNER_LOG</code></td><td><code>warn</code></td><td>Level: <code>off</code> · <code>error</code> · <code>warn</code> · <code>info</code> · <code>debug</code> · <code>trace</code></td></tr>
           <tr><td><code>AFTERBURNER_LOG_FORMAT</code></td><td><code>text</code></td><td>Reporter: <code>text</code> (stderr) or <code>json</code> (stdout NDJSON)</td></tr>
-          <tr><td><code>BURN_PYTHON_RUNTIME</code></td><td>unset</td><td>Directory holding the Pyodide runtime (<code>pyodide-exnref.wasm</code> + <code>python_stdlib.zip</code>) for the Python REPL. When unset, the Python REPL prints an actionable error and exits.</td></tr>
+          <tr><td><code>BURN_PYTHON_RUNTIME</code></td><td>unset</td><td>Directory holding the Python runtime for the Python REPL. When unset, the Python REPL prints an actionable error and exits.</td></tr>
           <tr><td><code>BURN_MAX_LINEAR_MEMORY</code></td><td><code>1G</code></td><td>Per-instance WASM linear-memory ceiling (pooling allocator). Plain bytes or a <code>K</code>/<code>M</code>/<code>G</code> suffix; clamped to 4 GiB (wasm32 ABI limit). Raise for long-running daemons; lower for many concurrent instances.</td></tr>
           <tr><td><code>BURN_SHARDS</code></td><td>auto (CPU count)</td><td>Parallel workers the HTTP daemon uses. Accepted range 1 to 128; out-of-range or non-numeric falls back to auto with a warning. <code>BURN_SHARDS=1</code> reverts to single-worker.</td></tr>
           <tr><td><code>BURN_QUIET</code></td><td>unset</td><td>Set to <code>1</code> to suppress the first-run banner and non-essential stderr notices. Same as <code>--quiet</code>.</td></tr>
@@ -2219,13 +2247,13 @@ $ <span class="tok-mod">burn</span> agent uninstall --all         <span class="t
           <tr><td><code>afterburner-core</code></td><td><code>Combustor</code> trait, <code>Manifold</code>, <code>FuelGauge</code>, <code>BurnCache</code>, <code>BurnCacheBackend</code>, <code>StateStore</code>, <code>HostContext</code>, level-gated logging.</td></tr>
           <tr><td><code>afterburner-afb</code></td><td>The <code>.afb</code> format: pack / unpack, the manifest parser, the dependency resolver and <code>afb.lock</code>.</td></tr>
           <tr><td><code>afterburner-cloud</code></td><td>Registry client: publish / install / yank, project <code>burn.lock</code>, concurrent digest-verified fetch.</td></tr>
-          <tr><td><code>afterburner-wasi</code></td><td>Wasmtime sandbox + the deterministic engine. Host-function imports, pooling allocator, bytecode cache, the Pyodide runner and Emscripten side-module linking (numpy / pandas), daemon coordinators.</td></tr>
+          <tr><td><code>afterburner-wasi</code></td><td>The WASM sandbox + the deterministic engine. Host-function imports, pooling allocator, bytecode cache, the Python runner and native-extension linking (numpy / pandas), daemon coordinators.</td></tr>
           <tr><td><code>afterburner-ignite</code></td><td>Native JS engine; thread-local runtimes for sub-millisecond ignition.</td></tr>
           <tr><td><code>afterburner-node-compat</code></td><td>Node polyfill bundle + Rust-backed host implementations. Bounded HTTP &amp; DNS; pure-Rust shadows for <code>bcrypt</code>, <code>argon2</code>, <code>jsonwebtoken</code>, <code>sqlite3</code>, <code>sharp</code>.</td></tr>
           <tr><td><code>afterburner-flow</code></td><td><code>FlowEngine::load / execute / unload</code> + <code>register_bundle</code> for ES-module bundles.</td></tr>
           <tr><td><code>afterburner-adaptive</code></td><td>Flying Start: native-to-WASM tier switch on the second call.</td></tr>
           <tr><td><code>afterburner-thrust</code></td><td>Multi-threaded scheduler. Bounded per-worker deques, token-bucket admission, steal-when-idle, graceful drain.</td></tr>
-          <tr><td><code>afterburner-plugin</code></td><td>WASM-side runtime plugin (<code>wasm32-wasip1</code>), baked into the binary and pre-initialised for fast ignition.</td></tr>
+          <tr><td><code>afterburner-plugin</code></td><td>WASM-side runtime plugin, baked into the binary and pre-initialised for fast ignition.</td></tr>
         </tbody>
       </table></div>
 
@@ -2270,7 +2298,7 @@ $ ./target/release/<span class="tok-mod">burn</span> version</pre>
       <li><a href="#run">Run any language</a></li>
       <li><a href="#repl">The REPL</a></li>
       <li><a href="#first-package">Your first package</a></li>
-      <li><a href="#languages">The 8 languages</a></li>
+      <li><a href="#languages">Supported languages</a></li>
       <li class="toc-sub"><a href="#lang-rust">Rust</a></li>
       <li class="toc-sub"><a href="#lang-go">Go</a></li>
       <li class="toc-sub"><a href="#lang-c">C / C++</a></li>
