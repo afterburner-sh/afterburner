@@ -134,14 +134,15 @@ pub fn run_package_or_file(
             let dir = std::path::Path::new(".");
             let (lang, afb_name) = resolve_package_lang_and_output(dir)?;
             match SourceLang::from_str(&lang) {
-                Ok(SourceLang::Python) => {
-                    // Python package: run the source entry directly via the
-                    // Pyodide embedder. No compile step needed.
-                    let entry_path = resolve_package_entry(dir)?;
-                    run_python_source(&entry_path, user_args)
+                Ok(l @ (SourceLang::Python | SourceLang::Ruby)) => {
+                    // Interpreted package: run the `source/` tree directly on
+                    // the bundled interpreter with sibling modules mounted, the
+                    // same path `burn run <pkg.afb>` takes. No compile step.
+                    run_interpreted_dir(dir, l, user_args)
                 }
                 Ok(l) if !l.is_js_family() => {
-                    // Other native package: run the compiled .afb via EmbedderVm.
+                    // Compiled native package (Rust/Go/C/C++): run the compiled
+                    // .afb via EmbedderVm.
                     let afb_path = dir.join(&afb_name);
                     if !afb_path.exists() {
                         anyhow::bail!(
@@ -206,20 +207,44 @@ fn resolve_package_lang_and_output(dir: &Path) -> Result<(String, String)> {
     Ok((lang, afb_name))
 }
 
-/// Run a compiled `.afb` by extracting its `precompiled/wasm32-wasip1/main.wasm`
-/// and executing it as a WASI command module via `EmbedderVm::run_command`.
+/// Run a `.afb` package.
 ///
-/// The stdout of the WASM module is forwarded to the process stdout.
-/// A clear error is returned when the `.afb` has no precompiled WASM member
-/// (e.g. it is a source-only package), directing the user to `burn compile`.
+/// Dispatches on `[package] language`:
+/// - Python / Ruby: an interpreted package ships as source. The `source/`
+///   tree is run on the bundled CPython / CRuby interpreter with the package
+///   directory mounted and on the module search path, so sibling-module
+///   imports resolve. No precompiled WASM is required.
+/// - Everything else (Rust/Go/C/C++ and precompiled JS/TS): the
+///   `precompiled/wasm32-wasip1/main.wasm` member is extracted and executed as
+///   a WASI command module via `EmbedderVm::run_command`, with stdout forwarded
+///   and the WASM exit code propagated. A clear error is returned when no
+///   precompiled WASM member is present (e.g. a source-only JS package),
+///   directing the user to `burn compile`.
 #[cfg(feature = "wasm")]
 fn run_afb(afb_path: &Path, user_args: &[String]) -> Result<()> {
     use afterburner_cloud::afterburner_afb::Afb;
-    use afterburner_wasi::embedder_vm::EmbedderVm;
 
     let bytes = fs::read(afb_path).with_context(|| format!("reading {}", afb_path.display()))?;
     let afb =
         Afb::from_bytes(&bytes).with_context(|| format!("parsing .afb {}", afb_path.display()))?;
+
+    match SourceLang::from_str(&afb.manifest.package.language) {
+        Ok(SourceLang::Python) => run_python_afb(afb_path, &afb, user_args),
+        Ok(SourceLang::Ruby) => run_ruby_afb(afb_path, &afb, user_args),
+        _ => run_wasm_afb(afb_path, &afb, user_args),
+    }
+}
+
+/// Run a precompiled-WASM `.afb` (Rust/Go/C/C++ or precompiled JS/TS) by
+/// extracting its `precompiled/wasm32-wasip1/main.wasm` and executing it as a
+/// WASI command module.
+#[cfg(feature = "wasm")]
+fn run_wasm_afb(
+    afb_path: &Path,
+    afb: &afterburner_cloud::afterburner_afb::Afb,
+    user_args: &[String],
+) -> Result<()> {
+    use afterburner_wasi::embedder_vm::EmbedderVm;
 
     // Find the WASI command WASM. Prefer the plain (non-dyn, non-batch, non-columnar) target.
     let wasm_bytes = afb
@@ -265,6 +290,199 @@ fn run_afb(afb_path: &Path, user_args: &[String]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The entry source bytes of a Python/Ruby source `.afb`, as UTF-8.
+///
+/// Looks up `manifest.package.entry` (e.g. `source/main.py`) in the unpacked
+/// `source/` map and decodes it. Errors clearly when the entry is missing or
+/// not UTF-8 - an interpreted package's entry is always a text source file.
+#[cfg(feature = "wasm")]
+fn afb_entry_source(afb: &afterburner_cloud::afterburner_afb::Afb) -> Result<&str> {
+    let entry = &afb.manifest.package.entry;
+    let bytes = afb.source.get(entry).ok_or_else(|| {
+        anyhow::anyhow!(
+            "package entry {entry:?} (from afb.toml) is not present under source/ in the .afb"
+        )
+    })?;
+    std::str::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("package entry {entry:?} is not valid UTF-8"))
+}
+
+/// Run a Python source `.afb` on the bundled CPython runtime.
+#[cfg(feature = "wasm")]
+fn run_python_afb(
+    afb_path: &Path,
+    afb: &afterburner_cloud::afterburner_afb::Afb,
+    user_args: &[String],
+) -> Result<()> {
+    let entry_source = afb_entry_source(afb)
+        .with_context(|| format!("reading Python entry of {}", afb_path.display()))?;
+    run_python_package_from_sources(entry_source, &afb.source, user_args)
+}
+
+/// Run a Ruby source `.afb` on the bundled CRuby runtime.
+#[cfg(feature = "wasm")]
+fn run_ruby_afb(
+    afb_path: &Path,
+    afb: &afterburner_cloud::afterburner_afb::Afb,
+    user_args: &[String],
+) -> Result<()> {
+    let entry_rel = &afb.manifest.package.entry;
+    if !afb.source.contains_key(entry_rel) {
+        anyhow::bail!(
+            "package entry {entry_rel:?} (from afb.toml) is not present under source/ in {}",
+            afb_path.display()
+        );
+    }
+    run_ruby_package_from_sources(entry_rel, &afb.source, user_args)
+}
+
+/// Run a Python package from its `source/` map (archive-relative path ->
+/// bytes) on the bundled CPython runtime. The single canonical Python-package
+/// run path, shared by `burn run <pkg.afb>` and the in-directory `burn run`
+/// (no FILE) path.
+///
+/// Every `source/<rel>` member is mounted into the guest in-memory filesystem
+/// under `/pkg/source/<rel>`, `/pkg/source` is prepended to `sys.path`, and
+/// `entry_source` is run via `-c` - so a package whose entry does
+/// `import helper` resolves the sibling `source/helper.py`. `user_args` are
+/// reserved for a future `sys.argv` wiring (the Pyodide `-c` boot does not
+/// take positional argv yet).
+#[cfg(feature = "wasm")]
+fn run_python_package_from_sources(
+    entry_source: &str,
+    sources: &std::collections::BTreeMap<String, Vec<u8>>,
+    _user_args: &[String],
+) -> Result<()> {
+    use afterburner_wasi::pyodide_runner::{PyPackage, run_python_package};
+    use std::collections::BTreeMap;
+    use std::io::Write;
+
+    // Guest layout: every `source/<rel>` member lands at `/pkg/source/<rel>`,
+    // and `/pkg/source` is the sys.path entry, so `import sibling` resolves a
+    // sibling module (the entry runs via `-c`, but its siblings are imported
+    // from disk).
+    const GUEST_PKG_ROOT: &str = "/pkg";
+    let sys_path_dir = format!("{GUEST_PKG_ROOT}/source");
+
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for (rel, data) in sources {
+        files.insert(format!("{GUEST_PKG_ROOT}/{rel}"), data.clone());
+    }
+    let pkg = PyPackage {
+        files,
+        sys_path_dir,
+    };
+
+    let out = run_python_package(entry_source, &pkg)
+        .map_err(|e| anyhow::anyhow!("python runtime error: {e}"))?;
+
+    if !out.stdout.is_empty() {
+        std::io::stdout()
+            .write_all(&out.stdout)
+            .context("writing python stdout")?;
+    }
+    if out.exit_code != 0 {
+        std::process::exit(out.exit_code);
+    }
+    Ok(())
+}
+
+/// Run a Ruby package from its `source/` map (archive-relative path -> bytes)
+/// on the bundled CRuby runtime. The single canonical Ruby-package run path,
+/// shared by `burn run <pkg.afb>` and the in-directory `burn run` (no FILE)
+/// path.
+///
+/// The `source/` tree is written to a temp directory, that directory is
+/// preopened read-only and added to `$LOAD_PATH`, and the entry is run by its
+/// path - so `require_relative './helper'` and `require 'helper'` both resolve
+/// the sibling `source/helper.rb`. `user_args` are reserved for a future
+/// `ARGV` wiring.
+#[cfg(feature = "wasm")]
+fn run_ruby_package_from_sources(
+    entry_rel: &str,
+    sources: &std::collections::BTreeMap<String, Vec<u8>>,
+    _user_args: &[String],
+) -> Result<()> {
+    use afterburner_wasi::ruby_runner::run_ruby_package;
+    use std::io::Write;
+
+    // Materialize the `source/` tree to a temp dir so the WASI runtime can
+    // preopen it (the CRuby path reads from the host FS via preopens, unlike
+    // the Pyodide in-memory FS). A process-id-keyed dir avoids collisions.
+    let tmp_root = std::env::temp_dir().join(format!("burn-rb-pkg-{}", std::process::id()));
+    // Clean any stale dir from a recycled pid, then recreate.
+    let _ = fs::remove_dir_all(&tmp_root);
+    for (rel, data) in sources {
+        let dest = tmp_root.join(rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        fs::write(&dest, data).with_context(|| format!("writing {}", dest.display()))?;
+    }
+
+    let run_result = run_ruby_package(&tmp_root, entry_rel);
+
+    // Best-effort cleanup; never mask the real result.
+    let _ = fs::remove_dir_all(&tmp_root);
+
+    let out = run_result.map_err(|e| anyhow::anyhow!("ruby runtime error: {e}"))?;
+
+    if !out.stdout.is_empty() {
+        std::io::stdout()
+            .write_all(&out.stdout)
+            .context("writing ruby stdout")?;
+    }
+    if !out.stderr.is_empty() {
+        std::io::stderr()
+            .write_all(&out.stderr)
+            .context("writing ruby stderr")?;
+    }
+    if out.exit_code != 0 {
+        std::process::exit(out.exit_code);
+    }
+    Ok(())
+}
+
+/// Run an interpreted package (Python / Ruby) straight from its directory
+/// (`burn run` with no FILE, inside a package), reusing the same
+/// source-tree-mounting run path as `burn run <pkg.afb>`.
+///
+/// Loads the package's `source/` tree from disk via `LocalPackage` (the same
+/// loader the packer uses, so the source set is identical to what a `.afb`
+/// would carry) and delegates to the shared per-language package runner.
+#[cfg(feature = "wasm")]
+fn run_interpreted_dir(dir: &Path, lang: SourceLang, user_args: &[String]) -> Result<()> {
+    use afterburner_cloud::pkg::LocalPackage;
+
+    let local =
+        LocalPackage::load(dir).with_context(|| format!("loading package at {}", dir.display()))?;
+    let entry_rel = local.manifest.package.entry.clone();
+    let entry_bytes = local.sources.get(&entry_rel).ok_or_else(|| {
+        anyhow::anyhow!("package entry {entry_rel:?} (from afb.toml) is not present under source/")
+    })?;
+
+    match lang {
+        SourceLang::Python => {
+            let entry_source = std::str::from_utf8(entry_bytes)
+                .map_err(|_| anyhow::anyhow!("Python entry {entry_rel:?} is not valid UTF-8"))?;
+            run_python_package_from_sources(entry_source, &local.sources, user_args)
+        }
+        SourceLang::Ruby => run_ruby_package_from_sources(&entry_rel, &local.sources, user_args),
+        other => anyhow::bail!("run_interpreted_dir called for non-interpreted language {other:?}"),
+    }
+}
+
+/// Interpreted-package directory runner when the `wasm` feature is absent:
+/// honest error.
+#[cfg(not(feature = "wasm"))]
+fn run_interpreted_dir(dir: &Path, _lang: SourceLang, _user_args: &[String]) -> Result<()> {
+    anyhow::bail!(
+        "running interpreted packages requires the `wasm` feature \
+         (rebuild with `--features wasm`). Package: {}",
+        dir.display()
+    )
 }
 
 #[cfg(not(feature = "wasm"))]

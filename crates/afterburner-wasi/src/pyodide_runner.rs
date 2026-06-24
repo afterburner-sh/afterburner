@@ -624,6 +624,26 @@ pub fn run_python(python_source: &str) -> Result<PyodideRunOutput> {
     run_pyodide_with(&rt, python_source)
 }
 
+/// Run a Python *package* on the self-contained, zero-config runtime (or a
+/// `BURN_PYTHON_RUNTIME` override): mount the package's sibling modules into
+/// the guest filesystem, prepend `pkg.sys_path_dir` to `sys.path`, and run
+/// `entry_source` via `-c` - so a package whose entry does `import helper`
+/// resolves the sibling.
+///
+/// This is the entry point behind `burn run <pkg.afb>` for a Python package.
+/// It resolves the runtime via [`resolve_runtime`] (so no env vars are needed
+/// on a normal build) and reuses the one canonical run core
+/// ([`run_pyodide_package_with`]).
+///
+/// # Errors
+///
+/// Returns `Err` when no runtime is available (neither bundled nor via
+/// `BURN_PYTHON_RUNTIME`), or when boot / run traps. The message is actionable.
+pub fn run_python_package(entry_source: &str, pkg: &PyPackage) -> Result<PyodideRunOutput> {
+    let rt = resolve_runtime()?;
+    run_pyodide_package_with(&rt, entry_source, pkg)
+}
+
 /// Boot Pyodide, run `python -c <python_source>`, and return stdout + exit code.
 ///
 /// The source string is passed verbatim as the `-c` argument to CPython.
@@ -655,12 +675,70 @@ pub fn run_pyodide_source(
     run_pyodide_with(&rt, python_source)
 }
 
+/// A Python *package* to run: sibling `.py` modules to mount into the guest
+/// in-memory filesystem, and the guest directory to add to `sys.path` so
+/// `import sibling` resolves.
+///
+/// Built by `burn run <pkg.afb>` for a Python package: the unpacked `source/`
+/// tree (entry + helpers) is mounted under [`Self::sys_path_dir`] and that dir
+/// is prepended to `sys.path`.
+pub struct PyPackage {
+    /// Guest-absolute path -> file contents for every `.py` module in the
+    /// package (the entry is run via `-c`, so it need not be listed here, but
+    /// listing it is harmless). Mounted into the boot-time [`InMemFs`].
+    pub files: std::collections::BTreeMap<String, Vec<u8>>,
+    /// Guest directory prepended to `sys.path` (e.g. `/pkg`). The package's
+    /// modules in [`Self::files`] live under this directory.
+    pub sys_path_dir: String,
+}
+
 /// Boot a resolved [`PyRuntime`], run `python -c <source>`, return stdout + exit
 /// code. The one canonical run path; the public entry points are thin shims.
 pub fn run_pyodide_with(rt: &PyRuntime, python_source: &str) -> Result<PyodideRunOutput> {
+    run_pyodide_core(rt, python_source, None)
+}
+
+/// Run a Python *package* on a resolved [`PyRuntime`]: mount the package's
+/// sibling modules into the guest filesystem, prepend its directory to
+/// `sys.path`, and run `entry_source` via `-c` so `import helper` resolves a
+/// sibling module.
+///
+/// Reuses the same boot + run-argv machinery as [`run_pyodide_with`] (one
+/// canonical core); the only difference is the mounted package files and the
+/// `sys.path` entry. This mirrors how the wheel path already injects `.py`
+/// files into the boot-time [`InMemFs`] and lets CPython import them.
+pub fn run_pyodide_package_with(
+    rt: &PyRuntime,
+    entry_source: &str,
+    pkg: &PyPackage,
+) -> Result<PyodideRunOutput> {
+    run_pyodide_core(rt, entry_source, Some(pkg))
+}
+
+/// Shared boot + run core for [`run_pyodide_with`] and
+/// [`run_pyodide_package_with`]. Boots the interpreter, optionally mounts a
+/// package's sibling modules into the guest filesystem and prepends its
+/// directory to `sys.path`, then runs `python_source` via `-c`.
+fn run_pyodide_core(
+    rt: &PyRuntime,
+    python_source: &str,
+    pkg: Option<&PyPackage>,
+) -> Result<PyodideRunOutput> {
     let (mut store, instance, _got_globals) = boot_pyodide_instance(rt)?;
     // Clear any stdout emitted during boot before running user code.
     store.data_mut().wasi_stdout.clear();
+
+    // Mount the package's sibling modules into the guest in-memory FS so
+    // CPython's import machinery (which reads from this same FS the stdlib and
+    // wheels are mounted into) can load them once the dir is on `sys.path`.
+    if let Some(pkg) = pkg {
+        for (guest_path, contents) in &pkg.files {
+            store
+                .data_mut()
+                .fs
+                .insert_file(guest_path, contents.clone());
+        }
+    }
 
     // In Pyodide's native (non-JS) build, `sys.stdout`/`sys.stderr` go through a
     // JS-backed IO layer that emits NOTHING to WASI - so `print()` output never
@@ -680,8 +758,18 @@ pub fn run_pyodide_with(rt: &PyRuntime, python_source: &str) -> Result<PyodideRu
     let arg0_ptr = alloc_cstr(&mut store, b"python\0")?;
     let arg1_ptr = alloc_cstr(&mut store, b"-c\0")?;
 
-    // Prepend the redirect, then NUL-terminate the combined source string.
+    // Prepend the redirect (and, for a package, a `sys.path` insert of its
+    // directory so `import sibling` resolves), then NUL-terminate the combined
+    // source string. `sys.path.insert(0, ...)` is prepended via the redirect
+    // block, before any user import runs.
     let mut source_bytes = STDOUT_REDIRECT.to_vec();
+    if let Some(pkg) = pkg {
+        // The dir is a guest path with no embedded quote/newline (it is built
+        // by the caller from the package mount constant + relative subdirs), so
+        // a single-quoted Python literal is safe here.
+        let sys_path_line = format!("_sys.path.insert(0, '{}')\n", pkg.sys_path_dir);
+        source_bytes.extend_from_slice(sys_path_line.as_bytes());
+    }
     source_bytes.extend_from_slice(python_source.as_bytes());
     source_bytes.push(0);
     let arg2_ptr = alloc_cstr(&mut store, &source_bytes)?;
@@ -790,6 +878,44 @@ mod tests {
         assert!(
             text.contains("5050"),
             "expected 5050 in stdout, got: {text:?}"
+        );
+    }
+
+    /// End-to-end multi-file: a package whose entry imports a sibling module
+    /// runs on the bundled (zero-config) runtime and prints the value computed
+    /// via the sibling. Proves the package's `.py` files are mounted into the
+    /// guest FS and its directory is on `sys.path`. LOUD-SKIPs (never fails)
+    /// when no runtime was assembled in this build, so the suite stays green
+    /// offline.
+    #[test]
+    fn run_python_package_resolves_sibling_import() {
+        let rt = match resolve_runtime() {
+            Ok(rt) => rt,
+            Err(_) => {
+                eprintln!("skip: no python runtime assembled in this build");
+                return;
+            }
+        };
+
+        // Mount a sibling module `helper.py` under the package's sys.path dir
+        // and import it from the entry.
+        let mut files = std::collections::BTreeMap::new();
+        files.insert(
+            "/pkg/source/helper.py".to_owned(),
+            b"def square(n):\n    return n * n\n".to_vec(),
+        );
+        let pkg = PyPackage {
+            files,
+            sys_path_dir: "/pkg/source".to_owned(),
+        };
+        let entry = "from helper import square\nprint(f\"sq={square(9)}\")\n";
+
+        let out = run_pyodide_package_with(&rt, entry, &pkg).expect("run_pyodide_package_with");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert_eq!(out.exit_code, 0, "clean exit; stdout={text:?}");
+        assert!(
+            text.contains("sq=81"),
+            "sibling import must resolve (9*9=81), got stdout={text:?}"
         );
     }
 }

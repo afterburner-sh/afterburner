@@ -1,0 +1,12 @@
+[format]
+version = "1.0"
+
+[package]
+name = "python-multimodule"
+namespace = "examples"
+version = "0.1.0"
+language = "python"
+entry = "source/main.py"
+
+[runtime]
+min = "0.1.0"

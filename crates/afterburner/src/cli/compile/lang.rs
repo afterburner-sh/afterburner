@@ -20,7 +20,10 @@
 //!   A `Makefile`/`CMakeLists.txt`, when present, is preferred.
 //! - `cpp`/`c++`/`cxx`/`cc` - `clang++ --target=wasm32-wasip1
 //!   --sysroot=<wasi-sdk>` over ALL `source/**/*.{cpp,cxx,cc}` (emcc fallback).
-//! - `python`/`py` and `ruby`/`rb` - pending (honest error; structure wired).
+//! - `python`/`py` and `ruby`/`rb` - interpreted: there is no WASM compile.
+//!   `burn compile` packs the `source/` tree into a source `.afb` (handled in
+//!   [`super::dispatch_compile`]); `burn run` executes it on the bundled
+//!   CPython / CRuby interpreter. The dispatch never routes them here.
 
 use super::cc;
 use anyhow::{Context, Result};
@@ -93,11 +96,13 @@ impl SourceLang {
     }
 }
 
-/// Compile a native language package (Rust/Go/C/C++/Python) to a WASM binary.
+/// Compile a compiled-to-WASM language package (Rust/Go/C/C++) to a WASM binary.
 ///
-/// `lang` must not be `Js` or `Ts` (those go through the Javy path).
-/// `pkg_dir` is the root of the package (where `afb.toml` lives).
-/// `entry` is the value of `[package] entry` (e.g. `source/main.rs`).
+/// `lang` must be one of the compiled languages. JS/TS go through the Javy
+/// path and Python/Ruby are interpreted (packed as source, run on the bundled
+/// interpreter); both are dispatched in `cli::compile::dispatch_compile` and
+/// never reach here. `pkg_dir` is the root of the package (where `afb.toml`
+/// lives); `entry` is the value of `[package] entry` (e.g. `source/main.rs`).
 ///
 /// Returns the raw bytes of a `wasm32-wasip1` WASI command module.
 pub fn compile_native(lang: SourceLang, pkg_dir: &Path, entry: &str) -> Result<Vec<u8>> {
@@ -105,12 +110,11 @@ pub fn compile_native(lang: SourceLang, pkg_dir: &Path, entry: &str) -> Result<V
         SourceLang::Js | SourceLang::Ts => {
             anyhow::bail!("compile_native called for JS/TS - use the JS engine path instead (bug)")
         }
+        SourceLang::Python | SourceLang::Ruby => compile_interpreted(lang),
         SourceLang::Rust => compile_rust(pkg_dir),
         SourceLang::Go => compile_go(pkg_dir, entry),
         SourceLang::C => cc::compile_c(pkg_dir, entry),
         SourceLang::Cpp => cc::compile_cpp(pkg_dir, entry),
-        SourceLang::Python => compile_python(pkg_dir, entry),
-        SourceLang::Ruby => compile_ruby(pkg_dir, entry),
     }
 }
 
@@ -394,38 +398,26 @@ fn compile_go(pkg_dir: &Path, entry: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Python compile backend.
+/// Backend for an interpreted language (Python / Ruby) reached through the
+/// WASM-compile dispatch.
 ///
-/// Python runs as source on the bundled CPython-WASI runtime (`burn run x.py`).
-/// Compiling a Python *package* to a single precompiled `.afb` (a vfs-packed,
-/// self-contained WASM module) is a separate, still-pending step. This function
-/// emits an honest, actionable error pointing at the working run path.
-///
-/// The structure is wired so that when the packing step lands, only this
-/// function needs to change.
-fn compile_python(_pkg_dir: &Path, _entry: &str) -> Result<Vec<u8>> {
+/// Python and Ruby do not compile to a WASM artifact: a `burn compile` of such
+/// a package packs the `source/` tree into a source `.afb` (see
+/// `cli::compile::dispatch_compile` -> `pack_source_afb`), and `burn run`
+/// executes that source on the bundled CPython / CRuby interpreter. So this
+/// function is never reached on a correct dispatch; it returns a clear error
+/// (rather than `unreachable!`) to fail loud, not panic, if a future caller
+/// routes an interpreted language into the WASM path by mistake.
+fn compile_interpreted(lang: SourceLang) -> Result<Vec<u8>> {
+    let (lang_name, run_hint) = match lang {
+        SourceLang::Python => ("Python", "burn run file.py"),
+        SourceLang::Ruby => ("Ruby", "burn run file.rb"),
+        other => anyhow::bail!("compile_interpreted called for non-interpreted language {other:?}"),
+    };
     anyhow::bail!(
-        "Python-to-.afb packaging is pending. Python runs as source on the bundled \
-         CPython-WASI runtime today: use `burn run file.py`. Packing a Python package \
-         into a single precompiled .afb is wired but not yet implemented."
-    )
-}
-
-/// Ruby compile backend.
-///
-/// Ruby runs as source on the bundled ruby.wasm runtime (`burn run x.rb`).
-/// Compiling a Ruby *package* to a single precompiled `.afb` (a vfs-packed,
-/// self-contained WASM module bundling the script + interpreter + stdlib) is a
-/// separate, still-pending step. This function emits an honest, actionable
-/// error pointing at the working run path.
-///
-/// The structure is wired so that when the packing step lands, only this
-/// function needs to change.
-fn compile_ruby(_pkg_dir: &Path, _entry: &str) -> Result<Vec<u8>> {
-    anyhow::bail!(
-        "Ruby-to-.afb packaging is pending. Ruby runs as source on the bundled \
-         ruby.wasm runtime today: use `burn run file.rb`. Packing a Ruby package into \
-         a single precompiled .afb is wired but not yet implemented."
+        "{lang_name} does not compile to a WASM artifact: it ships as source and runs on \
+         the bundled interpreter. `burn compile` packs the source `.afb`; `{run_hint}` runs \
+         it. Reaching the WASM-compile path for {lang_name} is a dispatch bug."
     )
 }
 
@@ -480,13 +472,17 @@ mod tests {
     }
 
     #[test]
-    fn ruby_backend_gives_honest_pending_error() {
+    fn ruby_via_wasm_compile_path_errors_as_interpreted() {
+        // Ruby is interpreted: routing it through the WASM-compile path
+        // (`compile_native`) is a dispatch bug, so it fails loud with a clear
+        // "ships as source" message rather than producing a bogus artifact.
         use std::path::Path;
-        let err = compile_ruby(Path::new("/tmp"), "source/main.rb").unwrap_err();
+        let err =
+            compile_native(SourceLang::Ruby, Path::new("/tmp"), "source/main.rb").unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("pending") || msg.contains("not yet"),
-            "must indicate pending: {msg}"
+            msg.contains("source") && msg.contains("interpreter"),
+            "must explain Ruby ships as source on the bundled interpreter: {msg}"
         );
     }
 
@@ -526,13 +522,17 @@ mod tests {
     // `super::cc`'s own `mod tests`.
 
     #[test]
-    fn python_backend_gives_honest_pending_error() {
+    fn python_via_wasm_compile_path_errors_as_interpreted() {
+        // Python is interpreted: routing it through the WASM-compile path
+        // (`compile_native`) is a dispatch bug, so it fails loud with a clear
+        // "ships as source" message rather than producing a bogus artifact.
         use std::path::Path;
-        let err = compile_python(Path::new("/tmp"), "source/main.py").unwrap_err();
+        let err =
+            compile_native(SourceLang::Python, Path::new("/tmp"), "source/main.py").unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("pending") || msg.contains("not yet"),
-            "must indicate pending: {msg}"
+            msg.contains("source") && msg.contains("interpreter"),
+            "must explain Python ships as source on the bundled interpreter: {msg}"
         );
     }
 

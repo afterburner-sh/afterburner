@@ -190,7 +190,11 @@ fn go_sum_compile_and_run() {
 }
 
 #[test]
-fn python_compile_gives_honest_pending_error() {
+fn python_via_wasm_compile_path_errors_as_interpreted() {
+    // Python is interpreted: `burn compile` packs its source `.afb` (see
+    // `dispatch_compile`), so the WASM-compile path (`compile_native`) is never
+    // taken for Python. If a caller routes it there anyway it fails loud with a
+    // clear "ships as source" message - never a fake artifact, never a panic.
     use afterburner::cli::compile::lang::SourceLang;
     let err = afterburner::cli::compile::lang::compile_native(
         SourceLang::Python,
@@ -200,8 +204,8 @@ fn python_compile_gives_honest_pending_error() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("pending") || msg.contains("not yet"),
-        "Python compile must report pending state, got: {msg}"
+        msg.contains("source") && msg.contains("interpreter"),
+        "Python WASM-compile path must explain it ships as source, got: {msg}"
     );
 }
 

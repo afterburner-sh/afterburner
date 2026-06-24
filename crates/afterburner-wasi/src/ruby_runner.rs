@@ -47,6 +47,13 @@ const RUBY_FUEL: u64 = 8_000_000_000_000;
 /// `usr` here gives CRuby its stdlib with no `RUBYLIB` and no realpath error.
 const GUEST_USR_MOUNT: &str = "/usr";
 
+/// Guest mount point for a `burn run <pkg.afb>` Ruby package's source tree.
+/// The unpacked `source/` dir is preopened read-only here, added to
+/// `$LOAD_PATH` via `-I`, and the entry is run by its path under this prefix -
+/// so `require_relative './helper'` (relative to the entry) and
+/// `require 'helper'` (via the load path) both resolve sibling modules.
+const GUEST_PKG_MOUNT: &str = "/pkg";
+
 /// A fully-resolved Ruby runtime: the standalone interpreter wasm and the
 /// stdlib dir to mount read-only.
 ///
@@ -167,6 +174,91 @@ pub fn run_ruby_with(rt: &RubyRuntime, ruby_source: &str) -> Result<RubyRunOutpu
     })
 }
 
+/// Run a Ruby *package* (a `burn run <pkg.afb>` Ruby package, or a directory of
+/// `.rb` files) on the bundled runtime: boot CRuby, preopen `pkg_dir`
+/// read-only, add it to `$LOAD_PATH`, and run the entry by its path under the
+/// package mount - so sibling modules resolve.
+///
+/// `entry_rel` is the entry file's path RELATIVE to `pkg_dir` (e.g.
+/// `"main.rb"`). Both forms of cross-file load work:
+/// - `require_relative './helper'` (resolved relative to the entry's own guest
+///   path under [`GUEST_PKG_MOUNT`]), and
+/// - `require 'helper'` (resolved via the `-I<mount>` load-path entry).
+///
+/// This reuses the stdlib-mount machinery of [`run_ruby_with`]: it is the same
+/// `preopen_ro` + `WasiCommandOpts` path, with one extra read-only preopen for
+/// the package source and the entry passed as a script path instead of `-e`.
+///
+/// # Errors
+///
+/// Returns `Err` when no runtime is available, when `pkg_dir` does not exist,
+/// or when boot / run traps (a fuel exhaustion, a wasm trap). A Ruby-level
+/// error (an exception, a syntax error) is NOT an `Err`: it surfaces as a
+/// non-zero `exit_code` with the message on `stderr`.
+pub fn run_ruby_package(pkg_dir: &Path, entry_rel: &str) -> Result<RubyRunOutput> {
+    let rt = resolve_ruby_runtime()?;
+    run_ruby_package_with(&rt, pkg_dir, entry_rel)
+}
+
+/// Boot a resolved [`RubyRuntime`] and run a Ruby package rooted at `pkg_dir`
+/// with entry `entry_rel`. The one canonical package run path; [`run_ruby_package`]
+/// is a thin shim that resolves the runtime first.
+pub fn run_ruby_package_with(
+    rt: &RubyRuntime,
+    pkg_dir: &Path,
+    entry_rel: &str,
+) -> Result<RubyRunOutput> {
+    if !pkg_dir.is_dir() {
+        return Err(AfterburnerError::Engine(format!(
+            "ruby package directory {} does not exist",
+            pkg_dir.display()
+        )));
+    }
+
+    let wasm_bytes = std::fs::read(&rt.wasm_path)
+        .map_err(|e| AfterburnerError::Engine(format!("read {}: {e}", rt.wasm_path.display())))?;
+
+    let vm = EmbedderVm::new()?;
+    let module = vm.compile(&wasm_bytes, true, |_| Ok(()))?;
+
+    // The entry's guest path: under the package mount, with forward slashes.
+    let entry_fwd = entry_rel.replace('\\', "/");
+    let guest_entry = format!("{GUEST_PKG_MOUNT}/{entry_fwd}");
+
+    // Load-path roots, both prepended to `$LOAD_PATH` via `-I`:
+    //   - the entry's own directory (e.g. `/pkg/source`), so `require 'helper'`
+    //     resolves a sibling sitting next to the entry (the flat-`source/` case);
+    //   - the package mount root (`/pkg`), so `require 'source/helper'` (a
+    //     subdir-qualified name) also resolves.
+    // Running the entry by its real guest path keeps `require_relative` working
+    // and sets `__FILE__`/`__dir__` correctly.
+    let entry_dir = match entry_fwd.rsplit_once('/') {
+        Some((dir, _file)) => format!("{GUEST_PKG_MOUNT}/{dir}"),
+        None => GUEST_PKG_MOUNT.to_owned(),
+    };
+    let i_entry_dir = format!("-I{entry_dir}");
+    let i_root = format!("-I{GUEST_PKG_MOUNT}");
+    let mut opts = WasiCommandOpts::new().args([
+        "ruby",
+        i_entry_dir.as_str(),
+        i_root.as_str(),
+        guest_entry.as_str(),
+    ]);
+
+    // Stdlib first (same machinery as `run_ruby_with`), then the package source.
+    if let Some(usr) = &rt.usr_dir {
+        opts = opts.preopen_ro(usr, GUEST_USR_MOUNT);
+    }
+    opts = opts.preopen_ro(pkg_dir, GUEST_PKG_MOUNT);
+
+    let out = vm.run_command(&module, opts, Some(RUBY_FUEL))?;
+    Ok(RubyRunOutput {
+        stdout: out.stdout,
+        stderr: out.stderr,
+        exit_code: out.result as i32,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +302,72 @@ mod tests {
         assert!(
             text.contains('2'),
             "expected 2 in stdout, got {text:?} stderr={err:?}"
+        );
+    }
+
+    /// `run_ruby_package_with` on a directory that does not exist is an honest
+    /// `Err`, not a panic - even with no runtime assembled.
+    #[test]
+    fn run_ruby_package_missing_dir_errors() {
+        let rt = RubyRuntime {
+            wasm_path: PathBuf::from("/nonexistent/ruby.wasm"),
+            usr_dir: None,
+        };
+        let err = run_ruby_package_with(&rt, Path::new("/no/such/pkg/dir"), "source/main.rb")
+            .expect_err("missing dir must error");
+        assert!(
+            err.to_string().contains("does not exist"),
+            "error must name the missing dir: {err}"
+        );
+    }
+
+    /// End-to-end multi-file: a package whose entry `require`s a sibling module
+    /// runs on the bundled runtime and prints the value computed via the
+    /// sibling. Proves the package source tree is on `$LOAD_PATH`. LOUD-SKIPs
+    /// (never fails) when no runtime was assembled in this build.
+    #[test]
+    fn run_ruby_package_resolves_sibling_require() {
+        let rt = match resolve_ruby_runtime() {
+            Ok(rt) => rt,
+            Err(_) => {
+                eprintln!("skip: no ruby runtime assembled in this build");
+                return;
+            }
+        };
+
+        // Write a 2-file package to a unique temp dir: main.rb requires helper.rb.
+        let root = std::env::temp_dir().join(format!(
+            "burn-rb-pkg-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("source");
+        std::fs::create_dir_all(&src).expect("create source dir");
+        std::fs::write(
+            src.join("helper.rb"),
+            "module Helper\n  def self.square(n); n * n; end\nend\n",
+        )
+        .expect("write helper.rb");
+        std::fs::write(
+            src.join("main.rb"),
+            "require 'helper'\nputs \"sq=#{Helper.square(9)}\"\n",
+        )
+        .expect("write main.rb");
+
+        let out =
+            run_ruby_package_with(&rt, &root, "source/main.rb").expect("run_ruby_package_with");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let text = String::from_utf8_lossy(&out.stdout);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.exit_code, 0,
+            "clean exit; stdout={text:?} stderr={err:?}"
+        );
+        assert!(
+            text.contains("sq=81"),
+            "sibling require must resolve (9*9=81), got stdout={text:?} stderr={err:?}"
         );
     }
 }

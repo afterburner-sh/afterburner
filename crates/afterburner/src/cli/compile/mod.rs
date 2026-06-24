@@ -265,11 +265,16 @@ fn resolve_one_dep(
 /// `burn package --compile`/`--wasm-only`.
 ///
 /// Reads `[package] language` from `local.manifest` and dispatches:
-/// - JS/TS: transpile TS (no-op for plain JS), then the Javy path.
-/// - Rust/Go/C/C++/Python: native toolchain -> WASM -> `.afb`.
+/// - JS/TS: transpile TS (no-op for plain JS), then the Javy path
+///   (source + precompiled WASM).
+/// - Python/Ruby: pack the `source/` tree as-is (no precompiled WASM) - the
+///   bundled CPython / CRuby interpreter runs the source at `burn run` time.
+/// - Rust/Go/C/C++: native toolchain -> WASM -> `.afb`.
 ///
 /// `wasm_only` controls whether source members are included in the output
 /// `.afb`. Pass `true` for `--wasm-only` (FullWasm mode), `false` otherwise.
+/// `--wasm-only` is rejected for Python/Ruby: an interpreted package has no
+/// WASM artifact to ship, so dropping the source would leave nothing runnable.
 pub fn dispatch_compile(
     dir: &Path,
     mut local: pkg::LocalPackage,
@@ -282,11 +287,52 @@ pub fn dispatch_compile(
     if lang.is_js_family() {
         transpile_ts_sources(&mut local)?;
         compile_with_local_package(local, out_path, wasm_only)
+    } else if lang.is_interpretable() {
+        // Python / Ruby: shipped as source, interpreted on the bundled runtime.
+        // There is no precompiled WASM artifact, so `--wasm-only` cannot apply.
+        if wasm_only {
+            anyhow::bail!(
+                "a {lang_name} package is interpreted (it ships as source and runs on the \
+                 bundled runtime); there is no WASM artifact, so `--wasm-only` is not \
+                 applicable. Use `burn compile` (source `.afb`) instead.",
+                lang_name = format!("{lang:?}").to_lowercase(),
+            );
+        }
+        pack_source_afb(local, out_path)
     } else {
         let entry = local.manifest.package.entry.clone();
         let pkg_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         compile_native_to_afb(local, lang, &pkg_dir, &entry, out_path, wasm_only)
     }
+}
+
+/// Pack an interpreted-language package (Python / Ruby) into a source `.afb`.
+///
+/// Mirrors the JS/TS source-`.afb` path: the `source/` tree (entry + sibling
+/// modules), `afb.toml` (carrying `[package] language = python|ruby`), and
+/// `manifold.json` are packed through the one canonical codec
+/// ([`pkg::LocalPackage::build`] -> [`afterburner_afb::pack::Builder`]), so the
+/// artifact is byte-identical to one `burn package` would emit and to the
+/// registry tooling. No `precompiled/*` member is added: `burn run <pkg.afb>`
+/// unpacks the source and runs it on the bundled CPython / CRuby interpreter.
+fn pack_source_afb(local: LocalPackage, out_path: &Path) -> Result<()> {
+    let coord = coord_str(&local);
+    let (bytes, d) =
+        style::spin("packing source", || local.build()).context("building source .afb")?;
+    std::fs::write(out_path, &bytes).with_context(|| format!("writing {}", out_path.display()))?;
+    println!(
+        "{} {} {}",
+        style::ok("packaged"),
+        style::accent(&coord),
+        style::gold("(source)")
+    );
+    print_digest(bytes.len() as u64, &hex(&d));
+    println!(
+        "  {} {}",
+        style::muted("->"),
+        style::value(&out_path.display().to_string())
+    );
+    Ok(())
 }
 
 /// `burn compile [dir] -o <out>` entry point.
@@ -308,11 +354,15 @@ pub fn compile(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
     dispatch_compile(dir, local, &out_path, false)
 }
 
-/// Compile a native language (Rust/Go/C/C++/Python) package to a `.afb`.
+/// Compile a native (compiled-to-WASM) language package (Rust/Go/C/C++) to a
+/// `.afb`.
 ///
 /// Invokes the language toolchain, reads the produced WASM bytes, and
 /// bundles them into a `.afb` with `[runtime] target = "wasm32-wasip1"`.
 /// The source files are included unless `wasm_only` is true.
+///
+/// JS/TS (the Javy path) and Python/Ruby (interpreted, packed as source) are
+/// dispatched elsewhere in [`dispatch_compile`] and never reach here.
 fn compile_native_to_afb(
     local: LocalPackage,
     lang: SourceLang,
@@ -327,9 +377,10 @@ fn compile_native_to_afb(
         SourceLang::Go => "Go",
         SourceLang::C => "C",
         SourceLang::Cpp => "C++",
-        SourceLang::Python => "Python",
-        SourceLang::Ruby => "Ruby",
         SourceLang::Js | SourceLang::Ts => unreachable!("JS/TS not handled here"),
+        SourceLang::Python | SourceLang::Ruby => {
+            unreachable!("Python/Ruby are interpreted and packed as source, not compiled here")
+        }
     };
 
     // Build the source-only .afb first (for the manifest + manifold).
