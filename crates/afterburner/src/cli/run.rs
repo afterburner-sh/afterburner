@@ -286,8 +286,8 @@ fn run_afb(afb_path: &Path, _user_args: &[String]) -> Result<()> {
 /// `.go` -> `GOOS=wasip1 GOARCH=wasm go build`
 /// `.c`  -> `clang --target=wasm32-wasip1 --sysroot=<wasi-sdk>` (WASI command)
 /// `.cpp` / `.cxx` / `.cc` -> `clang++ --target=wasm32-wasip1 --sysroot=<wasi-sdk>`
-/// `.py` / `.pyw` -> Pyodide embedder via `BURN_PYTHON_RUNTIME`
-/// `.rb` -> honest "runtime not available" error
+/// `.py` / `.pyw` -> Pyodide embedder (zero-config bundle; `BURN_PYTHON_RUNTIME` override)
+/// `.rb` -> bundled ruby.wasm embedder (zero-config bundle; `BURN_RUBY_RUNTIME` override)
 ///
 /// Sandbox posture: SEALED BY DEFAULT (no fs preopens, no net, no env).
 /// Grants are applied via the standard `--allow-*` / `-A` flags on the CLI.
@@ -299,6 +299,9 @@ fn run_native_script(cli: &Cli, path: &Path, user_args: &[String]) -> Result<()>
         .map(str::to_ascii_lowercase);
     if matches!(ext.as_deref(), Some("py" | "pyw")) {
         return run_python_source(path, user_args);
+    }
+    if matches!(ext.as_deref(), Some("rb")) {
+        return run_ruby_source(path, user_args);
     }
     use super::compile::lang::compile_single_file;
     let abs = path
@@ -354,6 +357,57 @@ fn run_python_source(path: &Path, _user_args: &[String]) -> Result<()> {
 fn run_python_source(path: &Path, _user_args: &[String]) -> Result<()> {
     anyhow::bail!(
         "running Python source files requires the `wasm` feature \
+         (rebuild with `--features wasm`). File: {}",
+        path.display()
+    )
+}
+
+/// Run a `.rb` source file via the bundled ruby.wasm runtime.
+///
+/// Uses the self-contained, zero-config runtime: the build script fetches the
+/// stock `ruby-3.4-wasm32-unknown-wasip1-full` release into a target cache and
+/// extracts the standalone CRuby WASI module + its stdlib, so `burn run x.rb`
+/// works out of the box with no env vars. `BURN_RUBY_RUNTIME` (a directory with
+/// `ruby.wasm`) remains an optional override. Exits with the Ruby process exit
+/// code.
+///
+/// When neither the bundle nor an override is available (a build where the
+/// network was unavailable), emits an honest, actionable error - never a fake
+/// success.
+#[cfg(feature = "wasm")]
+fn run_ruby_source(path: &Path, _user_args: &[String]) -> Result<()> {
+    use afterburner_wasi::ruby_runner::run_ruby;
+    use std::io::Write;
+
+    let source = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+
+    let out = run_ruby(&source).map_err(|e| anyhow::anyhow!("ruby runtime error: {e}"))?;
+
+    // Faithful streams: program output to stdout, Ruby diagnostics (an uncaught
+    // exception, a syntax error) to stderr - so `burn run x.rb` behaves like a
+    // real `ruby x.rb` and a failing script shows its reason.
+    if !out.stdout.is_empty() {
+        std::io::stdout()
+            .write_all(&out.stdout)
+            .context("writing ruby stdout")?;
+    }
+    if !out.stderr.is_empty() {
+        std::io::stderr()
+            .write_all(&out.stderr)
+            .context("writing ruby stderr")?;
+    }
+
+    if out.exit_code != 0 {
+        std::process::exit(out.exit_code);
+    }
+    Ok(())
+}
+
+/// Ruby source runner when the `wasm` feature is absent: honest error.
+#[cfg(not(feature = "wasm"))]
+fn run_ruby_source(path: &Path, _user_args: &[String]) -> Result<()> {
+    anyhow::bail!(
+        "running Ruby source files requires the `wasm` feature \
          (rebuild with `--features wasm`). File: {}",
         path.display()
     )

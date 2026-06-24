@@ -16,7 +16,8 @@
 //! target, no wasi-sdk. The skip is detected from the actionable error the
 //! driver emits ("not found on PATH", "rustup target add", "wasi-sdk not
 //! found", ...), so the suite is never silently green when a tool is missing.
-//! The Ruby and runtime-less Python paths assert their honest pending message.
+//! The Python and Ruby paths run when their bundled runtime is present and
+//! LOUD-SKIP (asserting the honest "runtime not found" message) when it is not.
 
 #![cfg(feature = "bin")]
 
@@ -238,21 +239,25 @@ fn python_repl_runs_or_skips_honestly() {
     assert!(stdout.contains("42"), "6*7 echoed -> 42; stdout={stdout:?}");
 }
 
-// ---- Ruby (honest pending) --------------------------------------------------
+// ---- Ruby (bundled ruby.wasm runtime; zero-config) --------------------------
 
 #[test]
-fn ruby_repl_is_honest_pending() {
-    // Ruby has no bundled runtime: it must report a clear, actionable pending
-    // state (never crash, never silently succeed).
-    let (_stdout, stderr) = run_repl("ruby", &[r#"puts "hi""#]);
-    assert!(
-        stderr.contains("ruby.wasm runtime not bundled"),
-        "ruby REPL must say its runtime is pending; stderr={stderr:?}"
-    );
-    assert!(
-        stderr.contains("BURN_RUBY_RUNTIME"),
-        "ruby pending message must be actionable; stderr={stderr:?}"
-    );
+fn ruby_repl_runs_or_skips_honestly() {
+    // Ruby runs on the self-contained bundle: `puts` prints, and a bare
+    // expression echoes its value IRB-style. When the bundle was not assembled
+    // in this build (no network at build time), the REPL LOUD-SKIPs with the
+    // honest "ruby runtime not found" message - never a silent green.
+    let (stdout, stderr) = run_repl("ruby", &[r#"puts "hi rb""#, "6 * 7"]);
+    if stderr.contains("ruby runtime not found") {
+        eprintln!("SKIP ruby REPL (runtime absent): {stderr}");
+        assert!(
+            stderr.contains("BURN_RUBY_RUNTIME"),
+            "ruby skip must be the actionable runtime-missing error; stderr={stderr:?}"
+        );
+        return;
+    }
+    assert!(stdout.contains("hi rb"), "puts; stdout={stdout:?}");
+    assert!(stdout.contains("42"), "6*7 echoed -> 42; stdout={stdout:?}");
 }
 
 // ---- unknown language -------------------------------------------------------

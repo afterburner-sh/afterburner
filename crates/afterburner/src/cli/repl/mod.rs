@@ -19,8 +19,8 @@
 //!   embedder. Honest about the per-line compile cost and the toolchain each
 //!   language needs (a missing toolchain is a clear error, never a crash).
 //! * `python` / `py` - a line REPL over the Pyodide runtime ([`python`]).
-//! * `ruby` / `rb` - an honest pending state ([`ruby`]) until the ruby.wasm
-//!   payload is bundled.
+//! * `ruby` / `rb` - a line REPL over the bundled ruby.wasm runtime ([`ruby`]),
+//!   IRB-style (each line echoes its value).
 //!
 //! Shared meta-commands (where the backend supports them): `:clear`/`:reset`
 //! forget the session, `:help`/`:?` list commands, `:exit`/`:quit` leave.

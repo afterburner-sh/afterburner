@@ -128,8 +128,12 @@ wasm-encoder = { version = "0.252", features = ["wasmparser"] }
 [build-dependencies]
 sha2.workspace = true
 # Build-time only (NOT linked into the runtime): fetch the stock Pyodide 0.28.3
-# payload from the CDN and (de)compress the wheels for exnref translation. The
-# self-contained bundle is assembled here so `burn run x.py` works with no env
-# vars and no runtime download (see build.rs + pyodide_payload.rs).
+# payload from the CDN and (de)compress the wheels for exnref translation, and
+# fetch + extract the stock ruby.wasm release tarball. The self-contained
+# bundles are assembled here so `burn run x.py` / `burn run x.rb` work with no
+# env vars and no runtime download (see build.rs + pyodide_payload.rs +
+# ruby_payload.rs).
 ureq.workspace = true
 flate2.workspace = true
+# Untar the stock ruby.wasm release (gzipped tarball -> bin/ruby + stdlib).
+tar.workspace = true

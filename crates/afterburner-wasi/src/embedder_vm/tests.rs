@@ -248,6 +248,44 @@ fn proc_exit_exit_code_surfaced() {
     assert_eq!(out.result, 5, "proc_exit(5) must surface as result == 5");
 }
 
+/// A WASI command module that writes to fd 2 (stderr) must have those bytes
+/// captured in `EmbedderRunOutput::stderr` (not silently dropped). This is the
+/// capture that lets a failing CRuby / C program show its diagnostics.
+#[test]
+fn run_command_captures_stderr() {
+    let vm = EmbedderVm::new().unwrap();
+    let module = vm
+        .compile(
+            &wat(r#"
+              (module
+                (import "wasi_snapshot_preview1" "fd_write"
+                  (func $fd_write (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 0) "boom")
+                (func (export "_start")
+                  ;; iovec at offset 8: buf=0, buf_len=4
+                  i32.const 8   i32.const 0   i32.store
+                  i32.const 12  i32.const 4   i32.store
+                  ;; fd_write(fd=2 (stderr), iovs_ptr=8, iovs_len=1, nwritten_ptr=16)
+                  i32.const 2
+                  i32.const 8
+                  i32.const 1
+                  i32.const 16
+                  call $fd_write
+                  drop))
+            "#),
+            true,
+            |_| Ok(()),
+        )
+        .unwrap();
+    let out = vm
+        .run_command(&module, WasiCommandOpts::new(), None)
+        .unwrap();
+    assert_eq!(out.result, 0, "clean exit");
+    assert_eq!(out.stderr, b"boom", "fd 2 bytes must be captured");
+    assert!(out.stdout.is_empty(), "nothing was written to fd 1");
+}
+
 // ---- determinism: same module + fuel -----------------------------------
 
 /// Two calls with value_doubler_wat and host.value=21 must both return 43.

@@ -57,6 +57,8 @@ pub mod pyodide_runner;
 // `pyo_trace!` is `#[macro_export]`ed (available crate-wide as `crate::pyo_trace`
 // via an explicit `use`); no `#[macro_use]` needed.
 pub mod pyodide_trace;
+pub mod ruby_bundle;
+pub mod ruby_runner;
 pub mod test_support;
 pub mod wasm_engine;
 pub mod wasm_loader;

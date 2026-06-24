@@ -449,9 +449,14 @@ unsafe impl Sync for EmbedderModule {}
 pub struct EmbedderRunOutput {
     /// The i64 value returned by the named export.
     pub result: i64,
-    /// Bytes written to stdout during execution. Non-empty only when the
+    /// Bytes written to stdout (fd 1) during execution. Non-empty only when the
     /// module was compiled with `wasi: true` and actually wrote to stdout.
     pub stdout: Vec<u8>,
+    /// Bytes written to stderr (fd 2) during execution. Captured for
+    /// [`run_command`][EmbedderVm::run_command] (so a command module's
+    /// diagnostics are not silently dropped); empty for [`run`][EmbedderVm::run]
+    /// and for non-WASI modules.
+    pub stderr: Vec<u8>,
 }
 
 // ---- VM ----------------------------------------------------------------------
@@ -658,7 +663,14 @@ impl EmbedderVm {
             None => Vec::new(),
         };
 
-        Ok(EmbedderRunOutput { result, stdout })
+        // `run` wires no stderr pipe (the typed-export path is for pure compute,
+        // not a command emitting diagnostics); stderr is captured by
+        // `run_command` instead.
+        Ok(EmbedderRunOutput {
+            result,
+            stdout,
+            stderr: Vec::new(),
+        })
     }
 
     /// Run a WASI *command* module: one that exports `_start` with signature
@@ -669,9 +681,10 @@ impl EmbedderVm {
     /// * Calls `_start` (no typed result - the module exits via `proc_exit`).
     /// * Threads argv and preopened directories from `opts` into the WASI
     ///   context so the module can read its arguments and access its stdlib.
-    /// * Returns `Ok(EmbedderRunOutput { result: exit_code as i64, stdout })`
+    /// * Returns `Ok(EmbedderRunOutput { result: exit_code, stdout, stderr })`
     ///   on a clean exit (exit code 0 is success; non-zero is surfaced in
-    ///   `result` rather than as an error, matching POSIX convention).
+    ///   `result` rather than as an error, matching POSIX convention). Both
+    ///   fd 1 (`stdout`) and fd 2 (`stderr`) are captured.
     /// * Returns `Err(AfterburnerError::FuelExhausted)` if the module runs out
     ///   of fuel, and `Err(AfterburnerError::WasmTrap(_))` for any other trap.
     ///
@@ -704,9 +717,15 @@ impl EmbedderVm {
         }
 
         let pipe = MemoryOutputPipe::new(4 * 1024 * 1024);
+        // Capture stderr too. A command module (CRuby, a C program) writes its
+        // diagnostics to fd 2; without this they are silently dropped and a
+        // failing run looks like an empty success. The pipe is read after the
+        // run via this retained handle (it is `Clone`; the clone goes to the
+        // ctx, this copy stays here).
+        let err_pipe = MemoryOutputPipe::new(4 * 1024 * 1024);
 
         let mut builder = WasiCtxBuilder::new();
-        builder.stdout(pipe.clone());
+        builder.stdout(pipe.clone()).stderr(err_pipe.clone());
 
         if !opts.args.is_empty() {
             builder.args(&opts.args);
@@ -815,6 +834,7 @@ impl EmbedderVm {
         Ok(EmbedderRunOutput {
             result: exit_code,
             stdout,
+            stderr: err_pipe.contents().to_vec(),
         })
     }
 }

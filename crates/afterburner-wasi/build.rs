@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Build-time work for afterburner-wasi: two independent jobs.
+//! Build-time work for afterburner-wasi: three independent jobs.
 //!
 //! Job one, the plugin drift gate: make sure the committed plugin binary
 //! matches the current polyfill bundle, so editing a polyfill without
@@ -22,15 +22,27 @@
 //! the payload step SKIPS cleanly (a `cargo:warning`, never a panic) and the
 //! runtime falls back to `BURN_PYTHON_RUNTIME` with an honest error - exactly
 //! as the plugin gate skips on a fresh checkout.
+//!
+//! Job three, the self-contained ruby.wasm payload: fetch the stock
+//! `ruby-3.4-wasm32-unknown-wasip1-full` tarball from the `ruby/ruby.wasm`
+//! GitHub release (sha256-pinned), extract the standalone interpreter (a plain
+//! WASI command module) and its stdlib, and cache the result under the target
+//! so `burn run x.rb` works with no env vars and no runtime download. No
+//! `wasm-opt` and no translation: the binary imports only
+//! `wasi_snapshot_preview1`. Skips cleanly (a `cargo:warning`) when the network
+//! is unreachable; the runtime then falls back to `BURN_RUBY_RUNTIME`. See
+//! `ruby_payload.rs` (build side) and `src/ruby_bundle.rs` (runtime).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod pyodide_payload;
+mod ruby_payload;
 
 fn main() {
     plugin_drift_gate();
     pyodide_payload::build();
+    ruby_payload::build();
 }
 
 // ---- 1. plugin drift gate --------------------------------------------------

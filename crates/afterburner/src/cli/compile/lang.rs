@@ -132,12 +132,12 @@ pub fn compile_single_file(source_path: &Path) -> Result<Vec<u8>> {
         Some("c") => compile_single_file_c(source_path),
         Some("cpp" | "cxx" | "cc") => compile_single_file_cpp(source_path),
         Some("py" | "pyw") => anyhow::bail!(
-            "Python runtime not available: the CPython-WASI payload is not bundled. \
-             Install it and re-run, or use a Python package with `burn compile`."
+            "Python does not compile to a standalone .wasm here: it runs as source on the \
+             bundled CPython-WASI runtime. Use `burn run file.py` to execute it."
         ),
         Some("rb") => anyhow::bail!(
-            "Ruby runtime not available: the ruby.wasm payload is not bundled. \
-             Install it and re-run, or use a Ruby package with `burn compile`."
+            "Ruby does not compile to a standalone .wasm here: it runs as source on the \
+             bundled ruby.wasm runtime. Use `burn run file.rb` to execute it."
         ),
         other => anyhow::bail!(
             "cannot compile {:?}: unsupported extension {:?}",
@@ -396,33 +396,36 @@ fn compile_go(pkg_dir: &Path, entry: &str) -> Result<Vec<u8>> {
 
 /// Python compile backend.
 ///
-/// Python-WASM packaging requires the CPython-WASI payload (a WASM build
-/// of the CPython interpreter). This payload is not yet bundled in
-/// afterburner. This function emits an honest, actionable error.
+/// Python runs as source on the bundled CPython-WASI runtime (`burn run x.py`).
+/// Compiling a Python *package* to a single precompiled `.afb` (a vfs-packed,
+/// self-contained WASM module) is a separate, still-pending step. This function
+/// emits an honest, actionable error pointing at the working run path.
 ///
-/// The structure is wired so that when the payload lands, only this function
-/// needs to change.
+/// The structure is wired so that when the packing step lands, only this
+/// function needs to change.
 fn compile_python(_pkg_dir: &Path, _entry: &str) -> Result<Vec<u8>> {
     anyhow::bail!(
-        "Python packaging needs the afterburner-python payload (pending). \
-         Python-to-WASM support is wired but the CPython-WASI runtime bundle \
-         is not yet included. Contributions welcome."
+        "Python-to-.afb packaging is pending. Python runs as source on the bundled \
+         CPython-WASI runtime today: use `burn run file.py`. Packing a Python package \
+         into a single precompiled .afb is wired but not yet implemented."
     )
 }
 
 /// Ruby compile backend.
 ///
-/// Ruby-WASM packaging requires the ruby.wasm runtime bundle (a WASM build
-/// of the CRuby interpreter). This payload is not yet bundled in
-/// afterburner. This function emits an honest, actionable error.
+/// Ruby runs as source on the bundled ruby.wasm runtime (`burn run x.rb`).
+/// Compiling a Ruby *package* to a single precompiled `.afb` (a vfs-packed,
+/// self-contained WASM module bundling the script + interpreter + stdlib) is a
+/// separate, still-pending step. This function emits an honest, actionable
+/// error pointing at the working run path.
 ///
-/// The structure is wired so that when the payload lands, only this function
-/// needs to change.
+/// The structure is wired so that when the packing step lands, only this
+/// function needs to change.
 fn compile_ruby(_pkg_dir: &Path, _entry: &str) -> Result<Vec<u8>> {
     anyhow::bail!(
-        "Ruby packaging needs the ruby.wasm runtime payload (pending). \
-         Ruby-to-WASM support is wired but the ruby.wasm bundle \
-         is not yet included. Contributions welcome."
+        "Ruby-to-.afb packaging is pending. Ruby runs as source on the bundled \
+         ruby.wasm runtime today: use `burn run file.rb`. Packing a Ruby package into \
+         a single precompiled .afb is wired but not yet implemented."
     )
 }
 
@@ -536,24 +539,28 @@ mod tests {
     // ---- compile_single_file dispatch -----------------------------------------
 
     #[test]
-    fn single_file_py_gives_runtime_not_available() {
+    fn single_file_py_points_at_burn_run() {
+        // Python is interpreted, not compiled to a standalone .wasm: the
+        // single-file compile path directs the user to `burn run` instead.
         use std::path::Path;
         let err = compile_single_file(Path::new("hello.py")).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("not available") || msg.contains("not bundled"),
-            "must say runtime not available: {msg}"
+            msg.contains("burn run") && msg.contains("bundled"),
+            "must point at the bundled-runtime run path: {msg}"
         );
     }
 
     #[test]
-    fn single_file_rb_gives_runtime_not_available() {
+    fn single_file_rb_points_at_burn_run() {
+        // Ruby is interpreted, not compiled to a standalone .wasm: the
+        // single-file compile path directs the user to `burn run` instead.
         use std::path::Path;
         let err = compile_single_file(Path::new("hello.rb")).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("not available") || msg.contains("not bundled"),
-            "must say runtime not available: {msg}"
+            msg.contains("burn run") && msg.contains("bundled"),
+            "must point at the bundled-runtime run path: {msg}"
         );
     }
 
