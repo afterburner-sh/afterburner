@@ -37,12 +37,13 @@
 //! objects created by `wire_env_memory_and_table_in_store`.
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use afterburner_core::{AfterburnerError, Result};
 use wasmparser::{KnownCustom, Parser, Payload};
 use wasmtime::{
-    AsContext, AsContextMut, Caller, Engine, ExternType, FuncType, Global, GlobalType, Instance,
-    Linker, Module, Mutability, Val, ValType,
+    AsContext, AsContextMut, Caller, Engine, ExternType, Func, FuncType, Global, GlobalType,
+    Instance, Linker, Module, Mutability, Val, ValType,
 };
 
 use crate::embedder_vm::EmbedderState;
@@ -292,6 +293,22 @@ pub fn pre_load_side_module<S>(
 where
     S: AsContextMut<Data = EmbedderState>,
 {
+    // The deterministic engine compiles the exnref EH proposal, not legacy
+    // try/catch (wasmtime's Cranelift dropped legacy-EH codegen). A SIDE_MODULE
+    // arriving from a stock wheel may still be legacy - notably CPython 3.14's
+    // Pyodide emits legacy EH in its C-extension `.so` (numpy's core, pocketfft).
+    // Translate it to exnref in process (the same lowering the build bundler
+    // applies) so a stock wheel loads; a `.so` with no legacy EH passes through
+    // unchanged. Without this the compile below fails with "legacy_exceptions
+    // feature required", surfacing to CPython as "unknown dlopen() error".
+    //
+    // Done first so every subsequent parse (dylink.0, the GOT name->slot map)
+    // reads the exact bytes the engine compiles and instantiates, keeping the
+    // table-slot bookkeeping in lockstep with the instance regardless of any
+    // reordering a future translator pass might do.
+    let wasm_cow = crate::emscripten_exnref::maybe_translate_side_module(wasm_bytes, path)?;
+    let wasm_bytes: &[u8] = wasm_cow.as_ref();
+
     // Parse dylink.0 for exact memory and table requirements.
     let dylink = parse_dylink0_mem_info(wasm_bytes);
     pyo_trace!(
@@ -525,6 +542,16 @@ where
         .collect();
     let (got_mem_resolved, got_mem_zero) = resolve_got_mem(store, main_instance, &got_mem_pairs);
     pyo_trace!("[sidemodule] {path}: GOT.mem resolved={got_mem_resolved} zero={got_mem_zero}");
+    // Diagnostic: name the GOT.mem data-address symbols that stayed 0 (the main
+    // module does not export them as a const global). A zeroed data pointer in a
+    // side-module vtable / relocated field is a prime cause of a ctor-time trap.
+    if crate::pyodide_trace::enabled() {
+        for (name, g) in &got_mem_globals {
+            if matches!(g.get(store.as_context_mut()), Val::I32(0)) {
+                pyo_trace!("[sidemodule-gotmem-zero] {path}: GOT.mem.{name}");
+            }
+        }
+    }
 
     // GOT.func is intentionally left at 0 here. The active element segment
     // runs during instantiation and places the side module's own functions into
@@ -548,9 +575,30 @@ where
         })
         .collect();
 
+    // Function names this module itself exports. A SIDE_MODULE may both import a
+    // symbol through `env` AND define+export it (Emscripten routes cross-symbol
+    // references through `env`/`GOT` for dedup, then resolves them to a local
+    // definition when one exists). Those imports must bind to the module's OWN
+    // function, not a no-op stub - else a direct or indirect call through the
+    // stub returns garbage / traps. CPython 3.14's newer LLVM emits these
+    // self-`env` imports (e.g. numpy's `BOOL_*_wrapper`, `std::__2` helpers)
+    // where the 3.13 wheels did not, so this only bites on 3.14.
+    let self_exported_funcs: std::collections::HashSet<&str> = module
+        .exports()
+        .filter(|e| matches!(e.ty(), ExternType::Func(_)))
+        .map(|e| e.name())
+        .collect();
+
     let mut from_main = 0u32;
     let mut from_side = 0u32;
+    let mut from_self = 0u32;
     let mut from_stub = 0u32;
+
+    // Forwarding trampolines for self-`env` imports: each holds a cell filled
+    // with the module's own export after instantiation (the instance does not
+    // exist yet here). `Func` and `OnceLock<Func>` are `Send + Sync`, satisfying
+    // the `func_new` closure bound. Collected so the cells can be filled below.
+    let mut self_forward_cells: Vec<(String, Arc<OnceLock<Func>>)> = Vec::new();
 
     for (name, ft) in &env_func_types {
         // Skip already-defined (memory, table, __memory_base, etc.).
@@ -581,8 +629,43 @@ where
                     AfterburnerError::Engine(format!("sidemodule wire env.{name} from side: {e}"))
                 })?;
             from_side += 1;
+        } else if self_exported_funcs.contains(name.as_str()) {
+            // Resolution path 3: the module's OWN export. The instance does not
+            // exist yet, so bind a forwarding trampoline whose target cell is
+            // filled with `instance.get_func(name)` right after instantiation.
+            let cell: Arc<OnceLock<Func>> = Arc::new(OnceLock::new());
+            let cell_for_call = Arc::clone(&cell);
+            let ft2 = ft.clone();
+            let nparams = ft2.params().len();
+            let nresults = ft2.results().len();
+            let nm = name.clone();
+            linker
+                .func_new(
+                    "env",
+                    name.as_str(),
+                    ft2,
+                    move |mut caller, params, results| {
+                        let Some(target) = cell_for_call.get() else {
+                            return Err(wasmtime::Error::msg(format!(
+                                "self-env forward env.{nm}: target not yet resolved"
+                            )));
+                        };
+                        // Untyped forward: the trampoline's type equals the
+                        // import's type equals the export's type, so the param /
+                        // result slices line up one-to-one.
+                        debug_assert_eq!(params.len(), nparams);
+                        debug_assert_eq!(results.len(), nresults);
+                        target.call(&mut caller, params, results)
+                    },
+                )
+                .map_err(|e| {
+                    AfterburnerError::Engine(format!("sidemodule wire self env.{name}: {e}"))
+                })?;
+            self_forward_cells.push((name.clone(), cell));
+            from_self += 1;
         } else {
-            // Not exported by main or any side module - wire a typed no-op stub.
+            // Not exported by main, any side module, or this module itself - wire
+            // a typed no-op stub.
             pyo_trace!("[sidemodule-stub] {path}: env.{name}");
             let ft2 = ft.clone();
             let result_tys: Vec<ValType> = ft2.results().collect();
@@ -603,7 +686,7 @@ where
     }
     pyo_trace!(
         "[sidemodule] {path}: env imports: {from_main} from main, {from_side} from side, \
-         {from_stub} stubs"
+         {from_self} self-forward, {from_stub} stubs"
     );
 
     // Instantiate the SIDE_MODULE. The active element segment fires here and
@@ -613,6 +696,76 @@ where
         .instantiate(store.as_context_mut(), &module)
         .map_err(|e| AfterburnerError::Engine(format!("sidemodule instantiate {path}: {e}")))?;
     pyo_trace!("[sidemodule] {path}: instantiated");
+
+    // Fill the self-`env` forwarding trampolines now that the instance exists:
+    // point each at the module's own exported function. A name that does not
+    // resolve (should not happen - it was in `self_exported_funcs`) leaves the
+    // cell empty and the trampoline errors loudly if ever called.
+    for (name, cell) in &self_forward_cells {
+        if let Some(func) = instance.get_func(store.as_context_mut(), name.as_str()) {
+            let _ = cell.set(func);
+        } else {
+            pyo_trace!("[sidemodule] {path}: self-env forward target missing: {name}");
+        }
+    }
+
+    // GOT.mem self-resolution: a SIDE_MODULE imports the data-address symbols it
+    // *defines itself* through `GOT.mem` (Emscripten routes every cross-symbol
+    // data reference through the GOT for dedup) and exports the same symbols as
+    // const globals. Those self-defined globals do not exist until the module is
+    // instantiated, so the pre-instantiation `resolve_got_mem` pass (which reads
+    // the MAIN instance) leaves them at 0. Re-resolve any still-zero GOT.mem
+    // global now from the module's OWN export, before `__wasm_apply_data_relocs`
+    // reads these globals to fill relocated data fields.
+    //
+    // CRITICAL: the module's exported global for a data symbol holds the symbol's
+    // *static, segment-relative offset* (its link-time address taken with
+    // `__memory_base` = 0), NOT an absolute address - the export is a plain
+    // `(global (i32.const <offset>))` constant that never adds the runtime
+    // `__memory_base`. A GOT.mem entry must be the ABSOLUTE address, so add this
+    // module's `memory_base`. The MAIN-module pass needs no such adjustment: the
+    // main module's data sits at memory base 0, so its exported globals are
+    // already absolute.
+    //
+    // Without the `+ memory_base`, a vtable pointer (`_ZTV...`) is written as a raw
+    // offset (e.g. 0x69d1c) far below the side module's data region
+    // (`[memory_base, memory_base + mem_size)`); the first virtual call
+    // dereferences that low MAIN-module address, reads a garbage function index,
+    // and the `call_indirect` traps `TableOutOfBounds`. CPython 3.14's newer LLVM
+    // emits these self-`GOT.mem` imports where the 3.13 wheels did not, so this
+    // only bites on 3.14.
+    {
+        let mut self_resolved = 0u32;
+        let mut still_zero = 0u32;
+        for (name, g) in &got_mem_globals {
+            if !matches!(g.get(store.as_context_mut()), Val::I32(0)) {
+                continue;
+            }
+            let own_offset = instance
+                .get_global(store.as_context_mut(), name.as_str())
+                .filter(|eg| eg.ty(store.as_context()).mutability() == Mutability::Const)
+                .and_then(|eg| match eg.get(store.as_context_mut()) {
+                    Val::I32(v) => Some(v as u32),
+                    _ => None,
+                });
+            match own_offset {
+                Some(off) => {
+                    let abs = memory_base.saturating_add(off);
+                    let _ = g.set(store.as_context_mut(), Val::I32(abs as i32));
+                    pyo_trace!(
+                        "[sidemodule-gotmem-self] {path}: GOT.mem.{name} \
+                         off={off:#x} + memory_base={memory_base:#x} = {abs:#x}"
+                    );
+                    self_resolved += 1;
+                }
+                None => still_zero += 1,
+            }
+        }
+        pyo_trace!(
+            "[sidemodule] {path}: GOT.mem self-resolve: {self_resolved} from own exports \
+             (+ memory_base), {still_zero} still zero"
+        );
+    }
 
     // Build a name->table_slot map from the side module's name section and
     // element segments. This is the source-of-truth for which table slot each
@@ -819,7 +972,25 @@ where
         ctors_fn
             .call(store.as_context_mut(), &[], &mut [])
             .map_err(|e| {
-                AfterburnerError::Engine(format!("sidemodule __wasm_call_ctors {path}: {e}"))
+                let kind = e
+                    .downcast_ref::<wasmtime::Trap>()
+                    .map(|t| format!(" [trap={t:?}]"))
+                    .unwrap_or_default();
+                let frames = e
+                    .downcast_ref::<wasmtime::WasmBacktrace>()
+                    .map(|bt| {
+                        let f: Vec<u32> = bt
+                            .frames()
+                            .iter()
+                            .take(6)
+                            .map(|fr| fr.func_index())
+                            .collect();
+                        format!(" [frames={f:?}]")
+                    })
+                    .unwrap_or_default();
+                AfterburnerError::Engine(format!(
+                    "sidemodule __wasm_call_ctors {path}: {e}{kind}{frames}"
+                ))
             })?;
         pyo_trace!("[sidemodule] {path}: __wasm_call_ctors OK");
     }
