@@ -26,6 +26,21 @@ use crate::{
 #[cfg(test)]
 mod tests;
 
+/// Size in bytes of the Emscripten wasm32 `struct stat` the guest allocates and
+/// passes to the `*stat*` syscalls.
+///
+/// This is the authoritative `__size__` from Emscripten's
+/// `struct_info_generated.json` (st_ino is the last field, at offset 88, an
+/// i64, so the struct ends at 96). The guest's stat buffer is exactly this
+/// many bytes; the syscall shims must write EXACTLY this many. Writing more
+/// (e.g. the 112-byte `sizeof` of the musl C `struct stat`, whose timespec
+/// layout differs) overruns the guest buffer and silently corrupts whatever the
+/// guest placed immediately after it - on CPython 3.14 that overflow zeroes a
+/// live PyObject header (refcnt + ob_type), which later double-frees with an
+/// `IndirectCallToNull` in `_Py_Dealloc`. See [`crate::emscripten_fs`]
+/// `write_stat_buf` for the field layout.
+pub(crate) const EM_STAT_STRUCT_BYTES: usize = 96;
+
 /// Log a stat syscall result: path, rc, and (if found) st_mode + st_size.
 #[inline]
 fn log_stat(tag: &str, abs: &str, rc: i32, mode_size: Option<(u32, u64)>) {
@@ -492,7 +507,7 @@ pub fn wire_fs_env_funcs(
                     _log.push("__syscall_fstat64", fd, stat_ptr);
                     // Resolve path for logging before the mutable borrow.
                     let path_for_log = caller.data().fs.fd_path(fd).map(str::to_owned);
-                    let mut buf = [0u8; 112];
+                    let mut buf = [0u8; EM_STAT_STRUCT_BYTES];
                     let rc = caller.data_mut().fs.fstat_into(fd, &mut buf);
                     let mode_size = path_for_log
                         .as_deref()
@@ -511,10 +526,10 @@ pub fn wire_fs_env_funcs(
                     };
                     let start = stat_ptr as u32 as usize;
                     let mem = memory.data_mut(&mut caller);
-                    if start + 112 > mem.len() {
+                    if start + EM_STAT_STRUCT_BYTES > mem.len() {
                         return EINVAL;
                     }
-                    mem[start..start + 112].copy_from_slice(&buf);
+                    mem[start..start + EM_STAT_STRUCT_BYTES].copy_from_slice(&buf);
                     0
                 },
             )
@@ -543,7 +558,7 @@ pub fn wire_fs_env_funcs(
                         }
                         log.push_back(format!("stat64:{abs}"));
                     }
-                    let mut buf = [0u8; 112];
+                    let mut buf = [0u8; EM_STAT_STRUCT_BYTES];
                     let rc = caller.data_mut().fs.stat_into(&abs, &mut buf);
                     let mode_size = caller.data().fs.stat_mode_size(&abs);
                     log_stat("stat64", &abs, rc, mode_size);
@@ -555,10 +570,10 @@ pub fn wire_fs_env_funcs(
                     };
                     let start = stat_ptr as u32 as usize;
                     let mem = memory.data_mut(&mut caller);
-                    if start + 112 > mem.len() {
+                    if start + EM_STAT_STRUCT_BYTES > mem.len() {
                         return EINVAL;
                     }
-                    mem[start..start + 112].copy_from_slice(&buf);
+                    mem[start..start + EM_STAT_STRUCT_BYTES].copy_from_slice(&buf);
                     0
                 },
             )
@@ -580,7 +595,7 @@ pub fn wire_fs_env_funcs(
                         None => return ENOENT,
                     };
                     let abs = caller.data().fs.resolve("/", &path_str);
-                    let mut buf = [0u8; 112];
+                    let mut buf = [0u8; EM_STAT_STRUCT_BYTES];
                     let rc = caller.data_mut().fs.stat_into(&abs, &mut buf);
                     let mode_size = caller.data().fs.stat_mode_size(&abs);
                     log_stat("lstat64", &abs, rc, mode_size);
@@ -592,10 +607,10 @@ pub fn wire_fs_env_funcs(
                     };
                     let start = stat_ptr as u32 as usize;
                     let mem = memory.data_mut(&mut caller);
-                    if start + 112 > mem.len() {
+                    if start + EM_STAT_STRUCT_BYTES > mem.len() {
                         return EINVAL;
                     }
-                    mem[start..start + 112].copy_from_slice(&buf);
+                    mem[start..start + EM_STAT_STRUCT_BYTES].copy_from_slice(&buf);
                     0
                 },
             )
@@ -629,7 +644,7 @@ pub fn wire_fs_env_funcs(
                         }
                     };
                     let abs = caller.data().fs.resolve(&base, &path_str);
-                    let mut buf = [0u8; 112];
+                    let mut buf = [0u8; EM_STAT_STRUCT_BYTES];
                     let rc = caller.data_mut().fs.stat_into(&abs, &mut buf);
                     let mode_size = caller.data().fs.stat_mode_size(&abs);
                     log_stat("newfstatat", &abs, rc, mode_size);
@@ -641,10 +656,10 @@ pub fn wire_fs_env_funcs(
                     };
                     let start = stat_ptr as u32 as usize;
                     let mem = memory.data_mut(&mut caller);
-                    if start + 112 > mem.len() {
+                    if start + EM_STAT_STRUCT_BYTES > mem.len() {
                         return EINVAL;
                     }
-                    mem[start..start + 112].copy_from_slice(&buf);
+                    mem[start..start + EM_STAT_STRUCT_BYTES].copy_from_slice(&buf);
                     0
                 },
             )

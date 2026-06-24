@@ -93,6 +93,7 @@
 
 use std::collections::HashMap;
 
+use crate::emscripten_syscall::EM_STAT_STRUCT_BYTES;
 use crate::pyo_trace;
 
 // ---- errno constants ---------------------------------------------------------
@@ -449,9 +450,10 @@ impl InMemFs {
         0
     }
 
-    /// Fill an Emscripten stat buffer (96 bytes, Emscripten doStat layout) for
-    /// the node at `abs_path`. Returns 0 or ENOENT.
-    pub fn stat_into(&mut self, abs_path: &str, buf: &mut [u8; 112]) -> i32 {
+    /// Fill an Emscripten stat buffer (Emscripten doStat layout) for the node at
+    /// `abs_path`. Returns 0 or ENOENT. The buffer is exactly the Emscripten
+    /// wasm32 `struct stat` size ([`crate::emscripten_syscall::EM_STAT_STRUCT_BYTES`]).
+    pub fn stat_into(&mut self, abs_path: &str, buf: &mut [u8; EM_STAT_STRUCT_BYTES]) -> i32 {
         match self.nodes.get(abs_path) {
             None => ENOENT,
             Some(node) => {
@@ -476,7 +478,7 @@ impl InMemFs {
     }
 
     /// Fill a `struct stat` buffer for the node referenced by `fd`.
-    pub fn fstat_into(&mut self, fd: i32, buf: &mut [u8; 112]) -> i32 {
+    pub fn fstat_into(&mut self, fd: i32, buf: &mut [u8; EM_STAT_STRUCT_BYTES]) -> i32 {
         let fd_usize = fd as usize;
         if fd_usize >= self.fds.len() {
             return EBADF;
@@ -684,16 +686,21 @@ fn parent_of(path: &str) -> Option<String> {
 
 // ---- stat buffer writer ----------------------------------------------------
 
-/// Write an Emscripten stat buffer (96 bytes, little-endian) into `buf`.
+/// Write an Emscripten stat buffer (Emscripten wasm32 `struct stat`,
+/// [`crate::emscripten_syscall::EM_STAT_STRUCT_BYTES`] bytes, little-endian) into
+/// `buf`.
 ///
-/// Uses the Emscripten `doStat()` field layout from `pyodide.asm.js`, NOT the
-/// musl C `struct stat` layout. The buffer passed by Emscripten is 96 bytes;
-/// our `buf` is 112 bytes so the tail is always zeroed and safe to ignore.
+/// Uses the Emscripten `struct stat` field layout (authoritative offsets from
+/// Emscripten's `struct_info_generated.json`: st_ino is the last field, at
+/// offset 88, so the struct is exactly 96 bytes), NOT the 112-byte musl C
+/// `struct stat` whose timespec layout differs. The guest allocates exactly this
+/// many bytes; the syscall shims must write exactly this many or they overrun
+/// the guest's buffer.
 ///
 /// Critical fields CPython reads:
 /// - `st_mode` at offset 4 (i32): `S_IFREG` or `S_IFDIR` bits
 /// - `st_size` at offset 24 (i64): byte length for regular files
-fn write_stat_buf(buf: &mut [u8; 112], ino: u64, mode: u32, size: u64) {
+fn write_stat_buf(buf: &mut [u8; EM_STAT_STRUCT_BYTES], ino: u64, mode: u32, size: u64) {
     buf.fill(0);
     // st_dev at offset 0 (i32 LE) - device 1
     buf[0..4].copy_from_slice(&1i32.to_le_bytes());

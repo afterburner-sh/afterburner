@@ -267,13 +267,13 @@ fn syscall_fstat64_fills_stat_buf_st_size() {
     let fd = store.data_mut().fs.open("/fstat_test.txt".to_owned(), 0);
     assert!(fd >= 3);
 
-    // stat buffer at offset 0x700 (need 112 bytes)
+    // stat buffer at offset 0x700 (Emscripten struct stat = 96 bytes)
     let stat_ptr = 0x700i32;
     let rc = call_shim_2(&mut store, &linker, "__syscall_fstat64", fd, stat_ptr);
     assert_eq!(rc, 0, "fstat64 must return 0 on success");
 
     // st_size is at offset 24 (i64 LE) in the Emscripten stat layout.
-    let buf = read_mem(&store, 0x700, 112);
+    let buf = read_mem(&store, 0x700, 96);
     let st_size = i64::from_le_bytes(buf[24..32].try_into().unwrap());
     assert_eq!(st_size, 11, "st_size must be 11 (len of 'hello world')");
 
@@ -310,7 +310,7 @@ fn syscall_stat64_regular_file_has_s_ifreg() {
     let rc = call_shim_2(&mut store, &linker, "__syscall_stat64", 0x900, stat_ptr);
     assert_eq!(rc, 0, "stat64 must return 0 for existing file");
 
-    let buf = read_mem(&store, 0xa00, 112);
+    let buf = read_mem(&store, 0xa00, 96);
     let st_mode = i32::from_le_bytes(buf[4..8].try_into().unwrap());
     assert!(st_mode & 0o100_000 != 0, "S_IFREG bit must be set");
     let st_size = i64::from_le_bytes(buf[24..32].try_into().unwrap());

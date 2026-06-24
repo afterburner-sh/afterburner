@@ -347,7 +347,7 @@ fn pread_does_not_advance_offset() {
 fn stat_into_file_mode_and_size_at_correct_offsets() {
     let mut fs = InMemFs::new();
     fs.insert_file("/s.txt", b"hello world".to_vec());
-    let mut buf = [0u8; 112];
+    let mut buf = [0u8; 96]; // Emscripten struct stat = 96 bytes
     let rc = fs.stat_into("/s.txt", &mut buf);
     assert_eq!(rc, 0);
 
@@ -367,7 +367,7 @@ fn stat_into_file_mode_and_size_at_correct_offsets() {
 fn stat_into_dir_mode_and_zero_size() {
     let mut fs = InMemFs::new();
     fs.mkdir_p("/d");
-    let mut buf = [0u8; 112];
+    let mut buf = [0u8; 96]; // Emscripten struct stat = 96 bytes
     let rc = fs.stat_into("/d", &mut buf);
     assert_eq!(rc, 0);
 
@@ -384,7 +384,7 @@ fn stat_into_dir_mode_and_zero_size() {
 #[test]
 fn stat_into_missing_path_returns_enoent() {
     let mut fs = InMemFs::new();
-    let mut buf = [0u8; 112];
+    let mut buf = [0u8; 96]; // Emscripten struct stat = 96 bytes
     assert_eq!(fs.stat_into("/no/such/file", &mut buf), ENOENT);
 }
 
@@ -392,7 +392,7 @@ fn stat_into_missing_path_returns_enoent() {
 fn stat_into_st_blksize_is_4096() {
     let mut fs = InMemFs::new();
     fs.insert_file("/blk.txt", b"data".to_vec());
-    let mut buf = [0u8; 112];
+    let mut buf = [0u8; 96]; // Emscripten struct stat = 96 bytes
     fs.stat_into("/blk.txt", &mut buf);
     let blksize = i32::from_le_bytes(buf[32..36].try_into().unwrap());
     assert_eq!(blksize, 4096);
@@ -405,7 +405,7 @@ fn fstat_into_matches_stat_into() {
     let mut fs = InMemFs::new();
     fs.insert_file("/fst.txt", b"abc".to_vec());
     let fd = fs.open("/fst.txt".to_owned(), 0);
-    let mut buf_fstat = [0u8; 112];
+    let mut buf_fstat = [0u8; 96]; // Emscripten struct stat = 96 bytes
     let rc = fs.fstat_into(fd, &mut buf_fstat);
     assert_eq!(rc, 0);
 
