@@ -390,7 +390,7 @@ impl WasmCombustor {
     }
 
     /// Register a pre-compiled self-contained (SEALED) WASM module and
-    /// return a [`ScriptId`] that [`thrust`] dispatches through the sealed
+    /// return a [`ScriptId`] that `thrust` dispatches through the sealed
     /// path. The module must import only `wasi_snapshot_preview1`; it reads
     /// JSON from stdin and writes JSON to stdout (the Javy self-contained
     /// command pattern).
@@ -665,19 +665,19 @@ impl WasmCombustor {
     /// a one-shot plugin Store in `compile-script` mode. The wrap +
     /// compile happens here on the host side; the resulting bytecode
     /// can then be handed to one or more `DaemonRuntime` instances
-    /// via [`DaemonRuntime::run_init_with_bytecode`], which skips
+    /// via [`crate::daemon_runtime::DaemonRuntime::run_init_with_bytecode`], which skips
     /// re-paying the parse + compile cost on each daemon Store.
     ///
     /// `argv` / `env` / `cwd` are baked into the compiled bytecode
     /// via the script-mode envelope wrap; calling
-    /// [`DaemonRuntime::run_init_with_bytecode`] reuses these
+    /// [`crate::daemon_runtime::DaemonRuntime::run_init_with_bytecode`] reuses these
     /// captured values. Embedders that need different values per
     /// invocation should re-compile.
     ///
     /// Returns `Err(AfterburnerError::CompileFailed)` on syntax
     /// errors or transpile failures, with the plugin's stderr
     /// captured in the message - same surface as
-    /// [`Self::compile_to_bytecode`] for the UDF path.
+    /// `compile_to_bytecode` for the UDF path.
     pub fn compile_daemon_init_bytecode(
         &self,
         source: &str,
@@ -742,10 +742,10 @@ impl WasmCombustor {
     }
 
     /// Spawn a long-lived daemon runtime against an existing
-    /// [`DaemonHttp`] coordinator. The `burn` CLI constructs one via
-    /// [`DaemonHttp::with_runtime`] (under the `daemon` feature) so
+    /// [`crate::daemon_http::DaemonHttp`] coordinator. The `burn` CLI constructs one via
+    /// `DaemonHttp::with_runtime` (under the `daemon` feature) so
     /// `__host_http_listen` lands on a real axum listener. Library
-    /// callers pass [`DaemonHttp::shared`] for stub mode.
+    /// callers pass [`crate::daemon_http::DaemonHttp::shared`] for stub mode.
     pub fn spawn_daemon_with(
         &self,
         source: &str,
@@ -763,7 +763,7 @@ impl WasmCombustor {
         )
     }
 
-    /// Like [`spawn_daemon_with`] but threads a [`ScriptInvocation`]
+    /// Like [`Self::spawn_daemon_with`] but threads a [`ScriptInvocation`]
     /// (argv + env) through. Matches the script-mode CLI surface so
     /// `process.argv` / `process.env` inside the daemon-init script
     /// reflect what the user typed.
@@ -788,14 +788,14 @@ impl WasmCombustor {
 
     /// Phase 1 columnar UDF path. Skips the JSON encode/decode the
     /// regular [`Combustor::thrust`] path pays per call: the host
-    /// encodes the [`ColumnarBatch`] into one contiguous binary blob
+    /// encodes the [`crate::ColumnarBatch`] into one contiguous binary blob
     /// (one `memcpy` per input column), the plugin's columnar-invoke
     /// mode reads the blob through the existing `host_get_input`
     /// channel, and the JS-side polyfill exposes each column as a
     /// TypedArray *view* into wasm linear memory - zero copy on the
     /// guest side. After the user UDF returns, the polyfill writes
     /// the result blob via `host_columnar_reply` and the host decodes
-    /// it (one `memcpy` per output column) into [`ColumnarOutput`].
+    /// it (one `memcpy` per output column) into [`crate::ColumnarOutput`].
     ///
     /// **Total data movement per call:** one host→guest `memcpy` per
     /// input column + one guest→host `memcpy` per output column. No
@@ -1412,7 +1412,7 @@ impl Combustor for WasmCombustor {
 
     /// Combustor-trait override: raw-bytes-in / raw-bytes-out for sealed
     /// precompiled modules. Delegates to the inherent
-    /// [`Self::thrust_sealed_raw_bytes_inner`].
+    /// `thrust_sealed_raw_bytes_inner`.
     fn thrust_sealed_raw_bytes(
         &self,
         id: &ScriptId,

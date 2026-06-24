@@ -8,7 +8,7 @@
 //!
 //! All functions here share the same dispatch model: `params[0]` is a funcref
 //! table index; `params[1..]` are forwarded to the callee. The implementation
-//! delegates to [`crate::emscripten_runtime::invoke_dispatch`].
+//! delegates to the internal `invoke_dispatch` helper in `emscripten_runtime`.
 
 use afterburner_core::{AfterburnerError, Result};
 use wasmtime::{Engine, FuncType, Linker, ValType};

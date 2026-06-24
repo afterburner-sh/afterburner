@@ -15,7 +15,7 @@
 //!
 //! ## Algorithm (mirrors Emscripten's assignGOTEntries)
 //!
-//! GOT.func.<name>:
+//! `GOT.func.<name>`:
 //!   - Parse the module bytes once (via `parse_got_name_to_slot`) to build a
 //!     `name -> table_slot` map from the wasm name section + active element
 //!     segments. This is the correct source: the element segments place function
@@ -31,7 +31,7 @@
 //!     the real table slot from the parsed map (resolution order: name+elem map
 //!     first, then module export fallback, else leave stub slot).
 //!
-//! GOT.mem.<name>:
+//! `GOT.mem.<name>`:
 //!   - `__heap_base` = `memory_base` + dylink.0 `memory_size` (4 632 232 bytes).
 //!   - `__stack_high` = initial stack pointer (top of stack region).
 //!   - `__stack_low`  = `__stack_high` - stack region size.

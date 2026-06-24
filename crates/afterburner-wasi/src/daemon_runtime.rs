@@ -67,8 +67,8 @@ impl DaemonRuntime {
     /// installs HTTP handlers onto `globalThis.__ab_http_handlers`
     /// and binds listeners via `__host_http_listen`.
     ///
-    /// Returns a handle the caller drives via [`dispatch_event`]
-    /// and [`drain_stdout`] / [`drain_stderr`].
+    /// Returns a handle the caller drives via [`Self::dispatch_event`]
+    /// and [`Self::drain_stdout`] / [`Self::drain_stderr`].
     pub fn new(
         engine: &Engine,
         instance_pre: &InstancePre<HostState>,
@@ -121,7 +121,7 @@ impl DaemonRuntime {
 
     /// Build the long-lived Store + plugin instance WITHOUT running
     /// daemon-init. Callers that need to inspect partial output on
-    /// init failure use `instantiate()` + [`run_init`] separately
+    /// init failure use `instantiate()` + [`Self::run_init`] separately
     /// instead of the convenience constructors.
     #[allow(clippy::too_many_arguments)]
     pub fn instantiate(
@@ -169,7 +169,7 @@ impl DaemonRuntime {
     /// Evaluate the user source as daemon-init. On success, JS state
     /// (handler tables, plenum caches, globals) persists in the
     /// Store. On failure, `self` is still valid - callers can call
-    /// [`drain_stdout`] / [`drain_stderr`] to retrieve whatever the
+    /// [`Self::drain_stdout`] / [`Self::drain_stderr`] to retrieve whatever the
     /// script wrote before it threw.
     pub fn run_init(&mut self, source: &str, invocation: &ScriptInvocation) -> Result<()> {
         let envelope = serde_json::json!({

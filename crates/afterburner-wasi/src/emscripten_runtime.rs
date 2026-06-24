@@ -488,7 +488,7 @@ pub fn wire_wasi_only(linker: &mut Linker<EmbedderState>) -> Result<()> {
 /// Use this when the module was translated to exnref (Pyodide 0.28+ via
 /// `wasm-opt --translate-to-exnref`): the exnref translation changes the
 /// JS-FFI import signatures (i32 sentinel/externref args appear), making the
-/// 0.26.4-typed stubs from [`wire_jsffi_stubs`] incompatible. Callers should
+/// 0.26.4-typed stubs from `wire_jsffi_stubs` incompatible. Callers should
 /// follow up with [`fill_unknown_imports_as_traps`] to auto-fill the remaining
 /// JS-FFI imports from the module's actual types.
 pub fn add_pyodide_imports_no_jsffi(
@@ -759,7 +759,7 @@ fn wire_got_globals_only(
 ///   module's exported `__stack_pointer` so side modules share the main stack
 ///   (the 314 memory layout is module-internal: the only correct stack pointer is
 ///   the module's own, not the fixed 0.28.x `WASM_STACK_BASE`);
-/// - grows the adopted table by [`GOT_FUNC_HOST_SLOTS`] so `fill_got_table_slots`
+/// - grows the adopted table by [`crate::emscripten_dylink::GOT_FUNC_HOST_SLOTS`] so `fill_got_table_slots`
 ///   can place host funcrefs into the reserved slots above the element segment,
 ///   exactly as the over-sized host-created table did on the 0.28.x path.
 ///

@@ -83,9 +83,9 @@ pub const LISTEN_ERR_IO: i32 = -3;
 pub const LISTEN_ERR_PERMISSION: i32 = -4;
 
 /// Outcome of `try_claim_port_for`. Sibling-protocol coordinators
-/// branch on this: [`Owner`] performs the bind; [`Follower`] returns
+/// branch on this: [`PortClaim::Owner`] performs the bind; [`PortClaim::Follower`] returns
 /// the existing id without binding (shared-listeners shard rejoin);
-/// [`Busy`] is the unshared-mode collision path.
+/// [`PortClaim::Busy`] is the unshared-mode collision path.
 #[derive(Debug, Clone, Copy)]
 pub enum PortClaim {
     Owner(ServerId),

@@ -79,7 +79,7 @@ const DEFAULT_FUEL: u64 = 100_000_000;
 #[derive(Debug, Default, Clone)]
 pub struct WasiCommandOpts {
     /// argv passed to the module via `args_get` / `args_sizes_get`.
-    /// The first element is conventionally the program name (argv[0]).
+    /// The first element is conventionally the program name (`argv[0]`).
     pub args: Vec<String>,
     /// Read-only preopens: (host_path, guest_path). Added with
     /// `DirPerms::READ | FilePerms::READ`.
@@ -98,7 +98,7 @@ impl WasiCommandOpts {
     }
 
     /// Set the argument list. Replaces any previously set args.
-    /// The first element should be the program name (argv[0]).
+    /// The first element should be the program name (`argv[0]`).
     pub fn args<I, S>(mut self, args: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -573,8 +573,8 @@ impl EmbedderVm {
     /// no parameters and return exactly one i64. Any other signature
     /// surfaces as `AfterburnerError::Engine`.
     ///
-    /// `fuel` - optional instruction budget. `None` uses
-    /// [`DEFAULT_FUEL`]. Pass `Some(u64::MAX)` for an effectively unlimited
+    /// `fuel` - optional instruction budget. `None` uses the crate-internal
+    /// default (100 million instructions). Pass `Some(u64::MAX)` for an effectively unlimited
     /// budget (production callers should supply an explicit bound so runaway
     /// modules surface as `FuelExhausted` rather than hanging the thread).
     pub fn run(
