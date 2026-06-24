@@ -24,9 +24,11 @@
 //! read, network) can mis-slice the shown suffix. Pure compute - the REPL's
 //! common case - is exact.
 //!
-//! Requires `BURN_PYTHON_RUNTIME=<dir>` (containing `pyodide-exnref.wasm` and
-//! `python_stdlib.zip`). When unset or the `wasm` feature is absent, the REPL
-//! prints a clear, actionable error and returns - never a fake prompt.
+//! Uses the self-contained Pyodide runtime by default (the bundle the build
+//! script assembles), so the REPL needs no configuration; `BURN_PYTHON_RUNTIME`
+//! still overrides it. When no runtime is available (no bundle and no override)
+//! or the `wasm` feature is absent, the REPL prints a clear, actionable error
+//! and returns - never a fake prompt.
 
 use crate::cli::style;
 use anyhow::Result;
@@ -44,7 +46,8 @@ pub fn run(_cli: &Cli) -> Result<()> {
     use super::{Flow, read_loop};
     use std::cell::RefCell;
 
-    let runtime = locate_runtime()?;
+    let runtime = afterburner_wasi::pyodide_runner::resolve_runtime()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     style::repl_banner_lang(env!("CARGO_PKG_VERSION"), "python");
     eprintln!(
         "  {}",
@@ -131,45 +134,11 @@ pub fn run(_cli: &Cli) -> Result<()> {
     anyhow::bail!("Python REPL requires the `wasm` cargo feature (rebuild with `--features wasm`).")
 }
 
-/// A located Python runtime: the absolute paths to the two artifacts the
-/// embedder needs.
-#[cfg(feature = "wasm")]
-struct Runtime {
-    wasm_path: String,
-    stdlib_path: String,
-}
-
-/// Locate the Pyodide runtime from `BURN_PYTHON_RUNTIME`, verifying the wasm
-/// payload exists. Returns an error carrying [`PY_RUNTIME_MISSING_MARKER`] when
-/// the variable is unset or the file is absent.
-#[cfg(feature = "wasm")]
-fn locate_runtime() -> Result<Runtime> {
-    let dir = std::env::var("BURN_PYTHON_RUNTIME").map_err(|_| {
-        anyhow::anyhow!(
-            "{PY_RUNTIME_MISSING_MARKER}; set BURN_PYTHON_RUNTIME=<dir> where <dir> \
-             contains pyodide-exnref.wasm and python_stdlib.zip"
-        )
-    })?;
-    let wasm_path = format!("{dir}/pyodide-exnref.wasm");
-    let stdlib_path = format!("{dir}/python_stdlib.zip");
-    if !std::path::Path::new(&wasm_path).exists() {
-        anyhow::bail!(
-            "{PY_RUNTIME_MISSING_MARKER}; {wasm_path} does not exist. \
-             Set BURN_PYTHON_RUNTIME to a directory containing pyodide-exnref.wasm \
-             and python_stdlib.zip"
-        );
-    }
-    Ok(Runtime {
-        wasm_path,
-        stdlib_path,
-    })
-}
-
 /// Run an accumulated Python program and return its stdout as a String.
 #[cfg(feature = "wasm")]
-fn run_program(rt: &Runtime, program: &str) -> Result<String> {
-    use afterburner_wasi::pyodide_runner::run_pyodide_source;
-    let out = run_pyodide_source(&rt.wasm_path, &rt.stdlib_path, program)
+fn run_program(rt: &afterburner_wasi::pyodide_runner::PyRuntime, program: &str) -> Result<String> {
+    use afterburner_wasi::pyodide_runner::run_pyodide_with;
+    let out = run_pyodide_with(rt, program)
         .map_err(|e| anyhow::anyhow!("python runtime error: {e}"))?;
     // A non-zero exit means the program raised; surface its stderr-shaped
     // output (CPython writes tracebacks to stdout under `-c` here) as an error.
