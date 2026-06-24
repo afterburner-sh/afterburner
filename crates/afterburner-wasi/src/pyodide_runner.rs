@@ -28,13 +28,15 @@ use wasmtime::{
 use crate::{
     embedder_vm::{EmbedderState, deterministic_engine},
     emscripten_dylink::{
-        fill_got_table_slots, parse_got_name_to_slot, wire_got_func_stubs_from_module,
+        fill_got_table_slots, parse_got_name_to_slot, resolve_self_provided_got_func,
+        wire_got_func_stubs_from_module,
     },
     emscripten_fs::mount_zip_into_fs,
     emscripten_invoke::wire_invoke_trampolines,
     emscripten_mechanical::wire_pyodide028_env_stubs,
     emscripten_runtime::{
-        MainModuleLayout, MechCallLog, NoopCallLog, fill_unknown_imports_as_noops,
+        MainModuleLayout, MechCallLog, NoopCallLog, adopt_self_provided_exports,
+        fill_unknown_imports_as_noops, module_self_provides_env,
         wire_env_memory_and_table_in_store, wire_wasi_only,
     },
     emscripten_syscall::wire_fs_env_funcs,
@@ -45,6 +47,25 @@ use crate::{
 /// vertexia: global fuel budget; per-phase sub-budgets would let us measure
 /// which init phase consumes the most instructions.
 const PYODIDE_FUEL: u64 = 500_000_000_000;
+
+/// Guest mount paths for the Python stdlib, derived from the interpreter's
+/// `X.Y` version (e.g. `"3.14"` -> `/lib/python314.zip` + `/lib/python3.14`).
+///
+/// The version comes from `BURN_PYTHON_STDLIB_VER` (default `3.13`, the Pyodide
+/// 0.28.x interpreter) so a single boot path serves any Pyodide release: CPython
+/// searches `sys.prefix/lib/pythonXY.zip` and `sys.prefix/lib/pythonX.Y/`, so the
+/// stdlib must be mounted under the exact version directory the binary was built
+/// for. The version is external knowledge (which Pyodide release), not derivable
+/// from the flat stdlib zip, so it is a parameter rather than a hardcoded
+/// constant.
+fn python_stdlib_mount_paths() -> (String, String) {
+    let ver = std::env::var("BURN_PYTHON_STDLIB_VER").unwrap_or_else(|_| "3.13".to_owned());
+    let flat = ver.replace('.', "");
+    (
+        format!("/lib/python{flat}.zip"),
+        format!("/lib/python{ver}"),
+    )
+}
 
 /// Output from a [`boot_pyodide`] call.
 pub struct PyodideBootOutput {
@@ -116,25 +137,36 @@ fn boot_pyodide_instance(
         .set_fuel(PYODIDE_FUEL)
         .map_err(|e| AfterburnerError::Engine(format!("set_fuel: {e}")))?;
 
-    let got_globals = wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, &layout)?;
+    // True for Emscripten 5.0.3 (Pyodide 314+): the module defines and exports
+    // its own memory, table, stack pointer, and EH tags, so the host must not
+    // create the env counterparts. Detected purely by import shape.
+    let self_provided = module_self_provides_env(&module);
 
-    // Native-EH tags: env.__c_longjmp and env.__cpp_exception.
-    let tag_func_ty = FuncType::new(&engine, [ValType::I32], []);
-    let tag_ty = TagType::new(tag_func_ty);
-    let c_longjmp = Tag::new(&mut store, &tag_ty)
-        .map_err(|e| AfterburnerError::Engine(format!("tag __c_longjmp: {e}")))?;
-    linker
-        .define(&mut store, "env", "__c_longjmp", c_longjmp)
-        .map_err(|e| AfterburnerError::Engine(format!("define __c_longjmp: {e}")))?;
-    let cpp_exc = Tag::new(&mut store, &tag_ty)
-        .map_err(|e| AfterburnerError::Engine(format!("tag __cpp_exception: {e}")))?;
-    linker
-        .define(&mut store, "env", "__cpp_exception", cpp_exc)
-        .map_err(|e| AfterburnerError::Engine(format!("define __cpp_exception: {e}")))?;
-    // Retain the tags in the store so every side module can share them.
-    // Tags are Copy; storing here and having the linker hold a ref both work.
-    store.data_mut().pyodide_cpp_exception_tag = Some(cpp_exc);
-    store.data_mut().pyodide_c_longjmp_tag = Some(c_longjmp);
+    let got_globals =
+        wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, &layout, &module)?;
+
+    // Native-EH tags. On the 0.28.x host-provided path the host creates and
+    // defines env.__c_longjmp / env.__cpp_exception. On the 314 self-providing
+    // path the module exports them; they are adopted after instantiation by
+    // adopt_self_provided_exports, so we skip host tag creation here.
+    if !self_provided {
+        let tag_func_ty = FuncType::new(&engine, [ValType::I32], []);
+        let tag_ty = TagType::new(tag_func_ty);
+        let c_longjmp = Tag::new(&mut store, &tag_ty)
+            .map_err(|e| AfterburnerError::Engine(format!("tag __c_longjmp: {e}")))?;
+        linker
+            .define(&mut store, "env", "__c_longjmp", c_longjmp)
+            .map_err(|e| AfterburnerError::Engine(format!("define __c_longjmp: {e}")))?;
+        let cpp_exc = Tag::new(&mut store, &tag_ty)
+            .map_err(|e| AfterburnerError::Engine(format!("tag __cpp_exception: {e}")))?;
+        linker
+            .define(&mut store, "env", "__cpp_exception", cpp_exc)
+            .map_err(|e| AfterburnerError::Engine(format!("define __cpp_exception: {e}")))?;
+        // Retain the tags in the store so every side module can share them.
+        // Tags are Copy; storing here and having the linker hold a ref both work.
+        store.data_mut().pyodide_cpp_exception_tag = Some(cpp_exc);
+        store.data_mut().pyodide_c_longjmp_tag = Some(c_longjmp);
+    }
 
     // Auto-fill extra GOT globals (Pyodide 0.28 has more than 0.26.4).
     let got_ty = GlobalType::new(ValType::I32, Mutability::Var);
@@ -153,13 +185,14 @@ fn boot_pyodide_instance(
             .map_err(|e| AfterburnerError::Engine(format!("define GOT {}: {e}", import.name())))?;
     }
 
-    // Mount stdlib zip.
+    // Mount stdlib zip under the interpreter's version-specific guest paths.
     if let Ok(zip_bytes) = std::fs::read(stdlib_zip_path) {
+        let (zip_mount, dir_mount) = python_stdlib_mount_paths();
         store
             .data_mut()
             .fs
-            .insert_file("/lib/python313.zip", zip_bytes.clone());
-        let _ = mount_zip_into_fs(&mut store.data_mut().fs, "/lib/python3.13", &zip_bytes);
+            .insert_file(&zip_mount, zip_bytes.clone());
+        let _ = mount_zip_into_fs(&mut store.data_mut().fs, &dir_mount, &zip_bytes);
     }
     store.data_mut().fs.mkdir_p("/tmp");
 
@@ -172,6 +205,13 @@ fn boot_pyodide_instance(
         .instantiate(&mut store, &module)
         .map_err(|e| AfterburnerError::Engine(format!("instantiate: {e}")))?;
 
+    // On the 314 self-providing path, adopt the module's exported memory, table,
+    // stack pointer, and EH tags into the store BEFORE GOT resolution (which
+    // reads the adopted table) and the ctors.
+    if self_provided {
+        adopt_self_provided_exports(&mut store, &instance)?;
+    }
+
     fill_got_table_slots(
         &mut store,
         &linker,
@@ -181,6 +221,12 @@ fn boot_pyodide_instance(
         &module,
         layout.host_got_base(),
     )?;
+
+    // On the 314 self-providing path, resolve every GOT.func import into a real
+    // table slot (the globals could not be pre-filled before instantiation).
+    if self_provided {
+        resolve_self_provided_got_func(&mut store, &linker, &module, &got_globals)?;
+    }
 
     if let Some(f) = instance.get_func(&mut store, "__wasm_apply_data_relocs") {
         f.call(&mut store, &[], &mut [])

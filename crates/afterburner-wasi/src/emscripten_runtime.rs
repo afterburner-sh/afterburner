@@ -60,7 +60,8 @@ use crate::{
 };
 use afterburner_core::{AfterburnerError, Result};
 use wasmtime::{
-    Engine, Global, GlobalType, Linker, MemoryType, Mutability, Table, TableType, Val, ValType,
+    Engine, Global, GlobalType, Linker, Memory, MemoryType, Module, Mutability, Table, TableType,
+    Tag, Val, ValType,
 };
 
 // ---- ref-type-safe value default --------------------------------------------
@@ -529,7 +530,28 @@ pub fn wire_env_memory_and_table_in_store(
     linker: &mut Linker<EmbedderState>,
     memory_base: u32,
     layout: &MainModuleLayout,
+    module: &Module,
 ) -> Result<GotGlobalMap> {
+    // Emscripten 5.0.3 (Pyodide 314+) changes the MAIN_MODULE linking model:
+    // the module DEFINES and EXPORTS its own linear memory, indirect function
+    // table, `__stack_pointer`, and the `__cpp_exception` / `__c_longjmp` tags
+    // instead of importing them from `env`. Detect this purely by import shape
+    // (does the module import `env.memory`?), never by a version constant.
+    //
+    // In that case the host must NOT create or define any of those env imports;
+    // they are adopted from the instance's exports after instantiation via
+    // [`adopt_self_provided_exports`]. Here we only create the GOT.func / GOT.mem
+    // globals the module still imports (314 keeps GOT.func imports for host WebGL
+    // and console functions; GOT.mem is empty). Their values are left at 0: the
+    // self-providing module performs its data relocations internally (it does not
+    // export `__wasm_apply_data_relocs`), so the host never pre-fills GOT slot
+    // addresses. `fill_got_table_slots` (Path 1, element-segment slots) sets the
+    // GOT.func globals that resolve to the module's own table entries after
+    // instantiation; the rest stay 0 and are backed by no-op stubs.
+    if module_self_provides_env(module) {
+        return wire_got_globals_only(store, linker, module);
+    }
+
     let mem_cfg = wasm_memory_config()
         .map_err(|e| AfterburnerError::Engine(format!("wasm memory config: {e}")))?;
     // Derive the minimum initial linear memory from the module layout so the C
@@ -664,6 +686,143 @@ pub fn wire_env_memory_and_table_in_store(
     prefill_got_mem_globals(store, &got_globals, memory_base, layout)?;
 
     Ok(got_globals)
+}
+
+// ---- self-provided-env (Emscripten 5.0.3 / Pyodide 314) boot path ------------
+
+/// True when the MAIN Emscripten module defines and exports its own linear
+/// memory rather than importing `env.memory`.
+///
+/// This is the import-shape discriminator between the two MAIN_MODULE linking
+/// models: Emscripten 4.0.9 (Pyodide 0.28.x) imports `env.memory` (the host
+/// creates it); Emscripten 5.0.3 (Pyodide 314+) defines and exports memory, the
+/// indirect function table, `__stack_pointer`, and the EH tags internally. The
+/// branch is purely structural: no per-package or hardcoded-version constant.
+pub fn module_self_provides_env(module: &Module) -> bool {
+    !module
+        .imports()
+        .any(|imp| imp.module() == "env" && imp.name() == "memory")
+}
+
+/// Create ONLY the GOT.func / GOT.mem globals a self-providing module imports.
+///
+/// Used on the 314 path: the module supplies its own memory, table, stack
+/// pointer, and tags (see [`adopt_self_provided_exports`]), so the host defines
+/// none of those. The GOT globals are created with init 0 and intentionally NOT
+/// pre-filled - the module relocates its own data internally and does not export
+/// `__wasm_apply_data_relocs`, so no host-side GOT address pre-fill is needed
+/// before instantiation. `fill_got_table_slots` updates the element-segment-
+/// resolved GOT.func globals after instantiation; host-only entries (WebGL,
+/// console) stay 0 and are backed by no-op stubs.
+fn wire_got_globals_only(
+    store: &mut wasmtime::Store<EmbedderState>,
+    linker: &mut Linker<EmbedderState>,
+    module: &Module,
+) -> Result<GotGlobalMap> {
+    let mut got_globals: GotGlobalMap = HashMap::new();
+    let got_ty = GlobalType::new(ValType::I32, Mutability::Var);
+    for import in module.imports() {
+        let m = import.module();
+        if m != "GOT.func" && m != "GOT.mem" {
+            continue;
+        }
+        if linker.get(&mut *store, m, import.name()).is_ok() {
+            continue;
+        }
+        let g = Global::new(&mut *store, got_ty.clone(), Val::I32(0))
+            .map_err(|e| AfterburnerError::Engine(format!("GOT {}.{}: {e}", m, import.name())))?;
+        linker
+            .define(&mut *store, m, import.name(), wasmtime::Extern::Global(g))
+            .map_err(|e| {
+                AfterburnerError::Engine(format!("define GOT {}.{}: {e}", m, import.name()))
+            })?;
+        let kind = if m == "GOT.func" { "func" } else { "mem" };
+        got_globals.insert(format!("GOT.{kind}::{}", import.name()), g);
+    }
+    Ok(got_globals)
+}
+
+/// Adopt a self-providing module's exported memory, table, stack pointer, and EH
+/// tags into [`EmbedderState`], so every generic shim reads them exactly as on
+/// the 0.28.x host-provided path.
+///
+/// Call AFTER `linker.instantiate` and BEFORE `fill_got_table_slots` /
+/// `__wasm_call_ctors` on the 314 path (see [`module_self_provides_env`]). On the
+/// 0.28.x host-provided path this is not called - the host already set those
+/// fields in [`wire_env_memory_and_table_in_store`].
+///
+/// Behaviour:
+/// - reads `memory`, `__indirect_function_table`, `__stack_pointer`,
+///   `__cpp_exception`, `__c_longjmp` exports into the matching state fields;
+/// - sets BOTH `pyodide_stack_pointer` and `pyodide_side_stack_pointer` to the
+///   module's exported `__stack_pointer` so side modules share the main stack
+///   (the 314 memory layout is module-internal: the only correct stack pointer is
+///   the module's own, not the fixed 0.28.x `WASM_STACK_BASE`);
+/// - grows the adopted table by [`GOT_FUNC_HOST_SLOTS`] so `fill_got_table_slots`
+///   can place host funcrefs into the reserved slots above the element segment,
+///   exactly as the over-sized host-created table did on the 0.28.x path.
+///
+/// Returns `Err` if any required export is absent or has the wrong kind.
+pub fn adopt_self_provided_exports(
+    store: &mut wasmtime::Store<EmbedderState>,
+    instance: &wasmtime::Instance,
+) -> Result<()> {
+    let memory: Memory = instance
+        .get_export(&mut *store, "memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| {
+            AfterburnerError::Engine("self-provided module: no exported `memory`".into())
+        })?;
+    store.data_mut().pyodide_memory = Some(memory);
+
+    let table: Table = instance
+        .get_export(&mut *store, "__indirect_function_table")
+        .and_then(|e| e.into_table())
+        .ok_or_else(|| {
+            AfterburnerError::Engine(
+                "self-provided module: no exported `__indirect_function_table`".into(),
+            )
+        })?;
+    // Reserve the host GOT.func stub slots directly above the module's element
+    // segment, matching the over-sized table the 0.28.x host path created.
+    table
+        .grow(
+            &mut *store,
+            u64::from(crate::emscripten_dylink::GOT_FUNC_HOST_SLOTS),
+            wasmtime::Ref::Func(None),
+        )
+        .map_err(|e| {
+            AfterburnerError::Engine(format!("self-provided table: reserve host GOT slots: {e}"))
+        })?;
+    store.data_mut().pyodide_table = Some(table);
+
+    let sp: Global = instance
+        .get_export(&mut *store, "__stack_pointer")
+        .and_then(|e| e.into_global())
+        .ok_or_else(|| {
+            AfterburnerError::Engine("self-provided module: no exported `__stack_pointer`".into())
+        })?;
+    store.data_mut().pyodide_stack_pointer = Some(sp);
+    // The side modules share the main module's stack pointer on the 314 layout.
+    store.data_mut().pyodide_side_stack_pointer = Some(sp);
+
+    let cpp_exc: Tag = instance
+        .get_export(&mut *store, "__cpp_exception")
+        .and_then(|e| e.into_tag())
+        .ok_or_else(|| {
+            AfterburnerError::Engine("self-provided module: no exported `__cpp_exception`".into())
+        })?;
+    store.data_mut().pyodide_cpp_exception_tag = Some(cpp_exc);
+
+    let c_longjmp: Tag = instance
+        .get_export(&mut *store, "__c_longjmp")
+        .and_then(|e| e.into_tag())
+        .ok_or_else(|| {
+            AfterburnerError::Engine("self-provided module: no exported `__c_longjmp`".into())
+        })?;
+    store.data_mut().pyodide_c_longjmp_tag = Some(c_longjmp);
+
+    Ok(())
 }
 
 // ---- GOT.mem name table ------------------------------------------------------
@@ -1013,6 +1172,45 @@ mod tests {
             wasm_memory_config_from(65_536, 65_536, 10_485_760).expect("exact page must parse");
         assert_eq!(cfg.initial_pages, 1);
         assert_eq!(cfg.max_pages, 1);
+    }
+
+    // ---- module_self_provides_env (Emscripten 0.28.x vs 314 discriminator) ----
+
+    fn compile(engine: &wasmtime::Engine, wat: &str) -> Module {
+        let bytes = wat::parse_str(wat).expect("WAT parse");
+        Module::new(engine, &bytes).expect("module compile")
+    }
+
+    /// A module that imports `env.memory` is the 0.28.x host-provided shape.
+    #[test]
+    fn self_provides_env_false_when_memory_imported() {
+        let engine = crate::embedder_vm::deterministic_engine().expect("engine");
+        let m = compile(
+            &engine,
+            r#"(module (import "env" "memory" (memory 1)) (func (export "f")))"#,
+        );
+        assert!(
+            !module_self_provides_env(&m),
+            "importing env.memory must be detected as host-provided"
+        );
+    }
+
+    /// A module that defines and exports its own memory is the 314 self-providing
+    /// shape, even when it imports other things from `env`.
+    #[test]
+    fn self_provides_env_true_when_memory_defined_and_exported() {
+        let engine = crate::embedder_vm::deterministic_engine().expect("engine");
+        let m = compile(
+            &engine,
+            r#"(module
+                 (import "env" "__something" (func))
+                 (memory (export "memory") 1)
+                 (func (export "f")))"#,
+        );
+        assert!(
+            module_self_provides_env(&m),
+            "a self-defined+exported memory and no env.memory import must be self-providing"
+        );
     }
 }
 

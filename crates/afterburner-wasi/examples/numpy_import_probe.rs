@@ -326,11 +326,11 @@ fn run_probe() -> String {
     let mut store = Store::new(&engine, EmbedderState::for_emscripten());
     store.set_fuel(PROBE_FUEL).expect("set_fuel");
 
-    let got_globals = match wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, &layout)
-    {
-        Ok(g) => g,
-        Err(e) => return format!("MEMORY/TABLE SETUP FAILED: {e}"),
-    };
+    let got_globals =
+        match wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, &layout, &module) {
+            Ok(g) => g,
+            Err(e) => return format!("MEMORY/TABLE SETUP FAILED: {e}"),
+        };
 
     let tag_func_ty = FuncType::new(&engine, [ValType::I32], []);
     let tag_ty = TagType::new(tag_func_ty);

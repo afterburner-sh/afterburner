@@ -38,8 +38,9 @@ use afterburner_wasi::emscripten_fs::mount_zip_into_fs;
 use afterburner_wasi::emscripten_invoke::wire_invoke_trampolines;
 use afterburner_wasi::emscripten_mechanical::wire_pyodide028_env_stubs;
 use afterburner_wasi::emscripten_runtime::{
-    JsFfiCallLog, MainModuleLayout, MechCallLog, NoopCallLog, fill_unknown_imports_as_noops,
-    wire_env_memory_and_table_in_store, wire_wasi_only,
+    JsFfiCallLog, MainModuleLayout, MechCallLog, NoopCallLog, adopt_self_provided_exports,
+    fill_unknown_imports_as_noops, module_self_provides_env, wire_env_memory_and_table_in_store,
+    wire_wasi_only,
 };
 use afterburner_wasi::emscripten_sidemodule::{pre_load_side_module, wire_dlopen_dlsym};
 use afterburner_wasi::emscripten_syscall::wire_fs_env_funcs;
@@ -62,17 +63,40 @@ const WHEELS: &[&str] = &[
     "/tmp/six_check.whl",
 ];
 
+/// Interpreter `X.Y` version (e.g. `3.14`), from `BURN_PYTHON_STDLIB_VER`
+/// (default `3.13`, the Pyodide 0.28.x interpreter). All guest mount paths and
+/// the side-module soabi tag derive from this, so the probe serves any Pyodide
+/// release without a rebuild: CPython 3.14 searches `/lib/python3.14` and loads
+/// `.so` files tagged `cpython-314`, where 3.13 used `/lib/python3.13` and
+/// `cpython-313`.
+fn py_ver() -> String {
+    std::env::var("BURN_PYTHON_STDLIB_VER").unwrap_or_else(|_| "3.13".to_owned())
+}
+
+/// soabi tag for wheel `.so` files: `cpython-314-wasm32-emscripten` for 3.14.
+fn soabi_tag() -> String {
+    format!("cpython-{}-wasm32-emscripten", py_ver().replace('.', ""))
+}
+
 /// The .so that CPython dlopen()s first to run `import numpy._core._multiarray_umath`.
 /// numpy is a pandas hard dependency, so this is pre-loaded exactly as in the
 /// numpy probe. Everything else loads on demand.
-const NUMPY_CORE_SO: &str = "numpy/_core/_multiarray_umath.cpython-313-wasm32-emscripten.so";
+fn numpy_core_so() -> String {
+    format!("numpy/_core/_multiarray_umath.{}.so", soabi_tag())
+}
 
 /// Guest site-packages prefix where wheels' `.py` and `.so` files are mounted.
-const SITE_PACKAGES: &str = "/lib/python3.13/site-packages";
+fn site_packages() -> String {
+    format!("/lib/python{}/site-packages", py_ver())
+}
 
-/// stdlib prefix inside python_stdlib.zip
-const STDLIB_MOUNT_PREFIX: &str = "/lib/python3.13";
-const STDLIB_ZIP_MOUNT_PATH: &str = "/lib/python313.zip";
+/// stdlib mount prefix and zip path inside the guest FS.
+fn stdlib_mount_prefix() -> String {
+    format!("/lib/python{}", py_ver())
+}
+fn stdlib_zip_mount_path() -> String {
+    format!("/lib/python{}.zip", py_ver().replace('.', ""))
+}
 
 /// Instruction budget. pandas import is far heavier than numpy (44 `.so` side
 /// modules plus a large pure-Python import graph), so the budget is raised.
@@ -252,6 +276,15 @@ fn run_probe() -> String {
         wasm_bytes.len()
     );
 
+    // Version-derived guest paths (BURN_PYTHON_STDLIB_VER; default 3.13).
+    let numpy_core = numpy_core_so();
+    let site_pkgs = site_packages();
+    eprintln!(
+        "[pandas_probe] python {} (soabi {}, site-packages {site_pkgs})",
+        py_ver(),
+        soabi_tag()
+    );
+
     // Wheel set: BURN_WHEELS (comma-separated paths) overrides the default
     // pandas closure, so any package can be probed without a rebuild.
     let wheels_owned: Vec<String> = std::env::var("BURN_WHEELS")
@@ -278,12 +311,9 @@ fn run_probe() -> String {
             bytes.len()
         );
         if numpy_so_bytes.is_none()
-            && let Some(so) = extract_from_zip(&bytes, NUMPY_CORE_SO)
+            && let Some(so) = extract_from_zip(&bytes, &numpy_core)
         {
-            eprintln!(
-                "[pandas_probe] extracted {NUMPY_CORE_SO} ({} bytes)",
-                so.len()
-            );
+            eprintln!("[pandas_probe] extracted {numpy_core} ({} bytes)", so.len());
             numpy_so_bytes = Some(so);
         }
         wheel_blobs.push((wheel.clone(), bytes));
@@ -371,32 +401,41 @@ fn run_probe() -> String {
     let mut store = Store::new(&engine, EmbedderState::for_emscripten());
     store.set_fuel(PROBE_FUEL).expect("set_fuel");
 
-    let got_globals = match wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, &layout)
-    {
-        Ok(g) => g,
-        Err(e) => return format!("MEMORY/TABLE SETUP FAILED: {e}"),
-    };
+    // Emscripten 5.0.3 (Pyodide 314+) defines and exports its own memory, table,
+    // stack pointer, and EH tags. Detect purely by import shape.
+    let self_provided = module_self_provides_env(&module);
 
-    let tag_func_ty = FuncType::new(&engine, [ValType::I32], []);
-    let tag_ty = TagType::new(tag_func_ty);
-    let c_longjmp_tag = match Tag::new(&mut store, &tag_ty) {
-        Ok(t) => t,
-        Err(e) => return format!("TAG CREATION FAILED: env.__c_longjmp: {e}"),
-    };
-    if let Err(e) = linker.define(&mut store, "env", "__c_longjmp", c_longjmp_tag) {
-        return format!("TAG DEFINE FAILED: env.__c_longjmp: {e}");
+    let got_globals =
+        match wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, &layout, &module) {
+            Ok(g) => g,
+            Err(e) => return format!("MEMORY/TABLE SETUP FAILED: {e}"),
+        };
+
+    // On the 0.28.x host-provided path the host creates the EH tags; on the 314
+    // self-providing path the module exports them and they are adopted after
+    // instantiation (adopt_self_provided_exports), so skip host tag creation.
+    if !self_provided {
+        let tag_func_ty = FuncType::new(&engine, [ValType::I32], []);
+        let tag_ty = TagType::new(tag_func_ty);
+        let c_longjmp_tag = match Tag::new(&mut store, &tag_ty) {
+            Ok(t) => t,
+            Err(e) => return format!("TAG CREATION FAILED: env.__c_longjmp: {e}"),
+        };
+        if let Err(e) = linker.define(&mut store, "env", "__c_longjmp", c_longjmp_tag) {
+            return format!("TAG DEFINE FAILED: env.__c_longjmp: {e}");
+        }
+        let cpp_exception_tag = match Tag::new(&mut store, &tag_ty) {
+            Ok(t) => t,
+            Err(e) => return format!("TAG CREATION FAILED: env.__cpp_exception: {e}"),
+        };
+        if let Err(e) = linker.define(&mut store, "env", "__cpp_exception", cpp_exception_tag) {
+            return format!("TAG DEFINE FAILED: env.__cpp_exception: {e}");
+        }
+        // Retain the tags in the store so every side module loaded on-demand by
+        // _dlopen_js can share them (mirrors pyodide_runner.rs boot_pyodide_instance).
+        store.data_mut().pyodide_cpp_exception_tag = Some(cpp_exception_tag);
+        store.data_mut().pyodide_c_longjmp_tag = Some(c_longjmp_tag);
     }
-    let cpp_exception_tag = match Tag::new(&mut store, &tag_ty) {
-        Ok(t) => t,
-        Err(e) => return format!("TAG CREATION FAILED: env.__cpp_exception: {e}"),
-    };
-    if let Err(e) = linker.define(&mut store, "env", "__cpp_exception", cpp_exception_tag) {
-        return format!("TAG DEFINE FAILED: env.__cpp_exception: {e}");
-    }
-    // Retain the tags in the store so every side module loaded on-demand by
-    // _dlopen_js can share them (mirrors pyodide_runner.rs boot_pyodide_instance).
-    store.data_mut().pyodide_cpp_exception_tag = Some(cpp_exception_tag);
-    store.data_mut().pyodide_c_longjmp_tag = Some(c_longjmp_tag);
 
     let got_ty = GlobalType::new(ValType::I32, Mutability::Var);
     for import in module.imports() {
@@ -428,16 +467,19 @@ fn run_probe() -> String {
         }
     }
 
-    // Create /tmp and mount stdlib.
+    // Create /tmp and mount stdlib. BURN_PYTHON_STDLIB_ZIP overrides the path so
+    // a version-specific stdlib (3.14) can be mounted without a rebuild.
     store.data_mut().fs.mkdir_p("/tmp");
 
-    match fs::read(PYTHON_STDLIB_ZIP_PATH) {
+    let stdlib_zip_path = std::env::var("BURN_PYTHON_STDLIB_ZIP")
+        .unwrap_or_else(|_| PYTHON_STDLIB_ZIP_PATH.to_owned());
+    match fs::read(&stdlib_zip_path) {
         Ok(zip_bytes) => {
             store
                 .data_mut()
                 .fs
-                .insert_file(STDLIB_ZIP_MOUNT_PATH, zip_bytes.clone());
-            match mount_zip_into_fs(&mut store.data_mut().fs, STDLIB_MOUNT_PREFIX, &zip_bytes) {
+                .insert_file(&stdlib_zip_mount_path(), zip_bytes.clone());
+            match mount_zip_into_fs(&mut store.data_mut().fs, &stdlib_mount_prefix(), &zip_bytes) {
                 Ok(n) => eprintln!("[pandas_probe] mounted {n} stdlib files"),
                 Err(e) => eprintln!("[pandas_probe] WARN: stdlib mount: {e}"),
             }
@@ -448,11 +490,11 @@ fn run_probe() -> String {
     // Mount every wheel's .py and .so into MEMFS site-packages.
     let mut total_mounted = 0usize;
     for (wheel, bytes) in &wheel_blobs {
-        let n = mount_wheel_into_fs(&mut store.data_mut().fs, bytes, SITE_PACKAGES);
+        let n = mount_wheel_into_fs(&mut store.data_mut().fs, bytes, &site_pkgs);
         eprintln!("[pandas_probe] mounted {n} files from {wheel}");
         total_mounted += n;
     }
-    eprintln!("[pandas_probe] mounted {total_mounted} site-packages files at {SITE_PACKAGES}");
+    eprintln!("[pandas_probe] mounted {total_mounted} site-packages files at {site_pkgs}");
 
     // Diagnostic override: BURN_FS_OVERRIDE=guestpath=hostfile[,guestpath=hostfile]
     // replaces an already-mounted guest file with bytes from a host file. Used to
@@ -501,6 +543,16 @@ fn run_probe() -> String {
     };
     eprintln!("[pandas_probe] instantiated");
 
+    // On the 314 self-providing path, adopt the module's exported memory, table,
+    // stack pointer, and EH tags into the store BEFORE GOT resolution (which
+    // reads the adopted table) and the ctors.
+    if self_provided {
+        if let Err(e) = adopt_self_provided_exports(&mut store, &instance) {
+            return format!("SELF-PROVIDED ADOPT FAILED: {e}");
+        }
+        eprintln!("[pandas_probe] adopted self-provided memory/table/sp/tags");
+    }
+
     // Store the main instance so _dlopen_js can wire env.* imports for
     // on-demand side modules.
     store.data_mut().main_instance = Some(instance);
@@ -519,6 +571,26 @@ fn run_probe() -> String {
             r.funcs_from_elem, r.funcs_from_export, r.funcs_stubbed, r.mem_resolved
         ),
         Err(e) => return format!("GOT RESOLUTION FAILED: {e}"),
+    }
+
+    // On the 314 self-providing path the GOT.func globals could not be pre-filled
+    // (the table is the module's own, adopted only after instantiation). Resolve
+    // every GOT.func import the module declares into a real table slot now, or it
+    // calls through slot 0 (null) and traps with IndirectCallToNull.
+    if self_provided {
+        match afterburner_wasi::emscripten_dylink::resolve_self_provided_got_func(
+            &mut store,
+            &linker,
+            &module,
+            &got_globals,
+        ) {
+            Ok((resolved, skipped)) => {
+                eprintln!(
+                    "[pandas_probe] self-provided GOT.func: {resolved} resolved, {skipped} skipped"
+                )
+            }
+            Err(e) => return format!("SELF-PROVIDED GOT.func FAILED: {e}"),
+        }
     }
 
     // Initialize the C-stack bookkeeping BEFORE relocs/ctors (see numpy probe).
@@ -547,15 +619,15 @@ fn run_probe() -> String {
             &instance,
             &[],
             numpy_so_bytes,
-            NUMPY_CORE_SO,
+            &numpy_core,
         ) {
             Ok(r) => r,
-            Err(e) => return format!("SIDE_MODULE LOAD FAILED for {NUMPY_CORE_SO}: {e}"),
+            Err(e) => return format!("SIDE_MODULE LOAD FAILED for {numpy_core}: {e}"),
         };
         let idx = store
             .data_mut()
             .side_modules
-            .insert(NUMPY_CORE_SO.to_owned(), handle);
+            .insert(numpy_core.clone(), handle);
         eprintln!("[pandas_probe] numpy core SIDE_MODULE pre-loaded, idx={idx}");
     } else {
         eprintln!("[pandas_probe] no numpy core .so in wheel set; skipping numpy pre-load");
@@ -565,15 +637,16 @@ fn run_probe() -> String {
     // before ctors, the same way numpy core is pre-loaded, to test whether the
     // numpy.random failure is specific to the on-demand dlopen path.
     if std::env::var("BURN_PRELOAD_RANDOM").is_ok() {
+        let tag = soabi_tag();
         let random_sos = [
-            "numpy/random/bit_generator.cpython-313-wasm32-emscripten.so",
-            "numpy/random/_common.cpython-313-wasm32-emscripten.so",
-            "numpy/random/_mt19937.cpython-313-wasm32-emscripten.so",
-            "numpy/random/_bounded_integers.cpython-313-wasm32-emscripten.so",
-            "numpy/random/mtrand.cpython-313-wasm32-emscripten.so",
+            format!("numpy/random/bit_generator.{tag}.so"),
+            format!("numpy/random/_common.{tag}.so"),
+            format!("numpy/random/_mt19937.{tag}.so"),
+            format!("numpy/random/_bounded_integers.{tag}.so"),
+            format!("numpy/random/mtrand.{tag}.so"),
         ];
-        for rel in random_sos {
-            let path = format!("{SITE_PACKAGES}/{rel}");
+        for rel in &random_sos {
+            let path = format!("{site_pkgs}/{rel}");
             let so_bytes = match store.data().fs.read_file(&path).map(|b| b.to_vec()) {
                 Some(b) => b,
                 None => {
@@ -585,7 +658,7 @@ fn run_probe() -> String {
             match pre_load_side_module(&engine, &mut store, &instance, &side_insts, &so_bytes, rel)
             {
                 Ok((h, _, _)) => {
-                    let i = store.data_mut().side_modules.insert(rel.to_owned(), h);
+                    let i = store.data_mut().side_modules.insert(rel.clone(), h);
                     eprintln!("[preload-random] pre-loaded {rel} idx={i}");
                 }
                 Err(e) => eprintln!("[preload-random] FAILED {rel}: {e}"),

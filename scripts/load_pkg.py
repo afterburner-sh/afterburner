@@ -19,18 +19,42 @@ import sys
 import urllib.request
 import zipfile
 
-PYODIDE_VER = "0.28.3"
+# Pyodide release to load (override with PYODIDE_VER). Everything below is keyed
+# by this version so multiple releases coexist in /tmp without colliding, and so
+# the probe mounts the matching stdlib + loads the right-soabi wheels. The
+# default is 314.0.0 (Emscripten 5.0.3, CPython 3.14, self-providing memory).
+PYODIDE_VER = os.environ.get("PYODIDE_VER", "314.0.0")
 CDN = f"https://cdn.jsdelivr.net/pyodide/v{PYODIDE_VER}/full"
-LOCK = "/tmp/pyodide-lock.json"
-WHEEL_DIR = "/tmp/burn_wheels"
-PROBE_WASM = "/tmp/pyodide-exnref.wasm"
+LOCK = f"/tmp/pyodide-lock-{PYODIDE_VER}.json"
+WHEEL_DIR = f"/tmp/burn_wheels-{PYODIDE_VER}"
+# exnref-translated main module; 314 uses its own file so the 0.28.3 artifact is
+# not clobbered. Override with BURN_PROBE_WASM.
+PROBE_WASM = os.environ.get(
+    "BURN_PROBE_WASM",
+    f"/tmp/pyodide-{PYODIDE_VER.split('.')[0]}-exnref.wasm",
+)
+STDLIB_ZIP = f"/tmp/python_stdlib-{PYODIDE_VER}.zip"
 AFTERBURNER = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def load_lock():
+def load_lock_doc():
     if not os.path.exists(LOCK):
         urllib.request.urlretrieve(f"{CDN}/pyodide-lock.json", LOCK)
-    return json.load(open(LOCK))["packages"]
+    return json.load(open(LOCK))
+
+
+def python_xy(lock_doc):
+    """`X.Y` interpreter version from the lock (e.g. '3.14'), for the stdlib
+    mount path and wheel soabi tag. Falls back to 3.13 (Pyodide 0.28.x)."""
+    full = lock_doc.get("info", {}).get("python", "3.13.0")
+    parts = full.split(".")
+    return ".".join(parts[:2]) if len(parts) >= 2 else "3.13"
+
+
+def ensure_stdlib():
+    if not os.path.exists(STDLIB_ZIP):
+        urllib.request.urlretrieve(f"{CDN}/python_stdlib.zip", STDLIB_ZIP)
+    return STDLIB_ZIP
 
 
 def resolve_closure(pkgs, root):
@@ -112,17 +136,23 @@ def main():
     pkg = args[0]
     code = args[1] if len(args) > 1 else f"import {pkg.replace('-', '_')}; print('{pkg} OK')"
 
-    pkgs = load_lock()
+    lock_doc = load_lock_doc()
+    pkgs = lock_doc["packages"]
+    py_xy = python_xy(lock_doc)
     closure = resolve_closure(pkgs, pkg)
     if not closure:
         print(f"{pkg}: not found in lock")
         return 1
     wheels = [exnref_wheel(download(p)) for p in closure]
-    print(f"{pkg}: {len(closure)} wheels -> {[p['name'] for p in closure]}")
+    print(
+        f"pyodide {PYODIDE_VER} (python {py_xy}): {pkg} -> "
+        f"{len(closure)} wheels {[p['name'] for p in closure]}"
+    )
     if resolve_only:
         print("BURN_WHEELS=" + ",".join(wheels))
         return 0
 
+    stdlib = ensure_stdlib()
     code_file = "/tmp/burn_pycode.py"
     open(code_file, "w").write(code)
     env = dict(
@@ -130,6 +160,10 @@ def main():
         BURN_WHEELS=",".join(wheels),
         BURN_PY_CODE=code_file,
         BURN_PROBE_WASM=PROBE_WASM,
+        # The probe reads these to mount the matching stdlib and load the
+        # right-soabi wheels (cpython-3XY): generic, version-driven, no rebuild.
+        BURN_PYTHON_STDLIB_VER=py_xy,
+        BURN_PYTHON_STDLIB_ZIP=stdlib,
     )
     return subprocess.run(
         ["cargo", "run", "-q", "-p", "afterburner-wasi", "--example", "pandas_import_probe"],

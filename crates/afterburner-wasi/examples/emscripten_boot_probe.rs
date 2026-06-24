@@ -171,6 +171,7 @@ fn run_probe() -> String {
         &mut linker,
         /* memory_base */ 0,
         /* layout */ &layout,
+        /* module */ &module,
     ) {
         Ok(g) => g,
         Err(e) => return format!("MEMORY/TABLE SETUP FAILED: {e}"),

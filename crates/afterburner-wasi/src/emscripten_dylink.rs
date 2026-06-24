@@ -272,6 +272,103 @@ pub fn resolve_got_func(
     (resolved, missing)
 }
 
+/// Resolve every `GOT.func.<name>` global a SELF-PROVIDING module imports by
+/// placing its host stub funcref into a fresh table slot and writing that slot
+/// index into the global.
+///
+/// On the 0.28.x host-provided path the GOT.func globals are pre-filled to their
+/// reserved host slots before instantiation (`prefill_got_func_globals`), and
+/// `fill_got_table_slots` places the matching funcref at exactly that slot. The
+/// 314 self-providing path cannot pre-fill (the table is the module's own and is
+/// only adopted after instantiation), so this runs afterwards and covers EVERY
+/// GOT.func import the module declares - not just the hardcoded `GOT_FUNC_NAMES`
+/// subset. A 314 module imports its host functions (WebGL, console, ...) entirely
+/// through GOT.func; any global left at 0 makes the module call through table
+/// slot 0 (the null trap slot) and trap with `IndirectCallToNull` the moment that
+/// pointer is invoked.
+///
+/// For each GOT.func import whose global is still 0 (not already resolved to a
+/// real element-segment slot by `fill_got_table_slots`), the funcref is sourced
+/// from the linker's `env.<name>` host stub (wired by
+/// `wire_got_func_stubs_from_module` + `fill_unknown_imports_as_noops`), a fresh
+/// table slot is grown, the funcref is placed there, and the slot index is
+/// written into the GOT.func global. Names with no `env.<name>` stub are skipped
+/// (their global stays 0; the module is not expected to dereference them).
+///
+/// Returns `(resolved, skipped)`.
+pub fn resolve_self_provided_got_func(
+    store: &mut Store<EmbedderState>,
+    linker: &Linker<EmbedderState>,
+    module: &Module,
+    got_globals: &GotGlobalMap,
+) -> Result<(u32, u32)> {
+    let Some(table) = store.data().pyodide_table else {
+        return Err(AfterburnerError::Engine(
+            "resolve_self_provided_got_func: pyodide_table not set in store".into(),
+        ));
+    };
+
+    // GOT.func import names in declaration order (deduplicated via the global map
+    // lookup below).
+    let names: Vec<String> = module
+        .imports()
+        .filter(|imp| imp.module() == "GOT.func")
+        .map(|imp| imp.name().to_owned())
+        .collect();
+
+    let mut resolved = 0u32;
+    let mut skipped = 0u32;
+    for name in &names {
+        let Some(&g) = got_globals.get(&format!("GOT.func::{name}")) else {
+            skipped += 1;
+            continue;
+        };
+        // Already resolved to a real slot (element-segment / module export)?
+        if let Val::I32(v) = g.get(&mut *store)
+            && v != 0
+        {
+            continue;
+        }
+        // Source the funcref from the linker's env.<name> host stub. If the name
+        // has no env.<name> import (a GOT.func-only host symbol, e.g. a WebGL
+        // entry the module references by address but never imports as a function),
+        // place a void->void trap stub so the global points to a real slot rather
+        // than the null trap slot 0: a stray call then surfaces as a clear
+        // type-mismatch / trap at that symbol instead of a bare IndirectCallToNull.
+        let func = match linker
+            .get(&mut *store, "env", name)
+            .ok()
+            .and_then(|ext| ext.into_func())
+        {
+            Some(f) => {
+                resolved += 1;
+                f
+            }
+            None => {
+                skipped += 1;
+                let ft = FuncType::new(store.engine(), [], []);
+                let label = format!("unresolved GOT.func host symbol: {name}");
+                Func::new(&mut *store, ft, move |_, _, _| {
+                    Err(wasmtime::Error::msg(label.clone()))
+                })
+            }
+        };
+        let slot = table.size(&*store) as u32;
+        table
+            .grow(&mut *store, 1, Ref::Func(None))
+            .map_err(|e| AfterburnerError::Engine(format!("GOT.func.{name}: table grow: {e}")))?;
+        table
+            .set(&mut *store, slot as u64, Ref::Func(Some(func)))
+            .map_err(|e| {
+                AfterburnerError::Engine(format!("GOT.func.{name}: table.set({slot}): {e}"))
+            })?;
+        g.set(&mut *store, Val::I32(slot as i32)).map_err(|e| {
+            AfterburnerError::Engine(format!("GOT.func.{name}: set global {slot}: {e}"))
+        })?;
+    }
+    Ok((resolved, skipped))
+}
+
 // ---- parse name section + element segments to build name->table_slot ----------
 
 /// Parse `wasm` bytes to build a `name -> table_slot` map for GOT.func resolution.
@@ -569,20 +666,24 @@ pub fn fill_got_table_slots(
     module: &Module,
     host_got_base: u32,
 ) -> Result<GotResolutionReport> {
-    // The table is a host-defined import; retrieve it from the linker.
-    let table = linker
-        .get(&mut *store, "env", "__indirect_function_table")
-        .map_err(|e| {
-            AfterburnerError::Engine(format!(
-                "GOT resolution: cannot get env.__indirect_function_table from linker: {e}"
-            ))
-        })?
-        .into_table()
-        .ok_or_else(|| {
+    // The indirect function table is host-defined and imported via `env` on the
+    // 0.28.x path; on the 314 self-providing path the module exports it and the
+    // host adopted it into the store (`adopt_self_provided_exports`). Prefer the
+    // linker import when present, else fall back to the adopted store handle.
+    let table = match linker.get(&mut *store, "env", "__indirect_function_table") {
+        Ok(ext) => ext.into_table().ok_or_else(|| {
             AfterburnerError::Engine(
                 "GOT resolution: env.__indirect_function_table is not a table".into(),
             )
-        })?;
+        })?,
+        Err(_) => store.data().pyodide_table.ok_or_else(|| {
+            AfterburnerError::Engine(
+                "GOT resolution: no env.__indirect_function_table import and no adopted \
+                 self-provided table in the store"
+                    .into(),
+            )
+        })?,
+    };
 
     // Per-symbol FuncType from the module's env.* imports. Used for Path-4
     // fallback stubs to ensure call_indirect type checks pass.

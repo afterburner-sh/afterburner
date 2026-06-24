@@ -343,11 +343,11 @@ fn run_probe() -> String {
         .set_fuel(PROBE_FUEL)
         .expect("set_fuel on consume_fuel engine");
 
-    let got_globals = match wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, &layout)
-    {
-        Ok(g) => g,
-        Err(e) => return format!("MEMORY/TABLE SETUP FAILED: {e}"),
-    };
+    let got_globals =
+        match wire_env_memory_and_table_in_store(&mut store, &mut linker, 0, &layout, &module) {
+            Ok(g) => g,
+            Err(e) => return format!("MEMORY/TABLE SETUP FAILED: {e}"),
+        };
 
     // Wire the 2 native-EH exception tags: (i32) -> ().
     let tag_func_ty = FuncType::new(&engine, [ValType::I32], []);

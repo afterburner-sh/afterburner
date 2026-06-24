@@ -141,7 +141,12 @@ fn pre_parse(wasm: &[u8]) -> (Vec<u32>, Vec<u32>, usize, Vec<bool>, Vec<bool>) {
             }
             Payload::CodeSectionEntry(body) => {
                 let mut count = 0u32;
-                for pair in body.get_locals_reader().expect("locals").into_iter().flatten() {
+                for pair in body
+                    .get_locals_reader()
+                    .expect("locals")
+                    .into_iter()
+                    .flatten()
+                {
                     count += pair.0;
                 }
                 local_counts.push(count);
@@ -156,7 +161,12 @@ fn pre_parse(wasm: &[u8]) -> (Vec<u32>, Vec<u32>, usize, Vec<bool>, Vec<bool>) {
         .collect();
     let func_single_i32_ret: Vec<bool> = func_type_indices
         .iter()
-        .map(|&ty_idx| type_single_i32_ret.get(ty_idx as usize).copied().unwrap_or(false))
+        .map(|&ty_idx| {
+            type_single_i32_ret
+                .get(ty_idx as usize)
+                .copied()
+                .unwrap_or(false)
+        })
         .collect();
     (
         param_counts,
