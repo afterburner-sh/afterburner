@@ -151,12 +151,135 @@ pub fn compile_single_file(source_path: &Path) -> Result<Vec<u8>> {
     }
 }
 
+/// Preflight the Rust toolchain before a compile: `rustc` must run and the
+/// `wasm32-wasip1` target std must be installed. Returns a precise, actionable
+/// error UP FRONT (compiler-missing vs target-missing) so a later non-zero
+/// `rustc`/`cargo` exit is unambiguously a compile error, not a setup gap.
+///
+/// The target check reads `rustc --print sysroot` and looks for
+/// `<sysroot>/lib/rustlib/wasm32-wasip1`, which works whether or not `rustup`
+/// is the installer.
+fn preflight_rust() -> Result<()> {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let sysroot = std::process::Command::new(&rustc)
+        .args(["--print", "sysroot"])
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "Rust is required to compile Rust to WebAssembly, but `rustc` was not \
+                     found on PATH. Install it from https://rustup.rs"
+                )
+            } else {
+                anyhow::anyhow!("running `rustc --print sysroot`: {e}")
+            }
+        })?;
+    if !sysroot.status.success() {
+        anyhow::bail!(
+            "`rustc --print sysroot` failed; the Rust toolchain looks broken. \
+             Reinstall from https://rustup.rs"
+        );
+    }
+    let root = String::from_utf8_lossy(&sysroot.stdout);
+    let target_lib = Path::new(root.trim()).join("lib/rustlib/wasm32-wasip1");
+    if !target_lib.exists() {
+        anyhow::bail!(
+            "the `wasm32-wasip1` target is not installed for this Rust toolchain. \
+             Add it with: rustup target add wasm32-wasip1"
+        );
+    }
+    Ok(())
+}
+
+/// Preflight the Go toolchain before a compile: `go` must run and be >= 1.21
+/// (the first release with the `wasip1` port). Actionable error up front.
+fn preflight_go() -> Result<()> {
+    let go = std::env::var("GO").unwrap_or_else(|_| "go".into());
+    let out = std::process::Command::new(&go)
+        .arg("version")
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!(
+                    "Go is required to compile Go to WebAssembly, but `go` was not found on \
+                     PATH. Install Go 1.21 or newer from https://go.dev/dl"
+                )
+            } else {
+                anyhow::anyhow!("running `go version`: {e}")
+            }
+        })?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "`go version` failed; the Go toolchain looks broken. Reinstall from https://go.dev/dl"
+        );
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    if let Some((major, minor)) = parse_go_minor(&text)
+        && (major, minor) < (1, 21)
+    {
+        anyhow::bail!(
+            "Go {major}.{minor} is too old to target wasip1 (the GOOS=wasip1 port arrived \
+             in Go 1.21). Upgrade to Go 1.21 or newer: https://go.dev/dl"
+        );
+    }
+    Ok(())
+}
+
+/// Parse the `go1.NN.P` token from `go version` output into `(major, minor)`.
+/// Returns `None` when the version cannot be parsed (then preflight is lenient
+/// and lets the build proceed rather than blocking on an unrecognized banner).
+fn parse_go_minor(version_output: &str) -> Option<(u32, u32)> {
+    let tok = version_output
+        .split_whitespace()
+        .find(|t| t.starts_with("go1."))?;
+    let mut parts = tok.strip_prefix("go")?.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::parse_go_minor;
+
+    #[test]
+    fn parses_go_version_banner() {
+        assert_eq!(
+            parse_go_minor("go version go1.22.3 linux/amd64"),
+            Some((1, 22))
+        );
+        assert_eq!(
+            parse_go_minor("go version go1.21.0 darwin/arm64"),
+            Some((1, 21))
+        );
+        assert_eq!(
+            parse_go_minor("go version go1.20 linux/amd64"),
+            Some((1, 20))
+        );
+    }
+
+    #[test]
+    fn unparseable_banner_is_none() {
+        assert_eq!(parse_go_minor("garbage output"), None);
+        assert_eq!(parse_go_minor(""), None);
+    }
+
+    #[test]
+    fn version_threshold_logic() {
+        // The preflight blocks below 1.21; confirm the comparison the gate uses.
+        assert!((1u32, 20u32) < (1, 21));
+        assert!(!((1u32, 21u32) < (1, 21)));
+        assert!(!((1u32, 22u32) < (1, 21)));
+    }
+}
+
 /// Compile a single `.rs` file to `wasm32-wasip1` via `rustc`.
 ///
 /// Uses `rustc --edition 2021 --target wasm32-wasip1` directly, so no
 /// Cargo project is required. Clear remediation when `wasm32-wasip1` is
 /// not installed: `rustup target add wasm32-wasip1`.
 fn compile_single_file_rust(source_path: &Path) -> Result<Vec<u8>> {
+    preflight_rust()?;
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
     let wasm_out = std::env::temp_dir().join(format!("burn-rs-{}.wasm", std::process::id()));
 
@@ -186,8 +309,8 @@ fn compile_single_file_rust(source_path: &Path) -> Result<Vec<u8>> {
     if !status.success() {
         let code = status.code().unwrap_or(-1);
         anyhow::bail!(
-            "`rustc --target wasm32-wasip1` exited with code {code}. \
-             If the target is missing: rustup target add wasm32-wasip1"
+            "`rustc --target wasm32-wasip1` exited with code {code} \
+             (compilation failed; see the errors above)"
         );
     }
 
@@ -248,6 +371,7 @@ fn compile_single_file_cpp(source_path: &Path) -> Result<Vec<u8>> {
 /// Clear remediation when the `wasm32-wasip1` target is not installed:
 /// `rustup target add wasm32-wasip1`.
 fn compile_rust(pkg_dir: &Path) -> Result<Vec<u8>> {
+    preflight_rust()?;
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
 
     let status = std::process::Command::new(&cargo)
@@ -267,16 +391,12 @@ fn compile_rust(pkg_dir: &Path) -> Result<Vec<u8>> {
 
     if !status.success() {
         let code = status.code().unwrap_or(-1);
-        // Check if the error is likely a missing target.
-        let target_dir = pkg_dir.join("target/wasm32-wasip1");
-        if !target_dir.exists() {
-            return Err(anyhow::anyhow!(
-                "`cargo build --target wasm32-wasip1` exited with code {code}. \
-                 The wasm32-wasip1 target may not be installed. \
-                 Fix with: rustup target add wasm32-wasip1"
-            ));
-        }
-        anyhow::bail!("`cargo build --target wasm32-wasip1` exited with code {code}");
+        // preflight_rust() already verified rustc + the wasm32-wasip1 target,
+        // so a non-zero exit here is a genuine build error (shown above).
+        anyhow::bail!(
+            "`cargo build --target wasm32-wasip1` exited with code {code} \
+             (build failed; see the errors above)"
+        );
     }
 
     // Locate the produced .wasm file. There should be exactly one binary.
@@ -343,6 +463,7 @@ fn read_cargo_package_name(dir: &Path) -> Option<String> {
 /// `entry` from `afb.toml` is treated as the go source file if it has a
 /// `.go` extension, otherwise the `pkg_dir` itself is passed (whole package).
 fn compile_go(pkg_dir: &Path, entry: &str) -> Result<Vec<u8>> {
+    preflight_go()?;
     let go = std::env::var("GO").unwrap_or_else(|_| "go".into());
 
     // Output to a temp file in the package dir so relative imports work.
