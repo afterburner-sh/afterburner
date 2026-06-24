@@ -319,39 +319,23 @@ fn run_native_script(_cli: &Cli, path: &Path, _user_args: &[String]) -> Result<(
 
 /// Run a `.py` source file via the Pyodide embedder.
 ///
-/// Locates runtime artifacts from the `BURN_PYTHON_RUNTIME` environment
-/// variable (a directory containing `pyodide-exnref.wasm` and
-/// `python_stdlib.zip`). Exits with the Python process exit code.
+/// Uses the self-contained, zero-config runtime: the build script bundles
+/// Pyodide 0.28.3 (with numpy + pandas) into a target cache, so `burn run x.py`
+/// works out of the box with no env vars. `BURN_PYTHON_RUNTIME` (a directory
+/// with `pyodide-exnref.wasm` + `python_stdlib.zip`) remains an optional
+/// override. Exits with the Python process exit code.
 ///
-/// If `BURN_PYTHON_RUNTIME` is not set, emits an honest error and returns
-/// immediately - no fake success.
+/// When neither the bundle nor an override is available (a build where
+/// `wasm-opt` or the network was unavailable), emits an honest, actionable
+/// error - never a fake success.
 #[cfg(feature = "wasm")]
 fn run_python_source(path: &Path, _user_args: &[String]) -> Result<()> {
-    use afterburner_wasi::pyodide_runner::run_pyodide_source;
+    use afterburner_wasi::pyodide_runner::run_python;
     use std::io::Write;
-
-    let runtime_dir = std::env::var("BURN_PYTHON_RUNTIME").map_err(|_| {
-        anyhow::anyhow!(
-            "python runtime not found; set BURN_PYTHON_RUNTIME=<dir> where <dir> contains \
-             pyodide-exnref.wasm and python_stdlib.zip"
-        )
-    })?;
-
-    let wasm_path = format!("{runtime_dir}/pyodide-exnref.wasm");
-    let stdlib_path = format!("{runtime_dir}/python_stdlib.zip");
-
-    if !std::path::Path::new(&wasm_path).exists() {
-        anyhow::bail!(
-            "python runtime not found; {wasm_path} does not exist. \
-             Set BURN_PYTHON_RUNTIME to a directory containing pyodide-exnref.wasm \
-             and python_stdlib.zip"
-        );
-    }
 
     let source = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
-    let out = run_pyodide_source(&wasm_path, &stdlib_path, &source)
-        .map_err(|e| anyhow::anyhow!("python runtime error: {e}"))?;
+    let out = run_python(&source).map_err(|e| anyhow::anyhow!("python runtime error: {e}"))?;
 
     if !out.stdout.is_empty() {
         std::io::stdout()

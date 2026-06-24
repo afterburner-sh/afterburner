@@ -57,6 +57,7 @@ use crate::{
     emscripten_jsffi::wire_jsffi_stubs,
     emscripten_mechanical::wire_mechanical_env_funcs,
     emscripten_wasi::wire_wasi_snapshot_preview1,
+    pyo_trace,
 };
 use afterburner_core::{AfterburnerError, Result};
 use wasmtime::{
@@ -861,7 +862,7 @@ pub(crate) fn invoke_dispatch(
     let slot_content = tbl.get(&mut caller, idx);
     if std::env::var_os("BURN_TRACE_INVOKE").is_some() {
         let is_null = !matches!(&slot_content, Some(wasmtime::Ref::Func(Some(_))));
-        eprintln!(
+        pyo_trace!(
             "[invoke_dispatch] idx={idx} slot_is_null={is_null} params_len={}",
             params.len()
         );
@@ -939,7 +940,7 @@ impl NoopCallLog {
 
     /// Record one call. Prints to stderr and appends to the ring.
     pub fn record(&self, name: &str) {
-        eprintln!("[noop-stub CALLED] {name}");
+        pyo_trace!("[noop-stub CALLED] {name}");
         let mut ring = self.ring.lock().unwrap_or_else(|e| e.into_inner());
         if ring.len() == MECH_RING_CAP {
             ring.pop_front();

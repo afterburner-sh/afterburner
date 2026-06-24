@@ -62,6 +62,7 @@ use wasmtime::{
 
 use crate::embedder_vm::EmbedderState;
 use crate::emscripten_runtime::{WASM_TABLE_INITIAL_SIZE, default_val_for};
+use crate::pyo_trace;
 
 /// Memory size declared in `pyodide.asm.wasm`'s `dylink.0` section (bytes).
 #[allow(dead_code)]
@@ -729,7 +730,7 @@ pub fn fill_got_table_slots(
         let stub_slot = host_got_base.saturating_add(idx as u32) as u64;
         if let Some(func) = instance.get_func(&mut *store, name) {
             if *name == "emscripten_out" || *name == "emscripten_err" {
-                eprintln!("[GOT Path2] {name} -> stub_slot={stub_slot} (module export)");
+                pyo_trace!("[GOT Path2] {name} -> stub_slot={stub_slot} (module export)");
             }
             table
                 .set(&mut *store, stub_slot, Ref::Func(Some(func)))
@@ -749,7 +750,7 @@ pub fn fill_got_table_slots(
             && let Some(func) = ext.into_func()
         {
             if *name == "emscripten_out" || *name == "emscripten_err" {
-                eprintln!("[GOT Path3] {name} -> stub_slot={stub_slot}");
+                pyo_trace!("[GOT Path3] {name} -> stub_slot={stub_slot}");
             }
             table
                 .set(&mut *store, stub_slot, Ref::Func(Some(func)))
@@ -763,7 +764,7 @@ pub fn fill_got_table_slots(
         }
 
         if *name == "emscripten_out" || *name == "emscripten_err" {
-            eprintln!("[GOT Path4-fallback] {name} -> stub_slot={stub_slot}");
+            pyo_trace!("[GOT Path4-fallback] {name} -> stub_slot={stub_slot}");
         }
 
         // Path 4: unresolved - place a correctly-typed no-op stub so the slot
@@ -808,7 +809,7 @@ pub fn fill_got_table_slots(
     let mem_pairs: Vec<(&str, Global)> =
         mem_entries.iter().map(|(s, g)| (s.as_str(), *g)).collect();
     let (mem_resolved, mem_zero) = resolve_got_mem(store, instance, &mem_pairs);
-    eprintln!(
+    pyo_trace!(
         "[GOT] main-module GOT.mem: resolved={mem_resolved} zero={mem_zero} total={}",
         mem_entries.len()
     );

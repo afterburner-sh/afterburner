@@ -17,6 +17,7 @@ use crate::{
     emscripten_runtime::MechCallLog,
     emscripten_runtime::wasm_memory_config,
     emscripten_syscall::wire_fs_env_funcs,
+    pyo_trace,
 };
 
 type WtResult<T> = wasmtime::Result<T>;
@@ -362,7 +363,7 @@ pub(crate) fn wire_mechanical_env_funcs(
         let st = caller.data_mut();
         st.cxa_throw_count += 1;
         let count = st.cxa_throw_count;
-        eprintln!("[__cxa_throw #{count}] ptr=0x{_ptr:x} tp=0x{_tp:x} name={type_name:?}");
+        pyo_trace!("[__cxa_throw #{count}] ptr=0x{_ptr:x} tp=0x{_tp:x} name={type_name:?}");
         if st.cxa_throw_log.len() >= 64 {
             st.cxa_throw_log.remove(0);
         }
@@ -396,7 +397,7 @@ pub(crate) fn wire_mechanical_env_funcs(
         let last = st.cxa_throw_log.last().cloned();
         let total = st.cxa_throw_count;
         let fs_ctx: Vec<String> = st.fs_path_log.iter().cloned().collect();
-        eprintln!(
+        pyo_trace!(
             "[__resumeException] ptr=0x{_ptr:x} total_throws={total} \
              last_throw={last:?} last_fs_paths={fs_ctx:?}"
         );
@@ -899,9 +900,9 @@ pub fn wire_pyodide028_env_stubs(
     // dispatches to this capturing stub and bytes reach wasi_stdout.
     def!("emscripten_out", |mut caller: Caller<'_, EmbedderState>,
                             ptr: i32| {
-        eprintln!("[emscripten_out] ptr={ptr:#x}");
+        pyo_trace!("[emscripten_out] ptr={ptr:#x}");
         if let Some(s) = read_cstr(&caller, ptr) {
-            eprintln!("[emscripten_out] text={s:?}");
+            pyo_trace!("[emscripten_out] text={s:?}");
             let buf = &mut caller.data_mut().wasi_stdout;
             buf.extend_from_slice(s.as_bytes());
             buf.push(b'\n');
@@ -909,9 +910,9 @@ pub fn wire_pyodide028_env_stubs(
     });
     def!("emscripten_err", |mut caller: Caller<'_, EmbedderState>,
                             ptr: i32| {
-        eprintln!("[emscripten_err] ptr={ptr:#x}");
+        pyo_trace!("[emscripten_err] ptr={ptr:#x}");
         if let Some(s) = read_cstr(&caller, ptr) {
-            eprintln!("[emscripten_err] text={s:?}");
+            pyo_trace!("[emscripten_err] text={s:?}");
             let buf = &mut caller.data_mut().wasi_stdout;
             buf.extend_from_slice(s.as_bytes());
             buf.push(b'\n');
@@ -921,9 +922,9 @@ pub fn wire_pyodide028_env_stubs(
     def!(
         "emscripten_console_log",
         |mut caller: Caller<'_, EmbedderState>, ptr: i32| {
-            eprintln!("[emscripten_console_log] ptr={ptr:#x}");
+            pyo_trace!("[emscripten_console_log] ptr={ptr:#x}");
             if let Some(s) = read_cstr(&caller, ptr) {
-                eprintln!("[emscripten_console_log] text={s:?}");
+                pyo_trace!("[emscripten_console_log] text={s:?}");
                 let buf = &mut caller.data_mut().wasi_stdout;
                 buf.extend_from_slice(s.as_bytes());
                 buf.push(b'\n');

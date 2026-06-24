@@ -48,6 +48,7 @@ use wasmtime::{
 use crate::embedder_vm::EmbedderState;
 use crate::emscripten_dylink::{parse_got_name_to_slot, resolve_got_mem};
 use crate::emscripten_runtime::default_val_for;
+use crate::pyo_trace;
 
 /// Memory requirements declared in a SIDE_MODULE's `dylink.0` custom section.
 #[derive(Debug, Clone, Copy)]
@@ -293,9 +294,11 @@ where
 {
     // Parse dylink.0 for exact memory and table requirements.
     let dylink = parse_dylink0_mem_info(wasm_bytes);
-    eprintln!(
+    pyo_trace!(
         "[sidemodule] {path}: dylink.0 mem_size={} mem_align={} table_size={}",
-        dylink.mem_size, dylink.mem_align, dylink.table_size
+        dylink.mem_size,
+        dylink.mem_align,
+        dylink.table_size
     );
 
     // Allocate memory for the side module's data segments in the main module's
@@ -307,12 +310,13 @@ where
         dylink.mem_align,
         path,
     )?;
-    eprintln!(
+    pyo_trace!(
         "[sidemodule] {path}: malloc({}) -> memory_base={:#x}",
-        dylink.mem_size, memory_base
+        dylink.mem_size,
+        memory_base
     );
 
-    eprintln!(
+    pyo_trace!(
         "[sidemodule] compiling {} ({} bytes) memory_base={:#x}",
         path,
         wasm_bytes.len(),
@@ -339,7 +343,7 @@ where
         .map_err(|e| {
             AfterburnerError::Engine(format!("sidemodule table grow by {table_size}: {e}"))
         })?;
-        eprintln!(
+        pyo_trace!(
             "[sidemodule] {path}: grew table {current} -> {} (table_base={current}, delta={table_size})",
             tbl.size(store.as_context())
         );
@@ -520,7 +524,7 @@ where
         .map(|(s, g)| (s.as_str(), *g))
         .collect();
     let (got_mem_resolved, got_mem_zero) = resolve_got_mem(store, main_instance, &got_mem_pairs);
-    eprintln!("[sidemodule] {path}: GOT.mem resolved={got_mem_resolved} zero={got_mem_zero}");
+    pyo_trace!("[sidemodule] {path}: GOT.mem resolved={got_mem_resolved} zero={got_mem_zero}");
 
     // GOT.func is intentionally left at 0 here. The active element segment
     // runs during instantiation and places the side module's own functions into
@@ -579,7 +583,7 @@ where
             from_side += 1;
         } else {
             // Not exported by main or any side module - wire a typed no-op stub.
-            eprintln!("[sidemodule-stub] {path}: env.{name}");
+            pyo_trace!("[sidemodule-stub] {path}: env.{name}");
             let ft2 = ft.clone();
             let result_tys: Vec<ValType> = ft2.results().collect();
             linker
@@ -597,7 +601,7 @@ where
             from_stub += 1;
         }
     }
-    eprintln!(
+    pyo_trace!(
         "[sidemodule] {path}: env imports: {from_main} from main, {from_side} from side, \
          {from_stub} stubs"
     );
@@ -608,13 +612,13 @@ where
     let instance = linker
         .instantiate(store.as_context_mut(), &module)
         .map_err(|e| AfterburnerError::Engine(format!("sidemodule instantiate {path}: {e}")))?;
-    eprintln!("[sidemodule] {path}: instantiated");
+    pyo_trace!("[sidemodule] {path}: instantiated");
 
     // Build a name->table_slot map from the side module's name section and
     // element segments. This is the source-of-truth for which table slot each
     // side-module function occupies after instantiation.
     let name_to_slot = parse_got_name_to_slot(wasm_bytes, table_base);
-    eprintln!(
+    pyo_trace!(
         "[sidemodule] {path}: element segment map has {} entries (table_base={table_base})",
         name_to_slot.len()
     );
@@ -722,7 +726,7 @@ where
         // Path 5: unresolved - leave at 0 (traps loudly on indirect call).
         got_func_zero += 1;
     }
-    eprintln!(
+    pyo_trace!(
         "[sidemodule] {path}: updateGOT: elem={got_func_from_elem} self={got_func_from_self} \
          side={got_func_from_side} main={got_func_from_main} zero={got_func_zero}"
     );
@@ -790,7 +794,7 @@ where
         inserted += 1;
     }
 
-    eprintln!(
+    pyo_trace!(
         "[sidemodule] {path}: {} export table slots resolved ({} from element segment, \
          {} eagerly inserted) ({total_exports} exports total, {} not in table)",
         func_table_slots.len(),
@@ -807,7 +811,7 @@ where
             .map_err(|e| {
                 AfterburnerError::Engine(format!("sidemodule __wasm_apply_data_relocs {path}: {e}"))
             })?;
-        eprintln!("[sidemodule] {path}: __wasm_apply_data_relocs OK");
+        pyo_trace!("[sidemodule] {path}: __wasm_apply_data_relocs OK");
     }
 
     // Call __wasm_call_ctors if present.
@@ -817,7 +821,7 @@ where
             .map_err(|e| {
                 AfterburnerError::Engine(format!("sidemodule __wasm_call_ctors {path}: {e}"))
             })?;
-        eprintln!("[sidemodule] {path}: __wasm_call_ctors OK");
+        pyo_trace!("[sidemodule] {path}: __wasm_call_ctors OK");
     }
 
     // Next bases: memory_base advances past this module's allocation;
@@ -871,14 +875,14 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                 // where dso.name = 36 - a direct string, not a pointer stored at +36).
                 let name_str_ptr = (handle_struct_ptr as u32).saturating_add(36) as i32;
                 let Some(name) = read_cstr_sidemodule(&caller, name_str_ptr) else {
-                    eprintln!("[dlopen_js] cannot read filename at handle+36={name_str_ptr:#x}");
+                    pyo_trace!("[dlopen_js] cannot read filename at handle+36={name_str_ptr:#x}");
                     return 0;
                 };
-                eprintln!("[dlopen_js] looking up '{name}'");
+                pyo_trace!("[dlopen_js] looking up '{name}'");
                 let dso_ptr = handle_struct_ptr as u32;
                 // Fast path: already mapped from a prior call.
                 if caller.data().side_modules.get_by_ptr(dso_ptr).is_some() {
-                    eprintln!("[dlopen_js] cached dso_ptr={dso_ptr:#x} for '{name}'");
+                    pyo_trace!("[dlopen_js] cached dso_ptr={dso_ptr:#x} for '{name}'");
                     return handle_struct_ptr;
                 }
                 // Check if the path was already pre-loaded (just needs ptr mapping).
@@ -889,7 +893,7 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                     .map(|(i, _)| i)
                 {
                     caller.data_mut().side_modules.map_ptr(dso_ptr, idx);
-                    eprintln!(
+                    pyo_trace!(
                         "[dlopen_js] mapped dso_ptr={dso_ptr:#x} -> idx={idx} for '{name}'"
                     );
                     return handle_struct_ptr;
@@ -911,14 +915,14 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                     for p in &candidates {
                         if let Some(b) = caller.data().fs.read_file(p.as_str()) {
                             found = Some(b.to_vec());
-                            eprintln!("[dlopen_js] found '{name}' at '{p}'");
+                            pyo_trace!("[dlopen_js] found '{name}' at '{p}'");
                             break;
                         }
                     }
                     match found {
                         Some(b) => b,
                         None => {
-                            eprintln!(
+                            pyo_trace!(
                                 "[dlopen_js] FS miss for '{name}' (tried {} paths)",
                                 candidates.len()
                             );
@@ -930,7 +934,7 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                 let main_instance = match caller.data().main_instance {
                     Some(i) => i,
                     None => {
-                        eprintln!("[dlopen_js] main_instance not set in store for '{name}'");
+                        pyo_trace!("[dlopen_js] main_instance not set in store for '{name}'");
                         return 0;
                     }
                 };
@@ -946,13 +950,13 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                     Ok((handle, _, _)) => {
                         let idx = caller.data_mut().side_modules.insert(name.clone(), handle);
                         caller.data_mut().side_modules.map_ptr(dso_ptr, idx);
-                        eprintln!(
+                        pyo_trace!(
                             "[dlopen_js] on-demand loaded '{name}' -> idx={idx} dso_ptr={dso_ptr:#x}"
                         );
                         handle_struct_ptr
                     }
                     Err(e) => {
-                        eprintln!("[dlopen_js] on-demand load FAILED for '{name}': {e}");
+                        pyo_trace!("[dlopen_js] on-demand load FAILED for '{name}': {e}");
                         0
                     }
                 }
@@ -972,14 +976,14 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                 let sym_name = match read_cstr_sidemodule(&caller, sym_ptr) {
                     Some(s) => s,
                     None => {
-                        eprintln!("[dlsym_js] cannot read symbol at {sym_ptr:#x}");
+                        pyo_trace!("[dlsym_js] cannot read symbol at {sym_ptr:#x}");
                         return 0;
                     }
                 };
                 // handle is the raw DSO struct pointer returned by _dlopen_js,
                 // which is the same pointer Emscripten uses as LDSO.loadedLibsByHandle key.
                 let dso_ptr = handle as u32;
-                eprintln!("[dlsym_js] dso_ptr={dso_ptr:#x} symbol='{sym_name}'");
+                pyo_trace!("[dlsym_js] dso_ptr={dso_ptr:#x} symbol='{sym_name}'");
 
                 // Instance and table are Copy; snapshot them before any mut borrow.
                 let instance_opt = caller
@@ -990,7 +994,7 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                 let table_opt = caller.data().pyodide_table;
 
                 let (Some(instance), Some(table)) = (instance_opt, table_opt) else {
-                    eprintln!("[dlsym_js] MISS: dso_ptr={dso_ptr:#x} not found or table absent");
+                    pyo_trace!("[dlsym_js] MISS: dso_ptr={dso_ptr:#x} not found or table absent");
                     return 0;
                 };
 
@@ -1004,7 +1008,7 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                 if let Some(slot) = pre_slot {
                     // Symbol is already in the table at the correct slot.
                     write_sym_idx(&mut caller, sym_idx_ptr, slot);
-                    eprintln!("[dlsym_js] pre-slot '{sym_name}' -> {slot}");
+                    pyo_trace!("[dlsym_js] pre-slot '{sym_name}' -> {slot}");
                     return slot as i32;
                 }
 
@@ -1012,19 +1016,19 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                 // the shared table at the next available slot past the current end.
                 let func_opt = instance.get_func(&mut caller, sym_name.as_str());
                 let Some(func) = func_opt else {
-                    eprintln!("[dlsym_js] MISS: '{sym_name}' not exported by side module");
+                    pyo_trace!("[dlsym_js] MISS: '{sym_name}' not exported by side module");
                     return 0;
                 };
 
                 // Grow the table by 1 to get a fresh slot, then place the func there.
                 let slot = table.size(&caller) as u32;
                 if let Err(e) = table.grow(&mut caller, 1, wasmtime::Ref::Func(None)) {
-                    eprintln!("[dlsym_js] table grow for '{sym_name}': {e}");
+                    pyo_trace!("[dlsym_js] table grow for '{sym_name}': {e}");
                     return 0;
                 }
                 if let Err(e) = table.set(&mut caller, slot as u64, wasmtime::Ref::Func(Some(func)))
                 {
-                    eprintln!("[dlsym_js] table.set slot {slot} for '{sym_name}': {e}");
+                    pyo_trace!("[dlsym_js] table.set slot {slot} for '{sym_name}': {e}");
                     return 0;
                 }
 
@@ -1035,7 +1039,7 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                     .set_slot(dso_ptr, sym_name.clone(), slot);
 
                 write_sym_idx(&mut caller, sym_idx_ptr, slot);
-                eprintln!("[dlsym_js] inserted '{sym_name}' -> table slot {slot}");
+                pyo_trace!("[dlsym_js] inserted '{sym_name}' -> table slot {slot}");
                 slot as i32
             },
         )

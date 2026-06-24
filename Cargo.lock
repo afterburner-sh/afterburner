@@ -312,6 +312,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "ureq",
  "wasm-encoder 0.252.0",
  "wasmparser 0.252.0",
  "wasmtime",

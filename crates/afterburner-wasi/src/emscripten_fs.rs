@@ -93,6 +93,8 @@
 
 use std::collections::HashMap;
 
+use crate::pyo_trace;
+
 // ---- errno constants ---------------------------------------------------------
 
 /// ENOENT: no such file or directory.
@@ -855,7 +857,7 @@ pub fn mount_zip_into_fs(fs: &mut InMemFs, prefix: &str, zip_data: &[u8]) -> Res
                 }
                 other => {
                     // Unsupported - skip silently (e.g. bzip2, lzma).
-                    eprintln!(
+                    pyo_trace!(
                         "[emscripten_fs] skipping {entry_name}: unsupported compression {other}"
                     );
                     pos = data_end;

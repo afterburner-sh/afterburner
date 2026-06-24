@@ -20,6 +20,7 @@ use crate::{
     emscripten_fs::{EBADF, EINVAL, ENOENT, ENOTTY},
     emscripten_mechanical::read_cstr,
     emscripten_runtime::MechCallLog,
+    pyo_trace,
 };
 
 #[cfg(test)]
@@ -29,11 +30,11 @@ mod tests;
 #[inline]
 fn log_stat(tag: &str, abs: &str, rc: i32, mode_size: Option<(u32, u64)>) {
     match mode_size {
-        Some((mode, size)) => eprintln!(
+        Some((mode, size)) => pyo_trace!(
             "[{tag}] {:?} -> rc={rc} st_mode=0o{mode:o} st_size={size}",
             abs
         ),
-        None => eprintln!("[{tag}] {:?} -> rc={rc}", abs),
+        None => pyo_trace!("[{tag}] {:?} -> rc={rc}", abs),
     }
 }
 
@@ -228,9 +229,9 @@ pub fn wire_fs_env_funcs(
                     let fd = caller.data_mut().fs.open(abs.clone(), flags);
                     // Extra log for .so / C-extension paths.
                     if abs.ends_with(".so") || abs.contains("_speedups") {
-                        eprintln!("[openat-SO] {:?} flags={flags} -> fd={fd}", abs);
+                        pyo_trace!("[openat-SO] {:?} flags={flags} -> fd={fd}", abs);
                     }
-                    eprintln!("[openat] {:?} flags={flags} -> fd={fd}", abs);
+                    pyo_trace!("[openat] {:?} flags={flags} -> fd={fd}", abs);
                     fd
                 },
             )
@@ -325,7 +326,7 @@ pub fn wire_fs_env_funcs(
                         }
                         let chunk: Vec<u8> =
                             memory.data(&caller)[buf_ptr..buf_ptr + buf_len].to_vec();
-                        eprintln!("[__syscall_writev] fd={fd} iov[{i}] buf_ptr={buf_ptr:#x} buf_len={buf_len}");
+                        pyo_trace!("[__syscall_writev] fd={fd} iov[{i}] buf_ptr={buf_ptr:#x} buf_len={buf_len}");
                         if fd == 1 || fd == 2 {
                             caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
                         } else if caller.data().fs.is_fs_fd(fd) {
@@ -336,7 +337,7 @@ pub fn wire_fs_env_funcs(
                         }
                         total += buf_len as i32;
                     }
-                    eprintln!("[__syscall_writev] fd={fd} total_bytes={total}");
+                    pyo_trace!("[__syscall_writev] fd={fd} total_bytes={total}");
                     total
                 },
             )
@@ -372,7 +373,7 @@ pub fn wire_fs_env_funcs(
                         return EINVAL;
                     }
                     let chunk: Vec<u8> = memory.data(&caller)[start..start + len].to_vec();
-                    eprintln!("[__syscall_write] fd={fd} buf={buf:#x} count={len}");
+                    pyo_trace!("[__syscall_write] fd={fd} buf={buf:#x} count={len}");
                     if fd == 1 || fd == 2 {
                         caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
                     } else if caller.data().fs.is_fs_fd(fd) {
@@ -689,7 +690,7 @@ pub fn wire_fs_env_funcs(
                     let buf_cap = count as u32 as usize;
                     let mut tmp = vec![0u8; buf_cap];
                     let n = caller.data_mut().fs.getdents64_into(fd, &mut tmp);
-                    eprintln!("[getdents64] fd={fd} count={count} -> n={n}");
+                    pyo_trace!("[getdents64] fd={fd} count={count} -> n={n}");
                     if n <= 0 {
                         // 0 = end-of-directory (correct termination), negative = error.
                         return n;

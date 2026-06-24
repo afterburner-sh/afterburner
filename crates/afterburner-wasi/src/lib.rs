@@ -52,7 +52,11 @@ pub mod host_imports;
 pub mod intake;
 pub mod manifold_codec;
 pub mod nozzle;
+pub mod pyodide_bundle;
 pub mod pyodide_runner;
+// `pyo_trace!` is `#[macro_export]`ed (available crate-wide as `crate::pyo_trace`
+// via an explicit `use`); no `#[macro_use]` needed.
+pub mod pyodide_trace;
 pub mod test_support;
 pub mod wasm_engine;
 pub mod wasm_loader;

@@ -3,15 +3,39 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Build-time gate: make sure the committed plugin binary matches the
-//! current polyfill bundle. Without this check, editing a polyfill and
-//! forgetting to rerun `crates/afterburner-plugin/build.sh` silently ships a
-//! stale plugin that behaves differently from what the source says.
+//! Build-time work for afterburner-wasi: two independent jobs.
+//!
+//! Job one, the plugin drift gate: make sure the committed plugin binary
+//! matches the current polyfill bundle, so editing a polyfill without
+//! rebuilding the plugin can never silently ship a stale binary.
+//!
+//! Job two, the self-contained Pyodide payload: fetch the stock Pyodide 0.28.3
+//! main wasm, the stdlib, and the pandas-closure wheels from the jsDelivr CDN,
+//! exnref-translate the wasm and each wheel `.so` with `wasm-opt`, and cache the
+//! result in a stable dir under the workspace target so `burn run x.py` (numpy +
+//! pandas) works with no env vars and no runtime download. The dir is exported
+//! as `AFTERBURNER_PYODIDE_BUNDLE_DIR`; the runtime loads from there by default.
+//! See `pyodide_payload.rs` (build side) and `src/pyodide_bundle.rs` (runtime).
+//!
+//! Honesty: `wasm-opt` is a BUILD-time dependency for the exnref translation
+//! (not a runtime dependency). When it is absent, or the CDN is unreachable,
+//! the payload step SKIPS cleanly (a `cargo:warning`, never a panic) and the
+//! runtime falls back to `BURN_PYTHON_RUNTIME` with an honest error - exactly
+//! as the plugin gate skips on a fresh checkout.
 
-use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+mod pyodide_payload;
 
 fn main() {
+    plugin_drift_gate();
+    pyodide_payload::build();
+}
+
+// ---- 1. plugin drift gate --------------------------------------------------
+
+fn plugin_drift_gate() {
     // CARGO_MANIFEST_DIR = <repo>/crates/afterburner-wasi.
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // Walk up two parents to reach the repo root for the sibling-crate
@@ -28,19 +52,19 @@ fn main() {
     println!("cargo:rerun-if-changed={}", bundle_path.display());
     println!("cargo:rerun-if-changed={}", sidecar_path.display());
 
-    let bundle = match fs::read(&bundle_path) {
+    let bundle = match std::fs::read(&bundle_path) {
         Ok(b) => b,
         Err(_) => return, // bundle not yet generated - fresh workspace checkout
     };
     let current_hash = sha256_hex(&bundle);
 
-    let committed_hash = match fs::read_to_string(&sidecar_path) {
+    let committed_hash = match std::fs::read_to_string(&sidecar_path) {
         Ok(s) => s.trim().to_string(),
         Err(_) => {
             // No recorded hash yet - first-time plugin build; record it
             // rather than fail. Normal CI/dev flow writes this via the
             // plugin's build.sh.
-            let _ = fs::write(&sidecar_path, format!("{current_hash}\n"));
+            let _ = std::fs::write(&sidecar_path, format!("{current_hash}\n"));
             return;
         }
     };
@@ -48,7 +72,7 @@ fn main() {
     if current_hash != committed_hash {
         panic!(
             "\n\n\
-             afterburner-plugin ↔ plenum bundle drift detected.\n\
+             afterburner-plugin <-> plenum bundle drift detected.\n\
              \n\
                  Committed plugin hash: {committed_hash}\n\
                  Current bundle hash:   {current_hash}\n\
@@ -65,14 +89,34 @@ fn main() {
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+// ---- shared helpers (used by the payload module too) -----------------------
+
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(bytes);
-    let bytes = h.finalize();
+    let digest = h.finalize();
     let mut out = String::with_capacity(64);
-    for b in bytes {
-        out.push_str(&format!("{b:02x}"));
+    for b in digest {
+        use std::fmt::Write;
+        let _ = write!(out, "{b:02x}");
     }
     out
+}
+
+/// Locate `wasm-opt`: PATH first, then the emsdk fallback Pyodide builds ship.
+/// Returns `None` when neither is present (the payload step then skips).
+pub(crate) fn find_wasm_opt() -> Option<PathBuf> {
+    if let Ok(out) = Command::new("wasm-opt").arg("--version").output()
+        && out.status.success()
+    {
+        return Some(PathBuf::from("wasm-opt"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let p = Path::new(&home).join("emsdk/upstream/bin/wasm-opt");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
 }

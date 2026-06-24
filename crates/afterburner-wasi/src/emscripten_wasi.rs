@@ -46,7 +46,7 @@
 use afterburner_core::{AfterburnerError, Result};
 use wasmtime::{Caller, Linker};
 
-use crate::{embedder_vm::EmbedderState, emscripten_abi::VIRTUAL_EPOCH_NS};
+use crate::{embedder_vm::EmbedderState, emscripten_abi::VIRTUAL_EPOCH_NS, pyo_trace};
 
 #[cfg(test)]
 mod tests;
@@ -141,7 +141,7 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                                buf_size_ptr: i32|
      -> i32 {
         // "PYTHONUNBUFFERED=1\0" = 20 bytes
-        eprintln!("[environ_sizes_get] returning 1 var, 20 bytes (PYTHONUNBUFFERED=1)");
+        pyo_trace!("[environ_sizes_get] returning 1 var, 20 bytes (PYTHONUNBUFFERED=1)");
         if !write_u32(&mut caller, count_ptr, 1) {
             return 1;
         }
@@ -159,7 +159,7 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                          environ_ptr: i32,
                          buf_ptr: i32|
      -> i32 {
-        eprintln!("[environ_get] writing PYTHONUNBUFFERED=1 at buf_ptr={buf_ptr:#x}");
+        pyo_trace!("[environ_get] writing PYTHONUNBUFFERED=1 at buf_ptr={buf_ptr:#x}");
         // Write the env string "PYTHONUNBUFFERED=1\0" at buf_ptr.
         let env_str = b"PYTHONUNBUFFERED=1\0";
         if !write_bytes(&mut caller, buf_ptr, env_str) {
@@ -179,7 +179,7 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                             argc_ptr: i32,
                             argv_buf_size_ptr: i32|
      -> i32 {
-        eprintln!("[args_sizes_get] called - returning 0 args");
+        pyo_trace!("[args_sizes_get] called - returning 0 args");
         if !write_u32(&mut caller, argc_ptr, 0) {
             return 1;
         }
@@ -194,7 +194,7 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                       _argv_ptr: i32,
                       _buf_ptr: i32|
      -> i32 {
-        eprintln!("[args_get] called");
+        pyo_trace!("[args_get] called");
         0
     });
 
@@ -212,7 +212,7 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                       iovs_len: i32,
                       nwritten_ptr: i32|
      -> i32 {
-        eprintln!(
+        pyo_trace!(
             "[fd_write] fd={fd} iovs_ptr={iovs_ptr:#x} iovs_len={iovs_len} nwritten_ptr={nwritten_ptr:#x} mem={}",
             caller.data().pyodide_memory.is_some()
         );
@@ -221,7 +221,7 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
         let iov_bytes = match read_bytes(&caller, iovs_ptr, iovs_len * 8) {
             Some(b) => b,
             None => {
-                eprintln!("[fd_write] EBADF on iov_bytes read");
+                pyo_trace!("[fd_write] EBADF on iov_bytes read");
                 return EBADF;
             }
         };
@@ -238,7 +238,7 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                 Some(c) => c,
                 None => return EBADF,
             };
-            eprintln!("[fd_write] fd={fd} iov[{i}] buf_ptr={buf_ptr:#x} buf_len={buf_len}");
+            pyo_trace!("[fd_write] fd={fd} iov[{i}] buf_ptr={buf_ptr:#x} buf_len={buf_len}");
             if fd == 1 || fd == 2 {
                 caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
             } else if caller.data().fs.is_fs_fd(fd) {
@@ -251,7 +251,7 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
             }
             total += buf_len as u32;
         }
-        eprintln!("[fd_write] fd={fd} total_bytes={total}");
+        pyo_trace!("[fd_write] fd={fd} total_bytes={total}");
         if !write_u32(&mut caller, nwritten_ptr, total) {
             return EBADF;
         }
@@ -379,7 +379,7 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                        _offset: i64,
                        nwritten_ptr: i32|
      -> i32 {
-        eprintln!("[fd_pwrite] fd={_fd} iovs_len={_iovs_len} offset={_offset}");
+        pyo_trace!("[fd_pwrite] fd={_fd} iovs_len={_iovs_len} offset={_offset}");
         if !write_u32(&mut caller, nwritten_ptr, 0) {
             return EBADF;
         }
@@ -586,7 +586,7 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
             linux_flags |= 512; // O_TRUNC
         }
         let new_fd = caller.data_mut().fs.open(abs.clone(), linux_flags);
-        eprintln!(
+        pyo_trace!(
             "[path_open] dirfd={dirfd} {:?} oflags={oflags:#x} rights={fs_rights_base:#x} linux_flags={linux_flags:#x} -> new_fd={new_fd}",
             abs
         );
