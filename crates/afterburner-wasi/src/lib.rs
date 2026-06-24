@@ -60,6 +60,7 @@ pub mod pyodide_trace;
 pub mod ruby_bundle;
 pub mod ruby_runner;
 pub mod test_support;
+pub mod wasi_sdk_bundle;
 pub mod wasm_engine;
 pub mod wasm_loader;
 

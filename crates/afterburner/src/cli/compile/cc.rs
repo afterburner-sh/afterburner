@@ -11,12 +11,20 @@
 //! like the Rust and Go backends.
 //!
 //! Invariants:
-//! - A wasi-sdk is required (its bundled `clang`/`clang++` ship the `wasm32`
-//!   compiler-rt builtins and the wasi-libc sysroot; a bare system clang is
-//!   not enough). When none is found, [`compile_c`]/[`compile_cpp`] return an
-//!   honest "wasi-sdk not found" error - never a fabricated success.
+//! - A wasi-sdk supplies the `clang`/`clang++` that ship the `wasm32`
+//!   compiler-rt builtins and the wasi-libc sysroot (a bare system clang is not
+//!   enough). It is resolved BUNDLE-FIRST: the toolchain assembled at build time
+//!   by `afterburner-wasi` (`wasi_sdk_bundle::resolve`), so `burn run x.c` works
+//!   with zero config; `WASI_SDK_PATH` and the standard prefixes are an explicit
+//!   override. When none resolves, [`compile_c`]/[`compile_cpp`] return an honest
+//!   internal-free "C/C++ compilation is not available" error, never a fake.
+//! - C++ exceptions: clang emits LEGACY wasm EH but the embedder runs the NEW
+//!   (exnref) proposal, so an EH-enabled C++ module is post-translated to exnref
+//!   with `wasm-opt` (as the bundled Python runtime is). With `wasm-opt` present
+//!   real try/catch/throw works; without it C++ compiles `-fno-exceptions`
+//!   (exception-free code, including `<iostream>`, still runs).
 //! - A `Makefile`/`CMakeLists.txt` at the package root, when present, drives
-//!   the build (it inherits the wasi-sdk via exported `CC`/`CXX`/`*FLAGS`).
+//!   the build (it inherits the toolchain via exported `CC`/`CXX`/`*FLAGS`).
 //! - A package (a `source/` tree) compiles every source under it in one
 //!   invocation; a bare single file (no `source/` dir) compiles only itself.
 
@@ -39,16 +47,33 @@ struct WasiSdk {
 
 /// Discover a wasi-sdk for compiling C/C++ to a `wasm32-wasip1` WASI command
 /// module. Returns `None` when none is found (the caller then emits an honest
-/// "wasi-sdk not found" error - never a fake success).
+/// "not available" error - never a fake success).
 ///
 /// Search order (first hit wins):
+/// 0. The toolchain bundled with this build (assembled by `afterburner-wasi`'s
+///    build script and resolved via `wasi_sdk_bundle::resolve`). This is the
+///    zero-config path: `burn run x.c` works with no env vars.
 /// 1. `WASI_SDK_PATH` env var (the canonical wasi-sdk convention): expects
-///    `$WASI_SDK_PATH/bin/clang` + `$WASI_SDK_PATH/share/wasi-sysroot`.
+///    `$WASI_SDK_PATH/bin/clang` + `$WASI_SDK_PATH/share/wasi-sysroot`. This is
+///    an explicit OVERRIDE of the bundled toolchain.
 /// 2. `WASI_SYSROOT` env var alongside `CC`/`CXX` (or system `clang`), for
 ///    setups where the sysroot is split from the driver.
 /// 3. Standard install prefixes: `/opt/wasi-sdk`, `/usr/local/wasi-sdk`,
 ///    `/usr/lib/wasi-sdk`, `~/wasi-sdk`, `~/.wasi-sdk`.
 fn find_wasi_sdk() -> Option<WasiSdk> {
+    // 0. The bundled toolchain assembled at build time: the zero-config path.
+    //    An explicit WASI_SDK_PATH below overrides it (mirrors how
+    //    BURN_PYTHON_RUNTIME / BURN_RUBY_RUNTIME override their bundles).
+    if std::env::var_os("WASI_SDK_PATH").is_none()
+        && let Some(b) = afterburner_wasi::wasi_sdk_bundle::resolve()
+    {
+        return Some(WasiSdk {
+            clang: b.clang,
+            clangxx: b.clangxx,
+            sysroot: b.sysroot,
+        });
+    }
+
     // 1. WASI_SDK_PATH (the canonical layout).
     if let Ok(root) = std::env::var("WASI_SDK_PATH")
         && let Some(sdk) = wasi_sdk_from_root(Path::new(&root))
@@ -111,18 +136,13 @@ fn wasi_sdk_from_root(root: &Path) -> Option<WasiSdk> {
     }
 }
 
-/// The actionable error when no wasi-sdk can be located. The substring
-/// "wasi-sdk not found" is matched by the e2e tests to skip honestly (never
-/// silently pass) when the toolchain is absent.
+/// The actionable error when no C/C++ toolchain can be located. The bundled
+/// toolchain normally satisfies this, so it rarely fires; when it does, the
+/// message stays internal-free (it names no toolchain, no env var, no URL). The
+/// substring "C/C++ compilation is not available" is matched by the e2e tests
+/// to skip honestly (never silently pass) when compilation cannot run.
 fn wasi_sdk_missing_error(lang: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "wasi-sdk not found: compiling {lang} to a wasm32-wasip1 WASI command module \
-         needs the wasi-sdk (its bundled clang ships the wasm32 compiler-rt builtins \
-         and wasi-libc sysroot). A bare system clang is not enough.\n\
-         Install it and set WASI_SDK_PATH=<dir>, where <dir> contains \
-         bin/clang and share/wasi-sysroot.\n\
-         Releases: https://github.com/WebAssembly/wasi-sdk/releases"
-    )
+    anyhow::anyhow!("C/C++ compilation is not available in this build of burn ({lang})")
 }
 
 /// Collect all translation units under `pkg_dir/source/` (recursively) whose
@@ -176,7 +196,12 @@ fn collect_sources_into(dir: &Path, exts: &[&str], out: &mut Vec<PathBuf>) -> Re
 ///   one `.wasm` under `pkg_dir` (searched recursively, newest wins on ties),
 /// - `Ok(None)` when no build file is present (caller does a direct compile),
 /// - `Err(_)` when a build file ran but failed or produced no `.wasm`.
-fn try_build_system(pkg_dir: &Path, sdk: &WasiSdk, is_cpp: bool) -> Result<Option<Vec<u8>>> {
+fn try_build_system(
+    pkg_dir: &Path,
+    sdk: &WasiSdk,
+    is_cpp: bool,
+    cpp_exceptions: bool,
+) -> Result<Option<Vec<u8>>> {
     let has_make = ["Makefile", "makefile", "GNUmakefile"]
         .iter()
         .any(|f| pkg_dir.join(f).is_file());
@@ -190,6 +215,22 @@ fn try_build_system(pkg_dir: &Path, sdk: &WasiSdk, is_cpp: bool) -> Result<Optio
     let cxx = sdk.clangxx.to_string_lossy().into_owned();
     let sysroot = sdk.sysroot.to_string_lossy().into_owned();
     let target_flags = format!("--target=wasm32-wasip1 --sysroot={sysroot}");
+    // C++ selects the exceptions-enabled or no-exceptions libc++ multilib (see
+    // the direct-compile path), gated on whether the exnref translator is
+    // available. `-lunwind` in LDFLAGS resolves the unwinder the EH variant
+    // needs and is a harmless no-op for a C link (an unreferenced archive pulls
+    // nothing).
+    let (cxx_flags, ld_flags) = if cpp_exceptions {
+        (
+            format!("{target_flags} -fwasm-exceptions"),
+            format!("{target_flags} -lunwind"),
+        )
+    } else {
+        (
+            format!("{target_flags} -fno-exceptions"),
+            target_flags.clone(),
+        )
+    };
 
     let run_make = |program: &str| -> Result<std::process::ExitStatus> {
         std::process::Command::new(program)
@@ -199,8 +240,8 @@ fn try_build_system(pkg_dir: &Path, sdk: &WasiSdk, is_cpp: bool) -> Result<Optio
             .env("CC", &cc)
             .env("CXX", &cxx)
             .env("CFLAGS", &target_flags)
-            .env("CXXFLAGS", &target_flags)
-            .env("LDFLAGS", &target_flags)
+            .env("CXXFLAGS", &cxx_flags)
+            .env("LDFLAGS", &ld_flags)
             .status()
             .with_context(|| format!("spawning `{program}`"))
     };
@@ -236,7 +277,8 @@ fn try_build_system(pkg_dir: &Path, sdk: &WasiSdk, is_cpp: bool) -> Result<Optio
             ])
             .arg(format!("-DCMAKE_SYSROOT={sysroot}"))
             .arg(format!("-DCMAKE_C_FLAGS={target_flags}"))
-            .arg(format!("-DCMAKE_CXX_FLAGS={target_flags}"))
+            .arg(format!("-DCMAKE_CXX_FLAGS={cxx_flags}"))
+            .arg(format!("-DCMAKE_EXE_LINKER_FLAGS={ld_flags}"))
             .arg(&compiler_flag)
             .status()
             .with_context(|| "spawning `cmake` (configure)")?;
@@ -294,6 +336,66 @@ fn sdk_root_of(sdk: &WasiSdk) -> PathBuf {
         .unwrap_or_else(|| sdk.clang.clone())
 }
 
+/// Locate `wasm-opt` for the C++ exnref translation: PATH first, then the emsdk
+/// fallback Binaryen ships at. Returns `None` when neither is present (the C++
+/// compile then drops to `-fno-exceptions`). Mirrors the build-side locator in
+/// `afterburner-wasi`'s `build.rs` (kept in step; the two run in different
+/// crates so a shared fn would couple a build dep to the runtime).
+fn find_wasm_opt() -> Option<PathBuf> {
+    if std::process::Command::new("wasm-opt")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        return Some(PathBuf::from("wasm-opt"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let p = Path::new(&home).join("emsdk/upstream/bin/wasm-opt");
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Translate a legacy-EH wasm module to the exnref/try_table proposal in place,
+/// the form the embedder's wasmtime config accepts. Uses the same flag set as
+/// the bundled Python runtime's translation (see `afterburner-wasi`'s
+/// `pyodide_payload.rs`). The output replaces `wasm` via a sibling temp + rename.
+fn translate_to_exnref(wasm_opt: &Path, wasm: &Path) -> Result<()> {
+    const FLAGS: &[&str] = &[
+        "--translate-to-exnref",
+        "--enable-exception-handling",
+        "--enable-reference-types",
+        "--enable-bulk-memory",
+        "--enable-simd",
+        "--enable-sign-ext",
+        "--enable-nontrapping-float-to-int",
+        "--enable-mutable-globals",
+        "--enable-multivalue",
+    ];
+    let out = wasm.with_extension("exnref.wasm");
+    let status = std::process::Command::new(wasm_opt)
+        .args(FLAGS)
+        .arg(wasm)
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .with_context(|| {
+            format!("spawning wasm-opt {wasm_opt:?} for the C++ exnref translation")
+        })?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&out);
+        anyhow::bail!(
+            "exnref translation (wasm-opt) exited with code {}",
+            status.code().unwrap_or(-1)
+        );
+    }
+    std::fs::rename(&out, wasm)
+        .with_context(|| format!("replacing {} with its exnref form", wasm.display()))?;
+    Ok(())
+}
+
 /// Compile ALL C sources under `source/` into a `wasm32-wasip1` WASI **command**
 /// module (a real `main`, linked against wasi-libc), so the result runs through
 /// `EmbedderVm::run_command`.
@@ -338,8 +440,29 @@ fn compile_c_family(pkg_dir: &Path, entry: &str, is_cpp: bool) -> Result<Vec<u8>
         return Err(wasi_sdk_missing_error(lang));
     };
 
+    // C++ exception strategy (shared by the build-system and direct paths). The
+    // embedder runs the NEW (exnref/try_table) EH proposal; clang emits the
+    // LEGACY EH, so an EH-enabled C++ module is post-translated to exnref with
+    // `wasm-opt` (the same step the bundled Python runtime uses). With wasm-opt
+    // present we compile real try/catch/throw and translate; without it we
+    // compile `-fno-exceptions` so exception-free C++ (incl. `<iostream>`) still
+    // works and exception-using C++ fails loudly at compile.
+    let wasm_opt = if is_cpp { find_wasm_opt() } else { None };
+    let cpp_exceptions = is_cpp && wasm_opt.is_some();
+
     // Prefer a project build file (Makefile / CMakeLists.txt) when present.
-    if let Some(bytes) = try_build_system(pkg_dir, &sdk, is_cpp)? {
+    if let Some(mut bytes) = try_build_system(pkg_dir, &sdk, is_cpp, cpp_exceptions)? {
+        // A build-system C++ artifact is legacy-EH too; translate it to exnref.
+        if let Some(ref wasm_opt) = wasm_opt {
+            let tmp = std::env::temp_dir().join(format!("burn-cpp-bs-{}.wasm", std::process::id()));
+            std::fs::write(&tmp, &bytes)
+                .with_context(|| format!("staging build-system wasm {}", tmp.display()))?;
+            let translated = translate_to_exnref(wasm_opt, &tmp).and_then(|()| {
+                std::fs::read(&tmp).with_context(|| format!("reading {}", tmp.display()))
+            });
+            let _ = std::fs::remove_file(&tmp);
+            bytes = translated?;
+        }
         return Ok(bytes);
     }
 
@@ -378,15 +501,32 @@ fn compile_c_family(pkg_dir: &Path, entry: &str, is_cpp: bool) -> Result<Vec<u8>
     let mut cmd = std::process::Command::new(driver);
     cmd.arg("--target=wasm32-wasip1")
         .arg(&sysroot_arg)
-        .arg("-O2")
-        // The package root is an include path so `#include "..."` from a
-        // nested source resolves package-relative headers.
-        .arg("-I")
+        .arg("-O2");
+    if is_cpp {
+        // wasi-sdk ships libc++ as multilib variants; the default one leaves
+        // `<iostream>`'s exception symbols (`__cxa_throw`, ...) undefined at
+        // link. `-fwasm-exceptions` selects the exceptions-enabled libc++ and
+        // (with `-lunwind` after the objects) links real try/catch/throw;
+        // `-fno-exceptions` selects the no-exceptions multilib that still links
+        // `<iostream>`. Picked by whether the exnref translator is available.
+        cmd.arg(if cpp_exceptions {
+            "-fwasm-exceptions"
+        } else {
+            "-fno-exceptions"
+        });
+    }
+    // The package root is an include path so `#include "..."` from a nested
+    // source resolves package-relative headers.
+    cmd.arg("-I")
         .arg(pkg_dir)
         .arg("-I")
         .arg(pkg_dir.join("source"));
     for src in &sources {
         cmd.arg(src);
+    }
+    if cpp_exceptions {
+        // After the objects so the linker pulls the unwind symbols they need.
+        cmd.arg("-lunwind");
     }
     cmd.arg("-o").arg(&wasm_out).current_dir(pkg_dir);
 
@@ -394,19 +534,25 @@ fn compile_c_family(pkg_dir: &Path, entry: &str, is_cpp: bool) -> Result<Vec<u8>
         if e.kind() == std::io::ErrorKind::NotFound {
             wasi_sdk_missing_error(lang)
         } else {
-            anyhow::anyhow!("spawning the wasi-sdk {lang} driver {driver:?}: {e}")
+            // No internal toolchain name or path in the user-facing text.
+            anyhow::anyhow!("spawning the {lang} compiler: {e}")
         }
     })?;
 
     if !status.success() {
         let _ = std::fs::remove_file(&wasm_out);
         anyhow::bail!(
-            "wasi-sdk {lang} compile exited with code {} ({} source file{} from {})",
+            "{lang} compile exited with code {} ({} source file{} from {})",
             status.code().unwrap_or(-1),
             sources.len(),
             if sources.len() == 1 { "" } else { "s" },
             pkg_dir.display()
         );
+    }
+
+    // Translate the legacy-EH C++ module to the exnref form the embedder runs.
+    if let Some(ref wasm_opt) = wasm_opt {
+        translate_to_exnref(wasm_opt, &wasm_out)?;
     }
 
     let bytes = std::fs::read(&wasm_out)
@@ -478,11 +624,11 @@ mod tests {
     }
 
     #[test]
-    fn c_compile_without_wasi_sdk_is_honest_not_silent() {
-        // When no wasi-sdk is configured, compiling a present C entry must
-        // fail loudly with "wasi-sdk not found" - never a fake success.
-        // Only assert when the environment genuinely has no wasi-sdk, so the
-        // test is correct whether or not the SDK is installed.
+    fn c_compile_without_toolchain_is_honest_not_silent() {
+        // When no C/C++ toolchain is available, compiling a present C entry must
+        // fail loudly with the internal-free "not available" error - never a
+        // fake success. Only assert when the environment genuinely has no
+        // toolchain, so the test is correct whether or not one is present.
         if find_wasi_sdk().is_some() {
             return;
         }
@@ -493,8 +639,12 @@ mod tests {
         let err = compile_c(dir.path(), "source/main.c").unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("wasi-sdk not found"),
-            "must be an honest wasi-sdk-missing error: {msg}"
+            msg.contains("C/C++ compilation is not available"),
+            "must be an honest toolchain-missing error: {msg}"
+        );
+        assert!(
+            !msg.contains("wasi-sdk") && !msg.contains("WASI_SDK_PATH"),
+            "the user-facing error must not name the internal toolchain: {msg}"
         );
     }
 }
