@@ -441,6 +441,23 @@ where
         .define(store.as_context_mut(), "env", "__stack_pointer", side_sp)
         .map_err(|e| AfterburnerError::Engine(format!("define sidemodule __stack_pointer: {e}")))?;
 
+    // Shared exnref EH tags from the main module, required for cross-module
+    // exception interop. An exnref-translated .so imports these tags from
+    // "env"; without them instantiation fails with "unknown import: env::__cpp_exception".
+    // Both tags are Copy so reading from the context and passing to define both compile.
+    if let Some(tag) = store.as_context().data().pyodide_cpp_exception_tag {
+        linker
+            .define(store.as_context_mut(), "env", "__cpp_exception", tag)
+            .map_err(|e| {
+                AfterburnerError::Engine(format!("define sidemodule __cpp_exception: {e}"))
+            })?;
+    }
+    if let Some(tag) = store.as_context().data().pyodide_c_longjmp_tag {
+        linker
+            .define(store.as_context_mut(), "env", "__c_longjmp", tag)
+            .map_err(|e| AfterburnerError::Engine(format!("define sidemodule __c_longjmp: {e}")))?;
+    }
+
     // Wire GOT.func and GOT.mem globals for the SIDE_MODULE.
     //
     // All GOT globals are created with init 0. Resolution happens in two

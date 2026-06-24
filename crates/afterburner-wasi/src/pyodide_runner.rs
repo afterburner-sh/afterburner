@@ -131,6 +131,10 @@ fn boot_pyodide_instance(
     linker
         .define(&mut store, "env", "__cpp_exception", cpp_exc)
         .map_err(|e| AfterburnerError::Engine(format!("define __cpp_exception: {e}")))?;
+    // Retain the tags in the store so every side module can share them.
+    // Tags are Copy; storing here and having the linker hold a ref both work.
+    store.data_mut().pyodide_cpp_exception_tag = Some(cpp_exc);
+    store.data_mut().pyodide_c_longjmp_tag = Some(c_longjmp);
 
     // Auto-fill extra GOT globals (Pyodide 0.28 has more than 0.26.4).
     let got_ty = GlobalType::new(ValType::I32, Mutability::Var);
@@ -323,9 +327,11 @@ pub fn run_pyodide_source(
         });
     }
 
-    // Clear any stdout emitted by Py_Initialize before running the -c code.
-    store.data_mut().wasi_stdout.clear();
-
+    // run_main() in the Emscripten Pyodide build is a keepalive-marked cleanup
+    // call; the actual -c code runs inside __main_argc_argv (which calls
+    // Py_Main). Do NOT clear wasi_stdout here: the output from print() is
+    // already captured from the __main_argc_argv call above.
+    //
     // run_main() calls pymain_run_python which executes the -c command.
     // Prefer run_main (EMSCRIPTEN_KEEPALIVE); fall back to pymain_run_python.
     let run_fn = instance

@@ -228,6 +228,16 @@ pub struct EmbedderState {
     /// frames, surfacing as the numpy.random `pool_size` default reading back as a
     /// stray numpy rodata pointer.
     pub pyodide_side_stack_pointer: Option<wasmtime::Global>,
+    /// ONE shared exnref EH tag for C++ exceptions (`env.__cpp_exception`),
+    /// created for the main interpreter module and reused by every side module
+    /// so a C++ exception thrown in one module can be caught in another.
+    /// Without this, exnref-translated `.so` files fail to instantiate with
+    /// "unknown import: env::__cpp_exception has not been defined".
+    pub pyodide_cpp_exception_tag: Option<wasmtime::Tag>,
+    /// ONE shared exnref EH tag for C longjmp (`env.__c_longjmp`),
+    /// created for the main interpreter module and reused by every side module.
+    /// Required by side modules that use setjmp/longjmp across module boundaries.
+    pub pyodide_c_longjmp_tag: Option<wasmtime::Tag>,
     /// Accumulated stdout bytes from custom WASI `fd_write` calls (fd 1/2).
     /// Appended by the `wasi_snapshot_preview1::fd_write` shim; read after
     /// `__wasm_call_ctors` returns.
@@ -271,6 +281,8 @@ impl EmbedderState {
             pyodide_table: None,
             pyodide_stack_pointer: None,
             pyodide_side_stack_pointer: None,
+            pyodide_cpp_exception_tag: None,
+            pyodide_c_longjmp_tag: None,
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
             last_invoke_idx: u64::MAX,
@@ -304,6 +316,8 @@ impl EmbedderState {
             pyodide_table: None,
             pyodide_stack_pointer: None,
             pyodide_side_stack_pointer: None,
+            pyodide_cpp_exception_tag: None,
+            pyodide_c_longjmp_tag: None,
             wasi_stdout: Vec::new(),
             fs: InMemFs::new_with_root_preopen(),
             last_invoke_idx: u64::MAX,
@@ -331,6 +345,8 @@ impl EmbedderState {
             pyodide_table: None,
             pyodide_stack_pointer: None,
             pyodide_side_stack_pointer: None,
+            pyodide_cpp_exception_tag: None,
+            pyodide_c_longjmp_tag: None,
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
             last_invoke_idx: u64::MAX,
@@ -574,6 +590,8 @@ impl EmbedderVm {
                 pyodide_table: None,
                 pyodide_stack_pointer: None,
                 pyodide_side_stack_pointer: None,
+                pyodide_cpp_exception_tag: None,
+                pyodide_c_longjmp_tag: None,
                 wasi_stdout: Vec::new(),
                 fs: InMemFs::new(),
                 last_invoke_idx: u64::MAX,
@@ -591,6 +609,8 @@ impl EmbedderVm {
                 pyodide_table: None,
                 pyodide_stack_pointer: None,
                 pyodide_side_stack_pointer: None,
+                pyodide_cpp_exception_tag: None,
+                pyodide_c_longjmp_tag: None,
                 wasi_stdout: Vec::new(),
                 fs: InMemFs::new(),
                 last_invoke_idx: u64::MAX,
@@ -725,6 +745,8 @@ impl EmbedderVm {
             pyodide_table: None,
             pyodide_stack_pointer: None,
             pyodide_side_stack_pointer: None,
+            pyodide_cpp_exception_tag: None,
+            pyodide_c_longjmp_tag: None,
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
             last_invoke_idx: u64::MAX,
