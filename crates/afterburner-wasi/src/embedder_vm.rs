@@ -214,6 +214,20 @@ pub struct EmbedderState {
     /// Used by `invoke_dispatch` to call funcrefs by table index without
     /// `caller.get_export`, which only works for module *exports* (not imports).
     pub pyodide_table: Option<wasmtime::Table>,
+    /// The main module's mutable `env.__stack_pointer` global, captured by
+    /// `wire_env_memory_and_table_in_store`. Retained for diagnostics and so a
+    /// future change can unify the side and main stacks; the side modules use the
+    /// separate [`Self::pyodide_side_stack_pointer`] today.
+    pub pyodide_stack_pointer: Option<wasmtime::Global>,
+    /// ONE mutable `env.__stack_pointer` shared by every loaded SIDE_MODULE.
+    /// Created lazily by `pre_load_side_module` on the first side-module load and
+    /// reused for all subsequent ones, so cross-module C calls between side
+    /// modules (e.g. a Cython extension calling into numpy's `_multiarray_umath`)
+    /// build and read C-stack argument frames at the same address. Without this
+    /// each side module had its own stack pointer and they clobbered each other's
+    /// frames, surfacing as the numpy.random `pool_size` default reading back as a
+    /// stray numpy rodata pointer.
+    pub pyodide_side_stack_pointer: Option<wasmtime::Global>,
     /// Accumulated stdout bytes from custom WASI `fd_write` calls (fd 1/2).
     /// Appended by the `wasi_snapshot_preview1::fd_write` shim; read after
     /// `__wasm_call_ctors` returns.
@@ -255,6 +269,8 @@ impl EmbedderState {
             wasi: None,
             pyodide_memory: None,
             pyodide_table: None,
+            pyodide_stack_pointer: None,
+            pyodide_side_stack_pointer: None,
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
             last_invoke_idx: u64::MAX,
@@ -286,6 +302,8 @@ impl EmbedderState {
             wasi: None,
             pyodide_memory: None,
             pyodide_table: None,
+            pyodide_stack_pointer: None,
+            pyodide_side_stack_pointer: None,
             wasi_stdout: Vec::new(),
             fs: InMemFs::new_with_root_preopen(),
             last_invoke_idx: u64::MAX,
@@ -311,6 +329,8 @@ impl EmbedderState {
             wasi: Some(WasiStateInner { ctx, stdout: pipe }),
             pyodide_memory: None,
             pyodide_table: None,
+            pyodide_stack_pointer: None,
+            pyodide_side_stack_pointer: None,
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
             last_invoke_idx: u64::MAX,
@@ -552,6 +572,8 @@ impl EmbedderVm {
                 wasi: Some(WasiStateInner { ctx, stdout: pipe }),
                 pyodide_memory: None,
                 pyodide_table: None,
+                pyodide_stack_pointer: None,
+                pyodide_side_stack_pointer: None,
                 wasi_stdout: Vec::new(),
                 fs: InMemFs::new(),
                 last_invoke_idx: u64::MAX,
@@ -567,6 +589,8 @@ impl EmbedderVm {
                 wasi: None,
                 pyodide_memory: None,
                 pyodide_table: None,
+                pyodide_stack_pointer: None,
+                pyodide_side_stack_pointer: None,
                 wasi_stdout: Vec::new(),
                 fs: InMemFs::new(),
                 last_invoke_idx: u64::MAX,
@@ -699,6 +723,8 @@ impl EmbedderVm {
             wasi: Some(WasiStateInner { ctx, stdout: pipe }),
             pyodide_memory: None,
             pyodide_table: None,
+            pyodide_stack_pointer: None,
+            pyodide_side_stack_pointer: None,
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
             last_invoke_idx: u64::MAX,

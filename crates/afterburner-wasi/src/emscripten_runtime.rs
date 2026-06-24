@@ -615,13 +615,18 @@ pub fn wire_env_memory_and_table_in_store(
         )
         .map_err(|e| AfterburnerError::Engine(format!("define env.__table_base: {e}")))?;
 
-    // env.__stack_pointer: mutable i32.
+    // env.__stack_pointer: the main module's mutable C stack pointer, initialized
+    // to the top of its stack region. Captured into the store so the side-module
+    // loader and diagnostics can reach it; the side modules run on their own
+    // shared stack pointer (see `pre_load_side_module`), so the main interpreter's
+    // stack stays independent.
     let sp = Global::new(
         &mut *store,
         GlobalType::new(ValType::I32, Mutability::Var),
         Val::I32(layout.stack_high() as i32),
     )
     .map_err(|e| AfterburnerError::Engine(format!("__stack_pointer global: {e}")))?;
+    store.data_mut().pyodide_stack_pointer = Some(sp);
     linker
         .define(
             &mut *store,
@@ -695,11 +700,13 @@ pub(crate) fn invoke_dispatch(
     caller.data_mut().last_invoke_idx = idx;
 
     let slot_content = tbl.get(&mut caller, idx);
-    let is_null = !matches!(&slot_content, Some(wasmtime::Ref::Func(Some(_))));
-    eprintln!(
-        "[invoke_dispatch] idx={idx} slot_is_null={is_null} params_len={}",
-        params.len()
-    );
+    if std::env::var_os("BURN_TRACE_INVOKE").is_some() {
+        let is_null = !matches!(&slot_content, Some(wasmtime::Ref::Func(Some(_))));
+        eprintln!(
+            "[invoke_dispatch] idx={idx} slot_is_null={is_null} params_len={}",
+            params.len()
+        );
+    }
     let Some(wasmtime::Ref::Func(Some(func))) = slot_content else {
         // Return a named error (not a Trap) so the probe's "debug chain" shows
         // the exact table index rather than just UnreachableCodeReached.

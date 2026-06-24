@@ -401,31 +401,45 @@ where
         .define(store.as_context_mut(), "env", "__table_base", tb_val)
         .map_err(|e| AfterburnerError::Engine(format!("define sidemodule __table_base: {e}")))?;
 
-    // env.__stack_pointer: shared mutable i32 stack pointer.
-    // Provided by main instance as an export, or use the main store's GOT.
-    let sp_ty = GlobalType::new(ValType::I32, Mutability::Var);
-    // vertexia: use a dummy stack pointer if not exported by pyodide; upgrade
-    // path is reading __stack_pointer from the main module's GOT.mem global.
-    if let Some(sp_ext) = main_instance.get_global(store.as_context_mut(), "__stack_pointer") {
-        linker
-            .define(store.as_context_mut(), "env", "__stack_pointer", sp_ext)
+    // env.__stack_pointer: ONE C stack pointer shared by ALL side modules.
+    //
+    // Emscripten's dynamic-linking C ABI keeps a single stack pointer across the
+    // modules that pass C-stack pointers to one another: a callee reads the
+    // argument frame the caller built on the stack, so two modules that call each
+    // other with the wrong-aligned (private) stack pointer build and read frames
+    // at different addresses and corrupt the C stack. The numpy.random failure is
+    // exactly this: the Cython `bit_generator` side module builds the `np.zeros`
+    // argument vector on its C stack and passes a pointer to numpy core's
+    // `_multiarray_umath` side module; with per-module stacks the two clobber each
+    // other and the boxed `pool_size=4` default reads back as a stray numpy rodata
+    // pointer.
+    //
+    // The side modules therefore share ONE `__stack_pointer` global, created on the
+    // first side-module load and reused for every subsequent one (stored in the
+    // embedder state). It is deliberately NOT the main module's stack pointer: the
+    // main CPython interpreter keeps its own stack, and side modules run nested
+    // under it on a separate region, mirroring the layout the loader has always
+    // used (`WASM_STACK_BASE`). Unifying only the side modules fixes the
+    // cross-Cython-module corruption without disturbing the main interpreter's
+    // independently-working stack.
+    let side_sp = match store.as_context().data().pyodide_side_stack_pointer {
+        Some(g) => g,
+        None => {
+            let g = Global::new(
+                store.as_context_mut(),
+                GlobalType::new(ValType::I32, Mutability::Var),
+                Val::I32(crate::emscripten_runtime::WASM_STACK_BASE as i32),
+            )
             .map_err(|e| {
-                AfterburnerError::Engine(format!("define sidemodule __stack_pointer: {e}"))
+                AfterburnerError::Engine(format!("sidemodule shared __stack_pointer: {e}"))
             })?;
-    } else {
-        // Provide a stub stack pointer at the Pyodide stack base.
-        let sp_val = Global::new(
-            store.as_context_mut(),
-            sp_ty,
-            Val::I32(crate::emscripten_runtime::WASM_STACK_BASE as i32),
-        )
-        .map_err(|e| AfterburnerError::Engine(format!("sidemodule stub __stack_pointer: {e}")))?;
-        linker
-            .define(store.as_context_mut(), "env", "__stack_pointer", sp_val)
-            .map_err(|e| {
-                AfterburnerError::Engine(format!("define sidemodule stub __stack_pointer: {e}"))
-            })?;
-    }
+            store.as_context_mut().data_mut().pyodide_side_stack_pointer = Some(g);
+            g
+        }
+    };
+    linker
+        .define(store.as_context_mut(), "env", "__stack_pointer", side_sp)
+        .map_err(|e| AfterburnerError::Engine(format!("define sidemodule __stack_pointer: {e}")))?;
 
     // Wire GOT.func and GOT.mem globals for the SIDE_MODULE.
     //
