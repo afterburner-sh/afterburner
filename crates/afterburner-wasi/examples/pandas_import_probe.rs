@@ -112,7 +112,15 @@ fn main() {
 
 fn exnref_engine_cfg() -> Config {
     let mut cfg = Config::new();
-    cfg.cranelift_opt_level(OptLevel::Speed)
+    // BURN_OPT_LEVEL lets a diagnostic run pick the Cranelift optimization level
+    // (none / speed / speed_and_size) so a possible optimizer miscompile of the
+    // exnref/GC lowering can be bisected. Defaults to Speed (the production level).
+    let opt = match std::env::var("BURN_OPT_LEVEL").as_deref() {
+        Ok("none") => OptLevel::None,
+        Ok("speed_and_size") => OptLevel::SpeedAndSize,
+        _ => OptLevel::Speed,
+    };
+    cfg.cranelift_opt_level(opt)
         .cranelift_nan_canonicalization(true)
         .wasm_relaxed_simd(true)
         .relaxed_simd_deterministic(true)
@@ -932,6 +940,99 @@ fn run_pandas_phase(
                         0
                     }
                 };
+                // instrument_callind_314 scratch (magic 0xCA111DCA at 0x1BF0000):
+                // the first call_indirect with a null (slot-0) index records the
+                // caller function and call-site ordinal here, then traps.
+                // instrument_addr_watch_314 ring (head at 0x1B00000, entries
+                // {func,val,addr} at +8): the write history of the watched object
+                // header. Shows who last wrote (and zeroed) the corrupt PyObject.
+                {
+                    let ring = 0x1B0_0000usize;
+                    let head = rd(ring);
+                    if head > 0 {
+                        let cap = 256u32;
+                        let shown = head.min(cap);
+                        eprintln!(
+                            "[addrwatch] {head} stores to watched window; last {shown} (func, val, addr):"
+                        );
+                        let start = head.saturating_sub(shown);
+                        for i in start..head {
+                            let slot = (i % cap) as usize;
+                            let e = ring + 8 + slot * 12;
+                            eprintln!(
+                                "  [{i}] func={} val={:#x} addr={:#x}",
+                                rd(e),
+                                rd(e + 4),
+                                rd(e + 8)
+                            );
+                        }
+                    }
+                }
+                // instrument_minsp_314 scratch (magic 0x51595159 at 0x1BE0000):
+                // the lowest C stack-pointer value reached. Below __stack_low
+                // (0x3e0110) means a stack overflow corrupted memory.
+                let ms = 0x1BE_0000usize;
+                if rd(ms) == 0x5159_5159 {
+                    let min_sp = rd(ms + 4);
+                    eprintln!(
+                        "[minsp314] min C stack-pointer reached = {min_sp:#x} (__stack_low=0x3e0110); \
+                         {} stack region",
+                        if min_sp < 0x3e0110 {
+                            "OVERFLOWED below"
+                        } else {
+                            "within"
+                        }
+                    );
+                }
+                let cs = 0x1BF_0000usize;
+                if rd(cs) == 0xCA11_1DCA {
+                    eprintln!(
+                        "[callind314] magic set: index={} caller_func={} callsite_ordinal={}",
+                        rd(cs + 4),
+                        rd(cs + 8),
+                        rd(cs + 12),
+                    );
+                    let obj = rd(cs + 16);
+                    let ob_type = rd(cs + 20);
+                    let tp_dealloc = rd(cs + 24);
+                    let tp_flags = rd(cs + 28);
+                    let tp_name_ptr = rd(cs + 32);
+                    eprintln!(
+                        "[callind314] obj={obj:#x} ob_type={ob_type:#x} tp_dealloc={tp_dealloc:#x} \
+                         tp_flags={tp_flags:#x} tp_name_ptr={tp_name_ptr:#x}"
+                    );
+                    // Read the tp_name C-string if the pointer looks sane.
+                    let read_cstr = |p: usize| -> String {
+                        if p == 0 || p >= d.len() {
+                            return "<null/oob>".to_owned();
+                        }
+                        let mut s = Vec::new();
+                        let mut q = p;
+                        while q < d.len() && d[q] != 0 && s.len() < 64 {
+                            s.push(d[q]);
+                            q += 1;
+                        }
+                        String::from_utf8_lossy(&s).into_owned()
+                    };
+                    eprintln!(
+                        "[callind314] tp_name = {:?}",
+                        read_cstr(tp_name_ptr as usize)
+                    );
+                    // Dump the type object header (first 32 words) so tp_dealloc
+                    // (offset 24) and neighbours are visible.
+                    if ob_type != 0 && (ob_type as usize) < d.len() {
+                        let ot = ob_type as usize;
+                        let mut w = String::new();
+                        for k in 0..32usize {
+                            let off = ot + k * 4;
+                            if off + 4 > d.len() {
+                                break;
+                            }
+                            w.push_str(&format!("+{}={:#x} ", k * 4, rd(off)));
+                        }
+                        eprintln!("[callind314] ob_type @ {ot:#x}: {w}");
+                    }
+                }
                 let s = 0x1BD_0000usize;
                 if rd(s) == 0x00B_00B {
                     let obj = rd(s + 16);
