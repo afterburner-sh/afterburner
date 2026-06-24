@@ -75,7 +75,7 @@ fn toolchain_absent_reason(msg: &str) -> Option<String> {
         "not found on PATH",                         // cargo / go / rustc missing
         "wasm32-wasip1 target may not be installed", // rust target missing
         "wasm32-wasip1` exited with code",           // build failed (often missing target)
-        "wasi-sdk not found",                        // C/C++ wasi-sdk missing
+        "C/C++ compilation is not available",        // C/C++ toolchain absent
         "go build` exited with code",                // go build failed
     ];
     ABSENT_SIGNALS

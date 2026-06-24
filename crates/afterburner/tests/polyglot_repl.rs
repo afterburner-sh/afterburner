@@ -67,7 +67,7 @@ fn toolchain_absent(stderr: &str) -> bool {
         "not found on PATH",
         "rustup target add",
         "wasm32-wasip1",
-        "wasi-sdk not found",
+        "C/C++ compilation is not available",
         "was not found on PATH",
         "exited with code",
     ];
@@ -196,11 +196,11 @@ fn go_repl_compiles_and_runs_each_line() {
 fn c_repl_runs_or_skips_honestly() {
     let (stdout, stderr) = run_repl("c", &[r#"printf("hello from c\n");"#]);
     if toolchain_absent(&stderr) {
-        eprintln!("SKIP c REPL (wasi-sdk absent): {stderr}");
-        // The skip must be the honest wasi-sdk message, never a silent pass.
+        eprintln!("SKIP c REPL (C/C++ toolchain absent): {stderr}");
+        // The skip must be the honest internal-free message, never a silent pass.
         assert!(
-            stderr.contains("wasi-sdk not found"),
-            "C skip must be the honest wasi-sdk-missing error; stderr={stderr:?}"
+            stderr.contains("C/C++ compilation is not available"),
+            "C skip must be the honest toolchain-missing error; stderr={stderr:?}"
         );
         return;
     }
@@ -216,10 +216,10 @@ fn c_repl_runs_or_skips_honestly() {
 fn cpp_repl_runs_or_skips_honestly() {
     let (stdout, stderr) = run_repl("cpp", &[r#"std::cout << "hi cpp" << std::endl;"#]);
     if toolchain_absent(&stderr) {
-        eprintln!("SKIP cpp REPL (wasi-sdk absent): {stderr}");
+        eprintln!("SKIP cpp REPL (C/C++ toolchain absent): {stderr}");
         assert!(
-            stderr.contains("wasi-sdk not found"),
-            "C++ skip must be the honest wasi-sdk-missing error; stderr={stderr:?}"
+            stderr.contains("C/C++ compilation is not available"),
+            "C++ skip must be the honest toolchain-missing error; stderr={stderr:?}"
         );
         return;
     }

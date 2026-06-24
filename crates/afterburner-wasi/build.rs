@@ -32,17 +32,28 @@
 //! `wasi_snapshot_preview1`. Skips cleanly (a `cargo:warning`) when the network
 //! is unreachable; the runtime then falls back to `BURN_RUBY_RUNTIME`. See
 //! `ruby_payload.rs` (build side) and `src/ruby_bundle.rs` (runtime).
+//!
+//! Job four, the self-contained C/C++ toolchain payload: fetch the stock
+//! `WebAssembly/wasi-sdk` release for the host platform (sha256-pinned per
+//! platform), unpack the toolchain tree (the `clang`/`clang++` drivers, their
+//! resource dir, and the WASI sysroot) under the target so `burn run x.c` /
+//! `burn run x.cpp` compile with no env vars and no runtime download. Skips
+//! cleanly (a `cargo:warning`) on an unsupported host or when the network is
+//! unreachable; the C/C++ compile then falls back to `WASI_SDK_PATH`. See
+//! `wasi_sdk_payload.rs` (build side) and `src/wasi_sdk_bundle.rs` (runtime).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod pyodide_payload;
 mod ruby_payload;
+mod wasi_sdk_payload;
 
 fn main() {
     plugin_drift_gate();
     pyodide_payload::build();
     ruby_payload::build();
+    wasi_sdk_payload::build();
 }
 
 // ---- 1. plugin drift gate --------------------------------------------------
