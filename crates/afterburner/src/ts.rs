@@ -40,6 +40,24 @@ use std::path::Path;
 /// * The extension resolver rejects the path (e.g. unknown extension
 ///   dressed as `.ts`).
 pub fn transpile(source: &str, path: &Path) -> Result<String, TsError> {
+    transpile_inner(source, path, true)
+}
+
+/// Transpile like [`transpile`] but WITHOUT the trailing inline
+/// `//# sourceMappingURL=` comment.
+///
+/// The REPL transpiles one line at a time and wraps the result in an
+/// expression position, where a trailing source-map comment (and the line's
+/// own `;`) breaks the wrap. There is no `.ts` file for a stack trace to map
+/// back to either, so the map is pure noise here. Everything else (type strip,
+/// ESM->CJS lowering) is identical.
+pub fn transpile_no_source_map(source: &str, path: &Path) -> Result<String, TsError> {
+    transpile_inner(source, path, false)
+}
+
+/// Shared transpile body for [`transpile`] / [`transpile_no_source_map`].
+/// `emit_source_map` appends the inline base64 source-map comment when true.
+fn transpile_inner(source: &str, path: &Path, emit_source_map: bool) -> Result<String, TsError> {
     if path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("tsx"))
@@ -95,12 +113,13 @@ pub fn transpile(source: &str, path: &Path) -> Result<String, TsError> {
     use oxc::codegen::CodegenOptions;
     let codegen = Codegen::new()
         .with_options(CodegenOptions {
-            source_map_path: Some(path.to_path_buf()),
+            // Only ask oxc to produce a SourceMap when we will emit it.
+            source_map_path: emit_source_map.then(|| path.to_path_buf()),
             ..Default::default()
         })
         .build(&program);
     let mut code = codegen.code;
-    if let Some(map) = codegen.map.as_ref() {
+    if emit_source_map && let Some(map) = codegen.map.as_ref() {
         code.push_str("\n//# sourceMappingURL=");
         code.push_str(&map.to_data_url());
         code.push('\n');
@@ -158,4 +177,42 @@ pub fn is_typescript(path: &Path) -> bool {
             .as_deref(),
         Some("ts" | "mts" | "cts" | "tsx")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transpile_emits_inline_source_map() {
+        let p = Path::new("a.ts");
+        let out = transpile("const x: number = 1", p).unwrap();
+        assert!(out.contains("const x = 1"), "types stripped: {out}");
+        assert!(
+            out.contains("//# sourceMappingURL="),
+            "default transpile keeps the inline source map: {out}"
+        );
+    }
+
+    #[test]
+    fn transpile_no_source_map_strips_types_without_the_map() {
+        let p = Path::new("a.ts");
+        let out = transpile_no_source_map("const x: number = 1", p).unwrap();
+        assert!(out.contains("const x = 1"), "types stripped: {out}");
+        assert!(
+            !out.contains("sourceMappingURL"),
+            "no inline source map in the REPL variant: {out}"
+        );
+    }
+
+    #[test]
+    fn no_source_map_variant_handles_a_bare_expression() {
+        // The REPL feeds bare expressions; the stripped output must not carry a
+        // trailing map comment that would break an expression-position wrap.
+        let p = Path::new("<repl>.ts");
+        let out = transpile_no_source_map("1 as number", p).unwrap();
+        assert!(out.contains('1'), "value kept: {out}");
+        assert!(!out.contains("as number"), "cast stripped: {out}");
+        assert!(!out.contains("sourceMappingURL"), "no map: {out}");
+    }
 }

@@ -403,14 +403,18 @@ pub fn banner(version: &str) {
     banner_subtitle(version, "");
 }
 
-/// REPL welcome banner - animated wordmark on a terminal, one plain line otherwise.
-pub fn repl_banner(version: &str) {
+/// REPL welcome banner naming the session language - animated wordmark on a
+/// terminal, one plain line otherwise. `lang` is the short language id
+/// (`js`, `ts`, `rust`, `go`, `c`, `cpp`, `python`, `ruby`).
+pub fn repl_banner_lang(version: &str, lang: &str) {
     if !animations_enabled() {
-        eprintln!("burn {version}: Afterburner sandbox REPL. :help for commands, :exit to quit.");
+        eprintln!(
+            "burn {version}: Afterburner sandbox REPL ({lang}). :help for commands, :exit to quit."
+        );
         return;
     }
     animate_wordmark();
-    banner_subtitle(version, " · :help for commands · :exit to quit");
+    banner_subtitle(version, &format!(" · {lang} · :help for commands · :exit"));
 }
 
 #[cfg(test)]

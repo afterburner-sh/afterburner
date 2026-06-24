@@ -256,9 +256,19 @@ pub enum Cmd {
         #[arg(long, default_value_t = 0)]
         workers: usize,
     },
-    /// Interactive REPL. Each line becomes a fresh script (no state
-    /// shared across lines - matches the fresh-per-call invariant).
-    Repl,
+    /// Interactive REPL for any supported language. `--lang js` (the
+    /// default) is the JavaScript engine REPL; `--lang ts` transpiles each
+    /// line; `--lang rust|go|c|cpp` is a compile-and-run-per-line REPL
+    /// (honest about the per-line compile cost and the toolchain it needs);
+    /// `--lang python` is a line REPL over the Pyodide runtime; `--lang ruby`
+    /// reports an honest pending state until ruby.wasm is bundled.
+    Repl {
+        /// Source language for the session. One of: `js`, `javascript`,
+        /// `ts`, `typescript`, `rust`, `go`, `golang`, `c`, `cpp`, `c++`,
+        /// `cxx`, `cc`, `python`, `py`, `ruby`, `rb`. Default: `js`.
+        #[arg(long, value_name = "LANG", default_value = "js")]
+        lang: String,
+    },
     /// Print the build version + enabled features.
     Version,
 
