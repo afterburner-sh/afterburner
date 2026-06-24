@@ -477,50 +477,49 @@ fn run_probe() -> String {
     // table slot 0 (NULL) from _PyEval_EvalFrameDefault reading a NULL function
     // pointer out of a static C struct, i.e. an upstream eval-state corruption.
     // The byte-coincidence hits this scan reports are non-pointer data, not fnptrs.
-    if std::env::var("BURN_GAP_SCAN").is_ok() {
-        if let Some(mem) = store.data().pyodide_memory {
-            let d = mem.data(&store);
-            let (lo, hi) = (6074u32, 6643u32);
-            // Scan the whole static data image (first ~5 MiB) for aligned u32 in range.
-            let scan_end = d.len().min(6 * 1024 * 1024);
-            let mut by_slot: std::collections::BTreeMap<u32, usize> =
-                std::collections::BTreeMap::new();
-            let mut addrs_for_slot: std::collections::BTreeMap<u32, Vec<usize>> =
-                std::collections::BTreeMap::new();
-            let mut a = 0usize;
-            while a + 4 <= scan_end {
-                let v = u32::from_le_bytes([d[a], d[a + 1], d[a + 2], d[a + 3]]);
-                if v >= lo && v < hi {
-                    *by_slot.entry(v).or_default() += 1;
-                    let e = addrs_for_slot.entry(v).or_default();
-                    if e.len() < 4 {
-                        e.push(a);
-                    }
+    if std::env::var("BURN_GAP_SCAN").is_ok()
+        && let Some(mem) = store.data().pyodide_memory
+    {
+        let d = mem.data(&store);
+        let (lo, hi) = (6074u32, 6643u32);
+        // Scan the whole static data image (first ~5 MiB) for aligned u32 in range.
+        let scan_end = d.len().min(6 * 1024 * 1024);
+        let mut by_slot: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
+        let mut addrs_for_slot: std::collections::BTreeMap<u32, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        let mut a = 0usize;
+        while a + 4 <= scan_end {
+            let v = u32::from_le_bytes([d[a], d[a + 1], d[a + 2], d[a + 3]]);
+            if v >= lo && v < hi {
+                *by_slot.entry(v).or_default() += 1;
+                let e = addrs_for_slot.entry(v).or_default();
+                if e.len() < 4 {
+                    e.push(a);
                 }
-                a += 4;
             }
-            eprintln!(
-                "[GAP-SCAN] {} distinct gap-slot values referenced in static data (aligned u32)",
-                by_slot.len()
-            );
-            for (slot, cnt) in by_slot.iter() {
-                let addrs = addrs_for_slot
-                    .get(slot)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-                eprintln!("  slot={slot} refs={cnt} at_addrs={addrs:x?}");
-            }
-            // Dump the dispatch table that func 3530 reads (global 568 = 0x2BB770).
-            let base = 0x2BB770usize;
-            eprintln!("[GAP-SCAN] dispatch table @ {base:#x} (8-byte stride, first 32 entries):");
-            for i in 0..32usize {
-                let a = base + i * 8;
-                if a + 8 <= d.len() {
-                    let sel = u32::from_le_bytes([d[a], d[a + 1], d[a + 2], d[a + 3]]);
-                    let fp = u32::from_le_bytes([d[a + 4], d[a + 5], d[a + 6], d[a + 7]]);
-                    let mark = if fp >= lo && fp < hi { "  <-- GAP" } else { "" };
-                    eprintln!("  [{i:>2}] @{a:#x} word0={sel:#x} word1(fp)={fp}{mark}");
-                }
+            a += 4;
+        }
+        eprintln!(
+            "[GAP-SCAN] {} distinct gap-slot values referenced in static data (aligned u32)",
+            by_slot.len()
+        );
+        for (slot, cnt) in by_slot.iter() {
+            let addrs = addrs_for_slot
+                .get(slot)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            eprintln!("  slot={slot} refs={cnt} at_addrs={addrs:x?}");
+        }
+        // Dump the dispatch table that func 3530 reads (global 568 = 0x2BB770).
+        let base = 0x2BB770usize;
+        eprintln!("[GAP-SCAN] dispatch table @ {base:#x} (8-byte stride, first 32 entries):");
+        for i in 0..32usize {
+            let a = base + i * 8;
+            if a + 8 <= d.len() {
+                let sel = u32::from_le_bytes([d[a], d[a + 1], d[a + 2], d[a + 3]]);
+                let fp = u32::from_le_bytes([d[a + 4], d[a + 5], d[a + 6], d[a + 7]]);
+                let mark = if fp >= lo && fp < hi { "  <-- GAP" } else { "" };
+                eprintln!("  [{i:>2}] @{a:#x} word0={sel:#x} word1(fp)={fp}{mark}");
             }
         }
     }
@@ -1106,7 +1105,7 @@ fn dump_store_ring(store: &Store<EmbedderState>) {
     }
     // Determine the range of valid entries (up to RING_CAP, oldest first).
     let count = head.min(RING_CAP);
-    let oldest = if head > RING_CAP { head - RING_CAP } else { 0 };
+    let oldest = head.saturating_sub(RING_CAP);
     for i in oldest..head {
         let slot = i % RING_CAP;
         let entry_base = RING_BASE + RING_ENTRIES_OFFSET + slot * RING_ENTRY_BYTES;

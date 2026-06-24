@@ -524,7 +524,7 @@ fn classify_segment(seg: &str, base: usize) -> SegAction {
             // A run form (producing an executable) - suggest the burn form.
             match first_file_arg(&args) {
                 Some(f) => SegAction::Suggest(format!("burn {}", f.text)),
-                None => SegAction::Suggest(format!("burn <source>")),
+                None => SegAction::Suggest("burn <source>".to_string()),
             }
         }
         "tsx" | "ts-node" | "ts-node-esm" | "jest" | "vitest" | "mocha" => {

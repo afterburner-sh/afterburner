@@ -78,12 +78,15 @@ const DEFAULT_OUTPUT: &str = "/tmp/pyodide-spcheck.wasm";
 /// Ring buffer base address in guest linear memory (28 MiB).
 /// Chosen to be above the typical numpy import-time heap (~15-25 MiB) and
 /// well within the 30 MiB initial Pyodide linear memory allocation.
+#[allow(dead_code)] // diagnostic probe scaffolding
 const RING_BASE: u32 = 0x1C0_0000;
 
 /// Number of ring entries (power of two for cheap wrap).
+#[allow(dead_code)] // diagnostic probe scaffolding
 const RING_CAP: u32 = 1024;
 
 /// Byte offset from RING_BASE where entries start (skip 8-byte header).
+#[allow(dead_code)] // diagnostic probe scaffolding
 const RING_ENTRIES_OFFSET: u32 = 8;
 
 /// Corruption bit-pattern mask and expected high bits: (val & MASK) == EXPECTED
@@ -353,7 +356,7 @@ impl Reencode for StoreRecorder {
         let scratch_val = base;
         let scratch_addr = base + 1;
         let scratch_head = base + 2;
-        let scratch_slot = base + 3;
+        let _scratch_slot = base + 3;
         let scratch_f32 = base + 4;
         let scratch_i64 = base + 5;
 
@@ -518,6 +521,7 @@ impl Reencode for StoreRecorder {
 ///   RING_BASE+0: head (i32, monotonically incrementing, never wrapped)
 ///   RING_BASE+4: _pad (i32, 0)
 ///   RING_BASE+8 + ((head & (RING_CAP-1)) * 8): { addr:i32, val:i32 }
+#[allow(dead_code)] // diagnostic probe scaffolding
 fn emit_ring_write(
     f: &mut Function,
     scratch_addr: u32,

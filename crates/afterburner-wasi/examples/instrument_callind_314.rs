@@ -42,7 +42,7 @@ const MAGIC: i32 = 0xCA11_1DCAu32 as i32;
 
 /// Appended scratch global index = total globals in the 314 module (280 imported
 /// + 1146 defined = 1426). The Reencode pass preserves global ordering, so the
-/// appended global lands at the next index.
+///   appended global lands at the next index.
 const G_IDX: u32 = 1426;
 
 fn main() {

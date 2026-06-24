@@ -155,11 +155,11 @@ impl Reencode for EhCover {
                 .map_err(ReencodeError::ParseError)?;
             let mut has = false;
             while !r.eof() {
-                if let Ok(op) = r.read() {
-                    if matches!(op, Operator::TryTable { .. } | Operator::ThrowRef) {
-                        has = true;
-                        break;
-                    }
+                if let Ok(op) = r.read()
+                    && matches!(op, Operator::TryTable { .. } | Operator::ThrowRef)
+                {
+                    has = true;
+                    break;
                 }
             }
             has

@@ -268,8 +268,8 @@ mod preflight_tests {
     fn version_threshold_logic() {
         // The preflight blocks below 1.21; confirm the comparison the gate uses.
         assert!((1u32, 20u32) < (1, 21));
-        assert!(!((1u32, 21u32) < (1, 21)));
-        assert!(!((1u32, 22u32) < (1, 21)));
+        assert!((1u32, 21u32) >= (1, 21));
+        assert!((1u32, 22u32) >= (1, 21));
     }
 }
 
