@@ -4,10 +4,10 @@
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
 //! Shell-command classifier for the assistant hook - decides whether a
-//! command would execute JavaScript/TypeScript *outside* the sandbox and,
-//! when it would, builds the exact corrected command the assistant should
-//! run instead (usually the same command with the JS-executing segment
-//! prefixed by `burn`, which the pass-through dispatcher in
+//! command would execute code *outside* the sandbox and, when it would,
+//! builds the exact corrected command the assistant should run instead
+//! (usually the same command with the executing segment prefixed by
+//! `burn`, which the pass-through dispatcher in
 //! [`super::super::passthrough`] turns into a sandboxed run).
 //!
 //! Pure string work - no I/O, no engine init - so the hook adds
@@ -20,9 +20,9 @@
 /// What the classifier decided about one whole command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    /// Not JS execution (or already sandboxed) - let the host proceed.
+    /// Not code execution (or already sandboxed) - let the host proceed.
     Allow,
-    /// JS would run outside the sandbox: deny and hand back `corrected`.
+    /// Code would run outside the sandbox: deny and hand back `corrected`.
     Redirect {
         /// The ready-to-run replacement command.
         corrected: String,
@@ -92,12 +92,12 @@ pub fn classify(command: &str) -> Verdict {
     };
 
     let reason = format!(
-        "JavaScript must run SEALED in the burn sandbox: no network, no \
+        "Code must run SEALED in the burn sandbox: no network, no \
          filesystem, no env access by default. Conform the code to those \
          constraints, then re-run exactly: `{corrected}` . Only when a \
          capability is genuinely required, grant it narrowly after the \
          sandbox flag (e.g. `burn --sandbox --allow-net=api.example.com \
-         node app.js`); never --allow-all. Inline code: `burn --sandbox \
+         node app.js`); never --allow-all. Inline JS: `burn --sandbox \
          -e '<code>'`."
     );
     Verdict::Redirect { corrected, reason }
@@ -245,8 +245,12 @@ fn first_file_arg<'a>(args: &'a [&'a Tok]) -> Option<&'a Tok> {
         }
         if s.starts_with('-') {
             // Flags that consume a value would otherwise donate it as a
-            // phantom "file".
-            if matches!(s, "-e" | "--eval" | "-p" | "--print" | "-r" | "--require") {
+            // phantom "file". Covers node (-e/--eval/-p/--print/-r/--require)
+            // and python/ruby (-c/-e/--eval/-m).
+            if matches!(
+                s,
+                "-e" | "--eval" | "-p" | "--print" | "-r" | "--require" | "-c" | "-m"
+            ) {
                 skip_next = true;
             }
             continue;
@@ -453,6 +457,76 @@ fn classify_segment(seg: &str, base: usize) -> SegAction {
             }
             _ => SegAction::None,
         },
+        // ── interpreted: python / ruby ───────────────────────────────────
+        //
+        // `burn python x.py` / `burn python3 x.py` / `burn ruby x.rb`
+        // are now first-class in-process dispatch (passthrough.rs), so a
+        // plain prefix suffices. Bare interpreters (REPL) get a suggestion;
+        // metadata flags are allowed.
+        n if matches!(n, "python" | "ruby") || n.starts_with("python3") || n == "python3" => {
+            if only_metadata_flags(&args) {
+                return SegAction::None;
+            }
+            let has_inline = args
+                .iter()
+                .any(|t| matches!(t.text.as_str(), "-c" | "-e" | "--eval" | "-m"));
+            if has_inline || first_file_arg(&args).is_some() {
+                SegAction::Prefix(head.start)
+            } else {
+                let ext = if n == "ruby" { "rb" } else { "py" };
+                SegAction::Suggest(format!(
+                    "burn --sandbox {n} <file.{ext}>  (save the code to a file and run: burn <file.{ext}>)"
+                ))
+            }
+        }
+        // ── compiled: go run, cargo run, rustc, gcc/g++/clang ───────────
+        //
+        // Only the RUN forms are intercepted; pure build/metadata steps
+        // (`go build`, `cargo build`, `gcc -c`, `--version`) are allowed.
+        // A false-allow on a build is fine; a false-deny on a build is not.
+        "go" => match sub {
+            Some("run") => {
+                // `go run x.go` -> suggest `burn x.go`
+                let after_run: Vec<&Tok> = args
+                    .iter()
+                    .skip_while(|t| t.text != "run")
+                    .skip(1)
+                    .copied()
+                    .collect();
+                match first_file_arg(&after_run) {
+                    Some(f) => SegAction::Suggest(format!("burn {}", f.text)),
+                    None => SegAction::Suggest("burn <file.go>".to_string()),
+                }
+            }
+            _ => SegAction::None, // go build, go test metadata, etc.
+        },
+        "cargo" => match sub {
+            Some("run") => SegAction::Suggest("burn --sandbox run".to_string()),
+            _ => SegAction::None, // cargo build, cargo test, cargo check, etc.
+        },
+        "rustc" => {
+            if only_metadata_flags(&args) {
+                return SegAction::None;
+            }
+            match first_file_arg(&args) {
+                Some(f) => SegAction::Suggest(format!("burn {}", f.text)),
+                None => SegAction::Suggest("burn <file.rs>".to_string()),
+            }
+        }
+        "gcc" | "cc" | "g++" | "c++" | "clang" | "clang++" => {
+            // Allow pure compilation (-c/-S/-E) and metadata (--version/-v).
+            let compile_only = args
+                .iter()
+                .any(|t| matches!(t.text.as_str(), "-c" | "-S" | "-E"));
+            if compile_only || only_metadata_flags(&args) {
+                return SegAction::None;
+            }
+            // A run form (producing an executable) - suggest the burn form.
+            match first_file_arg(&args) {
+                Some(f) => SegAction::Suggest(format!("burn {}", f.text)),
+                None => SegAction::Suggest(format!("burn <source>")),
+            }
+        }
         "tsx" | "ts-node" | "ts-node-esm" | "jest" | "vitest" | "mocha" => {
             // Node-backed runners: the PATH shim re-enters burn for their
             // internal `node` spawns, so a plain prefix sandboxes them.
@@ -485,15 +559,32 @@ fn classify_segment(seg: &str, base: usize) -> SegAction {
             // The runtime appears as a later argument (`xargs node`,
             // `find … -exec node {} ;`). No clean mechanical rewrite.
             let runtime = args.iter().any(|t| {
-                !t.quoted
-                    && matches!(
-                        basename(&t.text).as_str(),
-                        "node" | "nodejs" | "npx" | "tsx" | "ts-node" | "bunx" | "pnpx"
-                    )
+                if t.quoted {
+                    return false;
+                }
+                let b = basename(&t.text);
+                matches!(
+                    b.as_str(),
+                    "node"
+                        | "nodejs"
+                        | "npx"
+                        | "tsx"
+                        | "ts-node"
+                        | "bunx"
+                        | "pnpx"
+                        | "python"
+                        | "python3"
+                        | "ruby"
+                        | "rustc"
+                        | "gcc"
+                        | "g++"
+                        | "clang"
+                        | "clang++"
+                ) || b.starts_with("python3")
             });
             if runtime {
                 SegAction::Suggest(
-                    "burn --sandbox <file>  (run each JavaScript entry through burn)".to_string(),
+                    "burn --sandbox <file>  (run each source file through burn)".to_string(),
                 )
             } else {
                 SegAction::None
@@ -750,8 +841,6 @@ mod tests {
     fn unrelated_commands_are_allowed() {
         assert!(allowed("ls -la"));
         assert!(allowed("git status"));
-        assert!(allowed("cargo test"));
-        assert!(allowed("python3 script.py"));
         assert!(allowed("echo 'use node for this'")); // quoted mention, no exec
         assert!(allowed("cat node.txt"));
         assert!(allowed("grep -r node_modules src/"));
@@ -775,5 +864,140 @@ mod tests {
             }
             Verdict::Allow => panic!(),
         }
+    }
+
+    // ── python / ruby interpreted languages ─────────────────────────────
+
+    #[test]
+    fn python_file_is_prefixed() {
+        assert_eq!(
+            corrected("python script.py"),
+            "burn --sandbox python script.py"
+        );
+        assert_eq!(
+            corrected("python3 script.py"),
+            "burn --sandbox python3 script.py"
+        );
+        assert_eq!(
+            corrected("python3.12 app.py"),
+            "burn --sandbox python3.12 app.py"
+        );
+    }
+
+    #[test]
+    fn ruby_file_is_prefixed() {
+        assert_eq!(corrected("ruby script.rb"), "burn --sandbox ruby script.rb");
+        assert_eq!(
+            corrected("ruby ./app.rb --port 3000"),
+            "burn --sandbox ruby ./app.rb --port 3000"
+        );
+    }
+
+    #[test]
+    fn python_inline_is_prefixed() {
+        // -c/-e with an inline payload: still prefixed (burn python handles it)
+        assert_eq!(
+            corrected("python -c 'print(1)'"),
+            "burn --sandbox python -c 'print(1)'"
+        );
+    }
+
+    #[test]
+    fn python_metadata_flags_are_allowed() {
+        assert!(allowed("python --version"));
+        assert!(allowed("python3 --version"));
+        assert!(allowed("ruby --version"));
+        assert!(allowed("python -h"));
+        assert!(allowed("ruby -h"));
+    }
+
+    #[test]
+    fn bare_python_gets_a_suggestion() {
+        match classify("python") {
+            Verdict::Redirect { corrected, .. } => assert!(corrected.contains("burn")),
+            Verdict::Allow => panic!("bare python must redirect"),
+        }
+        match classify("ruby") {
+            Verdict::Redirect { corrected, .. } => assert!(corrected.contains("burn")),
+            Verdict::Allow => panic!("bare ruby must redirect"),
+        }
+    }
+
+    // ── compiled languages ───────────────────────────────────────────────
+
+    #[test]
+    fn go_run_gets_a_suggestion() {
+        match classify("go run main.go") {
+            Verdict::Redirect { corrected, .. } => assert!(corrected.contains("burn")),
+            Verdict::Allow => panic!("go run must redirect"),
+        }
+    }
+
+    #[test]
+    fn go_build_is_allowed() {
+        assert!(allowed("go build ./..."));
+        assert!(allowed("go build -o out main.go"));
+        assert!(allowed("go test ./..."));
+        assert!(allowed("go --version"));
+    }
+
+    #[test]
+    fn cargo_run_gets_a_suggestion() {
+        match classify("cargo run") {
+            Verdict::Redirect { corrected, .. } => assert!(corrected.contains("burn")),
+            Verdict::Allow => panic!("cargo run must redirect"),
+        }
+        match classify("cargo run -- --port 8080") {
+            Verdict::Redirect { corrected, .. } => assert!(corrected.contains("burn")),
+            Verdict::Allow => panic!("cargo run with args must redirect"),
+        }
+    }
+
+    #[test]
+    fn cargo_build_and_test_are_allowed() {
+        assert!(allowed("cargo build"));
+        assert!(allowed("cargo build --release"));
+        assert!(allowed("cargo test"));
+        assert!(allowed("cargo check"));
+        assert!(allowed("cargo clippy"));
+        assert!(allowed("cargo fmt"));
+    }
+
+    #[test]
+    fn rustc_run_gets_a_suggestion() {
+        match classify("rustc main.rs") {
+            Verdict::Redirect { corrected, .. } => assert!(corrected.contains("burn")),
+            Verdict::Allow => panic!("rustc must redirect"),
+        }
+    }
+
+    #[test]
+    fn rustc_metadata_is_allowed() {
+        assert!(allowed("rustc --version"));
+        assert!(allowed("rustc -v"));
+    }
+
+    #[test]
+    fn gcc_link_gets_a_suggestion() {
+        match classify("gcc main.c -o main") {
+            Verdict::Redirect { corrected, .. } => assert!(corrected.contains("burn")),
+            Verdict::Allow => panic!("gcc linking must redirect"),
+        }
+        match classify("g++ main.cpp -o main") {
+            Verdict::Redirect { corrected, .. } => assert!(corrected.contains("burn")),
+            Verdict::Allow => panic!("g++ linking must redirect"),
+        }
+        match classify("clang main.c -o main") {
+            Verdict::Redirect { corrected, .. } => assert!(corrected.contains("burn")),
+            Verdict::Allow => panic!("clang linking must redirect"),
+        }
+    }
+
+    #[test]
+    fn gcc_compile_only_is_allowed() {
+        assert!(allowed("gcc -c main.c"));
+        assert!(allowed("g++ -c main.cpp -o main.o"));
+        assert!(allowed("clang -S main.c"));
+        assert!(allowed("gcc --version"));
     }
 }

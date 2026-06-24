@@ -16,12 +16,12 @@ const SENTINEL_START: &str = "<!-- >>> burn agent (managed) >>> -->";
 const SENTINEL_END: &str = "<!-- <<< burn agent (managed) <<< -->";
 
 /// The instruction block body (between the sentinels).
-const BLOCK_BODY: &str = "## JavaScript execution\n\
-Run ALL JavaScript/TypeScript SEALED in the burn sandbox - never invoke `node`/`npx`/`tsx` directly:\n\
-`burn --sandbox node script.js`, `burn --sandbox npm test`, inline: `burn --sandbox -e '<code>'`.\n\
-Sealed means no network, no filesystem, no env access: write code that conforms to that\n\
-(pure computation over explicit inputs). Only when a capability is genuinely required,\n\
-grant it narrowly per run, e.g. `burn --sandbox --allow-net=api.example.com node app.js`\n\
+const BLOCK_BODY: &str = "## Code execution\n\
+Run ALL code SEALED in the burn sandbox (no network, filesystem, or env by default).\n\
+Python: `burn x.py`  Ruby: `burn x.rb`  JS/TS: `burn node x.js` or `burn x.ts`\n\
+Rust/Go/C/C++: `burn x.rs` / `burn x.go` / `burn x.c` / `burn x.cpp`\n\
+Inline JS only: `burn --sandbox -e '<code>'`.\n\
+Grant capabilities narrowly when genuinely required, e.g. `--allow-net=api.example.com`\n\
 or `--allow-fs-read=./data`. Never use `--allow-all`.";
 
 /// The memory file a host reads, or `None` for hosts that have no plain
@@ -150,7 +150,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# My notes"));
         assert!(text.contains(SENTINEL_START));
-        assert!(text.contains("burn --sandbox node script.js"));
+        assert!(text.contains("burn x.py"));
 
         // Refresh in place: one block, never two.
         write_block(&path).unwrap();

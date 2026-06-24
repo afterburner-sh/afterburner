@@ -40,7 +40,9 @@ use super::shim;
 /// strictly required (Q5-A passes any PATH binary through), but these
 /// names anchor the user's mental model and get a clearer not-found
 /// message if the binary is missing.
-const KNOWN_TARGETS: &[&str] = &["node", "npm", "npx", "pnpm", "yarn", "bun"];
+const KNOWN_TARGETS: &[&str] = &[
+    "node", "npm", "npx", "pnpm", "yarn", "bun", "python", "python3", "ruby",
+];
 
 const SHIM_DEPTH_LIMIT: u32 = 8;
 const SHIM_DEPTH_ENV: &str = "BURN_SHIM_DEPTH";
@@ -131,6 +133,10 @@ pub fn dispatch(cli: &mut Cli, target: &str) -> Result<()> {
         // `node` stays a pure in-process dispatch - no subprocess, no
         // PATH lookup. It's just "run this script under burn".
         "node" => dispatch_node(cli),
+        // `python`/`python3`/`ruby` run in-process through the sealed
+        // WASM runner exactly like `node`. Bare REPL or `-c`/`-e`
+        // inline forms are not supported: the caller must supply a file.
+        "python" | "python3" | "ruby" => dispatch_interpreted(cli, target),
         _ => dispatch_via_shim(cli, target),
     }
 }
@@ -154,6 +160,40 @@ fn dispatch_node(cli: &mut Cli) -> Result<()> {
     let file = PathBuf::from(&args[0]);
     let user_args = &args[1..];
     run::run_file(cli, &file, user_args)
+}
+
+/// `burn python script.py arg1` → `burn run script.py arg1`
+/// `burn ruby script.rb arg1`   → `burn run script.rb arg1`
+///
+/// Bare interpreter invocations (no file) and inline `-c`/`-e` forms
+/// cannot be sandboxed in-process. Guide the user to save the code to
+/// a file and run it with `burn <file>`.
+fn dispatch_interpreted(cli: &mut Cli, target: &str) -> Result<()> {
+    let args = std::mem::take(&mut cli.rest_args);
+
+    // Detect bare-REPL or inline (-c/-e) invocations - not supported.
+    let has_inline = args
+        .iter()
+        .any(|a| matches!(a.as_str(), "-c" | "-e" | "--eval"));
+    let file_arg = args.iter().find(|a| !a.starts_with('-'));
+
+    if has_inline || file_arg.is_none() {
+        anyhow::bail!(
+            "burn {target}: save the code to a file and run: burn <file>\n\
+             example: burn script.{ext}",
+            ext = if target == "ruby" { "rb" } else { "py" }
+        );
+    }
+
+    let file = PathBuf::from(file_arg.unwrap());
+    // The remaining args after the file token become user args.
+    let file_str = file.to_string_lossy().into_owned();
+    let user_args: Vec<String> = args
+        .into_iter()
+        .skip_while(|a| *a != file_str)
+        .skip(1)
+        .collect();
+    run::run_file(cli, &file, &user_args)
 }
 
 /// `burn npm install express` → find real `npm`, prepend shim dir to
@@ -347,4 +387,31 @@ fn build_prepended_path(shim_dir: &Path) -> std::ffi::OsString {
         new_path.push(&existing);
     }
     new_path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `python`, `python3`, and `ruby` must be KnownTargets so that a missing
+    /// binary gets a typed error rather than the generic "unknown command".
+    #[test]
+    fn interpreted_languages_are_known_targets() {
+        for name in ["python", "python3", "ruby"] {
+            // Use a path that will never exist as a real file.
+            let p = Path::new(name);
+            // Existence check: skip if by some chance the file exists in cwd.
+            if !p.exists() {
+                let d = detect(p);
+                assert!(
+                    matches!(d, Detected::KnownTarget(_) | Detected::PathTarget(_)),
+                    "{name} should be KnownTarget or PathTarget, not Unknown"
+                );
+            }
+        }
+        // KNOWN_TARGETS slice must contain all three.
+        assert!(KNOWN_TARGETS.contains(&"python"));
+        assert!(KNOWN_TARGETS.contains(&"python3"));
+        assert!(KNOWN_TARGETS.contains(&"ruby"));
+    }
 }
