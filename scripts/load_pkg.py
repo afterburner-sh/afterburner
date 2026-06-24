@@ -13,9 +13,11 @@ Usage:
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import urllib.request
+import zipfile
 
 PYODIDE_VER = "0.28.3"
 CDN = f"https://cdn.jsdelivr.net/pyodide/v{PYODIDE_VER}/full"
@@ -57,6 +59,50 @@ def download(p):
     return dst
 
 
+WASM_OPT_FLAGS = [
+    "--translate-to-exnref", "--enable-exception-handling",
+    "--enable-reference-types", "--enable-bulk-memory", "--enable-simd",
+    "--enable-sign-ext", "--enable-nontrapping-float-to-int",
+    "--enable-mutable-globals", "--enable-multivalue",
+]
+
+
+def _wasm_opt():
+    return shutil.which("wasm-opt") or os.path.expanduser("~/emsdk/upstream/bin/wasm-opt")
+
+
+def exnref_wheel(wheel_path):
+    """Repackage a wheel with every .so translated legacy-EH -> exnref (cached).
+
+    Stock wheels ship side-module .so built with legacy try/catch EH; the engine
+    runs exnref. `wasm-opt --translate-to-exnref` converts them while preserving
+    the side-module structure (dylink.0, GOT imports, element/data segments). A
+    pure-Python wheel (no .so) is returned unchanged.
+    """
+    out = wheel_path[:-4] + ".exnref.whl"
+    if os.path.exists(out):
+        return out
+    with zipfile.ZipFile(wheel_path) as zin:
+        sos = [n for n in zin.namelist() if n.endswith(".so")]
+        if not sos:
+            return wheel_path
+        work = wheel_path + ".d"
+        if os.path.exists(work):
+            shutil.rmtree(work)
+        zin.extractall(work)
+    for so in sos:
+        p = os.path.join(work, so)
+        subprocess.run([_wasm_opt(), *WASM_OPT_FLAGS, p, "-o", p], check=True)
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zo:
+        for root, _, files in os.walk(work):
+            for f in sorted(files):
+                fp = os.path.join(root, f)
+                zo.write(fp, os.path.relpath(fp, work))
+    shutil.rmtree(work)
+    print(f"  exnref: {os.path.basename(wheel_path)} ({len(sos)} .so)")
+    return out
+
+
 def main():
     args = [a for a in sys.argv[1:] if a != "--resolve-only"]
     resolve_only = "--resolve-only" in sys.argv[1:]
@@ -71,7 +117,7 @@ def main():
     if not closure:
         print(f"{pkg}: not found in lock")
         return 1
-    wheels = [download(p) for p in closure]
+    wheels = [exnref_wheel(download(p)) for p in closure]
     print(f"{pkg}: {len(closure)} wheels -> {[p['name'] for p in closure]}")
     if resolve_only:
         print("BURN_WHEELS=" + ",".join(wheels))

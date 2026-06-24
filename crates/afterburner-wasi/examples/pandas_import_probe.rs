@@ -273,7 +273,10 @@ fn run_probe() -> String {
             Ok(b) => b,
             Err(e) => return format!("LOAD FAILED: cannot read {wheel}: {e}"),
         };
-        eprintln!("[pandas_probe] loaded wheel {wheel} ({} bytes)", bytes.len());
+        eprintln!(
+            "[pandas_probe] loaded wheel {wheel} ({} bytes)",
+            bytes.len()
+        );
         if numpy_so_bytes.is_none()
             && let Some(so) = extract_from_zip(&bytes, NUMPY_CORE_SO)
         {
@@ -390,6 +393,10 @@ fn run_probe() -> String {
     if let Err(e) = linker.define(&mut store, "env", "__cpp_exception", cpp_exception_tag) {
         return format!("TAG DEFINE FAILED: env.__cpp_exception: {e}");
     }
+    // Retain the tags in the store so every side module loaded on-demand by
+    // _dlopen_js can share them (mirrors pyodide_runner.rs boot_pyodide_instance).
+    store.data_mut().pyodide_cpp_exception_tag = Some(cpp_exception_tag);
+    store.data_mut().pyodide_c_longjmp_tag = Some(c_longjmp_tag);
 
     let got_ty = GlobalType::new(ValType::I32, Mutability::Var);
     for import in module.imports() {
@@ -459,7 +466,11 @@ fn run_probe() -> String {
                 Ok(bytes) => {
                     let n = bytes.len();
                     store.data_mut().fs.insert_file(guest.trim(), bytes);
-                    eprintln!("[pandas_probe] FS OVERRIDE {} <- {} ({n} bytes)", guest.trim(), host.trim());
+                    eprintln!(
+                        "[pandas_probe] FS OVERRIDE {} <- {} ({n} bytes)",
+                        guest.trim(),
+                        host.trim()
+                    );
                 }
                 Err(e) => eprintln!("[pandas_probe] FS OVERRIDE failed for {host}: {e}"),
             }
@@ -616,28 +627,16 @@ fn run_probe() -> String {
                     break;
                 }
                 let w0 = u32::from_le_bytes([d[base], d[base + 1], d[base + 2], d[base + 3]]);
-                let w1 =
-                    u32::from_le_bytes([d[base + 4], d[base + 5], d[base + 6], d[base + 7]]);
-                let w2 = u32::from_le_bytes([
-                    d[base + 8],
-                    d[base + 9],
-                    d[base + 10],
-                    d[base + 11],
-                ]);
-                let w3 = u32::from_le_bytes([
-                    d[base + 12],
-                    d[base + 13],
-                    d[base + 14],
-                    d[base + 15],
-                ]);
+                let w1 = u32::from_le_bytes([d[base + 4], d[base + 5], d[base + 6], d[base + 7]]);
+                let w2 = u32::from_le_bytes([d[base + 8], d[base + 9], d[base + 10], d[base + 11]]);
+                let w3 =
+                    u32::from_le_bytes([d[base + 12], d[base + 13], d[base + 14], d[base + 15]]);
                 let mark = if base <= addr && addr < base + 16 {
                     " <-- target"
                 } else {
                     ""
                 };
-                eprintln!(
-                    "  {base:#010x}: {w0:#010x} {w1:#010x} {w2:#010x} {w3:#010x}{mark}"
-                );
+                eprintln!("  {base:#010x}: {w0:#010x} {w1:#010x} {w2:#010x} {w3:#010x}{mark}");
             }
         }
     }
@@ -729,14 +728,27 @@ fn run_pandas_phase(
         Err(e) => return format!("ARGV ALLOC FAILED: {e}"),
     };
     // Allow overriding the Python snippet from a file (BURN_PY_CODE) so the
-    // import path can be probed without a rebuild. The file content is run
-    // verbatim; a trailing NUL is appended for the C `-c` argument.
+    // import path can be probed without a rebuild.
+    //
+    // In pyodide's native (non-JS) build, Python's sys.stdout goes through a
+    // JS-backed IO layer that produces no output. Prepend a redirect so that
+    // print() and traceback output land in /tmp/pyout.txt (captured by the
+    // probe via the in-memory FS) rather than being silently dropped.
+    // Use line-buffered mode (buffering=1) so each print() flushes immediately.
+    // Also redirect stderr so tracebacks land in the same file.
+    const STDOUT_REDIRECT: &[u8] =
+        b"import sys; _f=open('/tmp/pyout.txt','w',buffering=1); sys.stdout=_f; sys.stderr=_f\n";
     let code_owned: Option<Vec<u8>> = std::env::var("BURN_PY_CODE").ok().and_then(|p| {
         std::fs::read(&p)
-            .map(|mut b| {
-                b.push(0);
-                eprintln!("[pandas_probe] using BURN_PY_CODE from {p} ({} bytes)", b.len());
-                b
+            .map(|b| {
+                let mut out = STDOUT_REDIRECT.to_vec();
+                out.extend_from_slice(&b);
+                out.push(0);
+                eprintln!(
+                    "[pandas_probe] using BURN_PY_CODE from {p} ({} bytes)",
+                    out.len()
+                );
+                out
             })
             .ok()
     });
@@ -804,7 +816,9 @@ fn run_pandas_phase(
         None => return "BLOCKED: neither run_main nor pymain_run_python exported".to_owned(),
     };
 
-    store.data_mut().wasi_stdout.clear();
+    // Do NOT clear wasi_stdout here: the -c code runs inside __main_argc_argv,
+    // so any print() output is already in wasi_stdout. run_main() only does
+    // Emscripten keepalive cleanup with no user-visible output.
     eprintln!("[pandas_probe P5] calling run_main()...");
     let mut run_ret = [wasmtime::Val::I32(-99)];
     match run_fn.call(&mut *store, &[], &mut run_ret) {
@@ -832,9 +846,7 @@ fn run_pandas_phase(
                     _ => 0,
                 })
                 .unwrap_or(0);
-            eprintln!(
-                "[pandas_probe P5] shared __stack_pointer at trap = {sp_now:#x}"
-            );
+            eprintln!("[pandas_probe P5] shared __stack_pointer at trap = {sp_now:#x}");
 
             // Dump the OOB-instrumenter scratch region (instrument_callind_oob
             // records the offending call_indirect index + caller here).
