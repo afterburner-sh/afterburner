@@ -9,9 +9,11 @@
 //! The bundled binary (`usr/local/bin/ruby` from the stock
 //! `ruby-3.4-wasm32-unknown-wasip1-full` release) is a plain WASI command
 //! module: it exports `_start` and imports only `wasi_snapshot_preview1`. So it
-//! runs directly through [`EmbedderVm::run_command`] with argv
-//! `["ruby", "-e", <source>]` - no dynamic linking, no exnref translation, no
-//! host stubs (unlike the Emscripten/Pyodide path). The stdlib is mounted
+//! runs directly through [`EmbedderVm::run_command`] - no dynamic linking, no
+//! exnref translation, no host stubs (unlike the Emscripten/Pyodide path). The
+//! source runs as a script FILE (`ruby <file>`): CRuby's `-e <source>` cold-boot
+//! path can spin indefinitely under WASI, so the file path is the one reliable
+//! path (it is exactly what the package runner uses). The stdlib is mounted
 //! read-only at the guest path the binary's compiled-in load path expects, so
 //! `require 'json'` (and the rest of the stdlib) resolves with no `RUBYLIB`.
 //!
@@ -25,6 +27,7 @@
 //! actionable error - never a fake success.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use afterburner_core::{AfterburnerError, Result};
 
@@ -129,8 +132,8 @@ pub fn resolve_ruby_runtime() -> Result<RubyRuntime> {
 }
 
 /// Run a `.rb` program on the self-contained, zero-config runtime (or a
-/// `BURN_RUBY_RUNTIME` override): boot the bundled CRuby WASI module with
-/// `ruby -e <source>`, mount the stdlib read-only, and return stdout + exit
+/// `BURN_RUBY_RUNTIME` override): boot the bundled CRuby WASI module, mount the
+/// stdlib read-only, run the source as a script file, and return stdout + exit
 /// code.
 ///
 /// This is the entry point behind `burn run x.rb` and the Ruby REPL. It
@@ -149,29 +152,34 @@ pub fn run_ruby(ruby_source: &str) -> Result<RubyRunOutput> {
     run_ruby_with(&rt, ruby_source)
 }
 
-/// Boot a resolved [`RubyRuntime`], run `ruby -e <source>`, return stdout +
-/// exit code. The one canonical run path; [`run_ruby`] is a thin shim that
-/// resolves the runtime first.
+/// Process-unique, monotonic temp dir: `<tmpdir>/<prefix>-<pid>-<n>`. No
+/// wall-clock or RNG (both are unavailable / non-deterministic here); a static
+/// counter plus the pid is unique within and across concurrent runs.
+fn unique_tmp_dir(prefix: &str) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()))
+}
+
+/// Boot a resolved [`RubyRuntime`] and run a single `.rb` source on it, returning
+/// stdout + exit code. [`run_ruby`] is a thin shim that resolves the runtime
+/// first.
+///
+/// The source is staged as `main.rb` in a unique temp dir and run via
+/// [`run_ruby_package_with`] (i.e. `ruby <file>`), then the dir is removed.
+/// CRuby's `-e <source>` cold-boot path can spin indefinitely under WASI, so the
+/// script-file path is the one reliable run path - shared with the package
+/// runner, so single-file and package runs cannot diverge.
 pub fn run_ruby_with(rt: &RubyRuntime, ruby_source: &str) -> Result<RubyRunOutput> {
-    let wasm_bytes = std::fs::read(&rt.wasm_path)
-        .map_err(|e| AfterburnerError::Engine(format!("read {}: {e}", rt.wasm_path.display())))?;
-
-    let vm = EmbedderVm::new()?;
-    let module = vm.compile(&wasm_bytes, true, |_| Ok(()))?;
-
-    // argv: `ruby -e <source>`. The first element is argv[0] (the program
-    // name); `-e` takes the program text as the next argument.
-    let mut opts = WasiCommandOpts::new().args(["ruby", "-e", ruby_source]);
-    if let Some(usr) = &rt.usr_dir {
-        opts = opts.preopen_ro(usr, GUEST_USR_MOUNT);
-    }
-
-    let out = vm.run_command(&module, opts, Some(RUBY_FUEL))?;
-    Ok(RubyRunOutput {
-        stdout: out.stdout,
-        stderr: out.stderr,
-        exit_code: out.result as i32,
-    })
+    let dir = unique_tmp_dir("burn-rb-run");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| AfterburnerError::Engine(format!("create {}: {e}", dir.display())))?;
+    let entry = dir.join("main.rb");
+    let out = std::fs::write(&entry, ruby_source)
+        .map_err(|e| AfterburnerError::Engine(format!("write {}: {e}", entry.display())))
+        .and_then(|()| run_ruby_package_with(rt, &dir, "main.rb"));
+    let _ = std::fs::remove_dir_all(&dir);
+    out
 }
 
 /// Run a Ruby *package* (a `burn run <pkg.afb>` Ruby package, or a directory of
