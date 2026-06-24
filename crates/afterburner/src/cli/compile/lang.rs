@@ -11,11 +11,18 @@
 //!
 //! Supported languages and their compile paths:
 //! - `js`/`javascript` and `ts`/`typescript` - Javy (existing path).
-//! - `rust` - `cargo build --release --target wasm32-wasip1`.
-//! - `go`/`golang` - `GOOS=wasip1 GOARCH=wasm go build`.
-//! - `c` - `clang --target=wasm32-wasi` or `emcc` (requires wasi-sdk/emcc).
-//! - `python`/`py` - pending (honest error; structure is wired).
+//! - `rust` - `cargo build --release --target wasm32-wasip1` (multi-module
+//!   via Cargo over the shipped `source/` tree).
+//! - `go`/`golang` - `GOOS=wasip1 GOARCH=wasm go build` over the package
+//!   directory (multi-file / multi-package via the Go module system).
+//! - `c` - `clang --target=wasm32-wasip1 --sysroot=<wasi-sdk>` over ALL
+//!   `source/**/*.c`, producing a WASI **command** module (real `main`).
+//!   A `Makefile`/`CMakeLists.txt`, when present, is preferred.
+//! - `cpp`/`c++`/`cxx`/`cc` - `clang++ --target=wasm32-wasip1
+//!   --sysroot=<wasi-sdk>` over ALL `source/**/*.{cpp,cxx,cc}` (emcc fallback).
+//! - `python`/`py` and `ruby`/`rb` - pending (honest error; structure wired).
 
+use super::cc;
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::str::FromStr;
@@ -31,6 +38,7 @@ pub enum SourceLang {
     Rust,
     Go,
     C,
+    Cpp,
     Python,
     Ruby,
 }
@@ -46,6 +54,7 @@ impl FromStr for SourceLang {
     /// - `rust` -> `Rust`
     /// - `go`/`golang` -> `Go`
     /// - `c` -> `C`
+    /// - `cpp`/`c++`/`cxx`/`cc` -> `Cpp`
     /// - `python`/`py` -> `Python`
     /// - `ruby`/`rb` -> `Ruby`
     ///
@@ -57,11 +66,13 @@ impl FromStr for SourceLang {
             "rust" => Ok(Self::Rust),
             "go" | "golang" => Ok(Self::Go),
             "c" => Ok(Self::C),
+            "cpp" | "c++" | "cxx" | "cc" => Ok(Self::Cpp),
             "python" | "py" => Ok(Self::Python),
             "ruby" | "rb" => Ok(Self::Ruby),
             other => anyhow::bail!(
                 "unsupported [package] language {other:?}; \
-                 supported values: js, javascript, ts, typescript, rust, go, golang, c, python, py, ruby, rb"
+                 supported values: js, javascript, ts, typescript, rust, go, golang, \
+                 c, cpp, c++, cxx, cc, python, py, ruby, rb"
             ),
         }
     }
@@ -75,14 +86,14 @@ impl SourceLang {
 
     /// Whether this language can be shipped as source and interpreted at
     /// runtime (JS/TS via the JS engine, Python and Ruby via WASI runtimes).
-    /// Rust, Go, and C compile to WASM and have no source interpreter - they
-    /// must be precompiled before packaging.
+    /// Rust, Go, C, and C++ compile to WASM and have no source interpreter -
+    /// they must be precompiled before packaging.
     pub fn is_interpretable(self) -> bool {
         matches!(self, Self::Js | Self::Ts | Self::Python | Self::Ruby)
     }
 }
 
-/// Compile a native language package (Rust/Go/C/Python) to a WASM binary.
+/// Compile a native language package (Rust/Go/C/C++/Python) to a WASM binary.
 ///
 /// `lang` must not be `Js` or `Ts` (those go through the Javy path).
 /// `pkg_dir` is the root of the package (where `afb.toml` lives).
@@ -96,7 +107,8 @@ pub fn compile_native(lang: SourceLang, pkg_dir: &Path, entry: &str) -> Result<V
         }
         SourceLang::Rust => compile_rust(pkg_dir),
         SourceLang::Go => compile_go(pkg_dir, entry),
-        SourceLang::C => compile_c(pkg_dir, entry),
+        SourceLang::C => cc::compile_c(pkg_dir, entry),
+        SourceLang::Cpp => cc::compile_cpp(pkg_dir, entry),
         SourceLang::Python => compile_python(pkg_dir, entry),
         SourceLang::Ruby => compile_ruby(pkg_dir, entry),
     }
@@ -106,8 +118,9 @@ pub fn compile_native(lang: SourceLang, pkg_dir: &Path, entry: &str) -> Result<V
 /// WASI command module. The file's extension determines the language.
 ///
 /// Supported extensions: `.rs` (via `rustc`), `.go` (via `go build`),
-/// `.c` (via `clang`/`emcc`). Returns an honest error for `.py`/`.rb`
-/// (runtime not bundled) and an error for any other extension.
+/// `.c` (via `clang`/`emcc`), `.cpp`/`.cxx`/`.cc` (via `clang++`/`emcc`).
+/// Returns an honest error for `.py`/`.rb` (runtime not bundled) and an
+/// error for any other extension.
 pub fn compile_single_file(source_path: &Path) -> Result<Vec<u8>> {
     let ext = source_path
         .extension()
@@ -117,6 +130,7 @@ pub fn compile_single_file(source_path: &Path) -> Result<Vec<u8>> {
         Some("rs") => compile_single_file_rust(source_path),
         Some("go") => compile_single_file_go(source_path),
         Some("c") => compile_single_file_c(source_path),
+        Some("cpp" | "cxx" | "cc") => compile_single_file_cpp(source_path),
         Some("py" | "pyw") => anyhow::bail!(
             "Python runtime not available: the CPython-WASI payload is not bundled. \
              Install it and re-run, or use a Python package with `burn compile`."
@@ -193,7 +207,7 @@ fn compile_single_file_go(source_path: &Path) -> Result<Vec<u8>> {
     compile_go(pkg_dir, entry)
 }
 
-/// Compile a single `.c` file to `wasm32-wasi` WASM.
+/// Compile a single `.c` file to a `wasm32-wasip1` WASI command module.
 ///
 /// The parent directory is used as the working directory (for relative
 /// `#include` paths) and the file name as the entry.
@@ -203,7 +217,21 @@ fn compile_single_file_c(source_path: &Path) -> Result<Vec<u8>> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("");
-    compile_c(pkg_dir, entry)
+    cc::compile_c(pkg_dir, entry)
+}
+
+/// Compile a single `.cpp`/`.cxx`/`.cc` file to a `wasm32-wasip1` WASI
+/// command module.
+///
+/// The parent directory is used as the working directory (for relative
+/// `#include` paths) and the file name as the entry.
+fn compile_single_file_cpp(source_path: &Path) -> Result<Vec<u8>> {
+    let pkg_dir = source_path.parent().unwrap_or_else(|| Path::new("."));
+    let entry = source_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    cc::compile_cpp(pkg_dir, entry)
 }
 
 /// Compile a Rust package to `wasm32-wasip1` via Cargo.
@@ -366,99 +394,6 @@ fn compile_go(pkg_dir: &Path, entry: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Compile a C source file to `wasm32-wasi` WASM.
-///
-/// Tries `clang --target=wasm32-wasi` first, then `emcc`.
-/// Emits a clear actionable error when neither tool is present.
-fn compile_c(pkg_dir: &Path, entry: &str) -> Result<Vec<u8>> {
-    let source = pkg_dir.join(entry);
-    if !source.exists() {
-        anyhow::bail!(
-            "C entry file {:?} does not exist in {}",
-            entry,
-            pkg_dir.display()
-        );
-    }
-
-    let wasm_out = std::env::temp_dir().join(format!("burn-c-{}.wasm", std::process::id()));
-
-    // Try clang first (requires wasi-sdk on PATH or WASI_SDK_PATH).
-    let clang = std::env::var("CLANG").unwrap_or_else(|_| "clang".into());
-    let clang_result = std::process::Command::new(&clang)
-        .args([
-            "--target=wasm32-wasi",
-            "-nostdlib",
-            "-Wl,--no-entry",
-            "-Wl,--export-all",
-            source.to_str().unwrap_or(""),
-            "-o",
-            wasm_out.to_str().unwrap_or(""),
-        ])
-        .current_dir(pkg_dir)
-        .status();
-
-    match clang_result {
-        Ok(s) if s.success() => {
-            let bytes = std::fs::read(&wasm_out)
-                .with_context(|| format!("reading C WASM {}", wasm_out.display()))?;
-            let _ = std::fs::remove_file(&wasm_out);
-            return Ok(bytes);
-        }
-        Ok(s) => {
-            let _ = std::fs::remove_file(&wasm_out);
-            let code = s.code().unwrap_or(-1);
-            anyhow::bail!(
-                "`clang --target=wasm32-wasi` exited with code {code}. \
-                 Install wasi-sdk: https://github.com/WebAssembly/wasi-sdk/releases"
-            );
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // clang not found - try emcc
-        }
-        Err(e) => anyhow::bail!("spawning `clang`: {e}"),
-    }
-
-    // Fallback: emcc
-    let emcc_result = std::process::Command::new("emcc")
-        .args([
-            source.to_str().unwrap_or(""),
-            "-o",
-            wasm_out.to_str().unwrap_or(""),
-            "-s",
-            "WASM=1",
-            "-s",
-            "STANDALONE_WASM=1",
-        ])
-        .current_dir(pkg_dir)
-        .status();
-
-    match emcc_result {
-        Ok(s) if s.success() => {
-            let bytes = std::fs::read(&wasm_out)
-                .with_context(|| format!("reading C WASM (emcc) {}", wasm_out.display()))?;
-            let _ = std::fs::remove_file(&wasm_out);
-            Ok(bytes)
-        }
-        Ok(s) => {
-            let _ = std::fs::remove_file(&wasm_out);
-            anyhow::bail!(
-                "`emcc` exited with code {}. \
-                 Install Emscripten: https://emscripten.org/docs/getting_started/downloads.html",
-                s.code().unwrap_or(-1)
-            );
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            anyhow::bail!(
-                "C compilation requires either `clang` with wasi-sdk or `emcc` (Emscripten). \
-                 Neither was found on PATH.\n\
-                 - wasi-sdk: https://github.com/WebAssembly/wasi-sdk/releases\n\
-                 - Emscripten: https://emscripten.org/docs/getting_started/downloads.html"
-            );
-        }
-        Err(e) => anyhow::bail!("spawning `emcc`: {e}"),
-    }
-}
-
 /// Python compile backend.
 ///
 /// Python-WASM packaging requires the CPython-WASI payload (a WASM build
@@ -508,6 +443,11 @@ mod tests {
         assert_eq!(SourceLang::from_str("Go").unwrap(), SourceLang::Go);
         assert_eq!(SourceLang::from_str("c").unwrap(), SourceLang::C);
         assert_eq!(SourceLang::from_str("C").unwrap(), SourceLang::C);
+        assert_eq!(SourceLang::from_str("cpp").unwrap(), SourceLang::Cpp);
+        assert_eq!(SourceLang::from_str("c++").unwrap(), SourceLang::Cpp);
+        assert_eq!(SourceLang::from_str("cxx").unwrap(), SourceLang::Cpp);
+        assert_eq!(SourceLang::from_str("cc").unwrap(), SourceLang::Cpp);
+        assert_eq!(SourceLang::from_str("CPP").unwrap(), SourceLang::Cpp);
         assert_eq!(SourceLang::from_str("python").unwrap(), SourceLang::Python);
         assert_eq!(SourceLang::from_str("py").unwrap(), SourceLang::Python);
         assert_eq!(SourceLang::from_str("Python").unwrap(), SourceLang::Python);
@@ -554,19 +494,33 @@ mod tests {
         assert!(!SourceLang::Rust.is_js_family());
         assert!(!SourceLang::Go.is_js_family());
         assert!(!SourceLang::C.is_js_family());
+        assert!(!SourceLang::Cpp.is_js_family());
         assert!(!SourceLang::Python.is_js_family());
     }
 
     #[test]
     fn interpretable_predicate() {
-        // JS/TS and Python can run as source; Rust/Go/C must be precompiled.
+        // JS/TS and Python can run as source; Rust/Go/C/C++ must be precompiled.
         assert!(SourceLang::Js.is_interpretable());
         assert!(SourceLang::Ts.is_interpretable());
         assert!(SourceLang::Python.is_interpretable());
         assert!(!SourceLang::Rust.is_interpretable());
         assert!(!SourceLang::Go.is_interpretable());
         assert!(!SourceLang::C.is_interpretable());
+        assert!(!SourceLang::Cpp.is_interpretable());
     }
+
+    #[test]
+    fn cpp_parses_and_is_native() {
+        let l = SourceLang::from_str("c++").unwrap();
+        assert_eq!(l, SourceLang::Cpp);
+        assert!(!l.is_js_family());
+        assert!(!l.is_interpretable());
+    }
+
+    // The C/C++ compile backend (wasi-sdk discovery, multi-file source
+    // collection, build-system, honest "wasi-sdk not found") is tested in
+    // `super::cc`'s own `mod tests`.
 
     #[test]
     fn python_backend_gives_honest_pending_error() {

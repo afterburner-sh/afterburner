@@ -1,0 +1,12 @@
+[format]
+version = "1.0"
+
+[package]
+name = "c-multimodule"
+namespace = "examples"
+version = "0.1.0"
+language = "c"
+entry = "source/main.c"
+
+[runtime]
+min = "0.1.0"

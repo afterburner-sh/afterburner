@@ -21,14 +21,15 @@
 //! `crypto.createHash` call is denied under a sealed Manifold and granted
 //! under one with `crypto: true`.
 //!
-//! For non-JS/TS packages (`language = "rust"`, `"go"`, `"c"`, `"python"`),
-//! the language-native toolchain is invoked to produce a `wasm32-wasip1`
-//! WASI command module. The language is read exclusively from
-//! `[package] language` in `afb.toml` - no file-extension auto-detection.
+//! For non-JS/TS packages (`language = "rust"`, `"go"`, `"c"`, `"cpp"`,
+//! `"python"`), the language-native toolchain is invoked to produce a
+//! `wasm32-wasip1` WASI command module. The language is read exclusively
+//! from `[package] language` in `afb.toml` - no file-extension auto-detection.
 //!
 //! `javy` is required only for JS/TS - the runtime never shells to it.
 //! Required version: 8.1.1.
 
+mod cc; // C/C++ multi-file -> wasm32-wasip1 WASI command (wasi-sdk); used by `lang`.
 pub mod lang;
 
 use afterburner_cloud::afterburner_afb::Afb;
@@ -265,7 +266,7 @@ fn resolve_one_dep(
 ///
 /// Reads `[package] language` from `local.manifest` and dispatches:
 /// - JS/TS: transpile TS (no-op for plain JS), then the Javy path.
-/// - Rust/Go/C/Python: native toolchain -> WASM -> `.afb`.
+/// - Rust/Go/C/C++/Python: native toolchain -> WASM -> `.afb`.
 ///
 /// `wasm_only` controls whether source members are included in the output
 /// `.afb`. Pass `true` for `--wasm-only` (FullWasm mode), `false` otherwise.
@@ -307,7 +308,7 @@ pub fn compile(dir: Option<&Path>, out: Option<&Path>) -> Result<()> {
     dispatch_compile(dir, local, &out_path, false)
 }
 
-/// Compile a native language (Rust/Go/C/Python) package to a `.afb`.
+/// Compile a native language (Rust/Go/C/C++/Python) package to a `.afb`.
 ///
 /// Invokes the language toolchain, reads the produced WASM bytes, and
 /// bundles them into a `.afb` with `[runtime] target = "wasm32-wasip1"`.
@@ -325,6 +326,7 @@ fn compile_native_to_afb(
         SourceLang::Rust => "Rust",
         SourceLang::Go => "Go",
         SourceLang::C => "C",
+        SourceLang::Cpp => "C++",
         SourceLang::Python => "Python",
         SourceLang::Ruby => "Ruby",
         SourceLang::Js | SourceLang::Ts => unreachable!("JS/TS not handled here"),

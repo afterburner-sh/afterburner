@@ -1,0 +1,13 @@
+# Standalone Cargo project: its own [workspace] root detaches it from the
+# enclosing afterburner workspace, so `cargo build --target wasm32-wasip1`
+# here resolves the `source/` module tree independently. Edition 2024.
+[workspace]
+
+[package]
+name = "rust-multimodule"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "rust-multimodule"
+path = "source/main.rs"

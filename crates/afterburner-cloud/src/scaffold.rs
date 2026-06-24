@@ -246,6 +246,7 @@ fn default_entry_for_lang(lang: &str) -> String {
         "rust" => "source/main.rs".into(),
         "go" | "golang" => "source/main.go".into(),
         "c" => "source/main.c".into(),
+        "cpp" | "c++" | "cxx" | "cc" => "source/main.cpp".into(),
         "python" | "py" => "source/main.py".into(),
         "ruby" | "rb" => "source/main.rb".into(),
         _ => "source/main.js".into(),
@@ -256,7 +257,18 @@ fn default_entry_for_lang(lang: &str) -> String {
 fn is_native_lang(lang: &str) -> bool {
     matches!(
         lang,
-        "rust" | "go" | "golang" | "c" | "python" | "py" | "ruby" | "rb"
+        "rust"
+            | "go"
+            | "golang"
+            | "c"
+            | "cpp"
+            | "c++"
+            | "cxx"
+            | "cc"
+            | "python"
+            | "py"
+            | "ruby"
+            | "rb"
     )
 }
 
@@ -272,8 +284,12 @@ fn native_main_stub(lang: &str, namespace: &str, name: &str) -> String {
              package main\n\nfunc main() {{\n\t// Compute 1+2+...+100\n\tsum := 0\n\tfor i := 1; i <= 100; i++ {{\n\t\tsum += i\n\t}}\n\tprintln(sum)\n}}\n"
         ),
         "c" => format!(
-            "/* {namespace}/{name}: an Afterburner package (C -> wasm32-wasi). */\n\
+            "/* {namespace}/{name}: an Afterburner package (C -> wasm32-wasip1). */\n\
              #include <stdio.h>\nint main(void) {{\n    int sum = 0;\n    for (int i = 1; i <= 100; i++) sum += i;\n    printf(\"%d\\n\", sum);\n    return 0;\n}}\n"
+        ),
+        "cpp" | "c++" | "cxx" | "cc" => format!(
+            "// {namespace}/{name}: an Afterburner package (C++ -> wasm32-wasip1).\n\
+             #include <cstdio>\nint main() {{\n    int sum = 0;\n    for (int i = 1; i <= 100; i++) sum += i;\n    std::printf(\"%d\\n\", sum);\n    return 0;\n}}\n"
         ),
         "python" | "py" => format!(
             "# {namespace}/{name}: an Afterburner package (Python -> wasm32-wasip1).\n\
@@ -289,12 +305,19 @@ fn native_main_stub(lang: &str, namespace: &str, name: &str) -> String {
 
 /// Optional build file (Cargo.toml or go.mod) for a native scaffold.
 /// Returns `(filename, content)` or `None`.
+///
+/// The Rust `Cargo.toml` declares an empty `[workspace]` table so the package
+/// is its own workspace root (it is detached from any enclosing Cargo
+/// workspace), uses edition 2024, and points `[[bin]]` at `source/main.rs`.
+/// Cargo resolves sibling modules (`mod foo;` -> `source/foo.rs` or
+/// `source/foo/mod.rs`) relative to that crate root, so a multi-module
+/// `source/` tree compiles with no extra configuration.
 fn native_build_file(lang: &str, name: &str) -> Option<(&'static str, String)> {
     match lang {
         "rust" => Some((
             "Cargo.toml",
             format!(
-                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"{name}\"\npath = \"source/main.rs\"\n"
+                "[workspace]\n\n[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"{name}\"\npath = \"source/main.rs\"\n"
             ),
         )),
         "go" | "golang" => Some(("go.mod", format!("module {name}\n\ngo 1.21\n"))),
@@ -615,6 +638,61 @@ mod tests {
         assert!(matches!(m.net, NetAccess::OutboundFull(None)));
         assert!(matches!(m.env, EnvAccess::Full));
         assert!(m.crypto && m.child_process);
+    }
+
+    #[test]
+    fn rust_scaffold_uses_edition_2024_and_detached_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = ScaffoldOpts {
+            name: Some("gadget".into()),
+            namespace: Some("acme".into()),
+            lang: Some("rust".into()),
+            ..Default::default()
+        };
+        let s = run_init(Some(dir.path()), &o, None).unwrap();
+        assert_eq!(s.lang, "rust");
+        assert_eq!(s.entry, "source/main.rs");
+        assert!(dir.path().join("source/main.rs").exists());
+        let cargo = std::fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+        assert!(
+            cargo.contains("edition = \"2024\""),
+            "rust scaffold must use edition 2024: {cargo}"
+        );
+        assert!(
+            cargo.contains("[workspace]"),
+            "rust scaffold must detach into its own workspace: {cargo}"
+        );
+        assert!(
+            cargo.contains("path = \"source/main.rs\""),
+            "rust [[bin]] must point at source/main.rs: {cargo}"
+        );
+        // afb.toml language + entry agree.
+        let pkg = LocalPackage::load(dir.path()).unwrap();
+        assert_eq!(pkg.manifest.package.language, "rust");
+        assert_eq!(pkg.manifest.package.entry, "source/main.rs");
+    }
+
+    #[test]
+    fn cpp_scaffold_writes_main_cpp_and_records_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = ScaffoldOpts {
+            name: Some("widget".into()),
+            namespace: Some("acme".into()),
+            lang: Some("cpp".into()),
+            ..Default::default()
+        };
+        let s = run_init(Some(dir.path()), &o, None).unwrap();
+        assert_eq!(s.lang, "cpp");
+        assert_eq!(s.entry, "source/main.cpp");
+        let src = std::fs::read_to_string(dir.path().join("source/main.cpp")).unwrap();
+        assert!(src.contains("int main"), "C++ stub must have main: {src}");
+        assert!(
+            src.contains("std::printf"),
+            "C++ stub must use the C++ standard library: {src}"
+        );
+        let pkg = LocalPackage::load(dir.path()).unwrap();
+        assert_eq!(pkg.manifest.package.language, "cpp");
+        assert_eq!(pkg.manifest.package.entry, "source/main.cpp");
     }
 
     #[test]

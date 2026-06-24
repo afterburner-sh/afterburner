@@ -1,0 +1,7 @@
+{
+  "fs": "None",
+  "net": "None",
+  "env": "None",
+  "crypto": false,
+  "child_process": false
+}

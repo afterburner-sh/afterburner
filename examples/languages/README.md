@@ -19,6 +19,34 @@ Every example computes the same thing and prints:
 | Python     | `python/` | `source/main.py`   |
 | Ruby       | `ruby/`   | `source/main.rb`   |
 
+## Multi-module packages
+
+A burn package in a native language is a real, multi-module project compiled by
+its own toolchain, not one file at a time. These examples each have several
+source files with cross-module calls, an exported (`pub` / capitalized / header)
+API, and at least one PRIVATE item that `main` cannot reach:
+
+| Language | Directory           | Modules                                                         | Prints                 |
+|----------|---------------------|-----------------------------------------------------------------|------------------------|
+| Rust     | `rust-multimodule/` | `source/main.rs` + `source/geometry.rs` + `source/stats/mod.rs` | `area=50 mean=20`      |
+| Go       | `go-multimodule/`   | `source/main.go` + package `source/geometry/`                   | `area=50 perimeter=30` |
+| C        | `c-multimodule/`    | `source/main.c` + `source/geometry.c` (+ `geometry.h`)          | `area=50 mean=20`      |
+| C++      | `cpp-multimodule/`  | `source/main.cpp` + `source/geometry.cpp` (+ `geometry.hpp`)    | `area=50 mean=20`      |
+
+Encapsulation per language: Rust `pub` vs a private `fn`; Go capitalized
+(exported) vs lowercase (package-private); C/C++ `static` / anonymous-namespace
+helpers (internal linkage) behind a public header. C and C++ compile ALL of
+`source/**` into one `wasm32-wasip1` WASI command module via the wasi-sdk
+(`clang`/`clang++ --target=wasm32-wasip1 --sysroot=...`); set `WASI_SDK_PATH` so
+`burn compile` can find it. The Rust example uses edition 2024. Build and run
+them exactly like the single-file examples:
+
+```sh
+burn compile examples/languages/rust-multimodule -o demo.afb
+burn run demo.afb
+# area=50 mean=20
+```
+
 ## Build and run
 
 Each example is built and run the same way:

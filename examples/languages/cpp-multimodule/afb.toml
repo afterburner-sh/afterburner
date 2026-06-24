@@ -1,0 +1,12 @@
+[format]
+version = "1.0"
+
+[package]
+name = "cpp-multimodule"
+namespace = "examples"
+version = "0.1.0"
+language = "cpp"
+entry = "source/main.cpp"
+
+[runtime]
+min = "0.1.0"

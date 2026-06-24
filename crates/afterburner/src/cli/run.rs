@@ -53,7 +53,7 @@ fn is_native_script(path: &Path) -> bool {
         .map(str::to_ascii_lowercase);
     matches!(
         ext.as_deref(),
-        Some("rs" | "go" | "c" | "py" | "pyw" | "rb")
+        Some("rs" | "go" | "c" | "cpp" | "cxx" | "cc" | "py" | "pyw" | "rb")
     )
 }
 
@@ -284,7 +284,8 @@ fn run_afb(afb_path: &Path, _user_args: &[String]) -> Result<()> {
 /// The extension declares the language (no afb.toml needed):
 /// `.rs` -> `rustc --target wasm32-wasip1`
 /// `.go` -> `GOOS=wasip1 GOARCH=wasm go build`
-/// `.c`  -> `clang --target=wasm32-wasi` (or `emcc`)
+/// `.c`  -> `clang --target=wasm32-wasip1 --sysroot=<wasi-sdk>` (WASI command)
+/// `.cpp` / `.cxx` / `.cc` -> `clang++ --target=wasm32-wasip1 --sysroot=<wasi-sdk>`
 /// `.py` / `.pyw` -> Pyodide embedder via `BURN_PYTHON_RUNTIME`
 /// `.rb` -> honest "runtime not available" error
 ///
