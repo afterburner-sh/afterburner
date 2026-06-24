@@ -4,8 +4,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Afterburner · Sandboxed drop-in JavaScript runtime</title>
-  <meta name="description" content="A sandboxed JavaScript runtime in Rust. Run real Node apps under per-call fuel, memory, and timeout caps. Every capability is gated by a Manifold. One crate to embed." />
+  <title>Afterburner · One sandboxed, deterministic WASM runtime for eight languages</title>
+  <meta name="description" content="Afterburner runs C, C++, Rust, Go, TypeScript, JavaScript, and Python in one WebAssembly runtime. Sealed by default, deterministic, fuel-metered. Compile a real cargo project, go module, or C/C++ project to wasm. A REPL for every language. A content-addressed package registry." />
   <link rel="canonical" href="https://afterburner.sh/" />
   <meta name="theme-color" content="#ff6118" />
   <link rel="icon" type="image/svg+xml" href="art/afterburner-square.svg" />
@@ -16,21 +16,21 @@
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Afterburner" />
   <meta property="og:url" content="https://afterburner.sh/" />
-  <meta property="og:title" content="Afterburner · Sandboxed drop-in JavaScript runtime" />
-  <meta property="og:description" content="A sandboxed JavaScript execution runtime, in Rust. Real Node apps under per-call fuel, memory, and timeout caps. Every capability gated by a Manifold." />
+  <meta property="og:title" content="Afterburner · One sandboxed, deterministic WASM runtime for eight languages" />
+  <meta property="og:description" content="C, C++, Rust, Go, TypeScript, JavaScript, and Python. Every language compiled to WebAssembly, in one runtime. Sealed by default, deterministic, fuel-metered. A REPL for every language." />
   <meta property="og:image" content="https://afterburner.sh/art/og-image.png" />
   <meta property="og:image:secure_url" content="https://afterburner.sh/art/og-image.png" />
   <meta property="og:image:type" content="image/png" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="634" />
-  <meta property="og:image:alt" content="Afterburner: a sandboxed JavaScript runtime in Rust" />
+  <meta property="og:image:alt" content="Afterburner: one sandboxed, deterministic WASM runtime for eight languages" />
 
   <!-- Twitter / X -->
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Afterburner · Sandboxed drop-in JavaScript runtime" />
-  <meta name="twitter:description" content="A sandboxed JavaScript execution runtime, in Rust. Real Node apps under fuel, memory, and timeout caps. Capabilities gated by a Manifold." />
+  <meta name="twitter:title" content="Afterburner · One sandboxed, deterministic WASM runtime for eight languages" />
+  <meta name="twitter:description" content="C, C++, Rust, Go, TypeScript, JavaScript, and Python. Every language compiled to WebAssembly, in one runtime. Sealed by default, deterministic." />
   <meta name="twitter:image" content="https://afterburner.sh/art/og-image.png" />
-  <meta name="twitter:image:alt" content="Afterburner: a sandboxed JavaScript runtime in Rust" />
+  <meta name="twitter:image:alt" content="Afterburner: one sandboxed, deterministic WASM runtime for eight languages" />
   <link rel="stylesheet" href="design-system.css?v=3" />
   <link rel="icon" type="image/png" href="art/afterburner-square.png" />
   <style>
@@ -188,7 +188,7 @@
       line-height: 1.55;
       color: var(--fg-muted);
       margin: 0 0 var(--spacing-20);
-      max-width: 540px;
+      max-width: 560px;
       font-weight: 400;
     }
 
@@ -493,17 +493,15 @@
       box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.05) inset;
     }
 
-    .logo-tile.ts {
-      background: #3178C6;
-    }
+    .logo-tile.ts { background: #3178C6; }       /* TypeScript blue */
+    .logo-tile.js { background: #F7DF1E; color: #1a1a1a; }  /* JavaScript yellow */
+    .logo-tile.rs { background: #DE4A1F; }       /* Rust orange-red */
+    .logo-tile.go { background: #00ADD8; }       /* Go cyan */
+    .logo-tile.c  { background: #5C6BC0; }       /* C indigo */
+    .logo-tile.cpp { background: #00599C; }      /* C++ blue */
+    .logo-tile.py { background: #3776AB; }       /* Python blue */
+    .logo-tile.rb { background: #CC342D; }       /* Ruby red */
 
-    /* TypeScript blue */
-    .logo-tile.js {
-      background: #F7DF1E;
-      color: #1a1a1a;
-    }
-
-    /* JavaScript yellow */
     .orbital__chip.logo-chip.ts {
       box-shadow: 0 6px 18px rgba(49, 120, 198, 0.28), 0 0 0 0.5px rgba(255, 255, 255, 0.7) inset;
     }
@@ -716,8 +714,8 @@
       font-size: 13px;
       line-height: 1.7;
       color: var(--code-fg);
-      height: 340px;
-      max-height: 340px;
+      height: 360px;
+      max-height: 360px;
       overflow-y: auto;
       overscroll-behavior: contain;
       scrollbar-width: thin;
@@ -796,6 +794,306 @@
       height: 5px;
       border-radius: 50%;
       background: var(--action);
+    }
+
+    /* ============= LANGUAGE SHOWCASE ============= */
+    .langs {
+      padding: calc(96px * var(--density, 1)) 0;
+      background: var(--bg-soft);
+      border-top: 1px solid var(--stroke);
+      border-bottom: 1px solid var(--stroke);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .langs::before {
+      content: '';
+      position: absolute;
+      inset: -10% auto auto -8%;
+      width: 55%;
+      height: 60%;
+      background: radial-gradient(circle, rgba(255, 122, 0, 0.14), rgba(255, 46, 84, 0.08) 38%, transparent 66%);
+      filter: blur(64px);
+      pointer-events: none;
+    }
+
+    .langs__head {
+      position: relative;
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 32px;
+      flex-wrap: wrap;
+      margin-bottom: 36px;
+    }
+
+    .langs__head h2 {
+      font-family: var(--font-display);
+      font-size: var(--text-heading-lg);
+      font-weight: 300;
+      letter-spacing: -0.025em;
+      line-height: 1.1;
+      margin: 8px 0 0;
+      color: var(--fg);
+      max-width: 640px;
+    }
+
+    .langs__head p {
+      color: var(--fg-muted);
+      font-size: 15px;
+      margin: 0;
+      max-width: 360px;
+      line-height: 1.55;
+    }
+
+    /* the 8 language picker tiles */
+    .langs__pick {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+
+    .langtile {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      padding: 14px 8px 12px;
+      background: var(--bg);
+      border: 1px solid var(--stroke);
+      border-radius: var(--radius-card);
+      cursor: pointer;
+      transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+      text-align: center;
+    }
+
+    .langtile:hover {
+      transform: translateY(-2px);
+      box-shadow: var(--shadow-hover);
+    }
+
+    .langtile.active {
+      border-color: var(--action);
+      box-shadow: 0 0 0 1px var(--action), var(--shadow-hover);
+    }
+
+    .langtile__badge {
+      display: inline-grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      border-radius: 7px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 800;
+      color: #fff;
+      letter-spacing: 0.01em;
+    }
+
+    .langtile__name {
+      font-family: var(--font-body);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--fg);
+      letter-spacing: -0.005em;
+    }
+
+    .langtile__tool {
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      color: var(--fg-subtle);
+      letter-spacing: 0.01em;
+    }
+
+    /* the active language panel: code + facts */
+    .langs__panel {
+      position: relative;
+      display: grid;
+      grid-template-columns: 1.25fr 1fr;
+      gap: 16px;
+      align-items: stretch;
+    }
+
+    .langs__code {
+      position: relative;
+      background: var(--code-bg);
+      border-radius: var(--radius-card);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: var(--shadow-soft), 0 0 0 1px var(--code-stroke), 0 32px 64px -32px var(--code-glow);
+      transition: box-shadow 0.4s ease;
+    }
+
+    .langs__code::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--code-glow), transparent);
+      opacity: 0;
+      transition: opacity 0.4s ease;
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    html[data-code-theme="inferno"] .langs__code::before,
+    html[data-code-theme="matrix"] .langs__code::before {
+      opacity: 1;
+      animation: code-ember 6s linear infinite;
+    }
+
+    .langs__chrome {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 16px;
+      background: var(--code-bg-2);
+      border-bottom: 1px solid var(--code-stroke);
+    }
+
+    .langs__chrome .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    .langs__chrome .dot:nth-child(1) { background: #ff5f56; }
+    .langs__chrome .dot:nth-child(2) { background: #ffbd2e; }
+    .langs__chrome .dot:nth-child(3) { background: #27c93f; }
+
+    .langs__chrome .file {
+      margin-left: 12px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.55);
+    }
+
+    .langs__codebody {
+      padding: 20px 22px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.7;
+      overflow-x: auto;
+      flex: 1;
+    }
+
+    .langs__codebody pre {
+      margin: 0;
+      color: var(--code-fg);
+    }
+
+    .langs__run {
+      border-top: 1px solid var(--code-stroke);
+      padding: 12px 22px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.7);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      background: rgba(0, 0, 0, 0.25);
+    }
+
+    .langs__run .cmd { color: var(--action-soft); }
+    .langs__run .arrow { color: var(--accent); }
+    .langs__run .out { color: var(--color-accent-green); }
+
+    /* facts column next to the code */
+    .langs__facts {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: var(--bg);
+      border: 1px solid var(--stroke);
+      border-radius: var(--radius-card);
+      padding: 24px;
+    }
+
+    .langs__facts h3 {
+      font-family: var(--font-display);
+      font-weight: 500;
+      font-size: 22px;
+      letter-spacing: -0.01em;
+      margin: 0;
+      color: var(--fg);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .langs__facts h3 .badge {
+      display: inline-grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 800;
+      color: #fff;
+    }
+
+    .langs__facts p {
+      margin: 0;
+      color: var(--fg-muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .langs__facts p code {
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      background: var(--bg-section);
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: var(--action);
+    }
+
+    .langs__caps {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: auto;
+    }
+
+    .langs__cap {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--fg);
+      background: var(--bg-section);
+      padding: 5px 10px;
+      border-radius: 999px;
+    }
+
+    .langs__cap.on::before {
+      content: '';
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--color-accent-green);
+      box-shadow: 0 0 0 2px rgba(129, 184, 26, 0.18);
+    }
+
+    .langs__cap.soon {
+      color: var(--fg-muted);
+      background: rgba(255, 97, 24, 0.08);
+    }
+
+    .langs__cap.soon::before {
+      content: '';
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--color-vibrant-orange);
+      box-shadow: 0 0 0 2px rgba(255, 97, 24, 0.2);
     }
 
     /* ============= FEATURES ============= */
@@ -998,17 +1296,9 @@
       border-radius: 50%;
     }
 
-    .demo__chrome .dot:nth-child(1) {
-      background: #ff5f56;
-    }
-
-    .demo__chrome .dot:nth-child(2) {
-      background: #ffbd2e;
-    }
-
-    .demo__chrome .dot:nth-child(3) {
-      background: #27c93f;
-    }
+    .demo__chrome .dot:nth-child(1) { background: #ff5f56; }
+    .demo__chrome .dot:nth-child(2) { background: #ffbd2e; }
+    .demo__chrome .dot:nth-child(3) { background: #27c93f; }
 
     .demo__chrome .file {
       margin-left: 12px;
@@ -1179,393 +1469,139 @@
       border-radius: 999px;
     }
 
-    /* ============= RUNS / WHAT WORKS ============= */
-    .runs {
+    /* ============= PACKAGES / MULTI-MODULE ============= */
+    .pkg {
       padding: calc(96px * var(--density, 1)) 0;
       background: var(--bg-soft);
       border-top: 1px solid var(--stroke);
     }
 
-    .runs__head {
-      margin-bottom: 48px;
-      max-width: 700px;
+    .pkg__head {
+      margin-bottom: 40px;
+      max-width: 720px;
     }
 
-    .runs__head h2 {
+    .pkg__head h2 {
       font-family: var(--font-display);
       font-size: var(--text-heading-lg);
       font-weight: 300;
       letter-spacing: -0.025em;
-      margin: 8px 0 0;
+      margin: 8px 0 16px;
       line-height: 1.1;
     }
 
-    .runs__grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 12px;
+    .pkg__head p {
+      font-size: 16px;
+      color: var(--fg-muted);
+      margin: 0;
+      line-height: 1.55;
     }
 
-    .runs__cell {
+    .pkg__grid {
+      display: grid;
+      grid-template-columns: 1.1fr 1fr;
+      gap: 16px;
+    }
+
+    .pkg__tree {
+      position: relative;
+      background: var(--code-bg);
+      border-radius: var(--radius-card);
+      overflow: hidden;
+      box-shadow: var(--shadow-soft), 0 0 0 1px var(--code-stroke), 0 32px 64px -32px var(--code-glow);
+    }
+
+    .pkg__tree .demo__chrome { background: var(--code-bg-2); }
+
+    .pkg__treebody {
+      padding: 20px 24px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.85;
+      color: var(--code-fg);
+      overflow-x: auto;
+    }
+
+    .pkg__treebody pre { margin: 0; }
+    .pkg__treebody .dir { color: var(--tok-kw); }
+    .pkg__treebody .file { color: var(--code-fg); }
+    .pkg__treebody .note { color: var(--tok-com); font-style: italic; }
+    .pkg__treebody .pub { color: var(--color-accent-green); }
+
+    .pkg__side {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .pkg__card {
       background: var(--bg);
       border: 1px solid var(--stroke);
       border-radius: var(--radius-card);
-      padding: 20px;
+      padding: 24px;
+    }
+
+    .pkg__card h3 {
+      font-family: var(--font-display);
+      font-weight: 400;
+      font-size: 20px;
+      letter-spacing: -0.01em;
+      margin: 0 0 8px;
+      color: var(--fg);
+    }
+
+    .pkg__card p {
+      margin: 0;
+      color: var(--fg-muted);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .pkg__card p code {
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      background: var(--bg-section);
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: var(--action);
+    }
+
+    .pkg__steps {
+      list-style: none;
+      margin: 14px 0 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .pkg__steps li {
       display: flex;
       gap: 12px;
       align-items: flex-start;
+      font-size: 13.5px;
+      color: var(--fg-muted);
+      line-height: 1.5;
     }
 
-    .runs__check {
-      width: 22px;
-      height: 22px;
-      border-radius: 50%;
+    .pkg__steps li code {
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      color: var(--action);
+    }
+
+    .pkg__steps .n {
       flex-shrink: 0;
-      background: var(--action);
-      color: white;
+      width: 20px;
+      height: 20px;
+      border-radius: 5px;
       display: grid;
       place-items: center;
-      font-size: 12px;
+      background: var(--action);
+      color: #fff;
+      font-family: var(--font-mono);
+      font-size: 11px;
       font-weight: 600;
-    }
-
-    .runs__cell h4 {
-      font-family: var(--font-display);
-      font-weight: 500;
-      font-size: 15px;
-      margin: 2px 0 4px;
-      letter-spacing: -0.005em;
-      color: var(--fg);
-    }
-
-    .runs__cell p {
-      margin: 0;
-      color: var(--fg-muted);
-      font-size: 13px;
-      line-height: 1.5;
-    }
-
-    .runs__cell code {
-      font-family: var(--font-mono);
-      color: var(--action);
-      background: rgba(83, 58, 253, 0.08);
-      padding: 1px 5px;
-      border-radius: 4px;
-      font-size: 12px;
-    }
-
-    /* ============= BENCH ============= */
-    .bench {
-      padding: calc(96px * var(--density, 1)) 0;
-      background: var(--bg-soft);
-      position: relative;
-      overflow: hidden;
-    }
-
-    .bench::before {
-      content: '';
-      position: absolute;
-      inset: -10% -10% auto auto;
-      width: 60%;
-      height: 65%;
-      background: radial-gradient(circle, rgba(255, 122, 0, 0.18), rgba(255, 46, 84, 0.10) 35%, transparent 65%);
-      filter: blur(60px);
-      pointer-events: none;
-    }
-
-    .bench__head {
-      margin-bottom: 40px;
-      max-width: 760px;
-      position: relative;
-    }
-
-    .bench__head h2 {
-      font-family: var(--font-display);
-      font-weight: 300;
-      font-size: 44px;
-      line-height: 1.1;
-      letter-spacing: -0.025em;
-      margin: 6px 0 16px;
-      color: var(--fg);
-    }
-
-    .bench__head p {
-      margin: 0;
-      color: var(--fg-muted);
-      font-size: 16px;
-      line-height: 1.5;
-      max-width: 640px;
-    }
-
-    .bench__card {
-      position: relative;
-      background: var(--bg);
-      border: 1px solid var(--stroke);
-      border-radius: 12px;
-      padding: 28px 32px 24px;
-      box-shadow: 0 1px 2px rgba(6, 27, 49, 0.04), 0 12px 36px rgba(6, 27, 49, 0.06);
-    }
-
-    .bench__tabs {
-      display: flex;
-      gap: 4px;
-      border-bottom: 1px solid var(--stroke);
-      margin-bottom: 28px;
-      padding-bottom: 0;
-      flex-wrap: wrap;
-    }
-
-    .bench__tab {
-      appearance: none;
-      background: none;
-      border: 0;
-      padding: 12px 18px;
-      font-family: var(--font-body);
-      font-size: 13.5px;
-      font-weight: 500;
-      color: var(--fg-muted);
-      cursor: pointer;
-      border-bottom: 2px solid transparent;
-      margin-bottom: -1px;
-      transition: color 0.15s ease, border-color 0.15s ease;
-      position: relative;
-      white-space: nowrap;
-    }
-
-    .bench__tab:hover {
-      color: var(--fg);
-    }
-
-    .bench__tab.active {
-      color: var(--action);
-      border-bottom-color: var(--action);
-    }
-
-    .bench__tab code {
-      font-family: var(--font-mono);
-      font-size: 12.5px;
-      color: inherit;
-      background: none;
-      padding: 0;
-    }
-
-    .bench__title {
-      font-family: var(--font-mono);
-      font-size: 13px;
-      color: var(--fg);
-      margin: 0 0 4px;
-      letter-spacing: -0.005em;
-    }
-
-    .bench__title code {
-      background: rgba(255, 97, 24, 0.08);
-      color: var(--action);
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-family: var(--font-mono);
-      font-size: 12.5px;
-    }
-
-    .bench__sub {
-      font-size: 12.5px;
-      color: var(--fg-subtle);
-      margin: 0 0 24px;
-      line-height: 1.45;
-    }
-
-    .bench__chart {
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-      position: relative;
-    }
-
-    .bench__chart::before {
-      content: '';
-      position: absolute;
-      inset: 0;
-      background-image:
-        linear-gradient(to right, var(--stroke) 1px, transparent 1px);
-      background-size: 25% 100%;
-      background-position: 0 0;
-      background-repeat: repeat-y;
-      opacity: 0.4;
-      pointer-events: none;
-      margin-left: 168px;
-      margin-right: 132px;
-    }
-
-    .bench__row {
-      display: grid;
-      grid-template-columns: 160px 1fr 132px;
-      gap: 16px;
-      align-items: center;
-      min-height: 36px;
-    }
-
-    .bench__name {
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--fg);
-      text-align: right;
-      line-height: 1.25;
-      letter-spacing: -0.003em;
-    }
-
-    .bench__name .est {
-      display: block;
-      font-size: 10.5px;
-      font-weight: 400;
-      color: var(--fg-subtle);
-      margin-top: 2px;
-    }
-
-    .bench__track {
-      position: relative;
-      height: 26px;
-      border-radius: 6px;
-      background: rgba(229, 237, 245, 0.55);
-      overflow: hidden;
-    }
-
-    .bench__fill {
-      position: absolute;
-      inset: 0 auto 0 0;
-      width: 0;
-      border-radius: 6px;
-      background: var(--color-stone-gray);
-      transition: width 1.4s cubic-bezier(0.2, 0.7, 0.15, 1);
-      will-change: width;
-    }
-    /* Tiny bars (e.g. ClickHouse exec UDF at <1% of the leader)
-       still get a visible nub so the row reads as a real entry,
-       not an empty cell. The number column is the source of truth. */
-    .bench__fill.armed { min-width: 14px; }
-
-    .bench__fill.brand {
-      background: linear-gradient(90deg,
-          rgb(255, 207, 94) 0%,
-          rgb(255, 122, 0) 38%,
-          rgb(255, 46, 84) 72%,
-          rgb(247, 45, 243) 100%);
-      background-size: 220% 100%;
-      background-position: 100% 0;
-      box-shadow:
-        0 0 0 1px rgba(255, 122, 0, 0.18),
-        0 6px 18px rgba(255, 97, 24, 0.28),
-        inset 0 1px 0 rgba(255, 255, 255, 0.35);
-      animation: bench-shimmer 4.5s linear infinite;
-    }
-
-    @keyframes bench-shimmer {
-      0% {
-        background-position: 100% 0;
-      }
-
-      100% {
-        background-position: -120% 0;
-      }
-    }
-
-    .bench__row .bench__fill:not(.brand) {
-      background: var(--color-stone-gray);
-    }
-
-    .bench__row .bench__fill.peer-warm {
-      background: linear-gradient(90deg, rgba(80, 97, 122, 0.55), rgba(80, 97, 122, 0.78));
-    }
-
-    .bench__row.lead .bench__name {
-      color: var(--action);
-      font-weight: 600;
-    }
-
-    .bench__value {
-      display: flex;
-      flex-direction: column;
-      gap: 3px;
-      align-items: flex-start;
-      font-family: var(--font-mono);
-      font-size: 13.5px;
-      font-weight: 500;
-      color: var(--fg);
-      text-align: left;
-      font-variant-numeric: tabular-nums;
-      letter-spacing: -0.005em;
-    }
-
-    .bench__row.lead .bench__value {
-      color: var(--action);
-      font-weight: 600;
-    }
-
-    .bench__note {
-      display: inline-block;
-      padding: 2px 8px;
-      font-family: var(--font-body);
-      font-size: 10.5px;
-      font-weight: 500;
-      color: var(--action);
-      background: rgba(255, 97, 24, 0.10);
-      border-radius: 999px;
-      letter-spacing: 0;
-      white-space: nowrap;
-    }
-
-    .bench__legend {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      margin-top: 22px;
-      padding-top: 18px;
-      border-top: 1px dashed var(--stroke-strong);
-      font-size: 12px;
-      color: var(--fg-subtle);
-      flex-wrap: wrap;
-    }
-
-    .bench__legend strong {
-      color: var(--fg);
-      font-weight: 500;
-    }
-
-    .bench__legend a {
-      color: var(--fg-muted);
-      text-decoration: underline;
-      text-decoration-color: var(--stroke-strong);
-      text-underline-offset: 3px;
-    }
-
-    .bench__legend a:hover {
-      color: var(--action);
-      text-decoration-color: var(--action);
-    }
-
-    .bench__context {
-      margin-top: 24px;
-      padding: 16px 20px;
-      background: var(--bg-section);
-      border-radius: 10px;
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 8px 18px;
-      font-size: 12.5px;
-      color: var(--fg-muted);
-      line-height: 1.5;
-    }
-
-    .bench__context strong {
-      color: var(--fg);
-      font-family: var(--font-mono);
-      font-weight: 500;
-      margin-left: 4px;
-    }
-
-    .bench__context .ctx-aside {
-      color: var(--fg-subtle);
-      font-style: italic;
     }
 
     /* ============= USE CASES ============= */
@@ -1674,7 +1710,7 @@
       font-size: var(--text-subheading);
       color: var(--fg-muted);
       margin: 0 auto 32px;
-      max-width: 540px;
+      max-width: 560px;
     }
 
     .cta__cmd {
@@ -1718,7 +1754,7 @@
       align-items: flex-start;
       margin: 0 0 28px;
       width: 100%;
-      max-width: 540px;
+      max-width: 560px;
     }
 
     .hero .installer__cmd {
@@ -1894,7 +1930,7 @@
       color: rgba(255, 255, 255, 0.65);
       font-size: 13px;
       line-height: 1.6;
-      max-width: 320px;
+      max-width: 340px;
       margin: 0;
     }
 
@@ -1940,12 +1976,13 @@
       .features__grid,
       .use__grid,
       .control__grid,
-      .runs__grid {
+      .langs__panel,
+      .pkg__grid {
         grid-template-columns: 1fr;
       }
 
-      .runs__grid {
-        grid-template-columns: repeat(2, 1fr);
+      .langs__pick {
+        grid-template-columns: repeat(4, 1fr);
       }
 
       .demo__layout {
@@ -2015,9 +2052,17 @@
       }
 
       .live-term__body {
-        height: 280px;
-        max-height: 280px;
+        height: 300px;
+        max-height: 300px;
         padding: 18px 18px;
+      }
+
+      .langs {
+        padding: 64px 0;
+      }
+
+      .langs__head h2 {
+        font-size: 32px;
       }
 
       .features {
@@ -2052,42 +2097,12 @@
         font-size: 15px;
       }
 
-      .runs {
+      .pkg {
         padding: 64px 0;
       }
 
-      .runs__head {
-        margin-bottom: 28px;
-      }
-
-      .runs__head h2 {
+      .pkg__head h2 {
         font-size: 32px;
-      }
-
-      .bench {
-        padding: 64px 0;
-      }
-
-      .bench__head {
-        margin-bottom: 28px;
-      }
-
-      .bench__head h2 {
-        font-size: 32px;
-      }
-
-      .bench__card {
-        padding: 22px 18px 18px;
-      }
-
-      .bench__chart::before {
-        margin-left: 132px;
-        margin-right: 116px;
-      }
-
-      .bench__row {
-        grid-template-columns: 124px 1fr 116px;
-        gap: 12px;
       }
 
       .use {
@@ -2114,8 +2129,8 @@
        follow the viewport, not the desktop layout. */
       .live__copy h2 br,
       .control__head h2 br,
-      .runs__head h2 br,
-      .bench__head h2 br,
+      .langs__head h2 br,
+      .pkg__head h2 br,
       .demo__head h2 br {
         display: none;
       }
@@ -2234,8 +2249,8 @@
       .live-term__body {
         padding: 14px 14px;
         font-size: 12px;
-        height: 240px;
-        max-height: 240px;
+        height: 260px;
+        max-height: 260px;
       }
 
       .marquee {
@@ -2244,6 +2259,29 @@
 
       .marquee__track {
         gap: 32px;
+      }
+
+      .langs {
+        padding: 48px 0;
+      }
+
+      .langs__head h2 {
+        font-size: 26px;
+      }
+
+      .langs__pick {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+      }
+
+      .langs__codebody {
+        padding: 16px 16px;
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      .langs__facts {
+        padding: 18px;
       }
 
       .features {
@@ -2323,62 +2361,17 @@
         word-break: break-all;
       }
 
-      .runs {
+      .pkg {
         padding: 48px 0;
       }
 
-      .runs__grid {
-        grid-template-columns: 1fr;
-      }
-
-      .runs__cell {
-        padding: 16px;
-      }
-
-      .bench {
-        padding: 48px 0;
-      }
-
-      .bench__head h2 {
+      .pkg__head h2 {
         font-size: 26px;
       }
 
-      .bench__card {
-        padding: 18px 14px 14px;
-      }
-
-      .bench__chart::before {
-        display: none;
-      }
-
-      .bench__row {
-        grid-template-columns: 1fr;
-        gap: 4px;
-        align-items: stretch;
-      }
-
-      .bench__name {
-        text-align: left;
+      .pkg__treebody {
+        padding: 16px 16px;
         font-size: 12px;
-      }
-
-      .bench__value {
-        text-align: right;
-        font-size: 12.5px;
-      }
-
-      .bench__track {
-        height: 22px;
-      }
-
-      .bench__legend {
-        font-size: 11.5px;
-        gap: 10px;
-      }
-
-      .bench__context {
-        font-size: 11.5px;
-        padding: 12px 14px;
       }
 
       .use {
@@ -2452,8 +2445,8 @@
         font-size: 26px;
       }
 
-      .runs__head h2 {
-        font-size: 26px;
+      .langs__head h2 {
+        font-size: 24px;
       }
 
       .cta h2 {
@@ -2471,6 +2464,7 @@
         height: 12px;
       }
     }
+
     /* ============= MOBILE OVERHAUL ============= */
     /* Grid/flex children may not shrink below their content's min width by
        default - one nowrap code line then pushes every sibling past the
@@ -2479,7 +2473,8 @@
     .live__inner>*,
     .demo__layout>*,
     .control__grid>*,
-    .runs__grid>*,
+    .langs__panel>*,
+    .pkg__grid>*,
     .use__grid>*,
     .features__grid>*,
     .footer__top>* {
@@ -2489,6 +2484,8 @@
     .installer__cmd,
     .live-term__body,
     .demo__code,
+    .langs__codebody,
+    .pkg__treebody,
     .demo__output {
       max-width: 100%;
       overflow-x: auto;
@@ -2616,20 +2613,18 @@
         <span>Afterburner</span>
       </a>
       <div class="nav__links" id="navLinks">
+        <a href="#languages">Languages</a>
+        <a href="#try">Try it</a>
         <a href="#features">Features</a>
-        <a href="#demo">Try it</a>
-        <a href="#control">Configure</a>
-        <a href="#runs">Features</a>
+        <a href="#packages">Packages</a>
         <a href="docs.html">Docs</a>
         <a href="https://registry.afterburner.sh">Registry</a>
-        <a class="nav__links-extra" href="https://nodejs.org/docs/latest-v26.x/api/">Node.js Docs</a>
         <a class="nav__links-extra" href="https://github.com/afterburner-sh/afterburner">GitHub</a>
       </div>
       <button class="nav__burger" type="button" aria-label="Menu" aria-expanded="false" aria-controls="navLinks">
         <span></span><span></span><span></span>
       </button>
       <div class="nav__cta">
-        <a href="https://nodejs.org/docs/latest-v26.x/api/" class="btn btn--ghost btn--sm">Node.js Docs</a>
         <a href="https://github.com/afterburner-sh/afterburner" class="btn btn--ghost btn--sm">GitHub</a>
         <a href="docs.html" class="btn btn--primary btn--sm btn--burn">
           <video class="burn-bg" src="art/burning.mp4" muted loop playsinline preload="metadata"></video>
@@ -2644,13 +2639,14 @@
     <div class="hero__bg"></div>
     <div class="container hero__inner">
       <div class="hero__copy">
+        <span class="hero__pill"><span class="dot"></span>C · C++ · Rust · Go · TypeScript · JavaScript · Python</span>
         <h1 class="hero__title">
-          Run real Node apps. On your terms. At <em>full burn</em>.
+          Eight languages. One <em>sandboxed</em> runtime.
         </h1>
         <p class="hero__sub">
-          A sandboxed JavaScript execution runtime, in Rust. Real Node apps under per-call fuel, memory, and timeout
-          caps. Every capability (<code>fs</code>, <code>net</code>, <code>env</code>, <code>child_process</code>) is
-          gated by a <code>Manifold</code>. Embed in Rust with one crate.
+          Afterburner is the polyglot WebAssembly runtime. Compile a real cargo project, go module, or C/C++ project to
+          wasm and run it next to your TypeScript and Python, all on one engine. Sealed by default, deterministic to the
+          last bit, fuel-metered. <code>burn run</code> a file, a package, or a <code>repl</code>.
         </p>
         <div class="installer">
           <h3 class="installer__label">Install Burn</h3>
@@ -2691,9 +2687,9 @@
               <path d="M5 12h14M13 5l7 7-7 7" />
             </svg>
           </a>
-          <a href="#demo" class="btn btn--outlined btn--burn">
+          <a href="#languages" class="btn btn--outlined btn--burn">
             <video class="burn-bg" src="art/burning.mp4" muted loop playsinline preload="metadata"></video>
-            <span class="btn-label">See it in action</span>
+            <span class="btn-label">See the languages</span>
           </a>
           <a href="https://registry.afterburner.sh" class="btn btn--primary btn--burn">
             <video class="burn-bg" src="art/burning.mp4" muted loop playsinline preload="metadata"></video>
@@ -2701,12 +2697,12 @@
               <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
               <path d="M3.27 6.96L12 12.01l8.73-5.05M12 22.08V12" />
             </svg>
-            <span class="btn-label">Afterburner Package Registry</span>
+            <span class="btn-label">Package Registry</span>
           </a>
         </div>
         <div class="hero__meta">
-          <span><b>node · npm · pnpm · yarn · bun</b> pass-through shim</span>
-          <span><b>Node 26</b> compat surface</span>
+          <span><b>Every language</b> compiles to WebAssembly</span>
+          <span><b>Sealed by default</b> · grant net / fs / env</span>
         </div>
       </div>
 
@@ -2745,18 +2741,18 @@
             <circle cx="270" cy="270" r="240" stroke="url(#orbFade)" stroke-width="40" opacity="0.6" />
           </svg>
 
-          <!-- orbiting chips (outer) -->
-          <div class="orbital__chip outer c1"><span class="d"></span>burn server.js</div>
-          <div class="orbital__chip outer c2"><span class="d g"></span>npm install</div>
+          <!-- orbiting language chips (outer) -->
+          <div class="orbital__chip outer c1 logo-chip"><span class="logo-tile rs">Rs</span>Rust</div>
+          <div class="orbital__chip outer c2 logo-chip"><span class="logo-tile go">Go</span>Go</div>
           <div class="orbital__chip outer c3 logo-chip ts"><span class="logo-tile ts">TS</span>TypeScript</div>
-          <div class="orbital__chip outer c4"><span class="d p"></span>--allow-net</div>
-          <div class="orbital__chip outer c5"><span class="d o"></span>app.ts</div>
+          <div class="orbital__chip outer c4 logo-chip"><span class="logo-tile c">C</span>C</div>
+          <div class="orbital__chip outer c5 logo-chip"><span class="logo-tile cpp">C++</span>C++</div>
           <div class="orbital__chip outer c6 logo-chip js"><span class="logo-tile js">JS</span>JavaScript</div>
 
           <!-- orbiting chips (inner, reversed) -->
-          <div class="orbital__chip inner c1"><span class="d g"></span>fetch()</div>
-          <div class="orbital__chip inner c2"><span class="d o"></span>fs.promises</div>
-          <div class="orbital__chip inner c3"><span class="d"></span>crypto</div>
+          <div class="orbital__chip inner c1 logo-chip"><span class="logo-tile py">Py</span>Python</div>
+          <div class="orbital__chip inner c2"><span class="d g"></span>compile -&gt; wasm</div>
+          <div class="orbital__chip inner c3"><span class="d p"></span>--sandbox</div>
 
           <!-- sonar pulses -->
           <div class="orbital__pulse"></div>
@@ -2772,26 +2768,62 @@
     </div>
   </section>
 
+  <!-- ============= MARQUEE ============= -->
+  <div class="marquee" aria-hidden="true">
+    <div class="marquee__track" id="marquee"></div>
+  </div>
+
+  <!-- ============= LANGUAGE SHOWCASE ============= -->
+  <section class="langs" id="languages">
+    <div class="container">
+      <div class="langs__head reveal">
+        <div>
+          <span class="kicker">// Eight first-class languages</span>
+          <h2>Write in the language you reach for.<br />Ship the same WebAssembly.</h2>
+        </div>
+        <p>Each one compiles to <code style="font-family: var(--font-mono); font-size: 0.86em;">wasm32-wasip1</code> with
+          its own native toolchain, and each one has a REPL. Pick a tab.</p>
+      </div>
+
+      <div class="langs__pick reveal" id="langPick" role="tablist" aria-label="Language"></div>
+
+      <div class="langs__panel reveal">
+        <div class="langs__code">
+          <div class="langs__chrome">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            <span class="file" id="langFile">main.rs</span>
+          </div>
+          <div class="langs__codebody">
+            <pre id="langCode"></pre>
+          </div>
+          <div class="langs__run" id="langRun"></div>
+        </div>
+        <div class="langs__facts">
+          <h3><span class="badge" id="langBadge">Rs</span><span id="langName">Rust</span></h3>
+          <p id="langBlurb"></p>
+          <div class="langs__caps" id="langCaps"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ============= LIVE TERMINAL ============= -->
-  <section class="live">
+  <section class="live" id="try">
     <div class="container">
       <div class="live__inner reveal">
         <div class="live__copy">
           <span class="kicker">// Live demo</span>
-          <h2>Watch <em>burn</em> stand up<br />a real Node app.</h2>
-          <p>Same commands you already know. <code>burn server.js</code>, <code>burn npm install</code>,
-            <code>burn app.ts</code>. They run through the Rust runtime. Real ports, real sockets, TypeScript stripped
-            on the way in.
-          </p>
-          <p>When you need isolation: <code>--sandbox</code> seals the manifold; <code>--allow-fs</code>,
-            <code>--allow-net</code>, <code>--allow-env</code> grant exactly the surface a script needs. Deny by
-            default.
-          </p>
+          <h2>One binary runs<br />all of <em>them</em>.</h2>
+          <p>Point <code>burn</code> at a source file and it picks the toolchain, compiles to wasm, and runs the module,
+            in C, Rust, Go, TypeScript, or Python. Point it at a folder and it builds the whole package.</p>
+          <p>Need a sandbox? <code>--sandbox</code> seals every capability; <code>--allow-fs</code>,
+            <code>--allow-net</code>, <code>--allow-env</code> grant exactly the surface a program needs. Same run, same
+            bytes, every time.</p>
         </div>
         <div class="live-term">
           <div class="live-term__bar">
             <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-            <span class="name">~/my-app · zsh</span>
+            <span class="name">~/polyglot · zsh</span>
           </div>
           <div class="live-term__body" id="liveTerm"></div>
         </div>
@@ -2799,97 +2831,80 @@
     </div>
   </section>
 
-  <!-- ============= MARQUEE ============= -->
-  <div class="marquee" aria-hidden="true">
-    <div class="marquee__track" id="marquee"></div>
-  </div>
-
   <!-- ============= FEATURES ============= -->
   <section class="features" id="features">
     <div class="container">
       <div class="section-head reveal">
         <div>
           <span class="kicker">// What's in the box</span>
-          <h2>Everything you reach for in Node.<br /> None of the surprises.</h2>
+          <h2>A runtime that runs anything,<br /> and trusts nothing.</h2>
         </div>
         <p class="muted" style="max-width: 360px; margin: 0; font-size: 15px;">
-          Built to drop into your existing JavaScript workflow, and then give you the controls Node never offered.
+          WebAssembly is the common substrate. Afterburner adds the toolchains, the sandbox, the determinism, and the
+          packaging on top.
         </p>
       </div>
 
       <div class="features__grid">
         <div class="feat reveal">
           <div class="feat__num">01</div>
-          <h3>Real Node apps, unmodified</h3>
-          <p>Express servers, Postgres clients, Redis pubsub, MongoDB drivers. <code>burn server.js</code> binds ports,
-            opens raw TCP, terminates TLS, drives the event loop, handles SIGINT cleanly.</p>
+          <h3>Eight languages, one engine</h3>
+          <p>C, C++, Rust, Go, TypeScript, JavaScript, and Python all compile to WebAssembly and run side by side.
+            One <code>burn</code> binary, one execution model, no per-language runtime to install.</p>
         </div>
         <div class="feat reveal">
           <div class="feat__num">02</div>
-          <h3>Capability gates via Manifold</h3>
-          <p><code>fs</code>, <code>net</code>, <code>env</code>, <code>crypto</code>, <code>child_process</code>: each
-            is a field on the <code>Manifold</code>. Library default is <code>sealed()</code>. Grant only the surface a
-            script needs; <code>require</code> for anything else throws clearly.</p>
+          <h3>Native multi-module packages</h3>
+          <p>A real cargo project, a go module with sub-packages, a multi-file C/C++ project. Cross-module calls and
+            language-native encapsulation (<code>pub</code>, exported caps, <code>static</code>), not one file dressed
+            up.</p>
         </div>
         <div class="feat reveal">
           <div class="feat__num">03</div>
-          <h3>TypeScript &amp; ESM, no toolchain</h3>
-          <p><code>burn app.ts</code> just runs. <code>.ts</code>, <code>.mts</code>, <code>.cts</code> stripped via
-            oxc; ESM <code>import</code>/<code>export</code> transformed to CommonJS at load. No <code>tsc</code>, no
-            bundler.</p>
+          <h3>A REPL for every language</h3>
+          <p><code>burn repl --lang rust</code>, <code>go</code>, <code>c</code>, <code>cpp</code>, <code>ts</code>, or
+            <code>js</code>. The compiled languages run evcxr-style: each line recompiles, session state carries
+            forward. Toolchain errors are clear, never a crash.</p>
         </div>
         <div class="feat reveal">
           <div class="feat__num">04</div>
-          <h3>Adaptive ignition (Flying Start)</h3>
-          <p>Sub-millisecond startup on the first call, fully sandboxed from the second. Same script ID across both. Pin
-            a single mode if you'd rather.</p>
+          <h3>Deterministic by construction</h3>
+          <p>Canonical NaN, relaxed-SIMD pinned to one result, threads off, fuel-metered. The same module returns the
+            same bytes on an AVX-512 server and an Arm laptop. Reproducible runs, no flake.</p>
         </div>
         <div class="feat reveal">
           <div class="feat__num">05</div>
-          <h3>Limits you actually set</h3>
-          <p><code>.fuel(N)</code>, <code>.memory_bytes(N)</code>, <code>.timeout_ms(N)</code>: three independent caps,
-            all enforceable per call. Wall-clock backstops I/O that doesn't burn fuel. Runaway scripts lose their return
-            value, not your host.</p>
+          <h3>Sealed by default</h3>
+          <p>A program starts with no filesystem, no network, no environment. Grant exactly what it needs with
+            <code>--allow-fs</code>, <code>--allow-net</code>, <code>--allow-env</code>. Every capability is denied
+            until you say otherwise.</p>
         </div>
         <div class="feat reveal">
           <div class="feat__num">06</div>
-          <h3>Workers + lock-free scheduler</h3>
-          <p><code>worker_threads</code> ships (process-per-worker, length-prefixed JSON IPC). <code>.threaded(N)</code>
-            turns one instance into a steal-when-idle pool with token-bucket admission. Capability inheritance never
-            widens.</p>
+          <h3>Fuel, memory, and time caps</h3>
+          <p>A deterministic instruction budget bounds every run; a hard memory cap and a wall-clock timeout back it up.
+            An infinite loop surfaces as <code>FuelExhausted</code>, not a hung host.</p>
         </div>
         <div class="feat reveal">
           <div class="feat__num">07</div>
-          <h3>Native-addon shadows</h3>
-          <p><code>require('bcrypt')</code>, <code>argon2</code>, <code>jsonwebtoken</code>, <code>sqlite3</code>,
-            <code>sharp</code> all resolve to pure-Rust hosts. Same npm API, no <code>.node</code> binary.
-          </p>
+          <h3>The .afb package format</h3>
+          <p>Content-addressed by SHA-256, byte-reproducible (sorted entries, zeroed timestamps, zstd). A package
+            carries its manifest, its sealed capability manifold, its source, and an optional precompiled
+            <code>main.wasm</code>.</p>
         </div>
         <div class="feat reveal">
           <div class="feat__num">08</div>
-          <h3>WebAssembly modules in JS</h3>
-          <p><code>WebAssembly.compile</code> / <code>instantiate</code> / <code>Module</code> / <code>Instance</code> /
-            <code>Memory</code>. SQL.js, @jsquash, libheif-js, and other portable modules load directly.
-          </p>
+          <h3>A package registry</h3>
+          <p><code>burn publish</code>, <code>burn install</code>, <code>burn add</code>, <code>burn search</code>.
+            Dependencies pin by digest in <code>afb.toml</code>; installs land in a shared content-addressed cache.
+            Reproducible from the same digest, every time.</p>
         </div>
         <div class="feat reveal">
           <div class="feat__num">09</div>
-          <h3>Embed in Rust with one crate</h3>
-          <p><code>cargo add afterburner</code>. <code>Afterburner::builder()</code> → <code>.register(src)</code> →
-            <code>.run(id, json)</code>. Pluggable <code>BurnCacheBackend</code> (Redis / S3 / SQLite); pluggable
-            <code>StateStore</code>; <code>HostContext</code> hooks for <code>log</code> / <code>emit_row</code> /
-            <code>get_env</code>.
-          </p>
-        </div>
-        <div class="feat reveal">
-          <div class="feat__num">10</div>
-          <h3>Cargo-style dependencies</h3>
-          <p>Declare registry packages, local paths, or git repos in <code>afb.toml [dependencies]</code>. <code>burn compile</code> resolves the transitive closure per source, digest-pins every entry, and links them into one self-contained module. No copy-paste, no manual fetch.</p>
-        </div>
-        <div class="feat reveal">
-          <div class="feat__num">11</div>
-          <h3>Precompiled, source-optional packaging</h3>
-          <p><code>burn compile</code> ahead-of-time compiles your package to <code>precompiled/wasm32-wasip1/main.wasm</code>: no per-call JS compile, cold starts stay sub-millisecond. <code>burn package --wasm-only</code> ships the WASM without source; the default interactive mode asks which you want.</p>
+          <h3>Run a file, a package, or a REPL</h3>
+          <p><code>burn run app.go</code>, <code>burn run ./my-pkg</code>, <code>burn repl --lang c</code>. Feed JSON
+            through <code>burn thrust</code> for UDF mode, <code>burn check</code> to compile without running,
+            <code>burn bench</code> to measure.</p>
         </div>
       </div>
     </div>
@@ -2900,37 +2915,33 @@
     <div class="container">
       <div class="demo__head reveal">
         <div>
-          <span class="kicker">// One binary. Five workflows.</span>
-          <h2>Whatever you'd run in Node, you can run with <em class="grad-text">burn</em>.</h2>
+          <span class="kicker">// One binary. Every workflow.</span>
+          <h2>Whatever the language, the command is <em class="grad-text">burn</em>.</h2>
         </div>
-        <p>Drop the <code
-            style="font-family: var(--font-mono); color: var(--action); background: rgba(83,58,253,0.08); padding: 1px 6px; border-radius: 4px;">burn</code>
-          binary on your PATH and your existing scripts and toolchains keep working, with controls Node doesn't have.
-        </p>
+        <p>Run a single file, build a multi-module package, open a REPL, or seal the sandbox. The same controls span
+          every language.</p>
       </div>
 
       <div class="demo__layout reveal">
         <div class="demo__tabs" role="tablist">
-          <button class="demo__tab active" data-tab="0"><span class="num">1</span><span>HTTP server<span
-                class="sub">burn server.js</span></span></button>
-          <button class="demo__tab" data-tab="1"><span class="num">2</span><span>Package-mgr pass-through<span
-                class="sub">burn npm install …</span></span></button>
-          <button class="demo__tab" data-tab="2"><span class="num">3</span><span>TypeScript<span class="sub">burn
-                app.ts</span></span></button>
-          <button class="demo__tab" data-tab="3"><span class="num">4</span><span>Postgres + TLS<span class="sub">net
-                &middot; tls &middot; pg</span></span></button>
-          <button class="demo__tab" data-tab="4"><span class="num">5</span><span>Workers<span
-                class="sub">worker_threads</span></span></button>
-          <button class="demo__tab" data-tab="5"><span class="num">6</span><span>Sandboxed<span class="sub">--allow-fs /
+          <button class="demo__tab active" data-tab="0"><span class="num">1</span><span>Run a file<span
+                class="sub">burn run main.rs</span></span></button>
+          <button class="demo__tab" data-tab="1"><span class="num">2</span><span>Build a package<span
+                class="sub">burn run ./my-pkg</span></span></button>
+          <button class="demo__tab" data-tab="2"><span class="num">3</span><span>Open a REPL<span class="sub">burn repl
+                --lang go</span></span></button>
+          <button class="demo__tab" data-tab="3"><span class="num">4</span><span>Sandbox it<span class="sub">--sandbox
                 --allow-net</span></span></button>
-          <button class="demo__tab" data-tab="6"><span class="num">7</span><span>Embedded in Rust<span class="sub">use
-                afterburner</span></span></button>
+          <button class="demo__tab" data-tab="4"><span class="num">5</span><span>UDF mode<span class="sub">burn thrust
+                transform.ts</span></span></button>
+          <button class="demo__tab" data-tab="5"><span class="num">6</span><span>Publish &amp; install<span
+                class="sub">burn publish · install</span></span></button>
         </div>
 
         <div class="demo__panel">
           <div class="demo__chrome">
             <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-            <span class="file" id="demoFile">server.js</span>
+            <span class="file" id="demoFile">shell</span>
           </div>
           <div class="demo__code">
             <pre id="demoCode"></pre>
@@ -2944,27 +2955,86 @@
     </div>
   </section>
 
+  <!-- ============= PACKAGES / MULTI-MODULE ============= -->
+  <section class="pkg" id="packages">
+    <div class="container">
+      <div class="pkg__head reveal">
+        <span class="kicker">// Real packages, not single files</span>
+        <h2>A cargo project. A go module.<br />A C/C++ project. <em class="grad-text">Compiled whole.</em></h2>
+        <p>Afterburner packages are native multi-module projects built by their own toolchain. Exported APIs over
+          private helpers, cross-module calls, the encapsulation each language already gives you, compiled into one
+          self-contained WebAssembly module.</p>
+      </div>
+
+      <div class="pkg__grid reveal">
+        <div class="pkg__tree">
+          <div class="demo__chrome">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            <span class="file">rust-multimodule/</span>
+          </div>
+          <div class="pkg__treebody">
+<pre><span class="file">afb.toml</span>            <span class="note"># name, namespace, version, entry</span>
+<span class="file">manifold.json</span>       <span class="note"># sealed capability set</span>
+<span class="file">Cargo.toml</span>
+<span class="dir">source/</span>
+├─ <span class="file">main.rs</span>          <span class="note"># calls across both modules</span>
+├─ <span class="file">geometry.rs</span>      <span class="pub">pub fn</span> rectangle_area(..)
+│                    <span class="note"># private fn scale(..) stays internal</span>
+└─ <span class="dir">stats/</span>
+   └─ <span class="file">mod.rs</span>        <span class="pub">pub fn</span> mean(..)  <span class="note"># sum(..) private</span>
+
+<span class="note"># Go: capitalized identifiers exported across packages.
+# C/C++: all of source/** linked into one WASI command,
+#        static helpers encapsulated behind the header.</span></pre>
+          </div>
+        </div>
+
+        <div class="pkg__side">
+          <div class="pkg__card">
+            <h3>Build it, run it, ship it</h3>
+            <p>One workflow, every language. Scaffold, build, package, publish.</p>
+            <ol class="pkg__steps">
+              <li><span class="n">1</span><span><code>burn new geo --lang rust</code> scaffolds a project with a sealed
+                  manifold.</span></li>
+              <li><span class="n">2</span><span><code>burn run ./geo</code> compiles the whole package and runs the
+                  entry.</span></li>
+              <li><span class="n">3</span><span><code>burn package ./geo -o geo.afb</code> builds a content-addressed
+                  <code>.afb</code>, source plus optional precompiled wasm.</span></li>
+              <li><span class="n">4</span><span><code>burn publish geo.afb</code> uploads it; <code>burn install
+                    geo</code> pulls it back, digest-pinned.</span></li>
+            </ol>
+          </div>
+          <div class="pkg__card">
+            <h3>Dependencies pin by digest</h3>
+            <p>Declare packages in <code>afb.toml</code> under <code>[dependencies]</code>, pinned to a
+              <code>sha256:</code> digest. <code>burn add</code> writes the pin; installs resolve and land in a shared
+              content-addressed cache, so the same digest always rebuilds the same bytes.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ============= CONTROL ============= -->
   <section class="control" id="control">
     <div class="container">
       <div class="control__head reveal">
         <span class="kicker">// You're in control</span>
         <h2>Every limit, every gate,<br /> configurable.</h2>
-        <p>Nothing is hardcoded. Set the budgets that match your workload. Default-deny capabilities; grant exactly the
-          surface a script needs. Every knob is exposed on the CLI <em>and</em> the embedded API.</p>
+        <p>Nothing is hardcoded. Set the budgets that match your workload. Deny every capability by default, then grant
+          exactly the surface a program needs. Every knob is on the CLI <em>and</em> in the package manifold.</p>
       </div>
 
       <div class="control__grid reveal">
         <div class="knob">
           <div class="knob__row">
             <span class="knob__label">Fuel</span>
-            <span class="knob__tag">configurable</span>
+            <span class="knob__tag">deterministic</span>
           </div>
-          <div class="knob__name">Operations budget</div>
-          <p class="knob__desc">A deterministic op counter. Tight loops trip the gauge regardless of host speed. Set it
-            to whatever bounds your workload, or disable it entirely.</p>
-          <div class="knob__field"><span class="dim">.fuel(</span><span class="val">your_budget</span><span
-              class="dim">)</span></div>
+          <div class="knob__name">Instruction budget</div>
+          <p class="knob__desc">A deterministic op counter bounds every run. A tight loop trips the gauge regardless of
+            host speed and surfaces as <code>FuelExhausted</code>. Set the budget, or disable it.</p>
+          <div class="knob__field"><span class="dim">--fuel </span><span class="val">your_budget</span></div>
           <div class="knob__vis">
             <div class="knob__vis__bar" id="fuelBar" style="width: 60%;"></div>
           </div>
@@ -2975,12 +3045,10 @@
             <span class="knob__label">Memory</span>
             <span class="knob__tag">configurable</span>
           </div>
-          <div class="knob__name">Per-script memory cap</div>
-          <p class="knob__desc">Hard cap enforced per script. Over-budget allocations surface as JS-side
-            <code>OutOfMemory</code>. Your host never gets OOM-killed.
-          </p>
-          <div class="knob__field"><span class="dim">.memory_bytes(</span><span class="val">your_cap</span><span
-              class="dim">)</span></div>
+          <div class="knob__name">Per-run memory cap</div>
+          <p class="knob__desc">A hard cap on linear memory, enforced per run. Over-budget growth fails inside the
+            module. Your host never gets OOM-killed by a misbehaving guest.</p>
+          <div class="knob__field"><span class="dim">--memory </span><span class="val">your_cap</span></div>
           <div class="knob__vis">
             <div class="knob__vis__bar" id="memBar" style="width: 40%;"></div>
           </div>
@@ -2992,10 +3060,9 @@
             <span class="knob__tag">configurable</span>
           </div>
           <div class="knob__name">Wall-clock kill switch</div>
-          <p class="knob__desc">Backstop for I/O that doesn't burn fuel. Independent of fuel and memory. Set it in
-            milliseconds, seconds, minutes, whatever fits.</p>
-          <div class="knob__field"><span class="dim">.timeout_ms(</span><span class="val">your_deadline</span><span
-              class="dim">)</span></div>
+          <p class="knob__desc">A backstop for work that doesn't burn fuel. Independent of fuel and memory. Set it in
+            milliseconds, whatever fits the workload.</p>
+          <div class="knob__field"><span class="dim">--timeout </span><span class="val">your_deadline</span></div>
           <div class="knob__vis">
             <div class="knob__vis__bar" id="timeBar" style="width: 75%;"></div>
           </div>
@@ -3003,14 +3070,14 @@
 
         <div class="knob">
           <div class="knob__row">
-            <span class="knob__label">Workers</span>
-            <span class="knob__tag">configurable</span>
+            <span class="knob__label">Determinism</span>
+            <span class="knob__tag">always on</span>
           </div>
-          <div class="knob__name">Scheduler width</div>
-          <p class="knob__desc">From single-threaded to as many workers as your machine has cores. Bounded queues and
-            work-stealing keep cores busy without thrashing locality.</p>
-          <div class="knob__field"><span class="dim">.threaded(</span><span class="val">N</span><span
-              class="dim">)</span></div>
+          <div class="knob__name">Reproducible execution</div>
+          <p class="knob__desc">Canonical NaN, relaxed-SIMD pinned to one result, threads disabled. The same module
+            yields byte-identical output across host CPUs. Replay a run and get the same answer.</p>
+          <div class="knob__field"><span class="dim">canonical NaN · </span><span class="val">threads off</span><span
+              class="dim"> · pinned SIMD</span></div>
           <div class="knob__vis">
             <div class="knob__vis__bar" id="wkBar" style="width: 50%;"></div>
           </div>
@@ -3022,9 +3089,8 @@
             <span class="knob__tag">scoped</span>
           </div>
           <div class="knob__name">Read &amp; write roots</div>
-          <p class="knob__desc">Whitelist exact paths. <code>FsAccess::None</code>, <code>ReadOnly(roots)</code>, or
-            <code>ReadWrite(roots)</code>. Nothing you don't grant.
-          </p>
+          <p class="knob__desc">Sealed until granted. Whitelist exact roots, read-only or read-write. A program reaches
+            only the paths you list, and nothing else.</p>
           <div class="knob__field"><span class="flag">--allow-fs</span><span class="dim">=</span><span
               class="arg">./data,/tmp/jobs</span></div>
         </div>
@@ -3035,168 +3101,11 @@
             <span class="knob__tag">scoped</span>
           </div>
           <div class="knob__name">Hostname allow-list</div>
-          <p class="knob__desc">Outbound HTTP and DNS gated by hostname. Wildcards supported. The script can reach
-            exactly the services on your list, and nothing else.</p>
+          <p class="knob__desc">Outbound access gated by host. Use <code>host</code>, <code>host:port</code>,
+            <code>*.suffix</code>, or <code>*</code>. The program reaches exactly the services you allow.</p>
           <div class="knob__field"><span class="flag">--allow-net</span><span class="dim">=</span><span
               class="arg">api.example.com,*.trusted.io</span></div>
         </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============= RUNS / WHAT WORKS ============= -->
-  <section class="runs" id="runs">
-    <div class="container">
-      <div class="runs__head reveal"
-        style="display: flex; align-items: flex-end; justify-content: space-between; gap: 32px; flex-wrap: wrap; max-width: none;">
-        <div style="max-width: 700px;">
-          <span class="kicker">// Features</span>
-          <h2 style="margin-top: 8px;">Now, your Node app<br />runs on the <em class="grad-text">runtime you want...</em></h2>
-        </div>
-        <p class="muted" style="margin: 0; text-align: right; font-size: 15px; max-width: 420px;">Node 26 surface,
-          backed by Rust host functions.</p>
-      </div>
-      <div class="runs__grid reveal">
-        <div class="runs__cell">
-          <div class="runs__check">✓</div>
-          <div>
-            <h4>HTTP servers</h4>
-            <p><code>http.createServer().listen(...)</code>. Express. Real ports. Real sockets. Clean shutdown on
-              SIGINT.</p>
-          </div>
-        </div>
-        <div class="runs__cell">
-          <div class="runs__check">✓</div>
-          <div>
-            <h4>TypeScript</h4>
-            <p><code>.ts</code>, <code>.mts</code>, <code>.cts</code>. Strip types, run. No <code>tsc</code> required
-              for plain TypeScript.</p>
-          </div>
-        </div>
-        <div class="runs__cell">
-          <div class="runs__check">✓</div>
-          <div>
-            <h4>ES modules</h4>
-            <p><code>import</code>, <code>export</code>, named exports, re-exports. Translated transparently.</p>
-          </div>
-        </div>
-        <div class="runs__cell">
-          <div class="runs__check">✓</div>
-          <div>
-            <h4>node_modules</h4>
-            <p>CommonJS <code>require('pkg')</code> walks <code>node_modules</code>. <code>package.json</code>
-              resolution. Auto JSON parsing.</p>
-          </div>
-        </div>
-        <div class="runs__cell">
-          <div class="runs__check">✓</div>
-          <div>
-            <h4>Package managers</h4>
-            <p><code>burn npm install</code> and <code>burn bun add</code> both run end-to-end. <code>pnpm</code> /
-              <code>yarn</code> ride the npm path with corepack support landing.
-            </p>
-          </div>
-        </div>
-        <div class="runs__cell">
-          <div class="runs__check">✓</div>
-          <div>
-            <h4>Raw TCP &amp; TLS sockets</h4>
-            <p><code>net.connect</code>, <code>net.createServer</code>, <code>tls.connect</code>,
-              <code>tls.createServer</code>. SNI multi-cert routing, ALPN, custom CA roots. Database drivers like
-              <code>pg</code>, <code>redis</code>, <code>mongodb</code> just connect.
-            </p>
-          </div>
-        </div>
-        <div class="runs__cell">
-          <div class="runs__check">✓</div>
-          <div>
-            <h4>DNS resolvers</h4>
-            <p><code>resolve4</code>, <code>resolve6</code>, <code>resolveMx</code>, <code>resolveTxt</code>,
-              <code>resolveCname</code>, <code>resolveNs</code>, <code>reverse</code>. Callback and
-              <code>dns/promises</code> shapes both ship.
-            </p>
-          </div>
-        </div>
-        <div class="runs__cell">
-          <div class="runs__check">✓</div>
-          <div>
-            <h4>Worker threads</h4>
-            <p><code>new Worker('./bg.js', { workerData })</code> with <code>postMessage</code> round-trips. Capability
-              inheritance never widens. Lock-free runtime.</p>
-          </div>
-        </div>
-        <div class="runs__cell">
-          <div class="runs__check">✓</div>
-          <div>
-            <h4>Native-addon shadows</h4>
-            <p><code>bcrypt</code>, <code>argon2</code>, <code>jsonwebtoken</code>, <code>sqlite3</code>,
-              <code>sharp</code>. Pure-Rust under the hood, same npm API. SQLite statically linked. Sharp via
-              SIMD-accelerated <code>image</code>+<code>fast_image_resize</code>.
-            </p>
-          </div>
-        </div>
-        <div class="runs__cell">
-          <div class="runs__check">✓</div>
-          <div>
-            <h4>WebAssembly modules</h4>
-            <p><code>WebAssembly.compile</code> / <code>instantiate</code> / <code>Module</code> / <code>Instance</code>
-              / <code>Memory</code>. SQL.js, @jsquash, libheif-js, and other portable modules load directly.</p>
-          </div>
-        </div>
-        <div class="runs__cell">
-          <div class="runs__check">✓</div>
-          <div>
-            <h4>Crypto, zlib, streams</h4>
-            <p>SHA-1/256/384/512, HMAC, AES-GCM/CBC, PBKDF2, scrypt, RSA + ECDSA sign/verify. Streaming hashes. The
-              whole shape, intact.</p>
-          </div>
-        </div>
-        <div class="runs__cell">
-          <div class="runs__check">✓</div>
-          <div>
-            <h4>Embedded in Rust</h4>
-            <p><code>cargo add afterburner</code>. One builder. <code>register</code>, <code>run</code>, done. Or wrap
-              an N-worker scheduler around it.</p>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============= BENCH ============= -->
-  <section class="bench" id="bench">
-    <div class="container">
-      <div class="bench__head reveal">
-        <span class="kicker">// Per-core throughput</span>
-        <h2>Sandboxed JS UDFs over big data, <br /><em class="grad-text">at the speed limit.</em></h2>
-        <p>One JavaScript function over a billion rows. Per CPU core. Compared head-to-head against the published
-          in-process and sandboxed JS-UDF tier - Postgres PL/V8 and Snowflake JS UDFs, the apples-to-apples peers.</p>
-      </div>
-
-      <div class="bench__card reveal" id="benchCard">
-        <div class="bench__tabs" role="tablist">
-          <button class="bench__tab active" data-bench="light" role="tab" aria-selected="true">Compute-light</button>
-          <button class="bench__tab" data-bench="utf8" role="tab" aria-selected="false">Utf8 strings</button>
-          <button class="bench__tab" data-bench="heavy" role="tab" aria-selected="false">32-col aggregate</button>
-        </div>
-
-        <p class="bench__title" id="benchTitle"></p>
-        <p class="bench__sub" id="benchSub"></p>
-
-        <div class="bench__chart" id="benchChart"></div>
-
-        <div class="bench__legend">
-          <span><strong>rows / second / core</strong> &nbsp;·&nbsp; Intel Xeon W-2295, 18 cores, x86_64-linux</span>
-          <span>Source: <a href="https://github.com/afterburner-sh/afterburner">Afterburner</a> · published peer
-            benchmarks</span>
-        </div>
-      </div>
-
-      <div class="bench__context reveal">
-        <span>For reference, the non-UDF tier:</span>
-        <span>DuckDB native <code>length()</code> / arithmetic <strong>~30M</strong></span>
-        <span>Polars / DataFusion expressions <strong>100M+</strong></span>
-        <span class="ctx-aside">they are different tier (no UDF, no sandbox).</span>
       </div>
     </div>
   </section>
@@ -3207,7 +3116,7 @@
       <div class="section-head reveal">
         <div>
           <span class="kicker">// Built for</span>
-          <h2>Wherever JavaScript meets<br />code you can't fully trust.</h2>
+          <h2>Wherever you run code<br />you can't fully trust.</h2>
         </div>
       </div>
       <div class="use__grid">
@@ -3219,10 +3128,10 @@
               <path d="M8 21h8M12 17v4M2 12h20" />
             </svg>
           </div>
-          <h3>Multi-tenant extensions</h3>
-          <p>Let customers ship JavaScript that augments your product. Capability gates pin tenant N's <code>fs</code>
-            reads to <code>/tmp/tenant-N</code>. Limits keep their bugs out of your CPU graphs.</p>
-          <div class="tags"><span class="tag">customer scripting</span><span class="tag">isolation</span></div>
+          <h3>Polyglot plugins and extensions</h3>
+          <p>Let customers extend your product in the language they know, Rust, Go, C, TypeScript, or Python. One
+            sealed runtime gates every one of them the same way, so a plugin's bug stays out of your process.</p>
+          <div class="tags"><span class="tag">customer code</span><span class="tag">isolation</span></div>
         </div>
         <div class="use__card reveal">
           <div class="use__art">
@@ -3231,10 +3140,10 @@
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
             </svg>
           </div>
-          <h3>Per-row UDFs in your data plane</h3>
-          <p>Ship a streaming transform as a JS file. Pipe rows in via <code>burn thrust transform.js</code>; let the
-            scheduler hash-route by key and steal under skew.</p>
-          <div class="tags"><span class="tag">streaming</span><span class="tag">transforms</span></div>
+          <h3>Reproducible data UDFs</h3>
+          <p>Ship a transform as a package and pipe rows through <code>burn thrust</code>. Determinism means the same
+            input gives the same output on every machine, byte for byte, in whichever language fits the job.</p>
+          <div class="tags"><span class="tag">deterministic</span><span class="tag">transforms</span></div>
         </div>
         <div class="use__card reveal">
           <div class="use__art">
@@ -3243,9 +3152,9 @@
               <path d="M16 16h.01M9 12V8a3 3 0 0 1 6 0v4M5 12h14v8H5z" />
             </svg>
           </div>
-          <h3>Locked-down edge handlers</h3>
-          <p>Each request gets a sealed manifold by default. Outbound HTTP needs an allow-list; <code>fs</code> stays
-            off until you grant it. Production-shaped isolation, locally testable.</p>
+          <h3>Locked-down compute handlers</h3>
+          <p>Each request runs sealed by default. Outbound HTTP needs an allow-list; the filesystem stays off until you
+            grant it. Production-shaped isolation you can test on your laptop.</p>
           <div class="tags"><span class="tag">edge compute</span><span class="tag">handlers</span></div>
         </div>
         <div class="use__card reveal">
@@ -3255,10 +3164,9 @@
               <path d="M12 20h9M16 4l4 4-12 12H4v-4z" />
             </svg>
           </div>
-          <h3>Scriptable build steps</h3>
-          <p>Replace ad-hoc shell with version-pinned JS that has only the capabilities the step needs.
-            <code>burn --allow-fs=./out --allow-env=CI build.ts</code> beats a 200-line Bash file.
-          </p>
+          <h3>Scriptable, capability-scoped steps</h3>
+          <p>Replace ad-hoc shell with a version-pinned package that gets only the capabilities the step needs.
+            <code>burn run --allow-fs=./out --allow-env=CI build.ts</code> beats a brittle 200-line Bash file.</p>
           <div class="tags"><span class="tag">automation</span><span class="tag">CI</span></div>
         </div>
       </div>
@@ -3268,7 +3176,9 @@
   <!-- ============= CTA ============= -->
   <section class="cta">
     <div class="container">
-      <h2>One command to <em>BURN</em>.</h2>
+      <h2>One runtime. Every language. <em>Full burn.</em></h2>
+      <p class="muted">Install the binary, point it at any source file, and watch it compile to WebAssembly and run,
+        sealed and deterministic.</p>
       <div class="installer">
         <div class="installer__tabs" role="tablist" aria-label="Install command for OS">
           <button class="installer__tab" data-os="macos" role="tab" aria-selected="false">
@@ -3314,16 +3224,17 @@
       <div class="footer__top">
         <div class="footer__brand">
           <img src="art/afterburner-square.png" alt="Afterburner" width="28" height="28" decoding="async" />
-          <p>A JavaScript runtime built in Rust. Run real Node apps with the limits and capabilities you choose. Embed
-            in Rust with one crate.</p>
+          <p>The polyglot WebAssembly runtime. C, C++, Rust, Go, TypeScript, JavaScript, and Python in one engine.
+            Sealed by default, deterministic, fuel-metered.</p>
         </div>
         <div class="footer__col">
           <h4>Product</h4>
           <ul>
+            <li><a href="#languages">Languages</a></li>
+            <li><a href="#try">Try it</a></li>
             <li><a href="#features">Features</a></li>
-            <li><a href="#demo">Try it</a></li>
+            <li><a href="#packages">Packages</a></li>
             <li><a href="#control">Configuration</a></li>
-            <li><a href="#runs">Features</a></li>
           </ul>
         </div>
         <div class="footer__col">
@@ -3332,7 +3243,7 @@
             <li><a href="docs.html">Get started</a></li>
             <li><a href="docs.html#cli">burn CLI</a></li>
             <li><a href="docs.html#manifold">Capabilities</a></li>
-            <li><a href="docs.html#node-compat">Node compat</a></li>
+            <li><a href="docs.html#languages">Languages</a></li>
           </ul>
         </div>
         <div class="footer__col">
@@ -3365,171 +3276,355 @@
     }, { threshold: 0.1, rootMargin: '0px 0px -10% 0px' });
     document.querySelectorAll('.reveal').forEach(el => io.observe(el));
 
-    /* ============= BENCH CHART =============
-       Animated horizontal bar comparison of sandboxed JS UDF throughput.
-       Numbers are rows/sec/core from `docs/UDF_BENCH_RESULTS.md`
-       (Afterburner) and the published peer tier (PL/V8 / Snowflake JS
-       UDF / BigQuery JS UDF). Tab switch tears bars down and re-runs
-       the entrance animation; first paint is gated on viewport entry
-       so the count-up + width fill arrive together. */
-    (() => {
-      const card = document.getElementById('benchCard');
-      if (!card) return;
-      const titleEl = document.getElementById('benchTitle');
-      const subEl = document.getElementById('benchSub');
-      const chart = document.getElementById('benchChart');
-      const tabs = card.querySelectorAll('.bench__tab');
+    /* ============= SYNTAX HIGHLIGHTING ============= */
+    const escapeHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const JS_KW = /\b(const|let|var|function|return|if|else|for|while|new|class|extends|export|import|from|default|async|await|require|module|throw|try|catch|finally|of|in|break|continue|null|true|false|undefined|this|interface|type)\b/g;
+    const RUST_KW = /\b(use|fn|let|mut|pub|struct|enum|impl|trait|for|while|loop|if|else|match|return|crate|mod|self|Self|as|where|move|ref|in|async|await|dyn|box|true|false|u64|i64|usize)\b/g;
+    const GO_KW = /\b(package|import|func|var|const|type|struct|interface|map|chan|go|defer|return|if|else|for|range|switch|case|default|break|continue|nil|true|false|uint64|int)\b/g;
+    const C_KW = /\b(int|char|long|short|unsigned|signed|float|double|void|const|static|struct|typedef|enum|union|return|if|else|for|while|switch|case|break|continue|sizeof|include|define|auto|class|namespace|using|template|public|private|bool|true|false)\b/g;
+    const PY_KW = /\b(def|return|if|elif|else|for|while|in|import|from|as|class|with|try|except|finally|lambda|yield|pass|break|continue|None|True|False|and|or|not|is|print|range|sum)\b/g;
+    const SH_KW = /\b(burn|cargo|go|clang|rustup|cd|echo|ls|cat|git)\b/g;
 
-      const DATA = {
-        light: {
-          title: '<code>(x) =&gt; x * 2</code> over 1 billion <code>Float64</code> rows',
-          sub: 'Single-column compute-light transform · 1B rows · per CPU core.',
-          bars: [
-            { name: 'Afterburner',                value: 1453000, brand: true, note: '~5x over PL/V8' },
-            { name: 'PL/V8',                      value: 300000,              hint: 'Postgres in-process V8' },
-            { name: 'Snowflake JS UDF',           value:  30000,              hint: 'V8 subprocess, per-row' },
-            { name: 'BigQuery JS UDF (per-row)',  value:  25000,              hint: 'V8 subprocess, per-row' },
-            { name: 'ClickHouse executable UDF',  value:   6000,              hint: 'pipe IPC, per-row' },
-          ],
-        },
-        utf8: {
-          title: '<code>(s) =&gt; s.length</code> over 1 billion Utf8 rows',
-          sub: 'String length · ~99% short strings, ~1% long URLs · per CPU core.',
-          bars: [
-            { name: 'Afterburner',                value: 167000, brand: true, note: '~5x over PL/V8' },
-            { name: 'PL/V8',                      value:  35000,              hint: 'Postgres in-process V8' },
-            { name: 'Snowflake JS UDF',           value:  18000,              hint: 'V8 subprocess, per-row' },
-            { name: 'BigQuery JS UDF (per-row)',  value:  14000,              hint: 'V8 subprocess, per-row' },
-            { name: 'ClickHouse executable UDF',  value:   4000,              hint: 'pipe IPC, per-row' },
-          ],
-        },
-        heavy: {
-          title: '32-column <code>Float64</code> sum-of-columns',
-          sub: '32 column reads + 32 adds per row · 1B rows · per CPU core. Interpreter-bound - per-row dispatch in the peer tier dominates.',
-          bars: [
-            { name: 'Afterburner',                value: 48000, brand: true, note: '~6x over PL/V8' },
-            { name: 'PL/V8',                      value:  8000,              hint: 'Postgres in-process V8' },
-            { name: 'Snowflake JS UDF',           value:  3500,              hint: 'V8 subprocess, per-row' },
-            { name: 'BigQuery JS UDF (per-row)',  value:  2500,              hint: 'V8 subprocess, per-row' },
-            { name: 'ClickHouse executable UDF',  value:  1200,              hint: 'pipe IPC, per-row' },
-          ],
-        },
-      };
-
-      const fmt = (n) => {
-        if (n >= 1_000_000) return (n / 1_000_000).toFixed(2).replace(/\.?0+$/, '') + 'M';
-        if (n >= 10_000) return (n / 1000).toFixed(0) + 'K';
-        if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
-        return String(n);
-      };
-      const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
-
-      function render(key) {
-        const d = DATA[key];
-        titleEl.innerHTML = d.title;
-        subEl.textContent = d.sub;
-
-        // Scale bars to the largest value in the current tab so the
-        // leader fills the track. Other tabs scale independently -
-        // the chart is about ratio, not absolute axis carryover.
-        const max = Math.max(...d.bars.map(b => b.value));
-
-        chart.innerHTML = '';
-        const rows = d.bars.map((b, idx) => {
-          const row = document.createElement('div');
-          row.className = 'bench__row' + (b.brand ? ' lead' : '');
-
-          const name = document.createElement('div');
-          name.className = 'bench__name';
-          name.innerHTML = b.name + (b.est ? '<span class="est">estimated</span>' : '');
-          row.appendChild(name);
-
-          const track = document.createElement('div');
-          track.className = 'bench__track';
-          const fill = document.createElement('div');
-          fill.className = 'bench__fill' + (b.brand ? ' brand' : (idx === 1 ? ' peer-warm' : ''));
-          track.appendChild(fill);
-          row.appendChild(track);
-
-          const value = document.createElement('div');
-          value.className = 'bench__value';
-          const num = document.createElement('span');
-          num.className = 'bench__num';
-          num.textContent = '0';
-          value.appendChild(num);
-          if (b.note) {
-            const tag = document.createElement('span');
-            tag.className = 'bench__note';
-            tag.textContent = b.note;
-            value.appendChild(tag);
+    function tokenize(src, rules) {
+      const out = [];
+      let i = 0;
+      while (i < src.length) {
+        let bestStart = -1, bestEnd = -1, bestKind = null, bestText = null;
+        for (const [re, kind] of rules) {
+          re.lastIndex = i;
+          const m = re.exec(src);
+          if (!m) continue;
+          if (bestStart === -1 || m.index < bestStart) {
+            bestStart = m.index; bestEnd = m.index + m[0].length;
+            bestKind = kind; bestText = m[0];
+            if (m.index === i) break;
           }
-          row.appendChild(value);
+        }
+        if (bestStart === -1) { out.push(escapeHtml(src.slice(i))); break; }
+        if (bestStart > i) out.push(escapeHtml(src.slice(i, bestStart)));
+        out.push('<span class="' + bestKind + '">' + escapeHtml(bestText) + '</span>');
+        i = bestEnd;
+      }
+      return out.join('');
+    }
+    function hlJS(src) {
+      return tokenize(src, [
+        [/\/\/[^\n]*/g, 'tok-com'],
+        [/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g, 'tok-str'],
+        [JS_KW, 'tok-kw'],
+        [/\b\d[\d_]*\b/g, 'tok-num'],
+        [/\b[a-zA-Z_][\w]*(?=\s*\()/g, 'tok-fn'],
+      ]);
+    }
+    function hlRust(src) {
+      return tokenize(src, [
+        [/\/\/[^\n]*/g, 'tok-com'],
+        [/"(?:[^"\\\n]|\\.)*"/g, 'tok-str'],
+        [RUST_KW, 'tok-kw'],
+        [/\b[A-Z][A-Za-z0-9_]*\b/g, 'tok-type'],
+        [/\b\d[\d_]*(?:_[a-z0-9]+)?\b/g, 'tok-num'],
+        [/\b[a-z_][a-z0-9_]*!?(?=\s*[\(!])/g, 'tok-fn'],
+      ]);
+    }
+    function hlGo(src) {
+      return tokenize(src, [
+        [/\/\/[^\n]*/g, 'tok-com'],
+        [/"(?:[^"\\\n]|\\.)*"|`[^`]*`/g, 'tok-str'],
+        [GO_KW, 'tok-kw'],
+        [/\b[A-Z][A-Za-z0-9_]*\b/g, 'tok-type'],
+        [/\b\d[\d_]*\b/g, 'tok-num'],
+        [/\b[a-zA-Z_][\w]*(?=\s*\()/g, 'tok-fn'],
+      ]);
+    }
+    function hlC(src) {
+      return tokenize(src, [
+        [/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, 'tok-com'],
+        [/#\s*\w+/g, 'tok-mod'],
+        [/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, 'tok-str'],
+        [C_KW, 'tok-kw'],
+        [/\b\d[\d_.]*\b/g, 'tok-num'],
+        [/\b[a-zA-Z_][\w]*(?=\s*\()/g, 'tok-fn'],
+      ]);
+    }
+    function hlPy(src) {
+      return tokenize(src, [
+        [/#[^\n]*/g, 'tok-com'],
+        [/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|f"(?:[^"\\\n]|\\.)*"/g, 'tok-str'],
+        [PY_KW, 'tok-kw'],
+        [/\b\d[\d_.]*\b/g, 'tok-num'],
+        [/\b[a-zA-Z_][\w]*(?=\s*\()/g, 'tok-fn'],
+      ]);
+    }
+    function hlShell(src) {
+      return tokenize(src, [
+        [/#[^\n]*/g, 'tok-com'],
+        [/'[^'\n]*'|"[^"\n]*"/g, 'tok-str'],
+        [SH_KW, 'tok-mod'],
+        [/--[a-z][a-z0-9-]*/g, 'tok-kw'],
+      ]);
+    }
+    const HL = { js: hlJS, ts: hlJS, rust: hlRust, go: hlGo, c: hlC, cpp: hlC, python: hlPy, sh: hlShell };
+    function highlight(code, lang) { return (HL[lang] || hlJS)(code); }
 
-          chart.appendChild(row);
-          return { fill, num, value: b.value, target: (b.value / max) * 100 };
-        });
+    /* ============= LANGUAGE SHOWCASE =============
+       Every language compiles to wasm32-wasip1 with its native toolchain
+       and has a REPL. Samples mirror examples/languages/* in the repo.
+       Honesty: the six compiled/scripted languages run + REPL today;
+       Ruby's compile + REPL are wired but pending the ruby.wasm payload,
+       so it is shown as "coming soon" and never asserted to run. */
+    const LANGS = [
+      {
+        id: 'rust', name: 'Rust', tile: 'Rs', tileBg: '#DE4A1F', file: 'main.rs',
+        tool: 'cargo', repl: true,
+        cmd: 'burn run main.rs', out: 'rust: sum(1..=100)=5050 fib(20)=6765',
+        blurb: 'Compiled by <code>cargo build --target wasm32-wasip1</code> over your whole source tree. A real crate with modules and dependencies, not a single file.',
+        caps: [['on', 'compiles to wasm'], ['on', 'burn repl --lang rust'], ['on', 'multi-module crate']],
+        code:
+`// A real crate, compiled to wasm32-wasip1 by cargo.
+fn fib(n: u64) -> u64 {
+    if n < 2 { return n; }
+    let mut a = 0u64;
+    let mut b = 1u64;
+    for _ in 2..=n {
+        let c = a + b;
+        a = b;
+        b = c;
+    }
+    b
+}
 
-        // Stagger entrance: each bar starts ~110 ms after the previous,
-        // bar width animates via CSS transition (1.4 s cubic-bezier),
-        // count-up tracks the same curve with rAF and finishes ~150 ms
-        // before the bar to feel responsive.
-        requestAnimationFrame(() => {
-          rows.forEach((r, i) => {
-            const delay = i * 110;
-            setTimeout(() => {
-              r.fill.classList.add('armed');
-              r.fill.style.width = r.target + '%';
-              const start = performance.now();
-              const dur = 1250;
-              const tick = (now) => {
-                const t = Math.min(1, (now - start) / dur);
-                const v = Math.round(r.value * easeOutCubic(t));
-                r.num.textContent = fmt(v);
-                if (t < 1) requestAnimationFrame(tick);
-                else r.num.textContent = fmt(r.value);
-              };
-              requestAnimationFrame(tick);
-            }, delay);
-          });
+fn main() {
+    let sum: u64 = (1u64..=100).sum();
+    println!("rust: sum(1..=100)={sum} fib(20)={}", fib(20));
+}`
+      },
+      {
+        id: 'go', name: 'Go', tile: 'Go', tileBg: '#00ADD8', file: 'main.go',
+        tool: 'go build', repl: true,
+        cmd: 'burn run main.go', out: 'go: sum(1..=100)=5050 fib(20)=6765',
+        blurb: 'Built with <code>GOOS=wasip1 GOARCH=wasm go build</code>. A go module with sub-packages, exported across boundaries by capitalized identifiers.',
+        caps: [['on', 'compiles to wasm'], ['on', 'burn repl --lang go'], ['on', 'multi-package module']],
+        code:
+`// A go module, built for GOOS=wasip1 GOARCH=wasm.
+package main
+
+import "fmt"
+
+func fib(n uint64) uint64 {
+	if n < 2 {
+		return n
+	}
+	a, b := uint64(0), uint64(1)
+	for i := uint64(2); i <= n; i++ {
+		a, b = b, a+b
+	}
+	return b
+}
+
+func main() {
+	var sum uint64
+	for i := uint64(1); i <= 100; i++ {
+		sum += i
+	}
+	fmt.Printf("go: sum(1..=100)=%d fib(20)=%d\\n", sum, fib(20))
+}`
+      },
+      {
+        id: 'c', name: 'C', tile: 'C', tileBg: '#5C6BC0', file: 'main.c',
+        tool: 'wasi-sdk', repl: true,
+        cmd: 'burn run main.c', out: 'c: sum(1..=100)=5050 fib(20)=6765',
+        blurb: 'Every <code>source/**/*.c</code> compiled in one wasi-sdk <code>clang</code> invocation into a WASI command module, linked against wasi-libc.',
+        caps: [['on', 'compiles to wasm'], ['on', 'burn repl --lang c'], ['on', 'multi-file project']],
+        code:
+`/* Multi-file C, compiled by wasi-sdk clang to a
+   wasm32-wasip1 WASI command, linked to wasi-libc. */
+#include <stdio.h>
+
+static unsigned long long fib(unsigned long long n) {
+    if (n < 2) return n;
+    unsigned long long a = 0, b = 1;
+    for (unsigned long long i = 2; i <= n; i++) {
+        unsigned long long c = a + b;
+        a = b; b = c;
+    }
+    return b;
+}
+
+int main(void) {
+    unsigned long long sum = 0;
+    for (int i = 1; i <= 100; i++) sum += i;
+    printf("c: sum(1..=100)=%llu fib(20)=%llu\\n", sum, fib(20));
+    return 0;
+}`
+      },
+      {
+        id: 'cpp', name: 'C++', tile: 'C++', tileBg: '#00599C', file: 'main.cpp',
+        tool: 'wasi-sdk', repl: true,
+        cmd: 'burn run main.cpp', out: 'cpp: sum(1..=100)=5050 fib(20)=6765',
+        blurb: 'Every <code>source/**/*.cpp</code> compiled by wasi-sdk <code>clang++</code> into one WASI command. A CMake or Makefile project is honored when present.',
+        caps: [['on', 'compiles to wasm'], ['on', 'burn repl --lang cpp'], ['on', 'multi-file project']],
+        code:
+`// Multi-file C++, compiled by wasi-sdk clang++
+// into one wasm32-wasip1 WASI command module.
+#include <cstdio>
+#include <cstdint>
+
+static uint64_t fib(uint64_t n) {
+    if (n < 2) return n;
+    uint64_t a = 0, b = 1;
+    for (uint64_t i = 2; i <= n; i++) {
+        uint64_t c = a + b;
+        a = b; b = c;
+    }
+    return b;
+}
+
+int main() {
+    uint64_t sum = 0;
+    for (int i = 1; i <= 100; i++) sum += i;
+    std::printf("cpp: sum(1..=100)=%llu fib(20)=%llu\\n",
+                (unsigned long long)sum, (unsigned long long)fib(20));
+    return 0;
+}`
+      },
+      {
+        id: 'ts', name: 'TypeScript', tile: 'TS', tileBg: '#3178C6', file: 'main.ts',
+        tool: 'engine', repl: true,
+        cmd: 'burn run main.ts', out: 'ts: sum(1..=100)=5050 fib(20)=6765',
+        blurb: 'Types stripped on the way in (oxc), then run on the engine. <code>burn repl --lang ts</code> transpiles each line; type-only lines are no-ops.',
+        caps: [['on', 'runs on the engine'], ['on', 'burn repl --lang ts'], ['on', 'types stripped (oxc)']],
+        code:
+`// TypeScript: types stripped (oxc), run on the engine.
+function fib(n: number): number {
+  if (n < 2) return n;
+  let a = 0, b = 1;
+  for (let i = 2; i <= n; i++) {
+    const c = a + b;
+    a = b;
+    b = c;
+  }
+  return b;
+}
+
+let sum = 0;
+for (let i = 1; i <= 100; i++) sum += i;
+
+console.log(\`ts: sum(1..=100)=\${sum} fib(20)=\${fib(20)}\`);`
+      },
+      {
+        id: 'js', name: 'JavaScript', tile: 'JS', tileBg: '#F7DF1E', tileFg: '#1a1a1a', file: 'main.js',
+        tool: 'engine', repl: true,
+        cmd: 'burn run main.js', out: 'js: sum(1..=100)=5050 fib(20)=6765',
+        blurb: 'Run on the engine and compiled to WebAssembly like the rest. <code>burn repl --lang js</code> keeps declarations across lines for an interactive session.',
+        caps: [['on', 'runs on the engine'], ['on', 'burn repl --lang js'], ['on', 'session-aware REPL']],
+        code:
+`// JavaScript, run on the burn engine.
+function fib(n) {
+  if (n < 2) return n;
+  let a = 0, b = 1;
+  for (let i = 2; i <= n; i++) {
+    const c = a + b;
+    a = b;
+    b = c;
+  }
+  return b;
+}
+
+let sum = 0;
+for (let i = 1; i <= 100; i++) sum += i;
+
+console.log(\`js: sum(1..=100)=\${sum} fib(20)=\${fib(20)}\`);`
+      },
+      {
+        id: 'python', name: 'Python', tile: 'Py', tileBg: '#3776AB', file: 'main.py',
+        tool: 'pyodide', repl: true,
+        cmd: 'burn run main.py', out: 'python: sum(1..=100)=5050 fib(20)=6765',
+        blurb: 'Runs on a CPython-on-WebAssembly runtime (Pyodide). Real Python: <code>numpy</code> and <code>pandas</code> work for compute on the current runtime.',
+        caps: [['on', 'runs on Pyodide'], ['on', 'numpy / pandas'], ['on', 'interactive REPL']],
+        code:
+`# Python, run on a CPython-on-wasm runtime (Pyodide).
+def fib(n):
+    if n < 2:
+        return n
+    a, b = 0, 1
+    for _ in range(2, n + 1):
+        a, b = b, a + b
+    return b
+
+
+total = sum(range(1, 101))
+print(f"python: sum(1..=100)={total} fib(20)={fib(20)}")`
+      },
+      {
+        id: 'ruby', name: 'Ruby', tile: 'Rb', tileBg: '#CC342D', file: 'main.rb',
+        tool: 'coming soon', repl: false,
+        cmd: 'burn run main.rb', out: 'coming soon: ruby.wasm payload pending',
+        blurb: 'Ruby support is wired end to end and ships the moment the <code>ruby.wasm</code> CRuby payload lands. The sample below already runs on every other language today.',
+        caps: [['soon', 'compile: coming soon'], ['soon', 'REPL: coming soon'], ['on', 'wired, payload pending']],
+        code:
+`# Ruby on burn: wired, pending the ruby.wasm payload.
+def fib(n)
+  return n if n < 2
+  a, b = 0, 1
+  (2..n).each { a, b = b, a + b }
+  b
+end
+
+total = (1..100).sum
+puts "ruby: sum(1..=100)=#{total} fib(20)=#{fib(20)}"`
+      },
+    ];
+
+    (function languageShowcase() {
+      const pick = document.getElementById('langPick');
+      const codeEl = document.getElementById('langCode');
+      const fileEl = document.getElementById('langFile');
+      const runEl = document.getElementById('langRun');
+      const badgeEl = document.getElementById('langBadge');
+      const nameEl = document.getElementById('langName');
+      const blurbEl = document.getElementById('langBlurb');
+      const capsEl = document.getElementById('langCaps');
+      if (!pick) return;
+
+      // build the 8 picker tiles
+      LANGS.forEach((l, i) => {
+        const t = document.createElement('button');
+        t.className = 'langtile' + (i === 0 ? ' active' : '');
+        t.setAttribute('role', 'tab');
+        t.setAttribute('aria-selected', i === 0 ? 'true' : 'false');
+        t.dataset.idx = i;
+        t.innerHTML =
+          `<span class="langtile__badge" style="background:${l.tileBg};${l.tileFg ? 'color:' + l.tileFg : ''}">${l.tile}</span>` +
+          `<span class="langtile__name">${l.name}</span>` +
+          `<span class="langtile__tool">${l.tool}</span>`;
+        pick.appendChild(t);
+      });
+
+      const tiles = [...pick.querySelectorAll('.langtile')];
+
+      function select(i) {
+        const l = LANGS[i];
+        tiles.forEach((t, j) => {
+          const on = j === i;
+          t.classList.toggle('active', on);
+          t.setAttribute('aria-selected', on ? 'true' : 'false');
         });
+        codeEl.innerHTML = highlight(l.code, l.id);
+        fileEl.textContent = l.file;
+        badgeEl.textContent = l.tile;
+        badgeEl.style.background = l.tileBg;
+        badgeEl.style.color = l.tileFg || '#fff';
+        nameEl.textContent = l.name;
+        blurbEl.innerHTML = l.blurb;
+        runEl.innerHTML =
+          `<span class="cmd">$ ${l.cmd}</span><span class="arrow">⟶</span><span class="out">${escapeHtml(l.out)}</span>`;
+        capsEl.innerHTML = l.caps
+          .map(([cls, txt]) => `<span class="langs__cap ${cls}">${txt}</span>`)
+          .join('');
       }
 
-      // First render gated on viewport entry - animations only fire when
-      // the chart is visible, so the entrance lands when the user
-      // arrives, not silently while the page is still off-screen.
-      let armed = false;
-      const benchIo = new IntersectionObserver((entries) => {
-        entries.forEach(e => {
-          if (e.isIntersecting && !armed) {
-            armed = true;
-            render('light');
-            benchIo.unobserve(e.target);
-          }
-        });
-      }, { threshold: 0.2 });
-      benchIo.observe(card);
-
-      tabs.forEach(t => {
-        t.addEventListener('click', () => {
-          if (t.classList.contains('active')) return;
-          tabs.forEach(x => {
-            x.classList.remove('active');
-            x.setAttribute('aria-selected', 'false');
-          });
-          t.classList.add('active');
-          t.setAttribute('aria-selected', 'true');
-          const key = t.getAttribute('data-bench');
-          // Tear-down: shrink fills to 0 (CSS transition handles it),
-          // then re-render after a beat so the entrance animation
-          // restages with the new dataset.
-          chart.querySelectorAll('.bench__fill').forEach(f => {
-            f.classList.remove('armed');
-            f.style.width = '0';
-          });
-          chart.querySelectorAll('.bench__num').forEach(n => n.textContent = '0');
-          setTimeout(() => render(key), 280);
-        });
-      });
+      tiles.forEach(t => t.addEventListener('click', () => select(+t.dataset.idx)));
+      select(0);
     })();
 
     /* ============= BURN BUTTONS - play video on hover ============= */
@@ -3556,7 +3651,7 @@
       if (!outer.length && !inner.length) return;
 
       // radii are % of orbital container; CSS box is square so % is fine
-      // outer ring r=240 of viewBox 540 → 44.4%; inner ring r=180 → 33.3%
+      // outer ring r=240 of viewBox 540 -> 44.4%; inner ring r=180 -> 33.3%
       const OUTER_R_PCT = 44.4;
       const INNER_R_PCT = 33.3;
 
@@ -3582,8 +3677,8 @@
 
       function tick() {
         if (!running) return;
-        place(outer, OUTER_R_PCT, 32000, +1);
-        place(inner, INNER_R_PCT, 22000, -1);
+        place(outer, OUTER_R_PCT, 36000, +1);
+        place(inner, INNER_R_PCT, 26000, -1);
         raf = requestAnimationFrame(tick);
       }
 
@@ -3600,17 +3695,18 @@
 
     /* ============= TERMINAL TYPING ============= */
     const TERM_LINES = [
-      { p: '$', t: 'burn server.js', d: 500 },
-      { o: 'listening on http://localhost:3000', c: 'var(--action-soft)', d: 350 },
-      { o: '✓ ready in 3ms', c: 'var(--color-accent-green)', d: 700 },
-      { p: '$', t: 'burn bun add express pg jsonwebtoken', d: 500 },
-      { o: 'installed 3 packages in 0.4s', c: 'var(--color-accent-green)', d: 500 },
-      { p: '$', t: 'burn app.ts', d: 500 },
-      { o: '⟶ types stripped (oxc) · ESM → CJS · ready', c: 'var(--accent)', d: 500 },
-      { p: '$', t: 'echo \'{"n":21}\' | burn thrust transform.js', d: 500 },
-      { o: '{ "doubled": 42 }', c: 'var(--action-soft)', d: 500 },
-      { p: '$', t: 'burn --sandbox --allow-net=api.example.com fetch.js', d: 500 },
-      { o: '{ status: 200 } · denied: outbound to 169.254.169.254', c: 'var(--color-accent-green)', d: 500 },
+      { p: '$', t: 'burn run main.rs', d: 480 },
+      { o: 'rust: sum(1..=100)=5050 fib(20)=6765', c: 'var(--color-accent-green)', d: 500 },
+      { p: '$', t: 'burn run main.go', d: 480 },
+      { o: 'go: sum(1..=100)=5050 fib(20)=6765', c: 'var(--color-accent-green)', d: 500 },
+      { p: '$', t: 'burn run main.c', d: 480 },
+      { o: 'c: sum(1..=100)=5050 fib(20)=6765', c: 'var(--color-accent-green)', d: 500 },
+      { p: '$', t: 'burn run ./geo', d: 480 },
+      { o: 'area=50 mean=20  (multi-module cargo package)', c: 'var(--action-soft)', d: 600 },
+      { p: '$', t: 'burn --sandbox --allow-net=api.example.com fetch.py', d: 480 },
+      { o: '{ status: 200 } · denied: 169.254.169.254 (not allowed)', c: 'var(--color-accent-green)', d: 600 },
+      { p: '$', t: 'burn repl --lang rust', d: 480 },
+      { o: 'afterburner rust repl · each line recompiles', c: 'var(--accent)', d: 500 },
       { p: '$', t: '', cursor: true },
     ];
     function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -3629,7 +3725,7 @@
           termEl.appendChild(line);
           for (const ch of ln.t) {
             typed.textContent += ch;
-            await sleep(28);
+            await sleep(26);
           }
         } else if (ln.o) {
           line.style.color = ln.c || 'var(--code-fg)';
@@ -3659,224 +3755,123 @@
 
     /* ============= MARQUEE ============= */
     const M_ITEMS = [
-      'http.createServer', 'net.connect', 'tls.connect', 'dns.resolve',
-      'dgram', 'worker_threads', 'fs.promises', 'fs.watch', 'crypto',
-      'zlib', 'WebAssembly', 'fetch', 'AbortController', 'streams',
-      'Buffer', 'EventEmitter', 'process.argv', 'setInterval',
-      'AsyncLocalStorage', 'TypeScript', 'ESM → CJS', 'require()',
-      'bcrypt', 'argon2', 'jsonwebtoken', 'sqlite3', 'sharp',
-      'TextEncoder', 'URL', 'structuredClone', 'queueMicrotask',
-      'performance.now', 'process.exit', 'EventTarget',
+      'C', 'C++', 'Rust', 'Go', 'TypeScript', 'JavaScript', 'Python',
+      'wasm32-wasip1', 'cargo build', 'go build', 'wasi-sdk clang',
+      'burn run', 'burn repl', 'burn compile', 'burn publish', 'burn install',
+      'canonical NaN', 'threads off', 'fuel-metered', 'sealed by default',
+      '--allow-net', '--allow-fs', '--allow-env', '.afb', 'content-addressed',
+      'multi-module', 'deterministic', 'reproducible', 'one runtime',
     ];
     const mTrack = document.getElementById('marquee');
     const fragHTML = M_ITEMS.map(s => `<div class="marquee__item"><span class="glow"></span>${s}</div>`).join('');
     mTrack.innerHTML = fragHTML + fragHTML;
 
     /* ============= CODE DEMO TABS ============= */
-    const escapeHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const JS_KW = /\b(const|let|var|function|return|if|else|for|while|new|class|extends|export|import|from|default|async|await|require|module|throw|try|catch|finally|of|in|break|continue|null|true|false|undefined|this|interface|type)\b/g;
-    const RUST_KW = /\b(use|fn|let|mut|pub|struct|enum|impl|trait|for|while|loop|if|else|match|return|crate|mod|self|Self|as|where|move|ref|in|async|await|dyn|box|true|false)\b/g;
-    const SH_KW = /\b(burn|node|npm|pnpm|yarn|npx|bun|cd|echo|cargo|cat|git)\b/g;
-
-    function tokenize(src, rules) {
-      const out = [];
-      let i = 0;
-      while (i < src.length) {
-        let bestStart = -1, bestEnd = -1, bestKind = null, bestText = null;
-        for (const [re, kind] of rules) {
-          re.lastIndex = i;
-          const m = re.exec(src);
-          if (!m) continue;
-          if (bestStart === -1 || m.index < bestStart) {
-            bestStart = m.index; bestEnd = m.index + m[0].length;
-            bestKind = kind; bestText = m[0];
-            if (m.index === i) break;
-          }
-        }
-        if (bestStart === -1) { out.push(escapeHtml(src.slice(i))); break; }
-        if (bestStart > i) out.push(escapeHtml(src.slice(i, bestStart)));
-        out.push('<span class="' + bestKind + '">' + escapeHtml(bestText) + '</span>');
-        i = bestEnd;
-      }
-      return out.join('');
-    }
-    function highlightJS(src) {
-      return tokenize(src, [
-        [/\/\/[^\n]*/g, 'tok-com'],
-        [/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g, 'tok-str'],
-        [JS_KW, 'tok-kw'],
-        [/\b\d[\d_]*\b/g, 'tok-num'],
-        [/\b[a-zA-Z_][\w]*(?=\s*\()/g, 'tok-fn'],
-      ]);
-    }
-    function highlightRust(src) {
-      return tokenize(src, [
-        [/\/\/[^\n]*/g, 'tok-com'],
-        [/"(?:[^"\\\n]|\\.)*"/g, 'tok-str'],
-        [RUST_KW, 'tok-kw'],
-        [/\b[A-Z][A-Za-z0-9_]*\b/g, 'tok-type'],
-        [/\b\d[\d_]*(?:_[a-z0-9]+)?\b/g, 'tok-num'],
-        [/\b[a-z_][a-z0-9_]*!?(?=\s*[\(!])/g, 'tok-fn'],
-      ]);
-    }
-    function highlightShell(src) {
-      return tokenize(src, [
-        [/#[^\n]*/g, 'tok-com'],
-        [/'[^'\n]*'|"[^"\n]*"/g, 'tok-str'],
-        [SH_KW, 'tok-mod'],
-        [/--[a-z][a-z0-9-]*/g, 'tok-kw'],
-      ]);
-    }
-
     const SAMPLES = [
       {
-        file: 'server.js', lang: 'js',
-        output: 'listening on http://localhost:3000',
+        file: 'shell', lang: 'sh',
+        output: 'picks the toolchain, compiles to wasm, runs the module',
         code:
-          `// A real Express server. Real port. Real sockets.
-const express = require('express');
-const app = express();
+`# Point burn at any source file. It picks the toolchain,
+# compiles to wasm32-wasip1, and runs the module.
 
-app.get('/', (req, res) => {
-  res.json({ hello: 'from burn', uptime: process.uptime() });
-});
+$ burn run main.rs        # cargo -> wasm
+rust: sum(1..=100)=5050 fib(20)=6765
 
-app.listen(3000, () => {
-  console.log('listening on http://localhost:3000');
-});`
+$ burn run main.go        # go build -> wasm
+go: sum(1..=100)=5050 fib(20)=6765
+
+$ burn run main.c         # wasi-sdk clang -> WASI command
+c: sum(1..=100)=5050 fib(20)=6765
+
+$ burn run main.py        # CPython on wasm (Pyodide)
+python: sum(1..=100)=5050 fib(20)=6765`
       },
       {
         file: 'shell', lang: 'sh',
-        output: 'every nested node call routes through burn',
+        output: 'a real multi-module package, compiled whole',
         code:
-          `# burn shims itself onto PATH. Every nested 'node script.js' re-enters burn.
+`# Point burn at a folder and it builds the whole package:
+# a real cargo project, go module, or C/C++ project.
 
-$ burn npm install express
-added 65 packages in 8s
-$ burn -A server.js                  # require('express') from node_modules
+$ burn new geo --lang rust    # scaffold with a sealed manifold
+$ burn run ./geo              # compile every module, run the entry
+area=50 mean=20
 
-$ burn bun add lodash                # bun: native, args pass through
-$ burn node -e "console.log(process.versions.node)"
-26.0.0-afterburner`
+# source/main.rs calls geometry::rectangle_area + stats::mean;
+# the private helpers in each module stay encapsulated.`
       },
       {
-        file: 'app.ts', lang: 'js',
-        output: 'TypeScript stripped, modules resolved.',
+        file: 'shell', lang: 'sh',
+        output: 'a REPL for every language',
         code:
-          `// .ts, .mts, .cts. Strip types, resolve modules, run.
-import { readFile } from 'node:fs/promises';
+`# Every language has a REPL. The compiled ones run evcxr-style:
+# each line recompiles, session state carries forward.
 
-interface User { name: string; tier: 'free' | 'pro'; }
+$ burn repl --lang go
+afterburner go repl  (each line recompiles)
+go> a, b := 6, 7
+go> fmt.Println(a * b)
+42
 
-const main = async (): Promise<void> => {
-  const raw = await readFile('./users.json', 'utf8');
-  const users: User[] = JSON.parse(raw);
-  for (const u of users) console.log(\`\${u.name} (\${u.tier})\`);
-};
-
-main();`
-      },
-      {
-        file: 'db.js', lang: 'js',
-        output: 'connected · TLS1.3 · SELECT now() → 2026-05-03',
-        code:
-          `// Real Postgres over TLS. SNI, ALPN, custom CA all work.
-const { Client } = require('pg');
-const { readFileSync } = require('node:fs');
-
-const client = new Client({
-  host: 'db.example.com',
-  port: 5432,
-  ssl: { ca: readFileSync('./root.crt'), rejectUnauthorized: true },
-});
-
-await client.connect();
-const { rows } = await client.query('SELECT now()');
-console.log(rows[0].now);
-await client.end();`
-      },
-      {
-        file: 'pool.js', lang: 'js',
-        output: 'spawned 4 workers · hashed 1000 rows in 84ms',
-        code:
-          `// worker_threads. Capability inheritance never widens.
-const { Worker, isMainThread, parentPort, workerData } = require('node:worker_threads');
-
-if (isMainThread) {
-  const workers = Array.from({ length: 4 }, (_, i) =>
-    new Worker(__filename, { workerData: { id: i } }));
-
-  for (const w of workers) {
-    w.on('message', (m) => console.log('row', m.id, '→', m.hash));
-  }
-} else {
-  const { createHash } = require('node:crypto');
-  parentPort.postMessage({
-    id: workerData.id,
-    hash: createHash('sha256').update(String(workerData.id)).digest('hex'),
-  });
-}`
+$ burn repl --lang rust    # rust
+$ burn repl --lang c       # C
+$ burn repl --lang ts      # TypeScript`
       },
       {
         file: 'shell', lang: 'sh',
         output: 'denied: outbound to 169.254.169.254 (not on allow-list)',
         code:
-          `# Deny by default. Grant only the surface a script needs.
+`# Sealed by default. Grant only the surface a program needs.
 $ burn --sandbox \\
        --allow-fs=./data,./out \\
        --allow-net=api.example.com,*.trusted.io \\
-       --allow-env=NODE_ENV,API_KEY \\
+       --allow-env=API_KEY \\
        --fuel=1000000000 \\
        --timeout=30000 \\
        transform.ts
 
-# Grant everything for trusted scripts.
-$ burn -A scripts/release.ts`
+# Grant everything for a trusted program.
+$ burn -A scripts/release.go`
       },
       {
-        file: 'main.rs', lang: 'rust',
-        output: 'returns: { "result": 42 }',
+        file: 'transform.ts', lang: 'ts',
+        output: '{ "doubled": 42 }',
         code:
-          `// Embed the same runtime in your Rust app. cargo add afterburner.
-use afterburner::{Afterburner, Manifold, FsAccess, NetAccess};
-use serde_json::json;
+`// UDF mode: read JSON from stdin as 'data', write JSON out.
+// $ echo '{"n":21}' | burn thrust transform.ts
 
-fn main() -> anyhow::Result<()> {
-    let ab = Afterburner::builder()
-        .fuel(1_000_000_000)
-        .memory_bytes(64 << 20)
-        .timeout_ms(30_000)
-        .manifold(Manifold {
-            fs: FsAccess::ReadOnly(vec!["./data".into()]),
-            net: NetAccess::OutboundHttp(Some(vec!["api.example.com".into()])),
-            ..Manifold::sealed()
-        })
-        .threaded(8)
-        .build()?;
-
-    let id = ab.register("module.exports = (d) => ({ result: d.n + 1 })")?;
-    let out = ab.run(&id, &json!({ "n": 41 }))?;
-    println!("{}", out);
-    Ok(())
+export default function (data: { n: number }) {
+  return { doubled: data.n * 2 };
 }`
       },
+      {
+        file: 'shell', lang: 'sh',
+        output: 'reproducible from the same sha256 digest, every time',
+        code:
+`# Package, publish, and install. Content-addressed by SHA-256.
+
+$ burn package ./geo -o geo.afb   # byte-reproducible .afb
+$ burn publish geo.afb            # upload to the registry
+$ burn add examples/geo           # pin a dep by digest in afb.toml
+$ burn install                    # resolve into the shared cache
+
+# afb.toml:
+#   [dependencies]
+#   "examples/geo" = "sha256:..."`
+      },
     ];
-    function highlight(s) {
-      if (s.lang === 'rust') return highlightRust(s.code);
-      if (s.lang === 'sh') return highlightShell(s.code);
-      return highlightJS(s.code);
-    }
     const demoCode = document.getElementById('demoCode');
     const demoFile = document.getElementById('demoFile');
     const demoOutput = document.getElementById('demoOutput');
-    const tabs = document.querySelectorAll('.demo__tab');
+    const demoTabs = document.querySelectorAll('.demo__tab');
     function setTab(i) {
-      tabs.forEach(t => t.classList.toggle('active', +t.dataset.tab === i));
-      demoCode.innerHTML = highlight(SAMPLES[i]);
+      demoTabs.forEach(t => t.classList.toggle('active', +t.dataset.tab === i));
+      demoCode.innerHTML = highlight(SAMPLES[i].code, SAMPLES[i].lang);
       demoFile.textContent = SAMPLES[i].file;
       demoOutput.textContent = SAMPLES[i].output;
     }
-    tabs.forEach(t => t.addEventListener('click', () => setTab(+t.dataset.tab)));
+    demoTabs.forEach(t => t.addEventListener('click', () => setTab(+t.dataset.tab)));
     setTab(0);
 
     /* ============= KNOB IDLE ANIMATION ============= */
@@ -3885,6 +3880,7 @@ fn main() -> anyhow::Result<()> {
     setInterval(() => {
       knobTick++;
       knobBars.forEach((b, i) => {
+        if (!b) return;
         const phase = (knobTick / 30) + i * 0.7;
         const w = 35 + Math.abs(Math.sin(phase) * 50);
         b.style.width = w.toFixed(1) + '%';
@@ -3911,7 +3907,7 @@ fn main() -> anyhow::Result<()> {
         },
       };
 
-      /* UA → default OS, computed once */
+      /* UA -> default OS, computed once */
       const ua = (navigator.userAgent || '');
       const detected =
         /Win(dows|NT|64|32|98|95)/i.test(ua) ? 'windows' :
