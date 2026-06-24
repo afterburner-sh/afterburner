@@ -5,7 +5,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Afterburner · One sandboxed, deterministic WASM runtime for every language</title>
-  <meta name="description" content="Afterburner runs C, C++, Rust, Go, TypeScript, JavaScript, and Python in one WebAssembly runtime. Sealed by default, deterministic, fuel-metered. Compile a real cargo project, go module, or C/C++ project to wasm. A REPL for every language. A content-addressed package registry." />
+  <meta name="description" content="Afterburner runs every language in one sandboxed WebAssembly runtime: sealed by default, deterministic, fuel-metered. Compile a real multi-module project to wasm, get a REPL for every language, and a content-addressed package registry." />
   <link rel="canonical" href="https://afterburner.sh/" />
   <meta name="theme-color" content="#ff6118" />
   <link rel="icon" type="image/svg+xml" href="art/afterburner-square.svg" />
@@ -17,7 +17,7 @@
   <meta property="og:site_name" content="Afterburner" />
   <meta property="og:url" content="https://afterburner.sh/" />
   <meta property="og:title" content="Afterburner · One sandboxed, deterministic WASM runtime for every language" />
-  <meta property="og:description" content="C, C++, Rust, Go, TypeScript, JavaScript, and Python. Every language compiled to WebAssembly, in one runtime. Sealed by default, deterministic, fuel-metered. A REPL for every language." />
+  <meta property="og:description" content="Every language, compiled to WebAssembly and run in one sandboxed runtime. Sealed by default, deterministic, fuel-metered. A REPL for every language." />
   <meta property="og:image" content="https://afterburner.sh/art/og-image.png" />
   <meta property="og:image:secure_url" content="https://afterburner.sh/art/og-image.png" />
   <meta property="og:image:type" content="image/png" />
@@ -28,7 +28,7 @@
   <!-- Twitter / X -->
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Afterburner · One sandboxed, deterministic WASM runtime for every language" />
-  <meta name="twitter:description" content="C, C++, Rust, Go, TypeScript, JavaScript, and Python. Every language compiled to WebAssembly, in one runtime. Sealed by default, deterministic." />
+  <meta name="twitter:description" content="Every language, compiled to WebAssembly and run in one sandboxed runtime. Sealed by default, deterministic." />
   <meta name="twitter:image" content="https://afterburner.sh/art/og-image.png" />
   <meta name="twitter:image:alt" content="Afterburner: one sandboxed, deterministic WASM runtime for every language" />
   <link rel="stylesheet" href="design-system.css?v=3" />
@@ -2654,13 +2654,12 @@
     <div class="container hero__inner">
       <div class="hero__copy">
         <h1 class="hero__title">
-          <em>Every</em> language. One sandboxed runtime.
+          <em>Every</em> language. One sandboxed <em>runtime</em>.
         </h1>
         <p class="hero__sub">
-          C, C++, Rust, Go, TypeScript, JavaScript, Python, Ruby, and growing. Afterburner is the polyglot WebAssembly
-          runtime: compile a real cargo project, go module, or C/C++ project to wasm and run it next to your TypeScript
-          and Python, all on one engine. Sealed by default, deterministic to the last bit, fuel-metered.
-          <code>burn run</code> a file, a package, or a <code>repl</code>.
+          Every language, in one polyglot WebAssembly runtime: compile a real multi-module project to wasm and run it
+          side by side with your scripts, all on one engine. Sealed by default, deterministic to the last bit,
+          fuel-metered. <code>burn run</code> a file, a package, or a <code>repl</code>.
         </p>
         <div class="installer">
           <h3 class="installer__label">Install Burn</h3>
@@ -2864,7 +2863,7 @@
         <div class="feat reveal">
           <div class="feat__num">01</div>
           <h3>Every language, one engine</h3>
-          <p>C, C++, Rust, Go, TypeScript, JavaScript, and Python all compile to WebAssembly and run side by side.
+          <p>Every language compiles to WebAssembly and runs side by side.
             One <code>burn</code> binary, one execution model, no per-language runtime to install.</p>
         </div>
         <div class="feat reveal">
@@ -3239,7 +3238,7 @@
       <div class="footer__top">
         <div class="footer__brand">
           <img src="art/afterburner-square.png" alt="Afterburner" width="28" height="28" decoding="async" />
-          <p>The polyglot WebAssembly runtime. C, C++, Rust, Go, TypeScript, JavaScript, and Python in one engine.
+          <p>The polyglot WebAssembly runtime: every language in one engine.
             Sealed by default, deterministic, fuel-metered.</p>
         </div>
         <div class="footer__col">
