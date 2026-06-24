@@ -35,12 +35,8 @@ use anyhow::Result;
 
 use super::super::args::Cli;
 
-/// The substring an integration test can match to LOUD-SKIP honestly when the
-/// Python runtime is not configured (never a silent green).
-pub const PY_RUNTIME_MISSING_MARKER: &str = "python runtime not found";
-
-/// Run the Python line REPL. Returns an actionable error (carrying
-/// [`PY_RUNTIME_MISSING_MARKER`]) when the runtime is unavailable.
+/// Run the Python line REPL. Returns an actionable error (its message contains
+/// "python runtime not found") when no runtime is available.
 #[cfg(feature = "wasm")]
 pub fn run(_cli: &Cli) -> Result<()> {
     use super::{Flow, read_loop};
