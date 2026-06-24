@@ -357,7 +357,7 @@ impl Afterburner {
         }
     }
 
-    /// Run a registered script against a typed [`ColumnarBatch`] and
+    /// Run a registered script against a typed \[`ColumnarBatch`\] and
     /// receive the result columns directly - no JSON parse / stringify
     /// on either side. Phase 1 of the UDF perf push: the data path
     /// is `host slice → wasm linmem → JS-side TypedArray view → user
@@ -380,7 +380,7 @@ impl Afterburner {
     ///
     /// **Engine-mode behaviour:**
     ///
-    /// * `Mode::Wasm` - direct call into [`WasmCombustor`].
+    /// * `Mode::Wasm` - direct call into \[`WasmCombustor`\].
     /// * `Mode::Adaptive` - routes to the wasm tier; if the
     ///   background wasm compile is still in flight on the first
     ///   columnar call, blocks up to 5 s waiting for it (subsequent
