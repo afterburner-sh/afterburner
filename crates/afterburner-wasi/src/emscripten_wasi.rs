@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Custom `wasi_snapshot_preview1` host functions for Emscripten-compiled
 //! modules (e.g. `pyodide.asm.wasm`).
@@ -128,11 +128,21 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
 
     // ---- environ ------------------------------------------------------------
 
+    // The fixed guest environment, exposed through the WASI environ ABI. Both
+    // environ_sizes_get and environ_get derive from this one list so they cannot
+    // disagree on the count or the buffer size.
+    //
+    //   PYTHONUNBUFFERED=1  forces unbuffered stdout, so print() output reaches
+    //                       fd_write rather than sitting in CPython's buffer.
+    //   HOME=/home/burn     gives os.path.expanduser('~') a value. Without it,
+    //                       CPython's expanduser raises "Could not determine home
+    //                       directory" and any package that resolves its cache or
+    //                       config dir at import (parso, jedi, fontconfig-style
+    //                       lookups) fails to import. The guest home is created in
+    //                       MEMFS at boot so writes under it succeed.
+    const GUEST_ENVIRON: &[&[u8]] = &[b"PYTHONUNBUFFERED=1\0", b"HOME=/home/burn\0"];
+
     // environ_sizes_get(count_ptr: i32, buf_size_ptr: i32) -> i32
-    // Returns one env var: PYTHONUNBUFFERED=1.
-    // This forces CPython to use unbuffered stdout (no buffering layer between
-    // print() and the underlying write syscall), ensuring output reaches fd_write
-    // even if Python's stdout buffering would otherwise hold bytes in the buffer.
     def!("environ_sizes_get", |mut caller: Caller<
         '_,
         EmbedderState,
@@ -140,34 +150,37 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                                count_ptr: i32,
                                buf_size_ptr: i32|
      -> i32 {
-        // "PYTHONUNBUFFERED=1\0" = 20 bytes
-        pyo_trace!("[environ_sizes_get] returning 1 var, 20 bytes (PYTHONUNBUFFERED=1)");
-        if !write_u32(&mut caller, count_ptr, 1) {
+        let count = GUEST_ENVIRON.len() as u32;
+        let buf_size: u32 = GUEST_ENVIRON.iter().map(|v| v.len() as u32).sum();
+        pyo_trace!("[environ_sizes_get] returning {count} vars, {buf_size} bytes");
+        if !write_u32(&mut caller, count_ptr, count) {
             return 1;
         }
-        if !write_u32(&mut caller, buf_size_ptr, 20) {
+        if !write_u32(&mut caller, buf_size_ptr, buf_size) {
             return 1;
         }
         0
     });
 
     // environ_get(environ_ptr: i32, buf_ptr: i32) -> i32
-    // Write PYTHONUNBUFFERED=1 into the environ buffer.
-    // environ_ptr: pointer to char* array (one entry: pointer to the env string).
-    // buf_ptr: pointer to the string storage ("PYTHONUNBUFFERED=1\0").
+    // environ_ptr: char* array (one pointer per env string, in order).
+    // buf_ptr: storage for the NUL-terminated strings, laid back to back.
     def!("environ_get", |mut caller: Caller<'_, EmbedderState>,
                          environ_ptr: i32,
                          buf_ptr: i32|
      -> i32 {
-        pyo_trace!("[environ_get] writing PYTHONUNBUFFERED=1 at buf_ptr={buf_ptr:#x}");
-        // Write the env string "PYTHONUNBUFFERED=1\0" at buf_ptr.
-        let env_str = b"PYTHONUNBUFFERED=1\0";
-        if !write_bytes(&mut caller, buf_ptr, env_str) {
-            return 1;
-        }
-        // Write the pointer to the env string at environ_ptr.
-        if !write_u32(&mut caller, environ_ptr, buf_ptr as u32) {
-            return 1;
+        pyo_trace!("[environ_get] writing {} vars at buf_ptr={buf_ptr:#x}", GUEST_ENVIRON.len());
+        let mut str_ptr = buf_ptr;
+        for (i, var) in GUEST_ENVIRON.iter().enumerate() {
+            // The string at str_ptr, then its pointer in the array slot.
+            if !write_bytes(&mut caller, str_ptr, var) {
+                return 1;
+            }
+            let slot = environ_ptr + (i as i32) * 4;
+            if !write_u32(&mut caller, slot, str_ptr as u32) {
+                return 1;
+            }
+            str_ptr += var.len() as i32;
         }
         0
     });

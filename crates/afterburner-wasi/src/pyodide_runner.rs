@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Minimal helper for booting the Pyodide 0.28+ Wasm binary in the
 //! deterministic embedder and capturing its stdout.
@@ -169,10 +169,23 @@ fn site_packages(python_xy: &str) -> String {
     format!("/lib/python{python_xy}/site-packages")
 }
 
+/// Whether a `.dist-info/` entry is one `importlib.metadata` reads at runtime.
+///
+/// `importlib.metadata.version("pkg")` / `metadata("pkg")` / `entry_points()`
+/// open `METADATA` and `entry_points.txt` inside the package's `.dist-info`. A
+/// package that checks its own version at import (duckdb, bokeh, h3, imageio,
+/// xarray, ...) raises `PackageNotFoundError` if these are missing. We mount
+/// exactly these two and skip the bulky rest of `.dist-info` (`RECORD`, `WHEEL`,
+/// `licenses/`, the signature files), which nothing imports.
+fn is_metadata_entry(name: &str) -> bool {
+    name.ends_with(".dist-info/METADATA") || name.ends_with(".dist-info/entry_points.txt")
+}
+
 /// Mount every file in a wheel (a zip of `.py` + `.so`) into `fs` under
-/// `guest_prefix`, skipping `.dist-info` and directory entries. Returns the
-/// count mounted. Supports the two zip methods Pyodide wheels use: 0 (stored)
-/// and 8 (deflate).
+/// `guest_prefix`. Skips directory entries and the bulk of `.dist-info`, but
+/// keeps the two metadata files `importlib.metadata` reads (see
+/// [`is_metadata_entry`]). Returns the count mounted. Supports the two zip
+/// methods Pyodide wheels use: 0 (stored) and 8 (deflate).
 fn mount_wheel(fs: &mut InMemFs, wheel_bytes: &[u8], guest_prefix: &str) -> usize {
     use flate2::read::DeflateDecoder;
     use std::io::Read;
@@ -212,7 +225,7 @@ fn mount_wheel(fs: &mut InMemFs, wheel_bytes: &[u8], guest_prefix: &str) -> usiz
         if data_end > wheel_bytes.len() {
             break;
         }
-        if name.contains(".dist-info") || name.ends_with('/') {
+        if name.ends_with('/') || (name.contains(".dist-info") && !is_metadata_entry(&name)) {
             pos = data_end;
             continue;
         }
@@ -456,6 +469,9 @@ fn boot_pyodide_instance(
         let _ = mount_zip_into_fs(&mut store.data_mut().fs, &dir_mount, &zip_bytes);
     }
     store.data_mut().fs.mkdir_p("/tmp");
+    // HOME (exposed via environ_get) must exist so a package that writes its
+    // cache/config under ~ at import (parso, jedi) can create directories there.
+    store.data_mut().fs.mkdir_p("/home/burn");
 
     // Mount every wheel's `.py` + `.so` into guest site-packages. Each `.so`
     // lands in MEMFS and is dlopen'd on demand; numpy's core `.so` is pre-loaded

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Mechanical Emscripten env.* imports: syscalls, memory ops, C++ EH, invoke trampolines.
 
@@ -61,6 +61,9 @@ pub(crate) fn read_cstr(caller: &Caller<'_, EmbedderState>, ptr: i32) -> Option<
         .map(|n| start + n)?;
     Some(String::from_utf8_lossy(&data[start..end]).into_owned())
 }
+
+/// Deterministic civil-time breakdown for the clock host functions.
+mod civil_time;
 
 /// Wire the pure-i32/i64/f64 env.* imports (syscalls, exceptions, trampolines).
 ///
@@ -444,20 +447,35 @@ pub(crate) fn wire_mechanical_env_funcs(
     // `wire_emscripten_ffi` directly. One canonical libffi/mmap host bridge.
     crate::emscripten_ffi::wire_emscripten_ffi(engine, linker)?;
 
-    // ---- time/locale stubs --------------------------------------------------
+    // ---- time/locale --------------------------------------------------------
 
-    def!("_gmtime_js", |_: Caller<'_, EmbedderState>,
-                        _t: i64,
-                        _tmptr: i32| {});
-    def!("_localtime_js", |_: Caller<'_, EmbedderState>,
-                           _t: i64,
-                           _tmptr: i32| {});
-    def!("_mktime_js", |_: Caller<'_, EmbedderState>,
-                        _tmptr: i32|
-     -> i64 { -1 });
-    def!("_timegm_js", |_: Caller<'_, EmbedderState>,
-                        _tmptr: i32|
-     -> i64 { -1 });
+    // `_gmtime_js(t, tmPtr)` / `_localtime_js(t, tmPtr)` break a Unix timestamp
+    // (seconds since the epoch) into a `struct tm` at `tmPtr`. A no-op leaves the
+    // struct uninitialized, so CPython's `time.localtime()` / `datetime.now()`
+    // read garbage and raise "month out of range" - which blocks importing every
+    // package that touches the clock at import (scikit-learn, statsmodels, ipython,
+    // sqlalchemy, ...). The runtime's virtual clock is UTC, so gmtime == localtime;
+    // both fill the struct from the same civil-time breakdown.
+    def!("_gmtime_js", |mut caller: Caller<'_, EmbedderState>,
+                        t: i64,
+                        tmptr: i32| {
+        civil_time::write_tm(&mut caller, t, tmptr);
+    });
+    def!("_localtime_js", |mut caller: Caller<'_, EmbedderState>,
+                           t: i64,
+                           tmptr: i32| {
+        civil_time::write_tm(&mut caller, t, tmptr);
+    });
+    // `_mktime_js(tmPtr)` / `_timegm_js(tmPtr)`: the inverse, returning the Unix
+    // timestamp for the `struct tm` at `tmPtr`. UTC-deterministic, so both are the
+    // same (no local-zone offset). Returning -1 (the no-op) makes `time.mktime`
+    // raise OverflowError; the real value lets it round-trip.
+    def!("_mktime_js", |caller: Caller<'_, EmbedderState>,
+                        tmptr: i32|
+     -> i64 { civil_time::read_tm_to_unix(&caller, tmptr) });
+    def!("_timegm_js", |caller: Caller<'_, EmbedderState>,
+                        tmptr: i32|
+     -> i64 { civil_time::read_tm_to_unix(&caller, tmptr) });
     def!("_tzset_js", |_: Caller<'_, EmbedderState>,
                        _tz: i32,
                        _dl: i32,
@@ -911,6 +929,46 @@ pub fn wire_pyodide028_env_stubs(
         "_PyEM_GetCountArgsPtr",
         |_: Caller<'_, EmbedderState>| -> i32 { 0 }
     );
+
+    // ---- time / clock --------------------------------------------------------
+    //
+    // The exnref Pyodide path does not go through wire_mechanical_env_funcs, so
+    // these would otherwise fall to the noop fill and leave the `struct tm`
+    // uninitialized: CPython's time.localtime() / datetime.now() then read garbage
+    // and raise "month out of range", blocking the import of every package that
+    // touches the clock at import (scikit-learn, statsmodels, ipython, sqlalchemy,
+    // ...). Wire them to the real, deterministic civil-time breakdown. All times
+    // are the virtual UTC epoch, so gmtime == localtime and there is no zone
+    // offset. (i32/i64/f64 only, so no externref-signature conflict on this path.)
+    def!("emscripten_date_now", |_: Caller<'_, EmbedderState>| -> f64 {
+        crate::emscripten_abi::VIRTUAL_EPOCH_MS
+    });
+    def!("_gmtime_js", |mut caller: Caller<'_, EmbedderState>,
+                        t: i64,
+                        tmptr: i32| {
+        civil_time::write_tm(&mut caller, t, tmptr);
+    });
+    def!("_localtime_js", |mut caller: Caller<'_, EmbedderState>,
+                           t: i64,
+                           tmptr: i32| {
+        civil_time::write_tm(&mut caller, t, tmptr);
+    });
+    def!("_mktime_js", |caller: Caller<'_, EmbedderState>,
+                        tmptr: i32|
+     -> i64 { civil_time::read_tm_to_unix(&caller, tmptr) });
+    def!("_timegm_js", |caller: Caller<'_, EmbedderState>,
+                        tmptr: i32|
+     -> i64 { civil_time::read_tm_to_unix(&caller, tmptr) });
+    // tzset writes the four libc zone globals (timezone, daylight, tzname[0/1]).
+    // UTC with no DST: timezone=0, daylight=0, both names "UTC". The args are the
+    // out-pointers Emscripten passes for those globals.
+    def!("_tzset_js", |mut caller: Caller<'_, EmbedderState>,
+                       timezone_ptr: i32,
+                       daylight_ptr: i32,
+                       std_name_ptr: i32,
+                       dst_name_ptr: i32| {
+        civil_time::write_tzset(&mut caller, timezone_ptr, daylight_ptr, std_name_ptr, dst_name_ptr);
+    });
 
     // ---- __hiwire_deduplicate_new: () -> externref ---------------------------
     //

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Filesystem and POSIX syscall implementations for the Emscripten env.* layer.
 //!
@@ -251,6 +251,45 @@ pub fn wire_fs_env_funcs(
                 },
             )
             .map_err(|e| AfterburnerError::Engine(format!("__syscall_openat: {e}")))?;
+    }
+
+    // __syscall_mkdirat(dirfd: i32, pathptr: i32, mode: i32) -> i32
+    // Create the directory (and any missing parents) in MEMFS. A no-op stub
+    // returning -1 makes every os.mkdir/makedirs fail, which blocks any package
+    // that creates a cache or config directory under HOME or /tmp at import
+    // (matplotlib and its dependents, Cartopy's tempdir probe). Resolves the
+    // dirfd-relative path exactly like __syscall_openat. Returns 0 on success.
+    {
+        let _log = mech_log.clone();
+        linker
+            .func_wrap(
+                "env",
+                "__syscall_mkdirat",
+                move |mut caller: Caller<'_, EmbedderState>,
+                      dirfd: i32,
+                      pathptr: i32,
+                      _mode: i32|
+                      -> i32 {
+                    _log.push("__syscall_mkdirat", dirfd, pathptr);
+                    let path_str = match read_cstr(&caller, pathptr) {
+                        Some(s) => s,
+                        None => return ENOENT,
+                    };
+                    let base = if path_str.starts_with('/') || dirfd == -100 {
+                        "/".to_owned()
+                    } else {
+                        match caller.data().fs.fd_path(dirfd) {
+                            Some(p) => p.to_owned(),
+                            None => return EBADF,
+                        }
+                    };
+                    let abs = caller.data().fs.resolve(&base, &path_str);
+                    caller.data_mut().fs.mkdir_p(&abs);
+                    pyo_trace!("[mkdirat] {abs:?} -> 0");
+                    0
+                },
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("__syscall_mkdirat: {e}")))?;
     }
 
     // __syscall_read(fd: i32, buf: i32, count: i32) -> i32
@@ -800,7 +839,8 @@ pub fn wire_fs_env_funcs(
             .map_err(|e| AfterburnerError::Engine(format!("__syscall_readlinkat: {e}")))?;
     }
 
-    def_syscall!("__syscall_mkdirat", 3);
+    // __syscall_mkdirat has a real handler above (creates the directory in
+    // MEMFS); omit it from the stub list so the real handler is not shadowed.
     def_syscall!("__syscall_mknodat", 4);
     def_syscall!("__syscall_unlinkat", 3);
     def_syscall!("__syscall_rmdir", 1);
