@@ -776,6 +776,16 @@ pub fn ruby_dir(home: &Path) -> PathBuf {
     home.join(format!("ruby-{RUBY_WASM_RELEASE}"))
 }
 
+/// The ruby.wasm release tag, exposed so the embed materializer targets the
+/// same `~/.burn` dir a network fetch would.
+#[allow(dead_code)] // used by the runtime embed path (embed-ruby)
+pub const RUBY_RELEASE: &str = RUBY_WASM_RELEASE;
+
+/// The Ruby ABI (`X.Y.Z`) the embedded stdlib was built for, exposed so the
+/// embed materializer can write a manifest that the resolver validates.
+#[allow(dead_code)] // used by the runtime embed path (embed-ruby)
+pub const RUBY_ABI_VERSION: &str = RUBY_ABI;
+
 /// A Ruby bundle manifest is complete when the wasm and the versioned stdlib dir
 /// it lists both exist.
 pub fn ruby_manifest_ok(dir: &Path) -> bool {
@@ -824,6 +834,46 @@ pub fn ensure_ruby(home: &Path, prog: &dyn BundleProgress) -> Result<(), String>
     let r = ensure_populated(&dir, &manifest_ok, &populate);
     prog.finish();
     r
+}
+
+/// Assemble the Ruby core (the `ruby.wasm` interpreter + the full `usr` stdlib
+/// tree) into `out_dir` for `include_bytes!` embedding under the `embed-ruby`
+/// feature. Called by the build script; the caller owns the dir's lifecycle.
+///
+/// The result is byte-identical to what [`ensure_ruby`] writes into `~/.burn`,
+/// so a later online run finds the embedded bytes already in place (a cache hit).
+/// No `wasm-opt` required: the interpreter is a pure WASI command module.
+#[allow(dead_code)] // used by the build script (embed-ruby); unused on the runtime side
+pub fn assemble_ruby_core(out_dir: &Path, prog: &dyn BundleProgress) -> Result<(), String> {
+    // A populated dir is a cache hit: both the interpreter and the versioned
+    // stdlib dir must be present.
+    let wasm_ok = out_dir.join("ruby.wasm").exists();
+    let stdlib_ok = out_dir.join(RUBY_STDLIB_ABI_REL).join(RUBY_ABI).exists();
+    if wasm_ok && stdlib_ok {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {}: {e}", out_dir.display()))?;
+
+    let url = format!(
+        "https://github.com/ruby/ruby.wasm/releases/download/{RUBY_WASM_RELEASE}/{RUBY_TARBALL}"
+    );
+    let tar_gz = fetch_verified(&url, RUBY_TARBALL_SHA256, RUBY_LABEL, prog)?;
+    prog.assembling(RUBY_LABEL);
+    extract_ruby(&tar_gz, out_dir)?;
+
+    let lines = [
+        format!("release={RUBY_WASM_RELEASE}"),
+        format!("ruby={RUBY_ABI}"),
+        "wasm=ruby.wasm".to_string(),
+        "usr=usr".to_string(),
+    ];
+    write_file(
+        &out_dir.join("manifest.txt"),
+        (lines.join("\n") + "\n").as_bytes(),
+    )?;
+    prog.finish();
+    Ok(())
 }
 
 /// Extract the standalone `bin/ruby` to `<staging>/ruby.wasm` and every stdlib

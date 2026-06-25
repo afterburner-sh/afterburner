@@ -109,8 +109,14 @@ sha1 = { workspace = true }
 kovan-channel.workspace = true
 
 [features]
-default = ["wasm", "native", "thrust"]
+default = ["wasm", "native", "thrust", "embed-core", "embed-ruby"]
 wasm = ["dep:afterburner-wasi"]
+# Bake the Python core (exnref wasm + stdlib zip) into the binary; passes through
+# to afterburner-wasi. Needs `wasm-opt` + network at build time.
+embed-core = ["afterburner-wasi?/embed-core"]
+# Bake the Ruby interpreter + stdlib tar into the binary; passes through to
+# afterburner-wasi. Needs network at build time (no `wasm-opt` required).
+embed-ruby = ["afterburner-wasi?/embed-ruby"]
 native = ["dep:afterburner-ignite"]
 adaptive = ["dep:afterburner-adaptive", "wasm", "native"]
 thrust = ["dep:afterburner-thrust", "wasm"]
@@ -186,4 +192,6 @@ release-cli = [
     "ts",
     "all-shadows",
     "http3",
+    "embed-core",
+    "embed-ruby",
 ]

@@ -73,6 +73,10 @@ pub mod pyodide_runner;
 // via an explicit `use`); no `#[macro_use]` needed.
 pub mod pyodide_trace;
 pub mod ruby_bundle;
+/// The embedded Ruby runtime (`include_bytes!`), present only under the
+/// `embed-ruby` feature; Ruby then runs offline with zero download.
+#[cfg(feature = "embed-ruby")]
+pub mod ruby_embed;
 pub mod ruby_runner;
 pub mod test_support;
 pub mod wasi_sdk_bundle;

@@ -35,6 +35,7 @@ fn main() {
     plugin_drift_gate();
     prefetch_bundles_if_requested();
     assemble_embed_core_if_enabled();
+    assemble_embed_ruby_if_enabled();
 }
 
 // ---- 1. plugin drift gate --------------------------------------------------
@@ -174,4 +175,64 @@ fn assemble_embed_core_if_enabled() {
         "cargo:rustc-env=AFTERBURNER_EMBED_CORE_DIR={}",
         core_dir.display()
     );
+}
+
+// ---- 4. embed-ruby: bake the Ruby runtime into the binary ------------------
+
+/// Under the `embed-ruby` feature, assemble the Ruby core (interpreter wasm and
+/// stdlib tar) into `OUT_DIR/embed-ruby` and export its path as
+/// `AFTERBURNER_EMBED_RUBY_DIR` so `src/ruby_embed.rs` can include the bytes.
+/// No `wasm-opt` needed (the interpreter is a plain WASI command module). The
+/// build fails when the network is unavailable because a binary built with this
+/// feature that shipped without the runtime would be a dishonest offline promise.
+fn assemble_embed_ruby_if_enabled() {
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_EMBED_RUBY");
+    if std::env::var_os("CARGO_FEATURE_EMBED_RUBY").is_none() {
+        return;
+    }
+
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR set in build script"));
+    let core_dir = out_dir.join("embed-ruby");
+
+    if let Err(e) = bundle_fetch::assemble_ruby_core(&core_dir, &bundle_fetch::NoProgress) {
+        panic!(
+            "embed-ruby: could not assemble the Ruby runtime ({e}).\n\
+             Building with `--features embed-ruby` requires network access at build time to \
+             fetch the stock ruby.wasm tarball. Build online, or drop the `embed-ruby` feature \
+             to use the default lazy ~/.burn fetch."
+        );
+    }
+
+    // Pack the `usr/` tree into a plain tar so the runtime can embed a single
+    // `include_bytes!` for the stdlib and extract it on first use. The tar is
+    // written adjacent to `ruby.wasm` in `OUT_DIR/embed-ruby/`.
+    let tar_path = core_dir.join("ruby_usr.tar");
+    if !tar_path.exists()
+        && let Err(e) = pack_usr_tar(&core_dir, &tar_path)
+    {
+        panic!("embed-ruby: could not pack usr/ tree into tar ({e}).");
+    }
+
+    println!(
+        "cargo:rustc-env=AFTERBURNER_EMBED_RUBY_DIR={}",
+        core_dir.display()
+    );
+}
+
+/// Walk `src_dir/usr` recursively and write a plain (uncompressed) tar to `out`.
+/// The tar entries use paths relative to `src_dir` (i.e. `usr/local/lib/...`),
+/// matching what `ruby_embed::materialize_core` expects to extract.
+fn pack_usr_tar(src_dir: &std::path::Path, out: &std::path::Path) -> Result<(), String> {
+    let usr = src_dir.join("usr");
+    if !usr.is_dir() {
+        return Err(format!("{} is not a directory", usr.display()));
+    }
+
+    let file = std::fs::File::create(out).map_err(|e| format!("create {}: {e}", out.display()))?;
+    let mut ar = tar::Builder::new(file);
+    ar.follow_symlinks(false);
+    ar.append_dir_all("usr", &usr)
+        .map_err(|e| format!("tar append usr: {e}"))?;
+    ar.finish().map_err(|e| format!("tar finish: {e}"))?;
+    Ok(())
 }

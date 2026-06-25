@@ -32,6 +32,8 @@ pub use engine::{
 };
 #[cfg(feature = "embed-core")]
 pub use engine::{PYODIDE_PYTHON_XY, PYODIDE_VERSION};
+#[cfg(feature = "embed-ruby")]
+pub use engine::{RUBY_ABI_VERSION, RUBY_RELEASE};
 
 /// The process-global progress reporter. The `burn` CLI installs one (rendering
 /// the gradient bar via `cli::style`) before running a script; every other
@@ -99,14 +101,36 @@ fn embed_core_fallback(_home: &std::path::Path, fetch_err: String) -> Result<Pat
 }
 
 /// Ensure the Ruby runtime bundle under `~/.burn`, rendering progress.
+///
+/// With the `embed-ruby` feature, a fetch failure (no network) falls back to
+/// materializing the embedded interpreter + stdlib (baked into the binary), so
+/// Ruby runs offline; the error is only returned when even that is unavailable.
+/// Without the feature, a fetch failure is returned verbatim.
 pub fn ensure_ruby_bundle() -> Result<PathBuf, String> {
     let home = home().ok_or_else(|| {
         "cannot locate the Afterburner home dir: neither BURN_HOME nor a home directory (HOME / USERPROFILE) is set. Set \
          BURN_RUBY_RUNTIME to a prebuilt runtime dir, or set HOME (USERPROFILE on Windows)."
             .to_string()
     })?;
-    ensure_ruby(&home, reporter())?;
-    Ok(ruby_dir(&home))
+    match ensure_ruby(&home, reporter()) {
+        Ok(()) => Ok(ruby_dir(&home)),
+        Err(fetch_err) => embed_ruby_fallback(&home, fetch_err),
+    }
+}
+
+/// With `embed-ruby`, materialize the embedded runtime into `~/.burn` so offline
+/// Ruby works when the network fetch failed; without it, propagate the error.
+#[cfg(feature = "embed-ruby")]
+fn embed_ruby_fallback(home: &std::path::Path, fetch_err: String) -> Result<PathBuf, String> {
+    crate::ruby_embed::materialize_core(home).map_err(|embed_err| {
+        format!("{fetch_err} (embedded-ruby fallback also failed: {embed_err})")
+    })
+}
+
+/// Without `embed-ruby`, propagate the fetch error directly.
+#[cfg(not(feature = "embed-ruby"))]
+fn embed_ruby_fallback(_home: &std::path::Path, fetch_err: String) -> Result<PathBuf, String> {
+    Err(fetch_err)
 }
 
 /// Ensure the C/C++ toolchain bundle under `~/.burn`, rendering progress.

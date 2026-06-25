@@ -267,10 +267,13 @@ pub fn run_ruby_package_with(
     ]);
 
     // Stdlib first (same machinery as `run_ruby_with`), then the package source.
+    // The stdlib and gem dirs are read-only. The package source dir is rw so
+    // Ruby scripts can write files under the preopened host path (e.g.
+    // File.write, CSV output, tempfile under the pkg tree).
     if let Some(usr) = &rt.usr_dir {
         opts = opts.preopen_ro(usr, GUEST_USR_MOUNT);
     }
-    opts = opts.preopen_ro(pkg_dir, GUEST_PKG_MOUNT);
+    opts = opts.preopen_rw(pkg_dir, GUEST_PKG_MOUNT);
 
     let out = vm.run_command(&module, opts, Some(RUBY_FUEL))?;
     Ok(RubyRunOutput {
@@ -413,12 +416,13 @@ fn run_ruby_package_with_gem_dirs(
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut opts = WasiCommandOpts::new().args(arg_refs);
 
-    // Stdlib, then gem vendor dir, then package source (same order as doc comment).
+    // Stdlib and gem vendor dir are read-only. The package source dir is rw so
+    // scripts can write files under the preopened host path.
     if let Some(usr) = &rt.usr_dir {
         opts = opts.preopen_ro(usr, GUEST_USR_MOUNT);
     }
     opts = opts.preopen_ro(gem_host_dir, GUEST_GEM_VENDOR_MOUNT);
-    opts = opts.preopen_ro(pkg_dir, GUEST_PKG_MOUNT);
+    opts = opts.preopen_rw(pkg_dir, GUEST_PKG_MOUNT);
 
     let out = vm.run_command(&module, opts, Some(RUBY_FUEL))?;
     Ok(RubyRunOutput {
@@ -479,6 +483,54 @@ mod tests {
             text.contains('2'),
             "expected 2 in stdout, got {text:?} stderr={err:?}"
         );
+    }
+
+    /// The `pkg_dir` preopen is read-write: a Ruby script can write files under
+    /// `/pkg` and they appear on the host `pkg_dir`. Verifies 5x that the write
+    /// persists across runs when the same `pkg_dir` is reused.
+    ///
+    /// `#[ignore]`: fetches/uses the real `~/.burn` Ruby runtime; run explicitly.
+    #[test]
+    #[ignore = "fetches/uses the real ~/.burn Ruby runtime; run explicitly"]
+    fn pkg_dir_is_rw_preopen() {
+        let rt = match resolve_ruby_runtime() {
+            Ok(rt) => rt,
+            Err(_) => {
+                eprintln!("skip: no ruby runtime assembled in this build");
+                return;
+            }
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg = tmp.path();
+
+        std::fs::write(
+            pkg.join("main.rb"),
+            "out = File.join(File.dirname(__FILE__), 'out.txt')\n\
+             File.write(out, \"persisted\")\n\
+             puts \"wrote\"\n",
+        )
+        .unwrap();
+
+        for i in 1u8..=5 {
+            let out = run_ruby_package_with(&rt, pkg, "main.rb").expect("run_ruby_package_with");
+            let text = String::from_utf8_lossy(&out.stdout);
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(
+                out.exit_code, 0,
+                "run {i}: must exit 0; stdout={text:?} stderr={err:?}"
+            );
+            let host_file = pkg.join("out.txt");
+            assert!(
+                host_file.exists(),
+                "run {i}: host file must exist after rw write"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&host_file).unwrap(),
+                "persisted",
+                "run {i}: host file content must match"
+            );
+        }
     }
 
     /// `run_ruby_package_with` on a directory that does not exist is an honest

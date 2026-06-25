@@ -25,6 +25,14 @@ default = []
 # bytes are byte-identical to the fetched+translated artifact, so a later online
 # run is a cache hit on the same `~/.burn/pyodide-<ver>` dir.
 embed-core = []
+# Embed the Ruby interpreter (ruby.wasm, ~33 MiB) and stdlib tree (~20 MiB)
+# into the binary via `include_bytes!`, so Ruby runs OFFLINE with zero
+# download even on a cold `~/.burn`. The build script fetches the stock
+# ruby-3.4-wasm32-wasip1-full tarball into `OUT_DIR` at compile time (it
+# needs network at build time only; no `wasm-opt` required). Off by default:
+# most builds prefer the smaller binary and the lazy download. The embedded
+# bytes are byte-identical to what the lazy runtime fetch produces.
+embed-ruby = []
 # Expose HostFunction::HttpRequest to JS scripts. Off by default so flow
 # scripts don't get ambient network access. Forwards to afterburner-core's
 # feature of the same name.
