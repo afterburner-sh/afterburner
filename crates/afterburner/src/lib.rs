@@ -59,6 +59,7 @@ mod builder;
 pub mod cli;
 #[cfg(feature = "ts")]
 pub mod esm;
+pub mod polyglot;
 pub mod prelude;
 #[cfg(feature = "ts")]
 pub mod ts;
@@ -153,3 +154,5 @@ pub use builder::{Afterburner, AfterburnerBuilder, Mode};
 
 #[cfg(feature = "thrust")]
 pub use builder::ThreadedBuilder;
+
+pub use polyglot::{Language, Outcome};

@@ -498,6 +498,64 @@ impl Afterburner {
         }
     }
 
+    /// Run `source` as a top-level script for the given `lang`.
+    ///
+    /// Dispatches to the appropriate single-shot runner for the language and
+    /// returns a unified [`Outcome`](crate::Outcome). Existing per-language
+    /// entry points (`run_script`, `run_python`, `run_ruby`) remain and are
+    /// unchanged; this is an additive facade over them.
+    ///
+    /// # Language dispatch
+    ///
+    /// - `Js` / `Ts`: delegates to [`run_script`](Self::run_script).
+    /// - `Python`: delegates to `afterburner_wasi::pyodide_runner::run_python`
+    ///   (requires the `wasm` feature and the Pyodide runtime).
+    /// - `Ruby`: delegates to `afterburner_wasi::ruby_runner::run_ruby`
+    ///   (requires the `wasm` feature and the ruby.wasm runtime).
+    /// - `Rust` / `Go` / `C` / `Cpp`: returns a typed error directing the
+    ///   caller to pre-compile to `wasm32-wasip1` and register via
+    ///   [`register_precompiled`](Self::register_precompiled).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use afterburner::{Afterburner, Language};
+    ///
+    /// let ab = Afterburner::new()?;
+    ///
+    /// let js_out = ab.run_source(Language::Js, "console.log('hello js')")?;
+    /// assert!(js_out.stdout.contains("hello js"));
+    /// # Ok::<_, afterburner::AfterburnerError>(())
+    /// ```
+    pub fn run_source(&self, lang: crate::Language, source: &str) -> Result<crate::Outcome> {
+        crate::polyglot::dispatch_run_source(self, lang, source)
+    }
+
+    /// Detect the language from `path`'s extension, read the file, and run
+    /// it via [`run_source`](Self::run_source).
+    ///
+    /// Returns a typed error when the extension is absent or unrecognized,
+    /// or when the file cannot be read.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use afterburner::Afterburner;
+    /// use std::path::Path;
+    ///
+    /// let ab = Afterburner::new()?;
+    /// let outcome = ab.run_file(Path::new("hello.js"))?;
+    /// assert!(outcome.ok);
+    /// # Ok::<_, afterburner::AfterburnerError>(())
+    /// ```
+    pub fn run_file(&self, path: &std::path::Path) -> Result<crate::Outcome> {
+        let lang = crate::polyglot::language_for_path(path)?;
+        let source = std::fs::read_to_string(path).map_err(|e| {
+            afterburner_core::AfterburnerError::Engine(format!("read {}: {e}", path.display()))
+        })?;
+        crate::polyglot::dispatch_run_source(self, lang, &source)
+    }
+
     /// Drop cached compilation artifacts for `id`. Next `run` re-compiles
     /// from source if available.
     pub fn unload(&self, id: &ScriptId) {
