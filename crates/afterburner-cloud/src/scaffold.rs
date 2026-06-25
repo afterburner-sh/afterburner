@@ -432,6 +432,8 @@ fn scaffold(
         },
         dependencies: Default::default(),
         npm: Default::default(),
+        pip: Default::default(),
+        gem: Default::default(),
         signature: None,
         metadata: Default::default(),
         extra: Default::default(),
