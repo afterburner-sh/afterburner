@@ -169,7 +169,10 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                          environ_ptr: i32,
                          buf_ptr: i32|
      -> i32 {
-        pyo_trace!("[environ_get] writing {} vars at buf_ptr={buf_ptr:#x}", GUEST_ENVIRON.len());
+        pyo_trace!(
+            "[environ_get] writing {} vars at buf_ptr={buf_ptr:#x}",
+            GUEST_ENVIRON.len()
+        );
         let mut str_ptr = buf_ptr;
         for (i, var) in GUEST_ENVIRON.iter().enumerate() {
             // The string at str_ptr, then its pointer in the array slot.

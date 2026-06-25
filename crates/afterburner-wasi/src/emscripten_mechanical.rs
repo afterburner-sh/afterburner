@@ -472,10 +472,14 @@ pub(crate) fn wire_mechanical_env_funcs(
     // raise OverflowError; the real value lets it round-trip.
     def!("_mktime_js", |caller: Caller<'_, EmbedderState>,
                         tmptr: i32|
-     -> i64 { civil_time::read_tm_to_unix(&caller, tmptr) });
+     -> i64 {
+        civil_time::read_tm_to_unix(&caller, tmptr)
+    });
     def!("_timegm_js", |caller: Caller<'_, EmbedderState>,
                         tmptr: i32|
-     -> i64 { civil_time::read_tm_to_unix(&caller, tmptr) });
+     -> i64 {
+        civil_time::read_tm_to_unix(&caller, tmptr)
+    });
     def!("_tzset_js", |_: Caller<'_, EmbedderState>,
                        _tz: i32,
                        _dl: i32,
@@ -940,9 +944,10 @@ pub fn wire_pyodide028_env_stubs(
     // ...). Wire them to the real, deterministic civil-time breakdown. All times
     // are the virtual UTC epoch, so gmtime == localtime and there is no zone
     // offset. (i32/i64/f64 only, so no externref-signature conflict on this path.)
-    def!("emscripten_date_now", |_: Caller<'_, EmbedderState>| -> f64 {
-        crate::emscripten_abi::VIRTUAL_EPOCH_MS
-    });
+    def!(
+        "emscripten_date_now",
+        |_: Caller<'_, EmbedderState>| -> f64 { crate::emscripten_abi::VIRTUAL_EPOCH_MS }
+    );
     def!("_gmtime_js", |mut caller: Caller<'_, EmbedderState>,
                         t: i64,
                         tmptr: i32| {
@@ -955,10 +960,14 @@ pub fn wire_pyodide028_env_stubs(
     });
     def!("_mktime_js", |caller: Caller<'_, EmbedderState>,
                         tmptr: i32|
-     -> i64 { civil_time::read_tm_to_unix(&caller, tmptr) });
+     -> i64 {
+        civil_time::read_tm_to_unix(&caller, tmptr)
+    });
     def!("_timegm_js", |caller: Caller<'_, EmbedderState>,
                         tmptr: i32|
-     -> i64 { civil_time::read_tm_to_unix(&caller, tmptr) });
+     -> i64 {
+        civil_time::read_tm_to_unix(&caller, tmptr)
+    });
     // tzset writes the four libc zone globals (timezone, daylight, tzname[0/1]).
     // UTC with no DST: timezone=0, daylight=0, both names "UTC". The args are the
     // out-pointers Emscripten passes for those globals.
@@ -967,7 +976,13 @@ pub fn wire_pyodide028_env_stubs(
                        daylight_ptr: i32,
                        std_name_ptr: i32,
                        dst_name_ptr: i32| {
-        civil_time::write_tzset(&mut caller, timezone_ptr, daylight_ptr, std_name_ptr, dst_name_ptr);
+        civil_time::write_tzset(
+            &mut caller,
+            timezone_ptr,
+            daylight_ptr,
+            std_name_ptr,
+            dst_name_ptr,
+        );
     });
 
     // ---- __hiwire_deduplicate_new: () -> externref ---------------------------

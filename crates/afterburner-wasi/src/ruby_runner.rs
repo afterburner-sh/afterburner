@@ -26,6 +26,7 @@
 //! bundle nor a `BURN_RUBY_RUNTIME` override), the resolver returns an honest,
 //! actionable error - never a fake success.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -56,6 +57,16 @@ const GUEST_USR_MOUNT: &str = "/usr";
 /// so `require_relative './helper'` (relative to the entry) and
 /// `require 'helper'` (via the load path) both resolve sibling modules.
 const GUEST_PKG_MOUNT: &str = "/pkg";
+
+/// Guest mount point for vendored gems (FORMAT_MINOR >= 3, section 13.3).
+///
+/// Each gem's extracted file tree is written under
+/// `<host_vendor_dir>/<gem_name>-<version>/` and preopened read-only here.
+/// A `-I` flag per gem's `lib/` subdirectory prepends it to `$LOAD_PATH`, so
+/// `require 'sinatra'` resolves `lib/sinatra.rb` inside the vendored gem tree
+/// without a gem toolchain and without network access. Mirrors the source-tree
+/// `-I` mechanism already used at `GUEST_PKG_MOUNT`.
+const GUEST_GEM_VENDOR_MOUNT: &str = "/pkg/vendor/gem";
 
 /// A fully-resolved Ruby runtime: the standalone interpreter wasm and the
 /// stdlib dir to mount read-only.
@@ -269,6 +280,154 @@ pub fn run_ruby_package_with(
     })
 }
 
+/// Write the `vendor/gem/**` subset of an `.afb`'s `vendor` map into `dest_dir`
+/// and collect the unique gem `lib/` subdirectories that exist within.
+///
+/// Keys are expected to be of the form `"vendor/gem/<name>-<version>/<rel>"`.
+/// The strip of `"vendor/gem/"` gives `"<name>-<version>/<rel>"`, which is
+/// written verbatim under `dest_dir`. For each `<name>-<version>` that has at
+/// least one file under `<name>-<version>/lib/`, the function records
+/// `<name>-<version>/lib` as a `lib/` root to put on `$LOAD_PATH` via `-I`.
+///
+/// Returns the sorted list of guest lib-dir strings (e.g.
+/// `"/pkg/vendor/gem/sinatra-3.1.0/lib"`).
+fn write_vendor_gems(vendor: &BTreeMap<String, Vec<u8>>, dest_dir: &Path) -> Result<Vec<String>> {
+    const PREFIX: &str = "vendor/gem/";
+    let mut lib_dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for (archive_key, data) in vendor {
+        let Some(rel) = archive_key.strip_prefix(PREFIX) else {
+            continue;
+        };
+        // rel is "<name>-<version>/<file_path>".
+        let dest = dest_dir.join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AfterburnerError::Engine(format!("vendor gem: create {}: {e}", parent.display()))
+            })?;
+        }
+        std::fs::write(&dest, data).map_err(|e| {
+            AfterburnerError::Engine(format!("vendor gem: write {}: {e}", dest.display()))
+        })?;
+
+        // If this file lives under `<gem_dir>/lib/`, record the lib root.
+        // The gem_dir is everything up to (and including) the first `/`.
+        if let Some(slash) = rel.find('/') {
+            let gem_dir = &rel[..slash];
+            let rest = &rel[slash + 1..];
+            if rest.starts_with("lib/") || rest == "lib" {
+                lib_dirs.insert(format!("{GUEST_GEM_VENDOR_MOUNT}/{gem_dir}/lib"));
+            }
+        }
+    }
+
+    Ok(lib_dirs.into_iter().collect())
+}
+
+/// Boot a resolved [`RubyRuntime`] and run a Ruby package rooted at `pkg_dir`
+/// with entry `entry_rel`, mounting vendored gems from the `.afb`'s `vendor`
+/// map.
+///
+/// Vendored gems (keys under `"vendor/gem/**"` in `vendor`) are extracted to a
+/// temp subdirectory alongside `pkg_dir`, preopened read-only at
+/// [`GUEST_GEM_VENDOR_MOUNT`], and each gem's `lib/` root is prepended to
+/// `$LOAD_PATH` via a `-I` flag - so `require 'sinatra'` (for example) resolves
+/// offline with no gem toolchain and no network. Everything the interpreter
+/// imports is already in the preopened host directories before user code runs.
+///
+/// When `vendor` contains no `"vendor/gem/**"` entries (the common case for
+/// packages with no `[gem]` dependencies), this is identical to
+/// [`run_ruby_package_with`].
+///
+/// The temp dir that holds the extracted gem tree is cleaned up after the run,
+/// whether it succeeds or fails.
+pub fn run_ruby_afb_with(
+    rt: &RubyRuntime,
+    pkg_dir: &Path,
+    entry_rel: &str,
+    vendor: &BTreeMap<String, Vec<u8>>,
+) -> Result<RubyRunOutput> {
+    // Fast path: no vendored gems - delegate directly.
+    let has_gems = vendor.keys().any(|k| k.starts_with("vendor/gem/"));
+    if !has_gems {
+        return run_ruby_package_with(rt, pkg_dir, entry_rel);
+    }
+
+    let gem_tmp = unique_tmp_dir("burn-rb-vendor-gem");
+    let write_result = write_vendor_gems(vendor, &gem_tmp);
+    let lib_dirs = match write_result {
+        Ok(dirs) => dirs,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&gem_tmp);
+            return Err(e);
+        }
+    };
+
+    let run_result = run_ruby_package_with_gem_dirs(rt, pkg_dir, entry_rel, &gem_tmp, &lib_dirs);
+    let _ = std::fs::remove_dir_all(&gem_tmp);
+    run_result
+}
+
+/// Inner: run a Ruby package with an already-materialized gem vendor dir and
+/// the guest lib-dir list. Called from [`run_ruby_afb_with`] after writing the
+/// gem tree to `gem_host_dir`.
+fn run_ruby_package_with_gem_dirs(
+    rt: &RubyRuntime,
+    pkg_dir: &Path,
+    entry_rel: &str,
+    gem_host_dir: &Path,
+    gem_lib_guest_dirs: &[String],
+) -> Result<RubyRunOutput> {
+    if !pkg_dir.is_dir() {
+        return Err(AfterburnerError::Engine(format!(
+            "ruby package directory {} does not exist",
+            pkg_dir.display()
+        )));
+    }
+
+    let wasm_bytes = std::fs::read(&rt.wasm_path)
+        .map_err(|e| AfterburnerError::Engine(format!("read {}: {e}", rt.wasm_path.display())))?;
+
+    let vm = EmbedderVm::new()?;
+    let module = vm.compile(&wasm_bytes, true, |_| Ok(()))?;
+
+    let entry_fwd = entry_rel.replace('\\', "/");
+    let guest_entry = format!("{GUEST_PKG_MOUNT}/{entry_fwd}");
+    let entry_dir = match entry_fwd.rsplit_once('/') {
+        Some((dir, _file)) => format!("{GUEST_PKG_MOUNT}/{dir}"),
+        None => GUEST_PKG_MOUNT.to_owned(),
+    };
+    let i_entry_dir = format!("-I{entry_dir}");
+    let i_root = format!("-I{GUEST_PKG_MOUNT}");
+
+    // Build the argv: ruby [-I<gem_lib>...] -I<entry_dir> -I<pkg_root> <entry>
+    // Gem lib dirs go first so vendored gems shadow nothing in the stdlib.
+    let mut args: Vec<String> = vec!["ruby".to_owned()];
+    for g in gem_lib_guest_dirs {
+        args.push(format!("-I{g}"));
+    }
+    args.push(i_entry_dir);
+    args.push(i_root);
+    args.push(guest_entry);
+
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut opts = WasiCommandOpts::new().args(arg_refs);
+
+    // Stdlib, then gem vendor dir, then package source (same order as doc comment).
+    if let Some(usr) = &rt.usr_dir {
+        opts = opts.preopen_ro(usr, GUEST_USR_MOUNT);
+    }
+    opts = opts.preopen_ro(gem_host_dir, GUEST_GEM_VENDOR_MOUNT);
+    opts = opts.preopen_ro(pkg_dir, GUEST_PKG_MOUNT);
+
+    let out = vm.run_command(&module, opts, Some(RUBY_FUEL))?;
+    Ok(RubyRunOutput {
+        stdout: out.stdout,
+        stderr: out.stderr,
+        exit_code: out.result as i32,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,6 +545,141 @@ mod tests {
         assert!(
             text.contains("sq=81"),
             "sibling require must resolve (9*9=81), got stdout={text:?} stderr={err:?}"
+        );
+    }
+
+    /// `write_vendor_gems`: an empty vendor map produces an empty lib-dir list.
+    #[test]
+    fn write_vendor_gems_empty_vendor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = write_vendor_gems(&BTreeMap::new(), tmp.path()).expect("no error on empty map");
+        assert!(dirs.is_empty());
+    }
+
+    /// `write_vendor_gems`: keys not under `"vendor/gem/"` are ignored.
+    #[test]
+    fn write_vendor_gems_skips_non_gem_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vendor = BTreeMap::new();
+        vendor.insert(
+            "vendor/pip/requests-2.31.0-py3-none-any.whl".to_owned(),
+            b"data".to_vec(),
+        );
+        vendor.insert("source/main.rb".to_owned(), b"puts 1".to_vec());
+        let dirs = write_vendor_gems(&vendor, tmp.path()).expect("no error when only non-gem keys");
+        assert!(
+            dirs.is_empty(),
+            "non-gem keys must not produce lib dirs: {dirs:?}"
+        );
+    }
+
+    /// `write_vendor_gems`: files under `<gem_dir>/lib/` produce a guest lib-dir
+    /// entry, while files outside `lib/` do not.
+    #[test]
+    fn write_vendor_gems_detects_lib_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut vendor = BTreeMap::new();
+        vendor.insert(
+            "vendor/gem/color-1.0.0/lib/color.rb".to_owned(),
+            b"module Color; end".to_vec(),
+        );
+        vendor.insert(
+            "vendor/gem/color-1.0.0/README.md".to_owned(),
+            b"# Color".to_vec(),
+        );
+        vendor.insert(
+            "vendor/gem/widget-2.1.3/lib/widget.rb".to_owned(),
+            b"module Widget; end".to_vec(),
+        );
+        let dirs = write_vendor_gems(&vendor, tmp.path()).expect("write succeeds");
+        assert_eq!(dirs.len(), 2, "two gems with lib/: {dirs:?}");
+        assert!(
+            dirs.iter().any(|d| d.ends_with("color-1.0.0/lib")),
+            "color lib present: {dirs:?}"
+        );
+        assert!(
+            dirs.iter().any(|d| d.ends_with("widget-2.1.3/lib")),
+            "widget lib present: {dirs:?}"
+        );
+        // Files are written to disk.
+        assert!(tmp.path().join("color-1.0.0/lib/color.rb").exists());
+        assert!(tmp.path().join("color-1.0.0/README.md").exists());
+        assert!(tmp.path().join("widget-2.1.3/lib/widget.rb").exists());
+    }
+
+    /// `run_ruby_afb_with` on a missing package directory is an honest `Err`,
+    /// not a panic, even when the vendor map has gem entries.
+    #[test]
+    fn run_ruby_afb_with_missing_dir_errors() {
+        let rt = RubyRuntime {
+            wasm_path: PathBuf::from("/nonexistent/ruby.wasm"),
+            usr_dir: None,
+        };
+        let mut vendor = BTreeMap::new();
+        vendor.insert(
+            "vendor/gem/fake-1.0.0/lib/fake.rb".to_owned(),
+            b"module Fake; end".to_vec(),
+        );
+        let err = run_ruby_afb_with(&rt, Path::new("/no/such/pkg/dir"), "main.rb", &vendor)
+            .expect_err("missing dir must error");
+        assert!(
+            err.to_string().contains("does not exist"),
+            "error must name the missing dir: {err}"
+        );
+    }
+
+    /// End-to-end offline gem vendor: a Ruby `.afb` package (source tree in a
+    /// temp dir) with a pre-vendored pure-Ruby gem runs offline, `require`s the
+    /// gem, and prints the expected output.
+    ///
+    /// `#[ignore]`: fetches/uses the real `~/.burn` Ruby runtime; run explicitly.
+    /// This is the PD integration test: vendored gems mount before user code.
+    #[test]
+    #[ignore = "fetches/uses the real ~/.burn Ruby runtime; run explicitly"]
+    fn run_ruby_afb_with_vendored_gem_offline() {
+        let rt = match resolve_ruby_runtime() {
+            Ok(rt) => rt,
+            Err(_) => {
+                eprintln!("skip: no ruby runtime assembled in this build");
+                return;
+            }
+        };
+
+        // Build a minimal in-memory vendor map: a pure-Ruby gem named `greet`
+        // at version 0.1.0 whose single lib file exports `Greet.hello`.
+        let mut vendor: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        vendor.insert(
+            "vendor/gem/greet-0.1.0/lib/greet.rb".to_owned(),
+            b"module Greet\n  def self.hello(name); \"hello #{name}\"; end\nend\n".to_vec(),
+        );
+
+        // Write the package source (one file that requires the vendored gem).
+        let root = std::env::temp_dir().join(format!(
+            "burn-rb-vendor-e2e-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create pkg root");
+        std::fs::write(
+            root.join("main.rb"),
+            "require 'greet'\nputs Greet.hello('world')\n",
+        )
+        .expect("write main.rb");
+
+        let out = run_ruby_afb_with(&rt, &root, "main.rb", &vendor)
+            .expect("run_ruby_afb_with must succeed");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let text = String::from_utf8_lossy(&out.stdout);
+        let err_text = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            out.exit_code, 0,
+            "clean exit; stdout={text:?} stderr={err_text:?}"
+        );
+        assert!(
+            text.contains("hello world"),
+            "vendored gem must be require-able offline; got stdout={text:?} stderr={err_text:?}"
         );
     }
 }

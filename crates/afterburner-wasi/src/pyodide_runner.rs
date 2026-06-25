@@ -339,8 +339,17 @@ pub struct PyodideRunOutput {
 /// `env.*` - exactly the machinery that lets numpy + pandas import. With no
 /// wheels this is the plain stdlib-only boot (byte-identical to the original
 /// basic-Python path).
+///
+/// `extra_wheel_bytes` are vendored wheels from a package's `vendor/pip/`
+/// archive members (already loaded into memory by the unpack path). They are
+/// appended to the runtime wheel set and mounted into the same
+/// `/lib/python<xy>/site-packages` guest directory, so `import <pkg>` resolves
+/// them exactly as it does the bundled numpy/pandas set. Callers pass an empty
+/// slice when running without a package (the `boot_pyodide` / `run_pyodide_source`
+/// paths).
 fn boot_pyodide_instance(
     rt: &PyRuntime,
+    extra_wheel_bytes: &[Vec<u8>],
 ) -> Result<(
     Store<EmbedderState>,
     Instance,
@@ -475,10 +484,16 @@ fn boot_pyodide_instance(
 
     // Mount every wheel's `.py` + `.so` into guest site-packages. Each `.so`
     // lands in MEMFS and is dlopen'd on demand; numpy's core `.so` is pre-loaded
-    // below (CPython expects it from the first dlopen).
-    if has_wheels {
+    // below (CPython expects it from the first dlopen). Vendored wheels from the
+    // package's `vendor/pip/` archive members are appended after the runtime set
+    // so `import <pkg>` resolves them exactly as the built-in numpy/pandas set.
+    let has_extra = !extra_wheel_bytes.is_empty();
+    if has_wheels || has_extra {
         let site_pkgs = site_packages(&rt.python_xy);
         for bytes in &wheel_blobs {
+            mount_wheel(&mut store.data_mut().fs, bytes, &site_pkgs);
+        }
+        for bytes in extra_wheel_bytes {
             mount_wheel(&mut store.data_mut().fs, bytes, &site_pkgs);
         }
     }
@@ -487,9 +502,11 @@ fn boot_pyodide_instance(
 
     // Wire `_dlopen_js` / `_dlsym_js` before the noop fill so Python's dlopen
     // dispatch reaches the side-module registry rather than a noop returning 0.
-    // Only needed when wheels ship `.so`; the stdlib-only path leaves it out so
-    // its import set stays exactly as before.
-    if has_wheels {
+    // Needed when any wheels are present (runtime set or vendored extras), since
+    // they may contain `.so` side modules. The stdlib-only path leaves this out
+    // to keep its import set exactly as before.
+    let any_wheels = has_wheels || has_extra;
+    if any_wheels {
         wire_dlopen_dlsym(&mut linker)?;
     }
 
@@ -509,7 +526,7 @@ fn boot_pyodide_instance(
 
     // Publish the main instance so `_dlopen_js` can wire each side module's
     // `env.*` imports against it when a `.so` is loaded on demand.
-    if has_wheels {
+    if any_wheels {
         store.data_mut().main_instance = Some(instance);
     }
 
@@ -532,7 +549,7 @@ fn boot_pyodide_instance(
     // Initialize the C-stack bookkeeping BEFORE relocs/ctors when side modules
     // are in play (they malloc into the heap, which needs the stack set up).
     // Left out of the stdlib-only path to keep it byte-identical to before.
-    if has_wheels && let Some(f) = instance.get_func(&mut store, "emscripten_stack_init") {
+    if any_wheels && let Some(f) = instance.get_func(&mut store, "emscripten_stack_init") {
         f.call(&mut store, &[], &mut [])
             .map_err(|e| AfterburnerError::Engine(format!("emscripten_stack_init: {e}")))?;
     }
@@ -627,7 +644,7 @@ pub fn boot_pyodide(wasm_path: &str, stdlib_zip_path: &str) -> Result<PyodideBoo
         wheels: Vec::new(),
         python_xy: std::env::var("BURN_PYTHON_STDLIB_VER").unwrap_or_else(|_| "3.13".to_owned()),
     };
-    let (store, _instance, _got_globals) = boot_pyodide_instance(&rt)?;
+    let (store, _instance, _got_globals) = boot_pyodide_instance(&rt, &[])?;
     let stdout = store.data().wasi_stdout.clone();
     Ok(PyodideBootOutput { stdout })
 }
@@ -714,6 +731,12 @@ pub struct PyPackage {
     /// Guest directory prepended to `sys.path` (e.g. `/pkg`). The package's
     /// modules in [`Self::files`] live under this directory.
     pub sys_path_dir: String,
+    /// Vendored Python wheels from `vendor/pip/` archive members (FORMAT_MINOR >= 3).
+    /// Each entry is the raw `.whl` bytes (a zip). During boot they are mounted
+    /// into site-packages via [`mount_wheel`] before CPython's import machinery
+    /// activates, so `import <pkg>` resolves them exactly as the bundled numpy/pandas
+    /// set. Empty for packages with no `[pip]` dependencies.
+    pub vendor_pip_wheels: Vec<Vec<u8>>,
 }
 
 /// Boot a resolved [`PyRuntime`], run `python -c <source>`, return stdout + exit
@@ -748,7 +771,12 @@ fn run_pyodide_core(
     python_source: &str,
     pkg: Option<&PyPackage>,
 ) -> Result<PyodideRunOutput> {
-    let (mut store, instance, _got_globals) = boot_pyodide_instance(rt)?;
+    // Collect vendored wheels from the package (if any) so they are mounted into
+    // site-packages during boot, before CPython's import machinery is active.
+    let vendor_wheels: &[Vec<u8>] = pkg
+        .map(|p| p.vendor_pip_wheels.as_slice())
+        .unwrap_or_default();
+    let (mut store, instance, _got_globals) = boot_pyodide_instance(rt, vendor_wheels)?;
     // Clear any stdout emitted during boot before running user code.
     store.data_mut().wasi_stdout.clear();
 
@@ -945,6 +973,7 @@ mod tests {
         let pkg = PyPackage {
             files,
             sys_path_dir: "/pkg/source".to_owned(),
+            vendor_pip_wheels: Vec::new(),
         };
         let entry = "from helper import square\nprint(f\"sq={square(9)}\")\n";
 
@@ -954,6 +983,231 @@ mod tests {
         assert!(
             text.contains("sq=81"),
             "sibling import must resolve (9*9=81), got stdout={text:?}"
+        );
+    }
+
+    /// Build a minimal synthetic pure-Python wheel (a zip containing
+    /// `stubpkg/__init__.py`) as raw bytes.
+    ///
+    /// A wheel is a zip; this uses stored (method 0) entries to keep the
+    /// helper self-contained. The filename follows PEP 427:
+    /// `stubpkg-1.0.0-py3-none-any.whl`.
+    fn make_synthetic_wheel() -> Vec<u8> {
+        let name: &[u8] = b"stubpkg/__init__.py";
+        let data: &[u8] = b"def hello():\n    return 'vendor_ok'\n";
+        build_stored_zip(&[(name, data)])
+    }
+
+    /// Build a zip archive containing zero-compression (stored) entries.
+    /// Used to construct synthetic `.whl` files for tests.
+    fn build_stored_zip(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        let mut central: Vec<u8> = Vec::new();
+        let mut offset = 0u32;
+
+        for (name, data) in entries {
+            let name_len = name.len() as u16;
+            let data_len = data.len() as u32;
+            let crc = crc32_ieee(data);
+
+            // Local file header.
+            out.extend_from_slice(b"PK\x03\x04");
+            out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            out.extend_from_slice(&0u16.to_le_bytes()); // flags
+            out.extend_from_slice(&0u16.to_le_bytes()); // method 0 = stored
+            out.extend_from_slice(&0u16.to_le_bytes()); // mod time
+            out.extend_from_slice(&0u16.to_le_bytes()); // mod date
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&data_len.to_le_bytes()); // compressed size
+            out.extend_from_slice(&data_len.to_le_bytes()); // uncompressed size
+            out.extend_from_slice(&name_len.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+            out.extend_from_slice(name);
+            out.extend_from_slice(data);
+
+            // Central directory entry.
+            let local_offset = offset;
+            central.extend_from_slice(b"PK\x01\x02");
+            central.extend_from_slice(&20u16.to_le_bytes()); // version made by
+            central.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            central.extend_from_slice(&0u16.to_le_bytes()); // flags
+            central.extend_from_slice(&0u16.to_le_bytes()); // method
+            central.extend_from_slice(&0u16.to_le_bytes()); // mod time
+            central.extend_from_slice(&0u16.to_le_bytes()); // mod date
+            central.extend_from_slice(&crc.to_le_bytes());
+            central.extend_from_slice(&data_len.to_le_bytes());
+            central.extend_from_slice(&data_len.to_le_bytes());
+            central.extend_from_slice(&name_len.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes()); // extra
+            central.extend_from_slice(&0u16.to_le_bytes()); // comment
+            central.extend_from_slice(&0u16.to_le_bytes()); // disk start
+            central.extend_from_slice(&0u16.to_le_bytes()); // int attributes
+            central.extend_from_slice(&0u32.to_le_bytes()); // ext attributes
+            central.extend_from_slice(&local_offset.to_le_bytes());
+            central.extend_from_slice(name);
+
+            offset += 30 + name_len as u32 + data_len;
+        }
+
+        let central_start = out.len() as u32;
+        let central_len = central.len() as u32;
+        let entry_count = entries.len() as u16;
+        out.extend_from_slice(&central);
+
+        // End of central directory record.
+        out.extend_from_slice(b"PK\x05\x06");
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk with central dir start
+        out.extend_from_slice(&entry_count.to_le_bytes());
+        out.extend_from_slice(&entry_count.to_le_bytes());
+        out.extend_from_slice(&central_len.to_le_bytes());
+        out.extend_from_slice(&central_start.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // comment length
+
+        out
+    }
+
+    /// CRC-32 (IEEE 802.3 polynomial) of `data`. Written inline so the test
+    /// module has no extra dependency on a crc crate.
+    fn crc32_ieee(data: &[u8]) -> u32 {
+        let mut crc: u32 = !0u32;
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                let carry = crc & 1;
+                crc >>= 1;
+                if carry != 0 {
+                    crc ^= 0xEDB8_8320u32;
+                }
+            }
+        }
+        !crc
+    }
+
+    /// End-to-end vendor pip wheel mount test.
+    ///
+    /// Proves that a Python `.afb` with a `vendor/pip/<wheel>.whl` member mounts
+    /// the wheel into site-packages before CPython's import machinery activates,
+    /// so `import stubpkg` resolves offline with no network.
+    ///
+    /// Flow:
+    /// 1. Build a synthetic pure-Python wheel containing `stubpkg/__init__.py`.
+    /// 2. Build a real `.afb` (via `afterburner_afb::pack::Builder`) with the
+    ///    wheel under `vendor/pip/stubpkg-1.0.0-py3-none-any.whl`, a minimal
+    ///    source entry, and `[pip] stubpkg = "*"` in the manifest.
+    /// 3. Unpack the `.afb` (full verification path) and extract the vendor
+    ///    wheels into `PyPackage.vendor_pip_wheels`.
+    /// 4. Run `import stubpkg; print(stubpkg.hello())` on the resolved runtime
+    ///    and assert the sentinel appears in stdout.
+    ///
+    /// `#[ignore]`: requires the real Python runtime in `~/.burn` (same
+    /// condition as `run_python_package_resolves_sibling_import`). Skips
+    /// gracefully when the runtime is absent, matching the survey-test precedent.
+    #[test]
+    #[ignore = "requires the real ~/.burn Python runtime; run explicitly"]
+    fn vendor_pip_wheel_mounts_and_imports_offline() {
+        use afterburner_afb::{
+            Afb,
+            manifest::{Format, Manifest, Package, Runtime},
+            pack::Builder,
+        };
+        use afterburner_core::Manifold;
+        use std::collections::BTreeMap;
+
+        let rt = match resolve_runtime() {
+            Ok(rt) => rt,
+            Err(_) => {
+                eprintln!(
+                    "[vendor_pip] SKIP: no python runtime available \
+                     (populate ~/.burn and re-run)"
+                );
+                return;
+            }
+        };
+
+        // 1. Build the synthetic wheel bytes (pure-Python, no .so).
+        let wheel_bytes = make_synthetic_wheel();
+        let wheel_archive_path = "vendor/pip/stubpkg-1.0.0-py3-none-any.whl";
+
+        // 2. Build a minimal Python .afb with the wheel vendored in.
+        let mut pip = BTreeMap::new();
+        pip.insert("stubpkg".to_owned(), "*".to_owned());
+
+        let manifest = Manifest {
+            format: Format {
+                version: "1.3".to_owned(),
+                min_reader: None,
+            },
+            package: Package {
+                name: "vendor-pip-test".to_owned(),
+                namespace: "test".to_owned(),
+                version: "0.0.1".to_owned(),
+                language: "python".to_owned(),
+                entry: "source/main.py".to_owned(),
+                description: None,
+                homepage: None,
+                license: None,
+                keywords: Vec::new(),
+            },
+            runtime: Runtime {
+                min: "0.1.0".to_owned(),
+                target: None,
+            },
+            dependencies: BTreeMap::new(),
+            npm: BTreeMap::new(),
+            pip,
+            gem: BTreeMap::new(),
+            signature: None,
+            metadata: toml::Table::new(),
+            extra: toml::Table::new(),
+        };
+
+        let (afb_bytes, _digest) = Builder::new(manifest, Manifold::sealed())
+            .source(
+                "source/main.py",
+                b"import stubpkg\nprint('VENDOR_PIP_OK ' + stubpkg.hello())\n".to_vec(),
+            )
+            .vendor(wheel_archive_path, wheel_bytes)
+            .build()
+            .expect("Builder::build");
+
+        // 3. Unpack the .afb (full verification path - exercises the vendor/
+        //    materialization in unpack.rs).
+        let afb = Afb::from_bytes(&afb_bytes).expect("Afb::from_bytes");
+
+        let vendor_pip_wheels: Vec<Vec<u8>> = afb
+            .vendor
+            .iter()
+            .filter(|(k, _)| k.starts_with("vendor/pip/") && k.ends_with(".whl"))
+            .map(|(_, v)| v.clone())
+            .collect();
+        assert_eq!(vendor_pip_wheels.len(), 1, "one vendored wheel in archive");
+
+        let entry_source = std::str::from_utf8(
+            afb.source
+                .get("source/main.py")
+                .expect("source/main.py in afb"),
+        )
+        .expect("entry source is UTF-8");
+
+        // 4. Mount the vendored wheel and run Python.
+        let pkg = PyPackage {
+            files: BTreeMap::new(),
+            sys_path_dir: "/pkg/source".to_owned(),
+            vendor_pip_wheels,
+        };
+
+        let out =
+            run_pyodide_package_with(&rt, entry_source, &pkg).expect("run_pyodide_package_with");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+
+        assert_eq!(
+            out.exit_code, 0,
+            "python must exit cleanly; stdout={text:?}"
+        );
+        assert!(
+            text.contains("VENDOR_PIP_OK vendor_ok"),
+            "vendored stubpkg must be importable offline; stdout={text:?}"
         );
     }
 }

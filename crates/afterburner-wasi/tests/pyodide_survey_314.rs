@@ -440,7 +440,10 @@ fn known_good_packages_still_import() {
         return;
     };
     if !Path::new(&m.wasm).exists() {
-        eprintln!("[pyodide_survey_314] SKIP: runtime wasm {} not found", m.wasm);
+        eprintln!(
+            "[pyodide_survey_314] SKIP: runtime wasm {} not found",
+            m.wasm
+        );
         return;
     }
     if KNOWN_GOOD.is_empty() {
