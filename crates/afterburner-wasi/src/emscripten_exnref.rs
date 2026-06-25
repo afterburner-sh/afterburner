@@ -15,9 +15,9 @@
 //! rejected at compile time with
 //! `legacy_exceptions feature required for try instruction`.
 //!
-//! Pyodide's own `pyodide.asm.wasm` is translated to exnref ahead of time, and
-//! the build-time bundler ([`crate::pyodide_bundle`] / `pyodide_payload.rs`)
-//! likewise repackages each wheel with its `.so` translated. But a SIDE_MODULE
+//! The main runtime wasm is translated to exnref ahead of time, and the
+//! runtime-bundle engine ([`crate::bundle`] / `bundle_fetch.rs`) likewise
+//! repackages each wheel with its `.so` translated. But a SIDE_MODULE
 //! that reaches the engine straight from a *stock* wheel (the `dlopen` /
 //! `pre_load_side_module` path mounting an untranslated wheel) is still legacy.
 //!
@@ -62,12 +62,14 @@ use crate::pyo_trace;
 /// while preserving the SIDE_MODULE structure (the `dylink.0` custom section,
 /// the `GOT.func` / `GOT.mem` imports, and the active element segments).
 ///
-/// Kept byte-for-byte in sync with `pyodide_payload::WASM_OPT_FLAGS` (the
-/// build-time bundler): the runtime and the bundler must apply the identical
-/// lowering so a stock `.so` translated here is the same as one translated at
-/// build time. The two live in different compilation units (build script vs
-/// runtime crate) and so cannot share a constant; a divergence would mean a
-/// runtime-translated `.so` differs from its bundled twin.
+/// Kept byte-for-byte in sync with the runtime-bundle engine's
+/// `bundle_fetch::WASM_OPT_FLAGS`: the on-demand `.so` translation here and the
+/// bundle assembly there must apply the identical lowering so a stock `.so`
+/// translated on this path is the same as one translated when the bundle is
+/// assembled. `bundle_fetch.rs` is `#[path]`-included into both the runtime and
+/// the build script, so its copy serves the build-time prefetch too; a
+/// divergence would mean a runtime-translated `.so` differs from its bundled
+/// twin.
 const WASM_OPT_FLAGS: &[&str] = &[
     "--translate-to-exnref",
     "--enable-exception-handling",

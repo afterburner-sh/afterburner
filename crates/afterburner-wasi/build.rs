@@ -3,57 +3,38 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Build-time work for afterburner-wasi: three independent jobs.
+//! Build-time work for afterburner-wasi: two jobs.
 //!
 //! Job one, the plugin drift gate: make sure the committed plugin binary
 //! matches the current polyfill bundle, so editing a polyfill without
 //! rebuilding the plugin can never silently ship a stale binary.
 //!
-//! Job two, the self-contained Pyodide payload: fetch the stock Pyodide 0.28.3
-//! main wasm, the stdlib, and the pandas-closure wheels from the jsDelivr CDN,
-//! exnref-translate the wasm and each wheel `.so` with `wasm-opt`, and cache the
-//! result in a stable dir under the workspace target so `burn run x.py` (numpy +
-//! pandas) works with no env vars and no runtime download. The dir is exported
-//! as `AFTERBURNER_PYODIDE_BUNDLE_DIR`; the runtime loads from there by default.
-//! See `pyodide_payload.rs` (build side) and `src/pyodide_bundle.rs` (runtime).
-//!
-//! Honesty: `wasm-opt` is a BUILD-time dependency for the exnref translation
-//! (not a runtime dependency). When it is absent, or the CDN is unreachable,
-//! the payload step SKIPS cleanly (a `cargo:warning`, never a panic) and the
-//! runtime falls back to `BURN_PYTHON_RUNTIME` with an honest error - exactly
-//! as the plugin gate skips on a fresh checkout.
-//!
-//! Job three, the self-contained ruby.wasm payload: fetch the stock
-//! `ruby-3.4-wasm32-unknown-wasip1-full` tarball from the `ruby/ruby.wasm`
-//! GitHub release (sha256-pinned), extract the standalone interpreter (a plain
-//! WASI command module) and its stdlib, and cache the result under the target
-//! so `burn run x.rb` works with no env vars and no runtime download. No
-//! `wasm-opt` and no translation: the binary imports only
-//! `wasi_snapshot_preview1`. Skips cleanly (a `cargo:warning`) when the network
-//! is unreachable; the runtime then falls back to `BURN_RUBY_RUNTIME`. See
-//! `ruby_payload.rs` (build side) and `src/ruby_bundle.rs` (runtime).
-//!
-//! Job four, the self-contained C/C++ toolchain payload: fetch the stock
-//! `WebAssembly/wasi-sdk` release for the host platform (sha256-pinned per
-//! platform), unpack the toolchain tree (the `clang`/`clang++` drivers, their
-//! resource dir, and the WASI sysroot) under the target so `burn run x.c` /
-//! `burn run x.cpp` compile with no env vars and no runtime download. Skips
-//! cleanly (a `cargo:warning`) on an unsupported host or when the network is
-//! unreachable; the C/C++ compile then falls back to `WASI_SDK_PATH`. See
-//! `wasi_sdk_payload.rs` (build side) and `src/wasi_sdk_bundle.rs` (runtime).
+//! Job two, the OPTIONAL runtime-bundle prefetch. By DEFAULT this build does no
+//! network work: the language runtimes (the Python runtime, the C/C++
+//! toolchain, the Ruby runtime) are fetched LAZILY into `~/.burn` on first use
+//! by the runtime resolvers (see `src/bundle.rs` + `bundle_fetch.rs`). When
+//! `BURN_PREFETCH=1` is set, this build calls the SAME `bundle_fetch` engine to
+//! populate `~/.burn` ahead of time, so a packaged binary ships with the
+//! bundles already in place. There is exactly one fetch+verify+translate+cache
+//! engine (`bundle_fetch.rs`, `#[path]`-included into both this build script and
+//! `src/lib.rs`), so a build-time prefetch and a lazy runtime fetch produce a
+//! byte-identical bundle - no drift. The prefetch skips cleanly (a
+//! `cargo:warning`, never a panic) when the network or `wasm-opt` is
+//! unavailable; the runtime then fetches on first use exactly as the default
+//! path does.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
-mod pyodide_payload;
-mod ruby_payload;
-mod wasi_sdk_payload;
+/// The shared bundle engine, `#[path]`-included so the optional `BURN_PREFETCH`
+/// prefetch uses the identical fetch+verify+translate+cache logic the runtime
+/// does. Only the `ensure_*` + `burn_home` entry points are used here.
+#[path = "bundle_fetch.rs"]
+mod bundle_fetch;
 
 fn main() {
     plugin_drift_gate();
-    pyodide_payload::build();
-    ruby_payload::build();
-    wasi_sdk_payload::build();
+    prefetch_bundles_if_requested();
+    assemble_embed_core_if_enabled();
 }
 
 // ---- 1. plugin drift gate --------------------------------------------------
@@ -79,7 +60,7 @@ fn plugin_drift_gate() {
         Ok(b) => b,
         Err(_) => return, // bundle not yet generated - fresh workspace checkout
     };
-    let current_hash = sha256_hex(&bundle);
+    let current_hash = bundle_fetch::sha256_hex_pub(&bundle);
 
     let committed_hash = match std::fs::read_to_string(&sidecar_path) {
         Ok(s) => s.trim().to_string(),
@@ -112,34 +93,85 @@ fn plugin_drift_gate() {
     }
 }
 
-// ---- shared helpers (used by the payload module too) -----------------------
+// ---- 2. optional ~/.burn prefetch (BURN_PREFETCH=1) ------------------------
 
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(bytes);
-    let digest = h.finalize();
-    let mut out = String::with_capacity(64);
-    for b in digest {
-        use std::fmt::Write;
-        let _ = write!(out, "{b:02x}");
+/// Populate `~/.burn` at build time when `BURN_PREFETCH=1`, via the SAME engine
+/// the runtime uses. Off by default: the runtime fetches lazily on first use.
+/// Every failure is a `cargo:warning`, never a build failure, since the lazy
+/// path is the real guarantee and a build host may have no network.
+fn prefetch_bundles_if_requested() {
+    println!("cargo:rerun-if-env-changed=BURN_PREFETCH");
+    if std::env::var_os("BURN_PREFETCH").is_none_or(|v| v.is_empty() || v == "0") {
+        return;
     }
-    out
-}
 
-/// Locate `wasm-opt`: PATH first, then the emsdk fallback Pyodide builds ship.
-/// Returns `None` when neither is present (the payload step then skips).
-pub(crate) fn find_wasm_opt() -> Option<PathBuf> {
-    if let Ok(out) = Command::new("wasm-opt").arg("--version").output()
-        && out.status.success()
-    {
-        return Some(PathBuf::from("wasm-opt"));
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let p = Path::new(&home).join("emsdk/upstream/bin/wasm-opt");
-        if p.exists() {
-            return Some(p);
+    let Some(home) = bundle_fetch::burn_home() else {
+        println!(
+            "cargo:warning=BURN_PREFETCH=1 set but neither BURN_HOME nor HOME is set; \
+             skipping prefetch (the runtime will fetch lazily on first use)."
+        );
+        return;
+    };
+
+    // A build-time prefetch renders nothing (no TTY on a build host); the lazy
+    // runtime fetch is where the gradient bar shows.
+    let prog = bundle_fetch::NoProgress;
+    for (label, result) in [
+        ("Python runtime", bundle_fetch::ensure_pyodide(&home, &prog)),
+        (
+            "C/C++ toolchain",
+            bundle_fetch::ensure_wasi_sdk(&home, &prog),
+        ),
+        ("Ruby runtime", bundle_fetch::ensure_ruby(&home, &prog)),
+    ] {
+        if let Err(e) = result {
+            println!(
+                "cargo:warning=BURN_PREFETCH: {label} not prefetched ({e}); \
+                 the runtime will fetch it lazily on first use."
+            );
         }
     }
-    None
+}
+
+// ---- 3. embed-core: bake the Python core into the binary -------------------
+
+/// Under the `embed-core` feature, assemble JUST the Python core (the exnref
+/// main wasm + the stdlib zip, no wheels) into `OUT_DIR/embed-core` and export
+/// its path as `AFTERBURNER_EMBED_CORE_DIR`, so `src/pyodide_embed.rs` can
+/// `include_bytes!` it. This needs `wasm-opt` + network AT BUILD TIME; if either
+/// is missing the build FAILS (unlike the optional prefetch), because a binary
+/// built `--features embed-core` that silently shipped without the core would be
+/// a dishonest "offline Python" promise. The wheels and the C/C++ toolchain are
+/// NOT embedded - they still fetch lazily into `~/.burn`.
+fn assemble_embed_core_if_enabled() {
+    // Cargo sets CARGO_FEATURE_<NAME> for each enabled feature of THIS crate.
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_EMBED_CORE");
+    if std::env::var_os("CARGO_FEATURE_EMBED_CORE").is_none() {
+        return;
+    }
+
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR set in build script"));
+    let core_dir = out_dir.join("embed-core");
+
+    // A populated core is a cache hit: skip the fetch + translate.
+    let manifest = core_dir.join("manifest.txt");
+    let core_present = manifest.exists()
+        && core_dir.join("pyodide-exnref.wasm").exists()
+        && core_dir.join("python_stdlib.zip").exists();
+
+    if !core_present
+        && let Err(e) = bundle_fetch::assemble_pyodide_core(&core_dir, &bundle_fetch::NoProgress)
+    {
+        panic!(
+            "embed-core: could not assemble the Python core ({e}).\n\
+             Building with `--features embed-core` requires `wasm-opt` (Binaryen) on PATH and \
+             network access at build time to fetch + translate the core. Install Binaryen and \
+             build online, or drop the `embed-core` feature to use the default lazy ~/.burn fetch."
+        );
+    }
+
+    println!(
+        "cargo:rustc-env=AFTERBURNER_EMBED_CORE_DIR={}",
+        core_dir.display()
+    );
 }

@@ -3,29 +3,23 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Resolver for the self-contained C/C++ compiler payload that the build script
-//! assembles (see `build.rs` + `wasi_sdk_payload.rs`).
+//! Resolver for the self-contained C/C++ toolchain payload, fetched lazily into
+//! `~/.burn` on first use.
 //!
-//! The build script fetches the stock toolchain release for the host platform,
-//! unpacks the whole tree (the `clang`/`clang++` drivers, their resource dir,
-//! and the WASI sysroot) under the workspace target, and writes a
-//! `manifest.txt`. The dir path is baked in at compile time as
-//! `AFTERBURNER_WASI_SDK_BUNDLE_DIR`.
+//! On a miss, [`crate::bundle::ensure_wasi_sdk_bundle`] downloads the stock
+//! toolchain release for the host platform from its pinned, sha256-checked
+//! source, unpacks the whole tree (the `clang`/`clang++` drivers, their resource
+//! dir, and the WASI sysroot) into `~/.burn/wasi-sdk-<tag>/`, and writes a
+//! `manifest.txt`. A populated bundle is a cache hit (no network). This module
+//! reads that manifest and returns the resolved paths, so `burn run x.c` /
+//! `burn run x.cpp` compile with NO env vars beyond the first-use download.
 //!
-//! This module reads that manifest at runtime and returns the resolved paths,
-//! so `burn run x.c` / `burn run x.cpp` compile with NO env vars and NO runtime
-//! download. `WASI_SDK_PATH` remains an optional OVERRIDE. When the bundle is
-//! absent (a build on an unsupported platform, or where the network was
-//! unavailable), `resolve` returns `None` and the caller falls back to the
-//! `WASI_SDK_PATH` path with an honest error.
+//! `WASI_SDK_PATH` remains an optional OVERRIDE handled one level up in the
+//! CLI's `find_wasi_sdk`; this resolver is the default path. When the fetch
+//! fails (an unsupported host, no network), `resolve` returns `None` and the
+//! caller falls back to the `WASI_SDK_PATH` path with an honest error.
 
 use std::path::{Path, PathBuf};
-
-/// Compile-time path to the cache dir the build script populates. Always set
-/// (the build script emits it unconditionally); the dir may or may not be
-/// populated depending on whether the host is supported and the network was
-/// available at build time.
-const BUNDLE_DIR: &str = env!("AFTERBURNER_WASI_SDK_BUNDLE_DIR");
 
 /// A resolved, ready-to-use C/C++ toolchain: absolute paths to the bundled
 /// `clang`/`clang++` drivers and the WASI sysroot to compile against.
@@ -40,13 +34,25 @@ pub struct BundledWasiSdk {
     pub sysroot: PathBuf,
 }
 
-/// Resolve the bundled C/C++ toolchain from the build-time cache, or `None` if
-/// it was not assembled (so the caller falls back to `WASI_SDK_PATH`).
+/// Resolve the bundled C/C++ toolchain, fetching it into `~/.burn` on a miss, or
+/// `None` when neither the fetch nor a populated bundle is available (so the
+/// caller falls back to `WASI_SDK_PATH`).
 ///
-/// Validates that the manifest exists and the driver + sysroot it lists are
-/// present; a half-populated cache resolves to `None` rather than a broken run.
+/// Ensures the bundle (a cache hit is a no-op; a miss downloads with the gradient
+/// bar), then validates that the driver + sysroot the manifest lists are present;
+/// a half-populated bundle resolves to `None` rather than a broken run.
 pub fn resolve() -> Option<BundledWasiSdk> {
-    let dir = Path::new(BUNDLE_DIR);
+    // Fetch into `~/.burn` on a miss (no-op on a hit). A failure (unsupported
+    // host, no network) is reported by the caller's honest fallback error, so
+    // swallow it to `None` and let the WASI_SDK_PATH path take over.
+    let dir = crate::bundle::ensure_wasi_sdk_bundle().ok()?;
+    resolve_dir(&dir)
+}
+
+/// Parse the manifest in a populated bundle `dir` into resolved paths, returning
+/// `None` when the manifest is absent, malformed, or lists a missing driver or
+/// sysroot. Pure (no network, no env): the fetch happened in [`resolve`].
+fn resolve_dir(dir: &Path) -> Option<BundledWasiSdk> {
     let text = std::fs::read_to_string(dir.join("manifest.txt")).ok()?;
 
     let mut clang = None;
@@ -66,7 +72,7 @@ pub fn resolve() -> Option<BundledWasiSdk> {
     let clang = clang?;
     let clangxx = clangxx?;
     let sysroot = sysroot?;
-    // The driver and the sysroot must exist; otherwise the cache is partial.
+    // The driver and the sysroot must exist; otherwise the bundle is partial.
     if !clang.exists() || !sysroot.exists() {
         return None;
     }
@@ -82,31 +88,44 @@ pub fn resolve() -> Option<BundledWasiSdk> {
 mod tests {
     use super::*;
 
-    /// The compile-time bundle dir env is always set by the build script.
-    #[test]
-    fn bundle_dir_env_is_set() {
-        assert!(
-            !BUNDLE_DIR.is_empty(),
-            "AFTERBURNER_WASI_SDK_BUNDLE_DIR must be baked in by build.rs"
-        );
+    /// Write a complete fixture bundle under `dir`, exercising `resolve_dir`
+    /// without a network fetch or env mutation (parallel-safe).
+    fn write_fixture(dir: &Path) {
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::create_dir_all(dir.join("share/wasi-sysroot/include")).unwrap();
+        std::fs::write(dir.join("bin/clang"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(dir.join("bin/clang++"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(
+            dir.join("manifest.txt"),
+            "release=wasi-sdk-33\nversion=33.0\nclang=bin/clang\nclangxx=bin/clang++\nsysroot=share/wasi-sysroot\n",
+        )
+        .unwrap();
     }
 
-    /// `resolve` never panics: it returns `Some` when the cache is fully
-    /// populated (the normal dev/CI path on a supported host with network) and
-    /// `None` when it is absent. Either is a valid, honest outcome.
+    /// A complete bundle dir resolves to the driver + sysroot.
     #[test]
-    fn resolve_is_total() {
-        match resolve() {
-            Some(sdk) => {
-                assert!(sdk.clang.exists(), "resolved clang must exist");
-                assert!(sdk.sysroot.exists(), "resolved sysroot must exist");
-                assert!(
-                    sdk.sysroot.join("include").exists(),
-                    "sysroot must carry an include tree: {}",
-                    sdk.sysroot.display()
-                );
-            }
-            None => { /* bundle not assembled in this build; acceptable */ }
-        }
+    fn resolves_a_complete_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture(tmp.path());
+        let sdk = resolve_dir(tmp.path()).expect("a complete bundle resolves");
+        assert!(sdk.clang.exists());
+        assert!(sdk.sysroot.exists());
+        assert!(sdk.sysroot.join("include").exists());
+    }
+
+    /// A bundle missing the sysroot resolves to `None`.
+    #[test]
+    fn partial_bundle_resolves_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture(tmp.path());
+        std::fs::remove_dir_all(tmp.path().join("share/wasi-sysroot")).unwrap();
+        assert!(resolve_dir(tmp.path()).is_none());
+    }
+
+    /// An absent manifest resolves to `None`, never a panic.
+    #[test]
+    fn missing_manifest_resolves_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(resolve_dir(tmp.path()).is_none());
     }
 }

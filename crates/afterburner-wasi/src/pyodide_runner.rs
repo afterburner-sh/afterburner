@@ -95,7 +95,10 @@ pub struct PyRuntime {
 /// 1. `BURN_PYTHON_RUNTIME=<dir>` - a directory with `pyodide-exnref.wasm` and
 ///    `python_stdlib.zip`. Wheels come from `BURN_WHEELS` (comma-separated
 ///    paths) if set, else none. `BURN_PYTHON_STDLIB_VER` overrides the version.
-/// 2. The bundled runtime the build script assembled (numpy + pandas included).
+/// 2. The self-contained runtime under `~/.burn` (numpy + pandas included),
+///    fetched lazily on first use ([`crate::pyodide_bundle::resolve`]). This is
+///    the default path; it fires on the CLI AND on a programmatic embed that
+///    calls `resolve_runtime` directly.
 ///
 /// Returns `Err` (honest, actionable) when neither is available.
 pub fn resolve_runtime() -> Result<PyRuntime> {
@@ -140,9 +143,10 @@ pub fn resolve_runtime() -> Result<PyRuntime> {
     }
 
     Err(AfterburnerError::Engine(
-        "python runtime not found. The bundled Pyodide runtime was not assembled at build time \
-         (wasm-opt or network unavailable); set BURN_PYTHON_RUNTIME=<dir> with pyodide-exnref.wasm \
-         and python_stdlib.zip, or rebuild with wasm-opt on PATH."
+        "python runtime not found. The runtime could not be fetched into ~/.burn on first use \
+         (no network, or `wasm-opt` (Binaryen) is not installed for the local translate step); \
+         set BURN_PYTHON_RUNTIME=<dir> with pyodide-exnref.wasm and python_stdlib.zip, or install \
+         Binaryen and re-run with network access."
             .to_owned(),
     ))
 }
@@ -895,17 +899,22 @@ mod tests {
     }
 
     /// End-to-end multi-file: a package whose entry imports a sibling module
-    /// runs on the bundled (zero-config) runtime and prints the value computed
+    /// runs on the resolved (zero-config) runtime and prints the value computed
     /// via the sibling. Proves the package's `.py` files are mounted into the
-    /// guest FS and its directory is on `sys.path`. LOUD-SKIPs (never fails)
-    /// when no runtime was assembled in this build, so the suite stays green
-    /// offline.
+    /// guest FS and its directory is on `sys.path`.
+    ///
+    /// `#[ignore]`: a cold cache makes `resolve_runtime` fetch the stock Python
+    /// runtime (and `wasm-opt`-translate it) into `~/.burn`, so it is opt-in
+    /// (the operator's CLI cold-download verify exercises that path). The
+    /// network-free manifest-resolution logic is covered by
+    /// [`crate::pyodide_bundle`]'s `resolve_dir` tests.
     #[test]
+    #[ignore = "fetches/uses the real ~/.burn Python runtime; run explicitly"]
     fn run_python_package_resolves_sibling_import() {
         let rt = match resolve_runtime() {
             Ok(rt) => rt,
             Err(_) => {
-                eprintln!("skip: no python runtime assembled in this build");
+                eprintln!("skip: no python runtime available");
                 return;
             }
         };

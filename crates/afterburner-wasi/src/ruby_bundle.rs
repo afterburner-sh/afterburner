@@ -3,29 +3,26 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Resolver for the self-contained ruby.wasm payload that the build script
-//! assembles (see `build.rs` + `ruby_payload.rs`).
+//! Resolver for the self-contained Ruby runtime payload, fetched lazily into
+//! `~/.burn` on first use.
 //!
-//! The build script fetches the stock `ruby-3.4-wasm32-unknown-wasip1-full`
-//! tarball, extracts the standalone interpreter (`usr/local/bin/ruby`, a pure
+//! On a miss, [`crate::bundle::ensure_ruby_bundle`] downloads the stock
+//! `ruby-3.4-wasm32-unknown-wasip1-full` tarball from its pinned, sha256-checked
+//! source, extracts the standalone interpreter (`usr/local/bin/ruby`, a pure
 //! WASI command module) and its stdlib tree (kept under `usr/local/lib/ruby`),
-//! and caches them under the workspace target with a `manifest.txt`. The dir
-//! path is baked in at compile time as `AFTERBURNER_RUBY_BUNDLE_DIR`.
+//! and populates `~/.burn/ruby-<release>/` atomically with a `manifest.txt`. A
+//! populated bundle is a cache hit (no network). This module reads that manifest
+//! and returns the resolved paths, so `burn run x.rb` (and the REPL) run with NO
+//! env vars beyond the first-use download.
 //!
-//! This module reads that manifest at runtime and returns the resolved paths,
-//! so `burn run x.rb` (and the REPL) run with NO env vars and NO runtime
-//! download. `BURN_RUBY_RUNTIME` remains an optional OVERRIDE. When the bundle
-//! is absent (a build where the network was unavailable), `resolve` returns
-//! `None` and the caller falls back to the env-var path with an honest error.
+//! `BURN_RUBY_RUNTIME` remains an optional OVERRIDE handled one level up in
+//! [`crate::ruby_runner::resolve_ruby_runtime`]; this resolver is the default
+//! path. When the fetch fails (no network), `resolve` returns `None` and the
+//! caller falls back to the env-var path with an honest error.
 
 use std::path::{Path, PathBuf};
 
-/// Compile-time path to the cache dir the build script populates. Always set
-/// (the build script emits it unconditionally); the dir may or may not be
-/// populated depending on whether the network was available at build time.
-const BUNDLE_DIR: &str = env!("AFTERBURNER_RUBY_BUNDLE_DIR");
-
-/// A resolved, ready-to-run ruby.wasm payload: absolute paths to the standalone
+/// A resolved, ready-to-run Ruby payload: absolute paths to the standalone
 /// interpreter and the `usr` tree to mount, plus the Ruby `X.Y.Z` ABI the
 /// stdlib was built for.
 #[derive(Debug, Clone)]
@@ -40,13 +37,24 @@ pub struct BundledRubyRuntime {
     pub ruby_abi: String,
 }
 
-/// Resolve the bundled ruby.wasm payload from the build-time cache, or `None` if
-/// it was not assembled (so the caller falls back to `BURN_RUBY_RUNTIME`).
+/// Resolve the Ruby payload, fetching it into `~/.burn` on a miss, or `None`
+/// when neither the fetch nor a populated bundle is available (so the caller
+/// falls back to `BURN_RUBY_RUNTIME`).
 ///
-/// Validates that the manifest exists and the files it lists are present; a
-/// half-populated cache resolves to `None` rather than a broken run.
+/// Ensures the bundle (a cache hit is a no-op; a miss downloads with the gradient
+/// bar), then validates that the files the manifest lists are present; a
+/// half-populated bundle resolves to `None` rather than a broken run.
 pub fn resolve() -> Option<BundledRubyRuntime> {
-    let dir = Path::new(BUNDLE_DIR);
+    // Fetch into `~/.burn` on a miss (no-op on a hit). A failure (no network) is
+    // reported by the caller's honest fallback error, so swallow it to `None`.
+    let dir = crate::bundle::ensure_ruby_bundle().ok()?;
+    resolve_dir(&dir)
+}
+
+/// Parse the manifest in a populated bundle `dir` into resolved paths, returning
+/// `None` when the manifest is absent, malformed, or the stdlib tree is missing.
+/// Pure (no network, no env): the fetch happened in [`resolve`].
+fn resolve_dir(dir: &Path) -> Option<BundledRubyRuntime> {
     let text = std::fs::read_to_string(dir.join("manifest.txt")).ok()?;
 
     let mut wasm_path = None;
@@ -81,37 +89,47 @@ pub fn resolve() -> Option<BundledRubyRuntime> {
 mod tests {
     use super::*;
 
-    /// The compile-time bundle dir env is always set by the build script.
-    #[test]
-    fn bundle_dir_env_is_set() {
-        assert!(
-            !BUNDLE_DIR.is_empty(),
-            "AFTERBURNER_RUBY_BUNDLE_DIR must be baked in by build.rs"
-        );
+    /// Write a complete fixture bundle under `dir`, exercising `resolve_dir`
+    /// without a network fetch or env mutation (parallel-safe).
+    fn write_fixture(dir: &Path) {
+        std::fs::create_dir_all(dir.join("usr/local/lib/ruby/3.4.0")).unwrap();
+        std::fs::write(dir.join("ruby.wasm"), b"wasm").unwrap();
+        std::fs::write(
+            dir.join("manifest.txt"),
+            "release=2.9.4\nruby=3.4.0\nwasm=ruby.wasm\nusr=usr\n",
+        )
+        .unwrap();
     }
 
-    /// `resolve` never panics: it returns `Some` when the cache is fully
-    /// populated (the normal dev/CI path with network) and `None` when it is
-    /// absent. Either is a valid, honest outcome.
+    /// A complete bundle dir resolves to the interpreter + `usr` tree.
     #[test]
-    fn resolve_is_total() {
-        match resolve() {
-            Some(rt) => {
-                assert!(rt.wasm_path.exists(), "resolved wasm must exist");
-                assert!(
-                    rt.usr_dir
-                        .join("local/lib/ruby")
-                        .join(&rt.ruby_abi)
-                        .exists(),
-                    "resolved usr tree must carry the versioned ABI dir"
-                );
-                assert!(
-                    rt.ruby_abi.starts_with("3.") || rt.ruby_abi.starts_with("4."),
-                    "ruby abi looks wrong: {}",
-                    rt.ruby_abi
-                );
-            }
-            None => { /* bundle not assembled in this build; acceptable */ }
-        }
+    fn resolves_a_complete_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture(tmp.path());
+        let rt = resolve_dir(tmp.path()).expect("a complete bundle resolves");
+        assert!(rt.wasm_path.exists());
+        assert!(
+            rt.usr_dir
+                .join("local/lib/ruby")
+                .join(&rt.ruby_abi)
+                .exists()
+        );
+        assert_eq!(rt.ruby_abi, "3.4.0");
+    }
+
+    /// A bundle missing the versioned stdlib ABI dir resolves to `None`.
+    #[test]
+    fn partial_bundle_resolves_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture(tmp.path());
+        std::fs::remove_dir_all(tmp.path().join("usr/local/lib/ruby/3.4.0")).unwrap();
+        assert!(resolve_dir(tmp.path()).is_none());
+    }
+
+    /// An absent manifest resolves to `None`, never a panic.
+    #[test]
+    fn missing_manifest_resolves_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(resolve_dir(tmp.path()).is_none());
     }
 }

@@ -93,7 +93,9 @@ pub struct RubyRunOutput {
 ///    tree (mounted at guest `/usr`) comes from `BURN_RUBY_USR=<dir>` if set,
 ///    else `<dir>/usr` when present, else none (sealed - bare scripts still
 ///    run).
-/// 2. The bundled runtime the build script assembled.
+/// 2. The self-contained runtime under `~/.burn`, fetched lazily on first use
+///    ([`crate::ruby_bundle::resolve`]). The default path, on the CLI and on a
+///    programmatic embed alike.
 ///
 /// Returns `Err` (honest, actionable) when neither is available.
 pub fn resolve_ruby_runtime() -> Result<RubyRuntime> {
@@ -124,8 +126,8 @@ pub fn resolve_ruby_runtime() -> Result<RubyRuntime> {
     }
 
     Err(AfterburnerError::Engine(
-        "ruby runtime not found. The bundled ruby.wasm runtime was not assembled at build time \
-         (network unavailable); set BURN_RUBY_RUNTIME=<dir> with ruby.wasm, or rebuild with \
+        "ruby runtime not found. The runtime could not be fetched into ~/.burn on first use \
+         (network unavailable); set BURN_RUBY_RUNTIME=<dir> with ruby.wasm, or re-run with \
          network access to fetch the stock ruby.wasm release."
             .to_owned(),
     ))
@@ -271,10 +273,16 @@ pub fn run_ruby_package_with(
 mod tests {
     use super::*;
 
-    /// `resolve_ruby_runtime` is total: it returns `Ok` when the bundle was
-    /// assembled (the normal build) or a `BURN_RUBY_RUNTIME` override is set,
-    /// and an honest, actionable `Err` otherwise. Never panics.
+    /// `resolve_ruby_runtime` is total: `Ok` when a runtime resolves (a
+    /// `BURN_RUBY_RUNTIME` override or a populated `~/.burn`), an honest,
+    /// actionable `Err` otherwise. Never panics.
+    ///
+    /// `#[ignore]`: a cold cache makes this fetch the stock runtime into
+    /// `~/.burn` over the network, so it is opt-in (run explicitly). The
+    /// network-free manifest-resolution logic is covered by
+    /// [`crate::ruby_bundle`]'s `resolve_dir` tests.
     #[test]
+    #[ignore = "fetches the real ~/.burn Ruby runtime on a cold cache; run explicitly"]
     fn resolve_is_total_and_honest() {
         match resolve_ruby_runtime() {
             Ok(rt) => assert!(rt.wasm_path.exists(), "resolved ruby.wasm must exist"),
@@ -288,10 +296,11 @@ mod tests {
         }
     }
 
-    /// End-to-end: when the bundle is present, `ruby -e 'puts 1 + 1'` runs and
-    /// prints `2`. Skips honestly (never fails) when no runtime was assembled
-    /// in this build, so the suite stays green offline.
+    /// End-to-end: `ruby -e 'puts 1 + 1'` runs on the resolved runtime and prints
+    /// `2`. `#[ignore]`: fetches the stock runtime into `~/.burn` on a cold cache,
+    /// so it is opt-in (the CLI cold-download path is the operator's verify).
     #[test]
+    #[ignore = "fetches/uses the real ~/.burn Ruby runtime; run explicitly"]
     fn run_ruby_puts_when_bundled() {
         let rt = match resolve_ruby_runtime() {
             Ok(rt) => rt,
@@ -330,10 +339,11 @@ mod tests {
     }
 
     /// End-to-end multi-file: a package whose entry `require`s a sibling module
-    /// runs on the bundled runtime and prints the value computed via the
-    /// sibling. Proves the package source tree is on `$LOAD_PATH`. LOUD-SKIPs
-    /// (never fails) when no runtime was assembled in this build.
+    /// runs on the resolved runtime and prints the value computed via the
+    /// sibling. Proves the package source tree is on `$LOAD_PATH`. `#[ignore]`:
+    /// fetches/uses the real `~/.burn` Ruby runtime, so it is opt-in.
     #[test]
+    #[ignore = "fetches/uses the real ~/.burn Ruby runtime; run explicitly"]
     fn run_ruby_package_resolves_sibling_require() {
         let rt = match resolve_ruby_runtime() {
             Ok(rt) => rt,

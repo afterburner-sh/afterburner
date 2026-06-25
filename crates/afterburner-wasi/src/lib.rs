@@ -10,6 +10,7 @@
 //! QuickJS-in-WASM. Produces hard-sandboxed JS execution with fuel,
 //! memory, and wall-clock caps.
 
+pub mod bundle;
 pub mod capture;
 mod chamber;
 pub mod columnar;
@@ -55,6 +56,10 @@ pub mod intake;
 pub mod manifold_codec;
 pub mod nozzle;
 pub mod pyodide_bundle;
+/// The embedded Python core (`include_bytes!`), present only under the
+/// `embed-core` feature; basic Python then runs offline with zero download.
+#[cfg(feature = "embed-core")]
+pub mod pyodide_embed;
 pub mod pyodide_runner;
 // `pyo_trace!` is `#[macro_export]`ed (available crate-wide as `crate::pyo_trace`
 // via an explicit `use`); no `#[macro_use]` needed.

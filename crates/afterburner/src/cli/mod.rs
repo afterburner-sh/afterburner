@@ -18,6 +18,7 @@ mod args;
 mod banner;
 mod bench;
 mod build;
+mod bundle_progress;
 mod check;
 pub mod compile;
 mod daemon;
@@ -63,6 +64,10 @@ pub fn run() -> Result<()> {
     ) {
         style::banner(env!("CARGO_PKG_VERSION"));
     }
+    // Install the colorful sink for the runtime-bundle lazy fetch into `~/.burn`,
+    // so a `.py` / `.c` / `.rb` first-run on a cold cache shows the gradient
+    // download bar (a no-op on a non-TTY / NO_COLOR stderr, and on a warm cache).
+    bundle_progress::install();
     let cli = Cli::parse();
     dispatch(cli)
 }

@@ -15,6 +15,16 @@ description = "Afterburner WASM engine — Wasmtime + QuickJS sandbox"
 
 [features]
 default = []
+# Embed the Python core (the exnref main wasm + the stdlib zip, ~10.6 MiB) into
+# the binary via `include_bytes!`, so basic Python runs OFFLINE with zero
+# download even on a cold `~/.burn`. The build script fetches + exnref-translates
+# JUST the core into `OUT_DIR` at compile time (it needs `wasm-opt` + network at
+# build time only). The wheels (numpy/pandas) and the C/C++ toolchain are NOT
+# embedded - they still fetch lazily into `~/.burn` on demand. Off by default:
+# most builds prefer the smaller binary and the lazy download. The embedded
+# bytes are byte-identical to the fetched+translated artifact, so a later online
+# run is a cache hit on the same `~/.burn/pyodide-<ver>` dir.
+embed-core = []
 # Expose HostFunction::HttpRequest to JS scripts. Off by default so flow
 # scripts don't get ambient network access. Forwards to afterburner-core's
 # feature of the same name.
@@ -106,6 +116,16 @@ h3 = { workspace = true, optional = true }
 h3-quinn = { workspace = true, optional = true }
 wasmparser = "0.252.0"
 flate2.workspace = true
+# Runtime, not build-only: the lazy runtime-bundle fetch into `~/.burn`
+# (`bundle_fetch.rs`, `#[path]`-included into `src/lib.rs`) downloads the stock
+# Python / Ruby / C-C++ runtime artifacts on first use, verifies their pinned
+# sha256, and untars the toolchain tarballs. `flate2` (above) inflates the
+# wheels + gzip; `ureq` fetches; `tar` extracts; `sha2` verifies. The SAME
+# engine, called with `BURN_PREFETCH=1`, also runs at build time, so there is
+# one copy of the logic and the bundle is byte-identical either way.
+ureq.workspace = true
+tar.workspace = true
+sha2.workspace = true
 
 # Genuinely unix-only — no Windows equivalent for the parts we use.
 [target.'cfg(unix)'.dependencies]
@@ -126,14 +146,12 @@ rcgen = { workspace = true }
 wasm-encoder = { version = "0.252", features = ["wasmparser"] }
 
 [build-dependencies]
+# The build script `#[path]`-includes the SAME `bundle_fetch.rs` engine the
+# runtime uses. By default it does no network work (the plugin-drift gate only);
+# with `BURN_PREFETCH=1` it calls the shared engine to populate `~/.burn` at
+# build time, so the prefetch and the lazy runtime fetch are one code path and
+# the bundle is byte-identical. These mirror the runtime `[dependencies]` block.
 sha2.workspace = true
-# Build-time only (NOT linked into the runtime): fetch the stock Pyodide 0.28.3
-# payload from the CDN and (de)compress the wheels for exnref translation, and
-# fetch + extract the stock ruby.wasm release tarball. The self-contained
-# bundles are assembled here so `burn run x.py` / `burn run x.rb` work with no
-# env vars and no runtime download (see build.rs + pyodide_payload.rs +
-# ruby_payload.rs).
 ureq.workspace = true
 flate2.workspace = true
-# Untar the stock ruby.wasm release (gzipped tarball -> bin/ruby + stdlib).
 tar.workspace = true

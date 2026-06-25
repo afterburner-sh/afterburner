@@ -361,7 +361,7 @@ fn find_wasm_opt() -> Option<PathBuf> {
 /// Translate a legacy-EH wasm module to the exnref/try_table proposal in place,
 /// the form the embedder's wasmtime config accepts. Uses the same flag set as
 /// the bundled Python runtime's translation (see `afterburner-wasi`'s
-/// `pyodide_payload.rs`). The output replaces `wasm` via a sibling temp + rename.
+/// `bundle_fetch.rs`). The output replaces `wasm` via a sibling temp + rename.
 fn translate_to_exnref(wasm_opt: &Path, wasm: &Path) -> Result<()> {
     const FLAGS: &[&str] = &[
         "--translate-to-exnref",

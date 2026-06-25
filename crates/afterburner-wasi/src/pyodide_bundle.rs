@@ -3,36 +3,33 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 4 years after this version's release. Change License: Apache-2.0.
 
-//! Resolver for the self-contained Pyodide 0.28.3 payload that the build script
-//! assembles (see `build.rs` + `pyodide_payload.rs`).
+//! Resolver for the self-contained Python runtime payload, fetched lazily into
+//! `~/.burn` on first use.
 //!
-//! The build script fetches the stock Pyodide 0.28.3 main wasm, the stdlib, and
-//! the pandas dependency closure (numpy, six, python-dateutil, pytz, pandas),
-//! exnref-translates the wasm and each wheel `.so` with `wasm-opt`, and caches
-//! the result under the workspace target, with a `manifest.txt` listing the
-//! files. The dir path is baked in at compile time as
-//! `AFTERBURNER_PYODIDE_BUNDLE_DIR`.
+//! On a miss, [`crate::bundle::ensure_pyodide_bundle`] downloads the stock
+//! Python runtime main wasm, the stdlib, and the pandas dependency closure
+//! (numpy, six, python-dateutil, pytz, pandas) from their pinned, sha256-checked
+//! sources, exnref-translates the wasm and each wheel `.so` locally, and
+//! populates `~/.burn/pyodide-<ver>/` atomically with a `manifest.txt`. A
+//! populated bundle is a cache hit (no network). This module reads that manifest
+//! and returns the resolved paths, so `burn run x.py` (and the REPL, and a
+//! programmatic embed calling [`crate::pyodide_runner::resolve_runtime`]) run
+//! numpy + pandas with NO env vars beyond the first-use download.
 //!
-//! This module reads that manifest at runtime and returns the resolved paths,
-//! so `burn run x.py` (and the REPL) run numpy + pandas with NO env vars and NO
-//! runtime download. `BURN_PYTHON_RUNTIME` / `BURN_WHEELS` remain optional
-//! OVERRIDES. When the bundle is absent (a build where `wasm-opt` or the network
-//! was unavailable), `resolve` returns `None` and the caller falls back to the
-//! env-var path with an honest error.
+//! `BURN_PYTHON_RUNTIME` / `BURN_WHEELS` remain optional OVERRIDES handled one
+//! level up in [`crate::pyodide_runner::resolve_runtime`]; this resolver is the
+//! default path. When the fetch fails (no network, no `wasm-opt`), `resolve`
+//! returns `None` and the caller falls back to the env-var path with an honest
+//! error.
 
 use std::path::{Path, PathBuf};
 
-/// Compile-time path to the cache dir the build script populates. Always set
-/// (the build script emits it unconditionally); the dir may or may not be
-/// populated depending on whether `wasm-opt` and the network were available.
-const BUNDLE_DIR: &str = env!("AFTERBURNER_PYODIDE_BUNDLE_DIR");
-
-/// A resolved, ready-to-run Pyodide payload: absolute paths to the exnref main
+/// A resolved, ready-to-run Python payload: absolute paths to the exnref main
 /// wasm, the stdlib zip, the wheels (in dependency order), and the interpreter
 /// `X.Y` version the stdlib + wheels were built for.
 #[derive(Debug, Clone)]
 pub struct BundledRuntime {
-    /// The exnref-translated `pyodide.asm.wasm`.
+    /// The exnref-translated main wasm.
     pub wasm_path: PathBuf,
     /// `python_stdlib.zip`.
     pub stdlib_path: PathBuf,
@@ -42,15 +39,26 @@ pub struct BundledRuntime {
     pub python_xy: String,
 }
 
-/// Resolve the bundled Pyodide payload from the build-time cache, or `None` if
-/// it was not assembled (so the caller falls back to `BURN_PYTHON_RUNTIME`).
+/// Resolve the Python payload, fetching it into `~/.burn` on a miss, or `None`
+/// when neither the fetch nor a populated bundle is available (so the caller
+/// falls back to `BURN_PYTHON_RUNTIME`).
 ///
-/// Validates that the manifest exists and every file it lists is present; a
-/// half-populated cache resolves to `None` rather than a broken run.
+/// Ensures the bundle (a cache hit is a no-op; a miss downloads with the gradient
+/// bar), then validates that every file the manifest lists is present; a
+/// half-populated bundle resolves to `None` rather than a broken run.
 pub fn resolve() -> Option<BundledRuntime> {
-    let dir = Path::new(BUNDLE_DIR);
-    let manifest = dir.join("manifest.txt");
-    let text = std::fs::read_to_string(&manifest).ok()?;
+    // Fetch into `~/.burn` on a miss (no-op on a hit). A failure here (no
+    // network, no `wasm-opt`) is reported by the caller's honest fallback error,
+    // so swallow it to `None` and let the env-var path take over.
+    let dir = crate::bundle::ensure_pyodide_bundle().ok()?;
+    resolve_dir(&dir)
+}
+
+/// Parse the manifest in a populated bundle `dir` into resolved paths, returning
+/// `None` when the manifest is absent, malformed, or lists a missing file. Pure
+/// (no network, no env): the fetch happened in [`resolve`].
+fn resolve_dir(dir: &Path) -> Option<BundledRuntime> {
+    let text = std::fs::read_to_string(dir.join("manifest.txt")).ok()?;
 
     let mut wasm_path = None;
     let mut stdlib_path = None;
@@ -70,7 +78,7 @@ pub fn resolve() -> Option<BundledRuntime> {
 
     let wasm_path = wasm_path?;
     let stdlib_path = stdlib_path?;
-    // Every listed file must exist; otherwise the cache is partial.
+    // Every listed file must exist; otherwise the bundle is partial.
     if !wasm_path.exists() || !stdlib_path.exists() || wheels.iter().any(|w| !w.exists()) {
         return None;
     }
@@ -87,34 +95,47 @@ pub fn resolve() -> Option<BundledRuntime> {
 mod tests {
     use super::*;
 
-    /// The compile-time bundle dir env is always set by the build script.
-    #[test]
-    fn bundle_dir_env_is_set() {
-        assert!(
-            !BUNDLE_DIR.is_empty(),
-            "AFTERBURNER_PYODIDE_BUNDLE_DIR must be baked in by build.rs"
-        );
+    /// Write a complete fixture bundle under `dir`, so `resolve_dir` can be
+    /// exercised without a network fetch or any env mutation (parallel-safe).
+    fn write_fixture(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("pyodide-exnref.wasm"), b"wasm").unwrap();
+        std::fs::write(dir.join("python_stdlib.zip"), b"zip").unwrap();
+        std::fs::write(dir.join("numpy.exnref.whl"), b"whl").unwrap();
+        std::fs::write(
+            dir.join("manifest.txt"),
+            "version=0\npython=3.13\nwasm=pyodide-exnref.wasm\nstdlib=python_stdlib.zip\nwheel=numpy.exnref.whl\n",
+        )
+        .unwrap();
     }
 
-    /// `resolve` never panics: it returns `Some` when the cache is fully
-    /// populated (the normal dev/CI path, wasm-opt present) and `None` when it
-    /// is absent. Either is a valid, honest outcome.
+    /// A complete bundle dir resolves to every listed path (the cache-hit shape:
+    /// `resolve` is `ensure_*` + this).
     #[test]
-    fn resolve_is_total() {
-        match resolve() {
-            Some(rt) => {
-                assert!(rt.wasm_path.exists(), "resolved wasm must exist");
-                assert!(rt.stdlib_path.exists(), "resolved stdlib must exist");
-                assert!(
-                    rt.python_xy.starts_with("3."),
-                    "python xy looks wrong: {}",
-                    rt.python_xy
-                );
-                for w in &rt.wheels {
-                    assert!(w.exists(), "resolved wheel must exist: {}", w.display());
-                }
-            }
-            None => { /* bundle not assembled in this build; acceptable */ }
-        }
+    fn resolves_a_complete_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture(tmp.path());
+        let rt = resolve_dir(tmp.path()).expect("a complete bundle resolves");
+        assert!(rt.wasm_path.exists());
+        assert!(rt.stdlib_path.exists());
+        assert_eq!(rt.python_xy, "3.13");
+        assert_eq!(rt.wheels.len(), 1);
+    }
+
+    /// A bundle whose manifest lists a missing file resolves to `None` (a partial
+    /// cache never reads back as complete).
+    #[test]
+    fn partial_bundle_resolves_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_fixture(tmp.path());
+        std::fs::remove_file(tmp.path().join("python_stdlib.zip")).unwrap();
+        assert!(resolve_dir(tmp.path()).is_none());
+    }
+
+    /// An absent manifest resolves to `None`, never a panic.
+    #[test]
+    fn missing_manifest_resolves_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(resolve_dir(tmp.path()).is_none());
     }
 }
