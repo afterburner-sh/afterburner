@@ -355,6 +355,19 @@ pub struct EmbedderState {
     /// syscall fires. Sealed / non-daemon runs leave this `None`.
     #[cfg(feature = "daemon")]
     pub socket_state: Option<Box<crate::emscripten_syscall::socket::SocketState>>,
+    /// Process-isolated thread coordinator. Each `pthread_create` from guest code
+    /// spawns a real runtime instance via this coordinator, reusing the same
+    /// `WorkerEvent` machinery already used for JS `new Worker()`. `None` in sealed
+    /// mode or when no thread grant is present; the pthread shims deny with EAGAIN
+    /// when absent. Under the `daemon` feature only.
+    #[cfg(feature = "daemon")]
+    pub daemon_workers: Option<std::sync::Arc<crate::daemon_workers::DaemonWorkers>>,
+    /// Shared-memory + kernel-futex coordinator. Backs `emscripten_futex_wait` /
+    /// `emscripten_futex_wake` with real OS futex semantics so guest threads can
+    /// synchronise without spinning. `None` in sealed mode. Under the `daemon`
+    /// feature only.
+    #[cfg(feature = "daemon")]
+    pub daemon_sab: Option<std::sync::Arc<crate::daemon_sab::DaemonSab>>,
 }
 
 impl EmbedderState {
@@ -385,6 +398,10 @@ impl EmbedderState {
             manifold: None,
             #[cfg(feature = "daemon")]
             socket_state: None,
+            #[cfg(feature = "daemon")]
+            daemon_workers: None,
+            #[cfg(feature = "daemon")]
+            daemon_sab: None,
         }
     }
 
@@ -427,6 +444,10 @@ impl EmbedderState {
             manifold: None,
             #[cfg(feature = "daemon")]
             socket_state: None,
+            #[cfg(feature = "daemon")]
+            daemon_workers: None,
+            #[cfg(feature = "daemon")]
+            daemon_sab: None,
         }
     }
 
@@ -463,6 +484,10 @@ impl EmbedderState {
             manifold: None,
             #[cfg(feature = "daemon")]
             socket_state: None,
+            #[cfg(feature = "daemon")]
+            daemon_workers: None,
+            #[cfg(feature = "daemon")]
+            daemon_sab: None,
         }
     }
 
@@ -720,6 +745,10 @@ impl EmbedderVm {
                 manifold: None,
                 #[cfg(feature = "daemon")]
                 socket_state: None,
+                #[cfg(feature = "daemon")]
+                daemon_workers: None,
+                #[cfg(feature = "daemon")]
+                daemon_sab: None,
             }
         } else {
             EmbedderState {
@@ -746,6 +775,10 @@ impl EmbedderVm {
                 manifold: None,
                 #[cfg(feature = "daemon")]
                 socket_state: None,
+                #[cfg(feature = "daemon")]
+                daemon_workers: None,
+                #[cfg(feature = "daemon")]
+                daemon_sab: None,
             }
         };
 
@@ -903,6 +936,10 @@ impl EmbedderVm {
             manifold: None,
             #[cfg(feature = "daemon")]
             socket_state: None,
+            #[cfg(feature = "daemon")]
+            daemon_workers: None,
+            #[cfg(feature = "daemon")]
+            daemon_sab: None,
         };
 
         let mut store = Store::new(&module.engine, state);

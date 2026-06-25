@@ -803,6 +803,16 @@ pub(crate) fn wire_mechanical_env_funcs(
     // and _PyImport_InitFunc_TrampolineCall) live in emscripten_invoke.rs.
     wire_invoke_trampolines(engine, linker)?;
 
+    // ---- pthread / futex surface (Section 4: real threads) ------------------
+    //
+    // Wire pthread_create / pthread_join / pthread_detach and the
+    // emscripten_futex_wait / emscripten_futex_wake shims onto the existing
+    // DaemonWorkers + DaemonSab coordinators. Available under the `daemon`
+    // feature only; without it the functions are caught by the catch-all
+    // no-op stubs installed by fill_unknown_imports_as_noops.
+    #[cfg(feature = "daemon")]
+    crate::emscripten_pthread::wire_pthread_imports(linker)?;
+
     Ok(())
 }
 
