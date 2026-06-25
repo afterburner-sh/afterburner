@@ -31,6 +31,7 @@ pub mod error;
 pub mod gem_client;
 pub mod install;
 pub mod lock;
+pub mod native_manifest;
 pub mod npm;
 pub mod pip_client;
 pub mod pkg;

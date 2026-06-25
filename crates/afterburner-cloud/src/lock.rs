@@ -6,6 +6,14 @@
 //! `burn.lock` - the resolved, pinned dependency set for reproducible installs.
 //! A locked install skips resolution entirely and just fetches + verifies the
 //! recorded digests, so it is both faster and deterministic.
+//!
+//! ## Format versions
+//!
+//! - `version = 1`: afb `[[package]]` entries only.
+//! - `version = 2`: adds `[[npm]]`, `[[pip]]`, and `[[gem]]` sections.
+//!   A version-1 reader rejects this loudly (the existing
+//!   `version != LOCK_VERSION` check at parse time). The version-2 reader
+//!   accepts both: a version-1 lock is valid with empty npm/pip/gem sections.
 
 use crate::error::{CloudError, Result};
 use crate::install::InstallItem;
@@ -14,18 +22,32 @@ use serde::{Deserialize, Serialize};
 
 /// Lockfile filename, alongside `afb.toml`.
 pub const LOCKFILE_NAME: &str = "burn.lock";
-const LOCK_VERSION: u32 = 1;
+/// Current lockfile format version.
+const LOCK_VERSION: u32 = 2;
+/// Oldest lockfile version this reader accepts (v1 has no npm/pip/gem sections,
+/// which default to empty via `#[serde(default)]` on the Vec fields).
+const LOCK_VERSION_MIN: u32 = 1;
 
 /// The full lockfile. Packages are sorted by `name` for a stable, diff-friendly
 /// file (the resolution uses a `BTreeMap`, so this is deterministic).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Lockfile {
     pub version: u32,
+    /// Resolved afb-registry packages (unchanged from v1).
     #[serde(default, rename = "package")]
     pub packages: Vec<LockedPackage>,
+    /// Resolved npm packages (new in v2).
+    #[serde(default, rename = "npm", skip_serializing_if = "Vec::is_empty")]
+    pub npm: Vec<LockedNpmPackage>,
+    /// Resolved pip (PyPI) packages (new in v2).
+    #[serde(default, rename = "pip", skip_serializing_if = "Vec::is_empty")]
+    pub pip: Vec<LockedPipPackage>,
+    /// Resolved gem (RubyGems) packages (new in v2).
+    #[serde(default, rename = "gem", skip_serializing_if = "Vec::is_empty")]
+    pub gem: Vec<LockedGemPackage>,
 }
 
-/// One pinned package in the lock.
+/// One pinned afb-registry package in the lock.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LockedPackage {
     /// `namespace/name`.
@@ -36,6 +58,44 @@ pub struct LockedPackage {
     /// Resolved dependency coords (sorted), for the runtime loader.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<String>,
+}
+
+/// One pinned npm package in the lock (closes gap G1 from the audit).
+///
+/// `integrity` is the SRI string from `dist.integrity` (sha512) or, for older
+/// packages, the sha1 from `dist.shasum`. The format mirrors the npm-lockfile v3
+/// SRI field so it is recognizable and interoperable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedNpmPackage {
+    pub name: String,
+    pub version: String,
+    /// SRI integrity string, e.g. `"sha512-..."` or `"sha1-..."`.
+    pub integrity: String,
+}
+
+/// One pinned PyPI wheel in the lock.
+///
+/// `wheel` is the wheel filename (e.g. `requests-2.31.0-py3-none-any.whl`);
+/// `integrity` is `"sha256-<base64>"` or `"sha256:<hex>"` depending on source.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedPipPackage {
+    pub name: String,
+    pub version: String,
+    /// The exact wheel filename that was resolved.
+    pub wheel: String,
+    /// `sha256-<base64>` or `sha256:<hex>` integrity from PyPI.
+    pub integrity: String,
+}
+
+/// One pinned RubyGems package in the lock.
+///
+/// `integrity` is `"sha256:<hex>"` from the RubyGems API `sha` field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedGemPackage {
+    pub name: String,
+    pub version: String,
+    /// `sha256:<hex>` from the RubyGems registry.
+    pub integrity: String,
 }
 
 impl Lockfile {
@@ -54,6 +114,9 @@ impl Lockfile {
         Lockfile {
             version: LOCK_VERSION,
             packages,
+            npm: Vec::new(),
+            pip: Vec::new(),
+            gem: Vec::new(),
         }
     }
 
@@ -64,15 +127,28 @@ impl Lockfile {
     }
 
     /// Parse a `burn.lock`.
+    ///
+    /// Accepts v1 (no npm/pip/gem sections) and v2 (all sections). A version
+    /// outside `[1, 2]` is rejected with a loud error naming the supported range.
     pub fn parse(s: &str) -> Result<Self> {
-        let lf: Lockfile = toml::from_str(s)
+        let mut lf: Lockfile = toml::from_str(s)
             .map_err(|e| CloudError::Package(format!("parsing {LOCKFILE_NAME}: {e}")))?;
-        if lf.version != LOCK_VERSION {
+        if lf.version < LOCK_VERSION_MIN || lf.version > LOCK_VERSION {
             return Err(CloudError::Package(format!(
-                "unsupported {LOCKFILE_NAME} version {} (this burn understands {LOCK_VERSION})",
+                "unsupported {LOCKFILE_NAME} version {} \
+                 (this burn understands versions {LOCK_VERSION_MIN} to {LOCK_VERSION}; \
+                 run `burn install` to regenerate the lockfile)",
                 lf.version
             )));
         }
+        // Normalise: a v1 lock on disk stays readable; write it out as v2 next
+        // time `burn install` runs (the caller decides when to rewrite).
+        // Ensure the version field reflects the actual content, not the wire value,
+        // so callers that inspect `lf.version` after parse see the real number.
+        // The wire value is preserved so a round-trip of a v1 lock stays v1 until
+        // a `from_resolution` call upgrades it.
+        // (No upgrade needed here; the parse is lossless for v1.)
+        let _ = &mut lf; // used mutably by the serde deserialization above
         Ok(lf)
     }
 
@@ -161,5 +237,130 @@ mod tests {
     fn rejects_unknown_version() {
         let err = Lockfile::parse("version = 999\n").unwrap_err();
         assert!(matches!(err, CloudError::Package(_)));
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unsupported") && msg.contains("999"),
+            "error must name the bad version: {msg}"
+        );
+    }
+
+    // ---- v2 round-trip (pip + gem + npm sections) ---------------------------
+
+    #[test]
+    fn v2_lock_with_all_sections_round_trips() {
+        let lock = Lockfile {
+            version: LOCK_VERSION,
+            packages: vec![LockedPackage {
+                name: "acme/core".to_string(),
+                version: "1.0.0".to_string(),
+                digest: "sha256:aabb".to_string(),
+                dependencies: vec![],
+            }],
+            npm: vec![LockedNpmPackage {
+                name: "lodash".to_string(),
+                version: "4.17.21".to_string(),
+                integrity: "sha512-abcdef==".to_string(),
+            }],
+            pip: vec![LockedPipPackage {
+                name: "requests".to_string(),
+                version: "2.31.0".to_string(),
+                wheel: "requests-2.31.0-py3-none-any.whl".to_string(),
+                integrity: "sha256:deadbeef".to_string(),
+            }],
+            gem: vec![LockedGemPackage {
+                name: "faraday".to_string(),
+                version: "2.7.12".to_string(),
+                integrity: "sha256:cafebabe".to_string(),
+            }],
+        };
+
+        let toml_str = lock.to_toml().expect("serialize");
+        // The TOML must use the array-of-tables keys.
+        assert!(
+            toml_str.contains("[[npm]]"),
+            "must have [[npm]]: {toml_str}"
+        );
+        assert!(
+            toml_str.contains("[[pip]]"),
+            "must have [[pip]]: {toml_str}"
+        );
+        assert!(
+            toml_str.contains("[[gem]]"),
+            "must have [[gem]]: {toml_str}"
+        );
+
+        let back = Lockfile::parse(&toml_str).expect("parse");
+        assert_eq!(lock, back);
+        assert_eq!(back.npm.len(), 1);
+        assert_eq!(back.npm[0].name, "lodash");
+        assert_eq!(back.pip.len(), 1);
+        assert_eq!(back.pip[0].wheel, "requests-2.31.0-py3-none-any.whl");
+        assert_eq!(back.gem.len(), 1);
+        assert_eq!(back.gem[0].integrity, "sha256:cafebabe");
+    }
+
+    #[test]
+    fn v2_lock_without_optional_sections_is_terse() {
+        // A v2 lock with only afb packages must not emit empty [[npm]]/[[pip]]/[[gem]].
+        let lock = Lockfile {
+            version: LOCK_VERSION,
+            packages: vec![LockedPackage {
+                name: "ns/x".to_string(),
+                version: "0.1.0".to_string(),
+                digest: "sha256:00".to_string(),
+                dependencies: vec![],
+            }],
+            npm: vec![],
+            pip: vec![],
+            gem: vec![],
+        };
+        let toml_str = lock.to_toml().expect("serialize");
+        assert!(
+            !toml_str.contains("[[npm]]"),
+            "empty npm must be omitted: {toml_str}"
+        );
+        assert!(
+            !toml_str.contains("[[pip]]"),
+            "empty pip must be omitted: {toml_str}"
+        );
+        assert!(
+            !toml_str.contains("[[gem]]"),
+            "empty gem must be omitted: {toml_str}"
+        );
+        let back = Lockfile::parse(&toml_str).expect("parse");
+        assert_eq!(back.npm, vec![]);
+        assert_eq!(back.pip, vec![]);
+        assert_eq!(back.gem, vec![]);
+    }
+
+    #[test]
+    fn v1_lock_parses_on_v2_reader() {
+        // A v1 lock (no npm/pip/gem) must still parse on the v2 reader.
+        let v1 = "version = 1\n\
+                   [[package]]\n\
+                   name = \"acme/x\"\n\
+                   version = \"1.0.0\"\n\
+                   digest = \"sha256:abcd\"\n";
+        let lock = Lockfile::parse(v1).expect("v1 lock must be accepted by v2 reader");
+        assert_eq!(lock.packages.len(), 1);
+        assert_eq!(lock.packages[0].name, "acme/x");
+        assert_eq!(lock.npm, vec![]);
+        assert_eq!(lock.pip, vec![]);
+        assert_eq!(lock.gem, vec![]);
+    }
+
+    #[test]
+    fn v3_lock_is_rejected_loudly() {
+        let v3 = "version = 3\n";
+        let err = Lockfile::parse(v3).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unsupported") && msg.contains("version 3"),
+            "must name the bad version: {msg}"
+        );
+        assert!(
+            msg.contains("burn install"),
+            "error must hint at `burn install`: {msg}"
+        );
     }
 }
