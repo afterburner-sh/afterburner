@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Programmatic (library-embed) proof that the `~/.burn` lazy fetch fires off
 //! the CLI: this binary calls `resolve_runtime()` + `run_pyodide_with()`

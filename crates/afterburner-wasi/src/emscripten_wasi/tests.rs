@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Tests for the wasi_snapshot_preview1 custom shims (emscripten_wasi.rs).
 //!
@@ -127,9 +127,15 @@ fn call_wasi_4(
 
 // ---- environ_sizes_get / environ_get ----------------------------------------
 
-/// environ_sizes_get writes count=1 and buf_size=20 (PYTHONUNBUFFERED=1\0).
+/// The fixed guest environment exposed via the WASI environ ABI, as bytes
+/// (each entry NUL-terminated). Mirrors `GUEST_ENVIRON` in the parent module so
+/// these tests pin the exact contract: PYTHONUNBUFFERED=1 and HOME=/home/burn.
+const EXPECTED_ENVIRON: &[&[u8]] = &[b"PYTHONUNBUFFERED=1\0", b"HOME=/home/burn\0"];
+
+/// environ_sizes_get writes the var count and total byte size of the fixed
+/// guest environment (PYTHONUNBUFFERED=1 and HOME=/home/burn).
 #[test]
-fn environ_sizes_get_returns_one_var_twenty_bytes() {
+fn environ_sizes_get_returns_fixed_environ() {
     let (mut store, linker) = make_store_and_linker();
     // count_ptr at 0x100, buf_size_ptr at 0x104
     let rc = call_wasi_2(&mut store, &linker, "environ_sizes_get", 0x100, 0x104);
@@ -137,31 +143,43 @@ fn environ_sizes_get_returns_one_var_twenty_bytes() {
 
     let count = u32::from_le_bytes(read_mem(&store, 0x100, 4).try_into().unwrap());
     let buf_size = u32::from_le_bytes(read_mem(&store, 0x104, 4).try_into().unwrap());
-    assert_eq!(count, 1, "environ count must be 1 (PYTHONUNBUFFERED=1)");
-    assert_eq!(
-        buf_size, 20,
-        "buf_size must be 20 bytes (PYTHONUNBUFFERED=1 + NUL)"
-    );
+    let want_count = EXPECTED_ENVIRON.len() as u32;
+    let want_size: u32 = EXPECTED_ENVIRON.iter().map(|v| v.len() as u32).sum();
+    assert_eq!(count, want_count, "environ count (PYTHONUNBUFFERED + HOME)");
+    assert_eq!(buf_size, want_size, "buf_size = sum of NUL-terminated vars");
 }
 
-/// environ_get writes PYTHONUNBUFFERED=1\0 to buf_ptr and the pointer to environ_ptr.
+/// environ_get writes each env string to the buffer and a pointer to each in
+/// the environ array. Asserts both vars and that HOME is set (the fix that lets
+/// os.path.expanduser('~') resolve).
 #[test]
-fn environ_get_writes_pythonunbuffered() {
+fn environ_get_writes_fixed_environ() {
     let (mut store, linker) = make_store_and_linker();
-    // environ_ptr at 0x200, buf_ptr at 0x210
+    // environ_ptr (the char* array) at 0x200, buf_ptr (string storage) at 0x210.
     let rc = call_wasi_2(&mut store, &linker, "environ_get", 0x200, 0x210);
     assert_eq!(rc, 0, "environ_get must return 0");
 
-    // Read the env string from buf_ptr = 0x210
-    let env_str_bytes = read_mem(&store, 0x210, 20);
-    assert_eq!(&env_str_bytes, b"PYTHONUNBUFFERED=1\0\0");
+    let total: usize = EXPECTED_ENVIRON.iter().map(|v| v.len()).sum();
+    let buf = read_mem(&store, 0x210, total);
+    // The strings are laid back to back in declaration order.
+    let mut expected = Vec::new();
+    for v in EXPECTED_ENVIRON {
+        expected.extend_from_slice(v);
+    }
+    assert_eq!(buf, expected, "environ buffer = vars back to back");
 
-    // The pointer written to environ_ptr must equal buf_ptr (0x210).
-    let ptr_val = u32::from_le_bytes(read_mem(&store, 0x200, 4).try_into().unwrap());
-    assert_eq!(ptr_val, 0x210u32, "environ_ptr[0] must point to buf_ptr");
+    // Each environ[i] points at the start of var i within the buffer.
+    let mut off = 0x210u32;
+    for (i, v) in EXPECTED_ENVIRON.iter().enumerate() {
+        let slot = 0x200usize + i * 4;
+        let ptr_val = u32::from_le_bytes(read_mem(&store, slot, 4).try_into().unwrap());
+        assert_eq!(ptr_val, off, "environ[{i}] must point at its string");
+        off += v.len() as u32;
+    }
 
-    // Sanity: PYTHONUNBUFFERED=1 is present in the string.
-    let as_str = std::str::from_utf8(&env_str_bytes).unwrap_or("");
+    // The HOME assignment is present (the expanduser fix).
+    let as_str = String::from_utf8_lossy(&buf);
+    assert!(as_str.contains("HOME=/home/burn"), "HOME must be set");
     assert!(
         as_str.contains("PYTHONUNBUFFERED=1"),
         "PYTHONUNBUFFERED=1 must be present"

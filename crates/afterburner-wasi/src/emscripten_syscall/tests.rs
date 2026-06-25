@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Tests for the __syscall_* filesystem shims (emscripten_syscall.rs).
 //!
@@ -252,6 +252,32 @@ fn syscall_openat_missing_file_returns_enoent() {
     // flags=0 (no O_CREAT)
     let rc = call_shim_4(&mut store, &linker, "__syscall_openat", -100, 0x600, 0, 0);
     assert_eq!(rc, -2, "missing file without O_CREAT must return ENOENT=-2");
+}
+
+// ---- __syscall_mkdirat ------------------------------------------------------
+
+/// mkdirat creates the directory (and missing parents) in MEMFS and returns 0,
+/// after which a file can be created under it. This is the fix that lets
+/// matplotlib create its cache dir under HOME at import.
+#[test]
+fn syscall_mkdirat_creates_directory() {
+    let (mut store, linker) = make_store_and_linker();
+    let path = b"/home/burn/.cache/sub\0";
+    write_mem(&mut store, 0x700, path);
+    // dirfd=-100 (AT_FDCWD), pathptr=0x700, mode=0o755.
+    let rc = call_shim_3(&mut store, &linker, "__syscall_mkdirat", -100, 0x700, 0o755);
+    assert_eq!(rc, 0, "mkdirat must return 0 on success, got {rc}");
+    assert!(
+        store.data().fs.exists("/home/burn/.cache/sub"),
+        "the directory must exist in MEMFS after mkdirat"
+    );
+    // Parents are created too (mkdir -p semantics).
+    assert!(store.data().fs.exists("/home/burn/.cache"));
+    // A file can then be created inside it via O_CREAT|O_WRONLY.
+    let file = b"/home/burn/.cache/sub/f.txt\0";
+    write_mem(&mut store, 0x780, file);
+    let fd = call_shim_4(&mut store, &linker, "__syscall_openat", -100, 0x780, 65, 0);
+    assert!(fd >= 3, "creating a file under the new dir must succeed");
 }
 
 // ---- __syscall_fstat64 ------------------------------------------------------

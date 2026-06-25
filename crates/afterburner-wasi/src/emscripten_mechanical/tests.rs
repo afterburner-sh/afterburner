@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 use super::*;
 use crate::embedder_vm::{EmbedderState, deterministic_engine};
@@ -90,6 +90,9 @@ fn mech_call_log_ring_capacity() {
     // arg0 of the last pushed entry is CAP + 10 - 1.
     assert_eq!(tail[0].arg0, (CAP + 9) as i32);
 }
+
+// The civil-time helpers (clock breakdown for _gmtime_js / _localtime_js) are
+// unit-tested in their own module: emscripten_mechanical/civil_time.rs.
 
 // ---- getentropy determinism (fill value) -----------------------------------
 
