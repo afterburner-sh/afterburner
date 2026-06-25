@@ -525,10 +525,21 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
     // fd_close(fd) -> i32
     //
     // For MEMFS fds: close via InMemFs. For 0/1/2: no-op (success).
+    // For socket fds (>= SOCK_FD_BASE): release coordinator resources, return 0.
+    // Python's socket.close() calls close(2) which Emscripten routes to fd_close,
+    // not __syscall_close; both handlers delegate to release_socket_fd.
     def!("fd_close", |mut caller: Caller<'_, EmbedderState>,
                       fd: i32|
      -> i32 {
         pyo_trace!("[fd_close] fd={fd}");
+        #[cfg(feature = "daemon")]
+        {
+            use crate::emscripten_syscall::socket::SOCK_FD_BASE;
+            if fd >= SOCK_FD_BASE {
+                crate::emscripten_syscall::socket::release_socket_fd(&mut caller, fd);
+                return 0;
+            }
+        }
         if fd >= 3 {
             let rc = caller.data_mut().fs.wasi_close(fd);
             if rc < 0 {

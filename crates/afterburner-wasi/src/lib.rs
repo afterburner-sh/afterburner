@@ -38,6 +38,8 @@ pub mod daemon_sab;
 pub mod daemon_shard_pool;
 #[cfg(feature = "daemon")]
 pub mod daemon_tls;
+#[cfg(all(feature = "daemon", unix))]
+pub mod daemon_unix;
 pub mod daemon_workers;
 pub mod embedder_vm;
 pub mod emscripten_abi;

@@ -374,6 +374,14 @@ pub struct EmbedderState {
     /// with EPERM when absent. Under the `daemon` feature only.
     #[cfg(feature = "daemon")]
     pub process_state: Option<Box<crate::emscripten_multiprocessing::ProcessState>>,
+    /// UDP host coordinator for Python AF_INET SOCK_DGRAM sockets. Populated
+    /// in daemon mode; `None` in sealed / non-network runs.
+    #[cfg(feature = "daemon")]
+    pub daemon_dgram_py: Option<std::sync::Arc<crate::daemon_dgram::DaemonDgram>>,
+    /// Unix-domain socket coordinator for AF_UNIX sockets. Populated in daemon
+    /// mode on Unix. `None` in sealed / non-network runs or on non-Unix hosts.
+    #[cfg(all(feature = "daemon", unix))]
+    pub daemon_unix: Option<std::sync::Arc<crate::daemon_unix::DaemonUnix>>,
     /// Read-write host-filesystem preopens for the Python runtime: a list of
     /// `(host_path, guest_path)` pairs, exactly as `WasiCommandOpts::preopens_rw`.
     /// A guest path under one of these preopens is routed to the real host FS
@@ -415,6 +423,10 @@ impl EmbedderState {
             daemon_sab: None,
             #[cfg(feature = "daemon")]
             process_state: None,
+            #[cfg(feature = "daemon")]
+            daemon_dgram_py: None,
+            #[cfg(all(feature = "daemon", unix))]
+            daemon_unix: None,
             rw_preopens: Vec::new(),
         }
     }
@@ -464,6 +476,10 @@ impl EmbedderState {
             daemon_sab: None,
             #[cfg(feature = "daemon")]
             process_state: None,
+            #[cfg(feature = "daemon")]
+            daemon_dgram_py: None,
+            #[cfg(all(feature = "daemon", unix))]
+            daemon_unix: None,
             rw_preopens: Vec::new(),
         }
     }
@@ -507,6 +523,10 @@ impl EmbedderState {
             daemon_sab: None,
             #[cfg(feature = "daemon")]
             process_state: None,
+            #[cfg(feature = "daemon")]
+            daemon_dgram_py: None,
+            #[cfg(all(feature = "daemon", unix))]
+            daemon_unix: None,
             rw_preopens: Vec::new(),
         }
     }
@@ -772,6 +792,10 @@ impl EmbedderVm {
                 daemon_sab: None,
                 #[cfg(feature = "daemon")]
                 process_state: None,
+                #[cfg(feature = "daemon")]
+                daemon_dgram_py: None,
+                #[cfg(all(feature = "daemon", unix))]
+                daemon_unix: None,
             }
         } else {
             EmbedderState {
@@ -805,6 +829,10 @@ impl EmbedderVm {
                 daemon_sab: None,
                 #[cfg(feature = "daemon")]
                 process_state: None,
+                #[cfg(feature = "daemon")]
+                daemon_dgram_py: None,
+                #[cfg(all(feature = "daemon", unix))]
+                daemon_unix: None,
             }
         };
 
@@ -969,6 +997,10 @@ impl EmbedderVm {
             daemon_sab: None,
             #[cfg(feature = "daemon")]
             process_state: None,
+            #[cfg(feature = "daemon")]
+            daemon_dgram_py: None,
+            #[cfg(all(feature = "daemon", unix))]
+            daemon_unix: None,
         };
 
         let mut store = Store::new(&module.engine, state);

@@ -741,6 +741,16 @@ pub fn wire_fs_env_funcs(
                 move |mut caller: Caller<'_, EmbedderState>, fd: i32| -> i32 {
                     _log.push("__syscall_close", fd, 0);
                     pyo_trace!("[__syscall_close] fd={fd}");
+                    // Socket fds (synthetic fds >= SOCK_FD_BASE) are handled by the
+                    // daemon coordinators; they never touch InMemFs.
+                    #[cfg(feature = "daemon")]
+                    {
+                        use crate::emscripten_syscall::socket::SOCK_FD_BASE;
+                        if fd >= SOCK_FD_BASE {
+                            crate::emscripten_syscall::socket::release_socket_fd(&mut caller, fd);
+                            return 0;
+                        }
+                    }
                     // Host-backed fds are closed first; otherwise delegate to InMemFs.
                     if let Some(rc) = caller.data_mut().fs.close_host(fd) {
                         rc

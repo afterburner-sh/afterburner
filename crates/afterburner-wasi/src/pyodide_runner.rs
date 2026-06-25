@@ -776,12 +776,17 @@ pub struct PythonNetOpts {
 #[cfg(feature = "daemon")]
 pub fn run_python_with_net(python_source: &str, opts: PythonNetOpts) -> Result<PyodideRunOutput> {
     let rt = resolve_runtime()?;
-    let daemon_net = crate::daemon_net::DaemonNet::new(opts.tokio_handle, opts.manifold.clone());
+    let daemon_net =
+        crate::daemon_net::DaemonNet::new(opts.tokio_handle.clone(), opts.manifold.clone());
     let daemon_workers = crate::daemon_workers::DaemonWorkers::new_parent(
         opts.manifold.clone(),
         crate::daemon_workers::WorkerConfig::default(),
     );
     let daemon_sab = crate::daemon_sab::DaemonSab::new();
+    let daemon_dgram_py =
+        crate::daemon_dgram::DaemonDgram::new(opts.tokio_handle.clone(), opts.manifold.clone());
+    #[cfg(unix)]
+    let daemon_unix = crate::daemon_unix::DaemonUnix::new(opts.tokio_handle.clone());
     run_pyodide_with_daemon(
         &rt,
         python_source,
@@ -790,6 +795,9 @@ pub fn run_python_with_net(python_source: &str, opts: PythonNetOpts) -> Result<P
         daemon_net,
         daemon_workers,
         daemon_sab,
+        daemon_dgram_py,
+        #[cfg(unix)]
+        daemon_unix,
     )
 }
 
@@ -1025,7 +1033,11 @@ fn run_booted_pyodide(
 /// Separated from `run_pyodide_core` so the sealed path carries no dependency
 /// on daemon types. The two functions share `run_booted_pyodide` for the
 /// post-boot execution logic (DRY: argv build, `__main_argc_argv`, `run_main`).
+// All args are coordinators wired to the store; grouping into a struct would
+// just move the count without reducing it. vertexia: consider DaemonBundle if
+// more coordinators are added.
 #[cfg(feature = "daemon")]
+#[allow(clippy::too_many_arguments)]
 fn run_pyodide_with_daemon(
     rt: &PyRuntime,
     python_source: &str,
@@ -1034,6 +1046,8 @@ fn run_pyodide_with_daemon(
     daemon_net: std::sync::Arc<crate::daemon_net::DaemonNet>,
     daemon_workers: std::sync::Arc<crate::daemon_workers::DaemonWorkers>,
     daemon_sab: std::sync::Arc<crate::daemon_sab::DaemonSab>,
+    daemon_dgram_py: std::sync::Arc<crate::daemon_dgram::DaemonDgram>,
+    #[cfg(unix)] daemon_unix: std::sync::Arc<crate::daemon_unix::DaemonUnix>,
 ) -> Result<PyodideRunOutput> {
     let (mut store, instance, _got_globals) = boot_pyodide_instance(rt, &[])?;
     store.data_mut().wasi_stdout.clear();
@@ -1042,6 +1056,11 @@ fn run_pyodide_with_daemon(
     store.data_mut().manifold = Some(manifold);
     store.data_mut().daemon_workers = Some(daemon_workers);
     store.data_mut().daemon_sab = Some(daemon_sab);
+    store.data_mut().daemon_dgram_py = Some(daemon_dgram_py);
+    #[cfg(unix)]
+    {
+        store.data_mut().daemon_unix = Some(daemon_unix);
+    }
     if !rw_preopens.is_empty() {
         store.data_mut().rw_preopens = rw_preopens.to_vec();
     }

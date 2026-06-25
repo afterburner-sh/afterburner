@@ -31,7 +31,7 @@
 //! - EPERM  (-1): denied by manifold (no `--allow-net` grant).
 //! - EBADF  (-9): unknown fd.
 //! - EINVAL (-22): bad address / argument.
-//! - ENOTSUP (-95): `SOCK_DGRAM` / `AF_UNIX` (not yet supported).
+//! - ENOTSUP (-95): unsupported domain/type combination.
 //! - ECONNREFUSED (-111): connection refused.
 
 // The real implementation is compiled only when the `daemon` feature is active,
@@ -41,10 +41,14 @@ use std::collections::{HashMap, VecDeque};
 
 // ---- AF / SOCK constants --------------------------------------------------------
 
+/// AF_UNIX (Unix-domain sockets).
+pub const AF_UNIX: i32 = 1;
 /// AF_INET (IPv4 sockets).
 pub const AF_INET: i32 = 2;
-/// SOCK_STREAM (TCP).
+/// SOCK_STREAM (TCP / Unix stream).
 pub const SOCK_STREAM: i32 = 1;
+/// SOCK_DGRAM (UDP / Unix datagram).
+pub const SOCK_DGRAM: i32 = 2;
 /// Mask to strip SOCK_NONBLOCK / SOCK_CLOEXEC from the type argument.
 pub const SOCK_TYPE_MASK: i32 = 0xF;
 
@@ -61,6 +65,21 @@ pub const ENOTSUP: i32 = -95;
 pub const ECONNREFUSED: i32 = -111;
 pub const EAGAIN: i32 = -11;
 
+// ---- Socket kind ---------------------------------------------------------------
+
+/// The protocol a file descriptor was created for (set at `socket()` time).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SockKind {
+    /// AF_INET SOCK_STREAM (TCP).
+    TcpStream,
+    /// AF_INET SOCK_DGRAM (UDP).
+    UdpDgram,
+    /// AF_UNIX SOCK_STREAM.
+    UnixStream,
+    /// AF_UNIX SOCK_DGRAM.
+    UnixDgram,
+}
+
 // ---- SocketState ---------------------------------------------------------------
 
 /// Per-run socket state stored in `EmbedderState`.
@@ -72,13 +91,27 @@ pub struct SocketState {
     /// Next synthetic socket fd to hand out.
     next_fd: i32,
     /// Synthetic sockfd -> DaemonNet ConnId (connected / accepted sockets).
+    /// Also used for AF_UNIX SOCK_STREAM conn_ids (kind differentiates).
     pub conn_fds: HashMap<i32, i32>,
     /// Synthetic sockfd -> DaemonNet ServerId (or -(port) placeholder before listen).
+    /// Also used for AF_UNIX SOCK_STREAM server_ids (kind differentiates).
     pub server_fds: HashMap<i32, i32>,
-    /// Per ConnId: buffered incoming bytes not yet consumed by `recv`.
+    /// Per ConnId / socket_id: buffered incoming bytes not yet consumed by `recv`.
     pub recv_bufs: HashMap<i32, VecDeque<Vec<u8>>>,
     /// Per ServerId: accepted ConnIds not yet consumed by `accept4`.
     pub accept_queues: HashMap<i32, VecDeque<i32>>,
+    /// Per-fd socket kind (set at socket() time).
+    pub fd_kinds: HashMap<i32, SockKind>,
+    /// Per-fd UDP socket_id in DaemonDgram (for AF_INET SOCK_DGRAM fds).
+    pub udp_fds: HashMap<i32, i32>,
+    /// Per-fd Unix dgram socket_id in DaemonUnix (for AF_UNIX SOCK_DGRAM fds).
+    pub unix_dgram_fds: HashMap<i32, i32>,
+    /// Per-fd UDP connected remote address (set by connect() on a SOCK_DGRAM fd).
+    pub udp_connected: HashMap<i32, (String, u16)>,
+    /// Per-fd Unix stream bind path (set by bind() before listen()).
+    pub unix_stream_bind_paths: HashMap<i32, String>,
+    /// Per-fd Unix dgram default remote path (set by connect() on AF_UNIX SOCK_DGRAM).
+    pub unix_dgram_connected: HashMap<i32, String>,
 }
 
 impl SocketState {
@@ -89,7 +122,18 @@ impl SocketState {
             server_fds: HashMap::new(),
             recv_bufs: HashMap::new(),
             accept_queues: HashMap::new(),
+            fd_kinds: HashMap::new(),
+            udp_fds: HashMap::new(),
+            unix_dgram_fds: HashMap::new(),
+            udp_connected: HashMap::new(),
+            unix_stream_bind_paths: HashMap::new(),
+            unix_dgram_connected: HashMap::new(),
         })
+    }
+
+    /// Returns the kind for a fd, or `None`.
+    pub fn fd_kind(&self, fd: i32) -> Option<SockKind> {
+        self.fd_kinds.get(&fd).copied()
     }
 
     /// Allocate a fresh synthetic socket fd.
@@ -134,6 +178,139 @@ impl SocketState {
             .map(|q| !q.is_empty())
             .unwrap_or(false)
     }
+}
+
+// ---- fd close helper -----------------------------------------------------------
+
+/// Release all coordinator resources for a socket fd and remove it from
+/// `SocketState`. Called by both the WASI `fd_close` and the Emscripten
+/// `__syscall_close` handlers so neither duplicates the release logic.
+///
+/// Returns 0 always; the callers return early with 0 after calling this.
+pub(crate) fn release_socket_fd(
+    caller: &mut wasmtime::Caller<'_, crate::embedder_vm::EmbedderState>,
+    fd: i32,
+) {
+    let kind = caller
+        .data()
+        .socket_state
+        .as_deref()
+        .and_then(|s| s.fd_kind(fd));
+
+    match kind {
+        Some(SockKind::TcpStream) => {
+            let conn_id = caller
+                .data()
+                .socket_state
+                .as_deref()
+                .and_then(|s| s.conn_fds.get(&fd).copied());
+            let server_id = caller
+                .data()
+                .socket_state
+                .as_deref()
+                .and_then(|s| s.server_fds.get(&fd).copied());
+            if let Some(cid) = conn_id {
+                if let Some(net) = caller.data().daemon_net.clone() {
+                    net.destroy(cid);
+                }
+                caller
+                    .data_mut()
+                    .socket_state
+                    .as_deref_mut()
+                    .map(|s| s.conn_fds.remove(&fd));
+            } else if let Some(sid) = server_id {
+                if sid > 0
+                    && let Some(net) = caller.data().daemon_net.clone()
+                {
+                    net.close_server(sid);
+                }
+                caller
+                    .data_mut()
+                    .socket_state
+                    .as_deref_mut()
+                    .map(|s| s.server_fds.remove(&fd));
+            }
+        }
+        Some(SockKind::UdpDgram) => {
+            let socket_id = caller
+                .data()
+                .socket_state
+                .as_deref()
+                .and_then(|s| s.udp_fds.get(&fd).copied());
+            if let Some(sid) = socket_id {
+                if let Some(dgram) = caller.data().daemon_dgram_py.clone() {
+                    dgram.close(sid);
+                }
+                caller
+                    .data_mut()
+                    .socket_state
+                    .as_deref_mut()
+                    .map(|s| s.udp_fds.remove(&fd));
+            }
+        }
+        #[cfg(unix)]
+        Some(SockKind::UnixStream) => {
+            let conn_id = caller
+                .data()
+                .socket_state
+                .as_deref()
+                .and_then(|s| s.conn_fds.get(&fd).copied());
+            let server_id = caller
+                .data()
+                .socket_state
+                .as_deref()
+                .and_then(|s| s.server_fds.get(&fd).copied());
+            if let Some(cid) = conn_id {
+                if let Some(unix) = caller.data().daemon_unix.clone() {
+                    unix.destroy(cid);
+                }
+                caller
+                    .data_mut()
+                    .socket_state
+                    .as_deref_mut()
+                    .map(|s| s.conn_fds.remove(&fd));
+            } else if let Some(sid) = server_id {
+                if sid > 0
+                    && let Some(unix) = caller.data().daemon_unix.clone()
+                {
+                    unix.close_server(sid);
+                }
+                caller
+                    .data_mut()
+                    .socket_state
+                    .as_deref_mut()
+                    .map(|s| s.server_fds.remove(&fd));
+            }
+        }
+        #[cfg(unix)]
+        Some(SockKind::UnixDgram) => {
+            let socket_id = caller
+                .data()
+                .socket_state
+                .as_deref()
+                .and_then(|s| s.unix_dgram_fds.get(&fd).copied());
+            if let Some(sid) = socket_id {
+                if let Some(unix) = caller.data().daemon_unix.clone() {
+                    unix.close_dgram(sid);
+                }
+                caller
+                    .data_mut()
+                    .socket_state
+                    .as_deref_mut()
+                    .map(|s| s.unix_dgram_fds.remove(&fd));
+            }
+        }
+        None => {}
+        #[cfg(not(unix))]
+        Some(SockKind::UnixStream | SockKind::UnixDgram) => {}
+    }
+
+    // Remove kind tag regardless so repeated close is a no-op.
+    caller
+        .data_mut()
+        .socket_state
+        .as_deref_mut()
+        .map(|s| s.fd_kinds.remove(&fd));
 }
 
 // ---- sockaddr helpers ----------------------------------------------------------
@@ -200,6 +377,59 @@ pub fn write_sockaddr_in(mem: &mut [u8], addr_ptr: usize, host: &str, port: u16)
     // Zero the 8 padding bytes.
     for i in 8..16 {
         mem[addr_ptr + i] = 0;
+    }
+}
+
+/// Parse a Unix-domain path from a wasm32 `sockaddr_un` at `addr_ptr` in `mem`.
+///
+/// `struct sockaddr_un` layout (wasm32, little-endian):
+///   offset 0: sa_family (i16, AF_UNIX = 1)
+///   offset 2: sun_path  (up to 108 bytes, null-terminated)
+///
+/// Returns `None` if out-of-bounds or the family is not `AF_UNIX`.
+pub fn parse_sockaddr_un(mem: &[u8], addr_ptr: usize) -> Option<String> {
+    // Minimum: 2 bytes for family + at least 1 byte of path.
+    if addr_ptr
+        .checked_add(3)
+        .map(|e| e > mem.len())
+        .unwrap_or(true)
+    {
+        return None;
+    }
+    let family = u16::from_le_bytes([mem[addr_ptr], mem[addr_ptr + 1]]);
+    if family as i32 != AF_UNIX {
+        return None;
+    }
+    let path_start = addr_ptr + 2;
+    // sun_path is at most 108 bytes; clamp to what remains in memory.
+    let max_path_end = (path_start + 108).min(mem.len());
+    // Find the NUL terminator.
+    let nul = mem[path_start..max_path_end]
+        .iter()
+        .position(|&b| b == 0)
+        .map(|p| path_start + p)
+        .unwrap_or(max_path_end);
+    let path_bytes = &mem[path_start..nul];
+    std::str::from_utf8(path_bytes).ok().map(|s| s.to_owned())
+}
+
+/// Write a minimal AF_UNIX `sockaddr_un` (family only, empty path) into guest
+/// memory at `addr_ptr`. Used when accepting a Unix-stream connection and the
+/// caller does not need the peer path.
+pub fn write_sockaddr_un_empty(mem: &mut [u8], addr_ptr: usize) {
+    if addr_ptr
+        .checked_add(2)
+        .map(|e| e > mem.len())
+        .unwrap_or(true)
+    {
+        return;
+    }
+    let fam = (AF_UNIX as u16).to_le_bytes();
+    mem[addr_ptr] = fam[0];
+    mem[addr_ptr + 1] = fam[1];
+    // NUL-terminate path immediately.
+    if addr_ptr + 2 < mem.len() {
+        mem[addr_ptr + 2] = 0;
     }
 }
 
@@ -485,6 +715,266 @@ pub mod blocking {
             }
             Some(_) => Err(EAGAIN),
         }
+    }
+
+    // ---- UDP (AF_INET SOCK_DGRAM) blocking helpers -------------------------
+
+    /// Block until a UDP datagram arrives for `socket_id` in `DaemonDgram`.
+    ///
+    /// Datagram payloads are stored in `state.recv_bufs` keyed by `socket_id`
+    /// (same map as TCP, different key space).
+    pub fn wait_dgram(
+        dgram: &Arc<crate::daemon_dgram::DaemonDgram>,
+        socket_id: i32,
+        state: &mut super::SocketState,
+        max: usize,
+    ) -> Result<Vec<u8>, i32> {
+        use crate::daemon_dgram::DgramEvent;
+        if state.has_buffered(socket_id) {
+            return Ok(state.drain_recv(socket_id, max));
+        }
+        // Drive the event loop until we have buffered data for this socket_id.
+        // Messages for OTHER socket_ids are buffered by sid; Close events for
+        // other sockets are silently discarded so they do not cut the wait short.
+        // A Close for THIS socket_id (or a timeout) ends the loop.
+        // Each `block_on` fetches exactly one event so `state` is not borrowed
+        // across await points.
+        let handle = dgram.runtime().clone();
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        loop {
+            if state.has_buffered(socket_id) {
+                return Ok(state.drain_recv(socket_id, max));
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(EAGAIN);
+            }
+            let dgram2 = Arc::clone(dgram);
+            let maybe_ev = handle.block_on(async move {
+                tokio::time::timeout(remaining, async move {
+                    loop {
+                        if let Some(ev) = dgram2.try_recv_event() {
+                            return ev;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .ok()
+            });
+            let Some(ev) = maybe_ev else {
+                return Err(EAGAIN); // deadline reached
+            };
+            match ev {
+                DgramEvent::Message {
+                    socket_id: sid,
+                    payload_b64,
+                    ..
+                } => {
+                    if let Some(bytes) = decode_b64(&payload_b64) {
+                        state.push_data(sid, bytes);
+                    }
+                }
+                DgramEvent::Close {
+                    socket_id: closed_sid,
+                } if closed_sid == socket_id => {
+                    return Ok(Vec::new()); // our socket was closed
+                }
+                DgramEvent::Close { .. } => {
+                    // Another socket's close - discard and keep waiting.
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // ---- AF_UNIX SOCK_STREAM blocking helpers (unix-only) ------------------
+
+    #[cfg(unix)]
+    /// Block until a Unix stream `Connect` or error event arrives for `conn_id`.
+    pub fn wait_unix_connect(
+        unix: &Arc<crate::daemon_unix::DaemonUnix>,
+        conn_id: crate::daemon_unix::ConnId,
+        _state: &mut super::SocketState,
+    ) -> i32 {
+        use crate::daemon_unix::UnixEvent;
+        let handle = unix.runtime().clone();
+        let unix2 = Arc::clone(unix);
+        handle.block_on(async move {
+            match tokio::time::timeout(TIMEOUT, async {
+                loop {
+                    if let Some(ev) = unix2.try_recv_event() {
+                        match ev {
+                            UnixEvent::Connect { conn_id: cid } if cid == conn_id => {
+                                return 0i32;
+                            }
+                            UnixEvent::Error { conn_id: cid, .. } if cid == conn_id => {
+                                return ECONNREFUSED;
+                            }
+                            UnixEvent::Close { conn_id: cid, .. } if cid == conn_id => {
+                                return EBADF;
+                            }
+                            _ => {}
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            {
+                Ok(rc) => rc,
+                Err(_) => ECONNREFUSED,
+            }
+        })
+    }
+
+    #[cfg(unix)]
+    /// Block until Unix stream data arrives for `conn_id`.
+    pub fn wait_unix_data(
+        unix: &Arc<crate::daemon_unix::DaemonUnix>,
+        conn_id: crate::daemon_unix::ConnId,
+        state: &mut super::SocketState,
+        max: usize,
+    ) -> Result<Vec<u8>, i32> {
+        use crate::daemon_unix::UnixEvent;
+        if state.has_buffered(conn_id) {
+            return Ok(state.drain_recv(conn_id, max));
+        }
+        let handle = unix.runtime().clone();
+        let unix2 = Arc::clone(unix);
+        let maybe = handle.block_on(async move {
+            tokio::time::timeout(TIMEOUT, async {
+                loop {
+                    if let Some(ev) = unix2.try_recv_event() {
+                        return ev;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .ok()
+        });
+        let ev = match maybe {
+            None => return Err(EAGAIN),
+            Some(ev) => ev,
+        };
+        match ev {
+            UnixEvent::Data {
+                conn_id: cid,
+                payload_b64,
+            } => {
+                if let Some(bytes) = decode_b64(&payload_b64) {
+                    state.push_data(cid, bytes);
+                }
+            }
+            UnixEvent::End { conn_id: cid } | UnixEvent::Close { conn_id: cid, .. }
+                if cid == conn_id =>
+            {
+                return Ok(Vec::new());
+            }
+            UnixEvent::Connection {
+                server_id,
+                conn_id: cid,
+            } => {
+                state
+                    .accept_queues
+                    .entry(server_id)
+                    .or_default()
+                    .push_back(cid);
+            }
+            _ => {}
+        }
+        Ok(state.drain_recv(conn_id, max))
+    }
+
+    #[cfg(unix)]
+    /// Block until a Unix stream connection is accepted on `server_id`.
+    pub fn wait_unix_accept(
+        unix: &Arc<crate::daemon_unix::DaemonUnix>,
+        server_id: crate::daemon_unix::ServerId,
+        state: &mut super::SocketState,
+    ) -> Result<crate::daemon_unix::ConnId, i32> {
+        use crate::daemon_unix::UnixEvent;
+        if let Some(cid) = state
+            .accept_queues
+            .entry(server_id)
+            .or_default()
+            .pop_front()
+        {
+            return Ok(cid);
+        }
+        let handle = unix.runtime().clone();
+        let unix2 = Arc::clone(unix);
+        let maybe = handle.block_on(async move {
+            tokio::time::timeout(TIMEOUT, async {
+                loop {
+                    if let Some(ev) = unix2.try_recv_event() {
+                        return ev;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .ok()
+        });
+        match maybe {
+            None => Err(EAGAIN),
+            Some(UnixEvent::Connection {
+                server_id: sid,
+                conn_id,
+            }) if sid == server_id => Ok(conn_id),
+            Some(UnixEvent::Data {
+                conn_id,
+                payload_b64,
+            }) => {
+                if let Some(bytes) = decode_b64(&payload_b64) {
+                    state.push_data(conn_id, bytes);
+                }
+                Err(EAGAIN)
+            }
+            Some(_) => Err(EAGAIN),
+        }
+    }
+
+    #[cfg(unix)]
+    /// Block until a Unix datagram arrives for `socket_id` in `DaemonUnix`.
+    pub fn wait_unix_dgram(
+        unix: &Arc<crate::daemon_unix::DaemonUnix>,
+        socket_id: i32,
+        state: &mut super::SocketState,
+        max: usize,
+    ) -> Result<Vec<u8>, i32> {
+        use crate::daemon_unix::UnixEvent;
+        if state.has_buffered(socket_id) {
+            return Ok(state.drain_recv(socket_id, max));
+        }
+        let handle = unix.runtime().clone();
+        let unix2 = Arc::clone(unix);
+        let maybe = handle.block_on(async move {
+            tokio::time::timeout(TIMEOUT, async {
+                loop {
+                    if let Some(ev) = unix2.try_recv_event() {
+                        return ev;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .ok()
+        });
+        let ev = match maybe {
+            None => return Err(EAGAIN),
+            Some(ev) => ev,
+        };
+        if let UnixEvent::DgramMessage {
+            socket_id: sid,
+            payload_b64,
+        } = ev
+            && let Some(bytes) = decode_b64(&payload_b64)
+        {
+            state.push_data(sid, bytes);
+        }
+        Ok(state.drain_recv(socket_id, max))
     }
 }
 

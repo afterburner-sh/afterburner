@@ -129,6 +129,11 @@ impl DaemonDgram {
         Self::new_inner(runtime, manifold, None)
     }
 
+    /// Tokio runtime handle used by this coordinator.
+    pub fn runtime(&self) -> &Handle {
+        &self.runtime
+    }
+
     /// Construct with a shared port-claim arbiter for multi-shard
     /// mode. See `daemon_port_claims` for the contract.
     pub fn new_with_claims(
