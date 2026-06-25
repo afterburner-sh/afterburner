@@ -736,6 +736,63 @@ pub fn run_pyodide_source(
     run_pyodide_with(&rt, python_source)
 }
 
+// ---- daemon-capable Python run (N1 sockets + N2 threads + N3 durable FS) ----
+
+/// Options for running Python with real OS capabilities (section 15 acceptance
+/// surface). Requires the `daemon` feature; sealed runs use `run_python` instead.
+///
+/// All fields default to `None` / empty (deny-by-default). Callers opt in
+/// explicitly to each capability so the security posture stays deny-by-default.
+#[cfg(feature = "daemon")]
+pub struct PythonNetOpts {
+    /// A running tokio runtime handle. `DaemonNet` and the blocking socket
+    /// bridge both require an async runtime; callers supply one so they control
+    /// its lifecycle (thread count, shutdown). A `Builder::new_multi_thread`
+    /// with `enable_all()` is the right choice for a webserver acceptance test.
+    pub tokio_handle: tokio::runtime::Handle,
+    /// Manifold that grants the capabilities this run needs. Use
+    /// `Manifold::open()` for a fully-open test run; narrow it for production.
+    /// `Manifold::sealed()` (the default) denies all socket and thread ops.
+    pub manifold: afterburner_core::Manifold,
+    /// Read-write host-filesystem preopens: `(host_path, guest_path)` pairs.
+    /// A Python path under a declared guest prefix is routed to the real
+    /// host FS instead of the in-memory FS. Empty = no durable FS access.
+    pub rw_preopens: Vec<(std::path::PathBuf, String)>,
+}
+
+/// Run Python with real OS capabilities: server sockets (N1), real threads via
+/// the process-isolation model (N2), and host-backed durable FS (N3).
+///
+/// This is the daemon-mode entry point behind the section-15 acceptance bar
+/// (plan `CONCURRENCY_AND_NETWORK_SURFACE_DESIGN.md` section 15). It wires
+/// `DaemonNet`, `DaemonWorkers`, and `DaemonSab` into the store so Python's
+/// socket syscalls and pthread shims reach the real OS rather than returning
+/// `EPERM`. The `tokio_handle` in `opts` is the async runtime the socket
+/// bridge uses for `block_on` calls.
+///
+/// # Errors
+///
+/// Returns `Err` when no runtime is available or when boot / run traps.
+#[cfg(feature = "daemon")]
+pub fn run_python_with_net(python_source: &str, opts: PythonNetOpts) -> Result<PyodideRunOutput> {
+    let rt = resolve_runtime()?;
+    let daemon_net = crate::daemon_net::DaemonNet::new(opts.tokio_handle, opts.manifold.clone());
+    let daemon_workers = crate::daemon_workers::DaemonWorkers::new_parent(
+        opts.manifold.clone(),
+        crate::daemon_workers::WorkerConfig::default(),
+    );
+    let daemon_sab = crate::daemon_sab::DaemonSab::new();
+    run_pyodide_with_daemon(
+        &rt,
+        python_source,
+        &opts.rw_preopens,
+        opts.manifold,
+        daemon_net,
+        daemon_workers,
+        daemon_sab,
+    )
+}
+
 /// A Python *package* to run: sibling `.py` modules to mount into the guest
 /// in-memory filesystem, and the guest directory to add to `sys.path` so
 /// `import sibling` resolves.
@@ -838,6 +895,21 @@ fn run_pyodide_core(
         }
     }
 
+    run_booted_pyodide(python_source, pkg, &mut store, &instance)
+}
+
+/// Execute `python_source` on a already-booted (post-ctors) interpreter
+/// instance. Both `run_pyodide_core` and the daemon-capable path share this
+/// so the argv-build + run-main logic lives in one place (DRY).
+///
+/// Caller is responsible for having already cleared `wasi_stdout`, installed
+/// rw-preopens, and wired any daemon coordinators into `store` before calling.
+fn run_booted_pyodide(
+    python_source: &str,
+    pkg: Option<&PyPackage>,
+    store: &mut Store<EmbedderState>,
+    instance: &Instance,
+) -> Result<PyodideRunOutput> {
     // In Pyodide's native (non-JS) build, `sys.stdout`/`sys.stderr` go through a
     // JS-backed IO layer that emits NOTHING to WASI - so `print()` output never
     // reaches `wasi_stdout`. Redirect both to a known guest file (line-buffered
@@ -853,8 +925,8 @@ fn run_pyodide_core(
     //   arg1_ptr -> "-c\0"
     //   arg2_ptr -> python_source with NUL terminator
     //   argv_ptr -> [arg0_ptr, arg1_ptr, arg2_ptr, 0]
-    let arg0_ptr = alloc_cstr(&mut store, b"python\0")?;
-    let arg1_ptr = alloc_cstr(&mut store, b"-c\0")?;
+    let arg0_ptr = alloc_cstr(&mut *store, b"python\0")?;
+    let arg1_ptr = alloc_cstr(&mut *store, b"-c\0")?;
 
     // Prepend the redirect (and, for a package, a `sys.path` insert of its
     // directory so `import sibling` resolves), then NUL-terminate the combined
@@ -870,14 +942,14 @@ fn run_pyodide_core(
     }
     source_bytes.extend_from_slice(python_source.as_bytes());
     source_bytes.push(0);
-    let arg2_ptr = alloc_cstr(&mut store, &source_bytes)?;
+    let arg2_ptr = alloc_cstr(&mut *store, &source_bytes)?;
 
-    let argv_ptr = alloc_argv_table(&mut store, arg0_ptr, arg1_ptr, arg2_ptr)?;
+    let argv_ptr = alloc_argv_table(&mut *store, arg0_ptr, arg1_ptr, arg2_ptr)?;
 
     // __main_argc_argv(argc=3, argv=argv_ptr): calls Py_Initialize with -c argv.
     // MUST be called EXACTLY ONCE; CPython is not initialized after __wasm_call_ctors.
     let main_fn = instance
-        .get_func(&mut store, "__main_argc_argv")
+        .get_func(&mut *store, "__main_argc_argv")
         .ok_or_else(|| {
             AfterburnerError::Engine(
                 "__main_argc_argv not exported; cannot initialize CPython".into(),
@@ -887,7 +959,7 @@ fn run_pyodide_core(
     let mut main_ret = [wasmtime::Val::I32(-99)];
     main_fn
         .call(
-            &mut store,
+            &mut *store,
             &[wasmtime::Val::I32(3), wasmtime::Val::I32(argv_ptr)],
             &mut main_ret,
         )
@@ -899,7 +971,7 @@ fn run_pyodide_core(
     };
     if main_exitcode != 0 {
         return Ok(PyodideRunOutput {
-            stdout: captured_stdout(&store),
+            stdout: captured_stdout(store),
             exit_code: main_exitcode,
         });
     }
@@ -912,8 +984,8 @@ fn run_pyodide_core(
     // run_main() calls pymain_run_python which executes the -c command.
     // Prefer run_main (EMSCRIPTEN_KEEPALIVE); fall back to pymain_run_python.
     let run_fn = instance
-        .get_func(&mut store, "run_main")
-        .or_else(|| instance.get_func(&mut store, "pymain_run_python"))
+        .get_func(&mut *store, "run_main")
+        .or_else(|| instance.get_func(&mut *store, "pymain_run_python"))
         .ok_or_else(|| {
             AfterburnerError::Engine(
                 "neither run_main nor pymain_run_python exported by the python runtime".into(),
@@ -922,7 +994,7 @@ fn run_pyodide_core(
 
     let mut run_ret = [wasmtime::Val::I32(-99)];
     run_fn
-        .call(&mut store, &[], &mut run_ret)
+        .call(&mut *store, &[], &mut run_ret)
         .map_err(|e| AfterburnerError::Engine(format!("run_main trapped: {e}")))?;
 
     let exit_code = match run_ret[0] {
@@ -940,9 +1012,39 @@ fn run_pyodide_core(
     }
 
     Ok(PyodideRunOutput {
-        stdout: captured_stdout(&store),
+        stdout: captured_stdout(store),
         exit_code,
     })
+}
+
+/// Daemon-capable boot + run: boots the interpreter, wires the daemon
+/// coordinators for real socket + thread access, installs rw-preopens, then
+/// runs `python_source` via `-c`. Called by [`run_python_with_net`].
+///
+/// Separated from `run_pyodide_core` so the sealed path carries no dependency
+/// on daemon types. The two functions share `run_booted_pyodide` for the
+/// post-boot execution logic (DRY: argv build, `__main_argc_argv`, `run_main`).
+#[cfg(feature = "daemon")]
+fn run_pyodide_with_daemon(
+    rt: &PyRuntime,
+    python_source: &str,
+    rw_preopens: &[(std::path::PathBuf, String)],
+    manifold: afterburner_core::Manifold,
+    daemon_net: std::sync::Arc<crate::daemon_net::DaemonNet>,
+    daemon_workers: std::sync::Arc<crate::daemon_workers::DaemonWorkers>,
+    daemon_sab: std::sync::Arc<crate::daemon_sab::DaemonSab>,
+) -> Result<PyodideRunOutput> {
+    let (mut store, instance, _got_globals) = boot_pyodide_instance(rt, &[])?;
+    store.data_mut().wasi_stdout.clear();
+    // Wire the daemon coordinators so socket and pthread shims reach the OS.
+    store.data_mut().daemon_net = Some(daemon_net);
+    store.data_mut().manifold = Some(manifold);
+    store.data_mut().daemon_workers = Some(daemon_workers);
+    store.data_mut().daemon_sab = Some(daemon_sab);
+    if !rw_preopens.is_empty() {
+        store.data_mut().rw_preopens = rw_preopens.to_vec();
+    }
+    run_booted_pyodide(python_source, None, &mut store, &instance)
 }
 
 /// The program's captured output. Prefers the guest `/tmp/pyout.txt` (where the

@@ -1515,7 +1515,7 @@ mod tests {
             true,
             &mut err,
         )
-        .expect(&format!("server config: {err}"));
+        .unwrap_or_else(|| panic!("server config: {err}"));
 
         // Build the mTLS client config: verifies server against server_ca,
         // presents client_leaf signed by client_ca.
@@ -1533,7 +1533,7 @@ mod tests {
         };
         let mut client_err = String::new();
         let client_cfg = build_client_config(&client_opts, &mut client_err)
-            .expect(&format!("client config: {client_err}"));
+            .unwrap_or_else(|| panic!("client config: {client_err}"));
 
         let peer_chain = run_mtls_handshake(server_cfg, move |port| async move {
             use rustls::pki_types::ServerName;
@@ -1576,7 +1576,7 @@ mod tests {
             true,
             &mut err,
         )
-        .expect(&format!("server config: {err}"));
+        .unwrap_or_else(|| panic!("server config: {err}"));
 
         let server_ca_pem = server_ca.pem();
         // Client that presents NO client cert.
@@ -1590,7 +1590,7 @@ mod tests {
         };
         let mut client_err = String::new();
         let client_cfg = build_client_config(&client_opts, &mut client_err)
-            .expect(&format!("client config: {client_err}"));
+            .unwrap_or_else(|| panic!("client config: {client_err}"));
 
         // The server should reject the connection; run_mtls_handshake
         // returns Err when the acceptor.accept() call fails.
@@ -1636,7 +1636,7 @@ mod tests {
             true,
             &mut err,
         )
-        .expect(&format!("server config: {err}"));
+        .unwrap_or_else(|| panic!("server config: {err}"));
 
         let server_ca_pem = server_ca.pem();
         let client_cert_pem = client_leaf_bad.pem();
@@ -1652,7 +1652,7 @@ mod tests {
         };
         let mut client_err = String::new();
         let client_cfg = build_client_config(&client_opts, &mut client_err)
-            .expect(&format!("client config: {client_err}"));
+            .unwrap_or_else(|| panic!("client config: {client_err}"));
 
         let result = run_mtls_handshake(server_cfg, move |port| async move {
             use rustls::pki_types::ServerName;
@@ -1686,7 +1686,7 @@ mod tests {
         // request_client_cert: false -> one-way TLS, client CA PEM ignored.
         let server_cfg =
             build_server_config(&server_cert_pem, &server_key_pem, "", "", false, &mut err)
-                .expect(&format!("server config: {err}"));
+                .unwrap_or_else(|| panic!("server config: {err}"));
 
         // Client verifies the server cert via ca_pem (the self-signed cert
         // is also its own CA).
@@ -1700,7 +1700,7 @@ mod tests {
         };
         let mut client_err = String::new();
         let client_cfg = build_client_config(&client_opts, &mut client_err)
-            .expect(&format!("client config: {client_err}"));
+            .unwrap_or_else(|| panic!("client config: {client_err}"));
 
         let peer_chain = run_mtls_handshake(server_cfg, move |port| async move {
             use rustls::pki_types::ServerName;
