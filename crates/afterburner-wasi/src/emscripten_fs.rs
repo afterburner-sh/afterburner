@@ -452,7 +452,7 @@ impl InMemFs {
 
     /// Fill an Emscripten stat buffer (Emscripten doStat layout) for the node at
     /// `abs_path`. Returns 0 or ENOENT. The buffer is exactly the Emscripten
-    /// wasm32 `struct stat` size ([`crate::emscripten_syscall::EM_STAT_STRUCT_BYTES`]).
+    /// wasm32 `struct stat` size (`EM_STAT_STRUCT_BYTES`).
     pub fn stat_into(&mut self, abs_path: &str, buf: &mut [u8; EM_STAT_STRUCT_BYTES]) -> i32 {
         match self.nodes.get(abs_path) {
             None => ENOENT,
@@ -716,7 +716,7 @@ fn parent_of(path: &str) -> Option<String> {
 // ---- stat buffer writer ----------------------------------------------------
 
 /// Write an Emscripten stat buffer (Emscripten wasm32 `struct stat`,
-/// [`crate::emscripten_syscall::EM_STAT_STRUCT_BYTES`] bytes, little-endian) into
+/// `EM_STAT_STRUCT_BYTES` bytes, little-endian) into
 /// `buf`.
 ///
 /// Uses the Emscripten `struct stat` field layout (authoritative offsets from

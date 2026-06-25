@@ -58,7 +58,8 @@
 //!   `ServerConfig`. SNI / multi-cert routing isn't part of the
 //!   minimum viable subset.
 
-use afterburner_core::{Manifold, NetAccess};
+use crate::daemon_net_gate::net_outbound_allowed;
+use afterburner_core::Manifold;
 use kovan_channel::flavors::bounded::{
     Receiver as BoundedRx, Sender as BoundedTx, channel as bounded_channel,
 };
@@ -563,44 +564,7 @@ impl DaemonTls {
     }
 }
 
-/// Manifold gate. Same posture as `daemon_net`: TLS over raw TCP
-/// must use `OutboundFull`; `OutboundHttp` is HTTP-only by design.
-/// Allow-list entries are `host` or `host:port` patterns - see
-/// [`afterburner_node_compat::http_host::split_host_port_pattern`]
-/// for the shared grammar. `port` here is the literal connect port.
-fn net_outbound_allowed(m: &Manifold, host: &str, port: u16) -> bool {
-    match &m.net {
-        NetAccess::None => false,
-        NetAccess::OutboundHttp(_) => false,
-        NetAccess::OutboundFull(None) => true,
-        NetAccess::OutboundFull(Some(allow)) => host_allowed(host, port, allow),
-    }
-}
-
-fn host_allowed(host: &str, port: u16, allow: &[String]) -> bool {
-    if allow.is_empty() {
-        return true;
-    }
-    let host_lc = host.to_ascii_lowercase();
-    allow.iter().any(|pat| {
-        // Shared `host[:port]` grammar - port-less entries match any
-        // port, `host:port` entries pin the connect port.
-        let (pat_host, pat_port) = afterburner_node_compat::http_host::split_host_port_pattern(pat);
-        if let Some(pp) = pat_port
-            && !pp.matches(port)
-        {
-            return false;
-        }
-        let p = pat_host.to_ascii_lowercase();
-        if p == "*" {
-            return true;
-        }
-        if let Some(suffix) = p.strip_prefix("*.") {
-            return host_lc.ends_with(&format!(".{suffix}"));
-        }
-        p == host_lc
-    })
-}
+// net_outbound_allowed and host_allowed live in daemon_net_gate (one canonical copy).
 
 // ---------------------------------------------------------------------
 // rustls config builders
@@ -1324,6 +1288,7 @@ pub fn decode_payload(b64: &str, last_error: &mut String) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use afterburner_core::NetAccess;
 
     #[test]
     fn outbound_full_no_allowlist_permits_anything() {

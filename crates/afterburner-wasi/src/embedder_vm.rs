@@ -169,7 +169,7 @@ impl WasiCommandOpts {
 /// ## On-disk compile cache (determinism-neutral)
 ///
 /// Wasmtime's built-in compilation cache ([`Config::cache`]) is installed
-/// rooted at the owner-only [`crate::wasm_engine::private_cache_dir`]. The
+/// rooted at the owner-only `wasm_engine::private_cache_dir`. The
 /// first compile of a runtime module (the ~25-34 MiB CRuby / Pyodide wasm, or
 /// any numpy `.so` side module) runs Cranelift and writes the native artifact;
 /// every later compile of byte-identical input reuses it and skips Cranelift,
@@ -339,6 +339,22 @@ pub struct EmbedderState {
     /// ctypes closure alloc/free cycles do not grow the table without bound.
     /// A plain `Vec` is correct here: the store is single-threaded.
     pub ffi_free_slots: Vec<u32>,
+    /// Raw TCP coordinator, populated when a daemon-mode caller wires network
+    /// access for a Python run. `None` in sealed / no-network mode; the socket
+    /// syscall shims deny with EPERM when absent.
+    #[cfg(feature = "daemon")]
+    pub daemon_net: Option<std::sync::Arc<crate::daemon_net::DaemonNet>>,
+    /// Manifold (capability profile) for this run. Carried here so the socket
+    /// syscall shims and the DNS shim can gate outbound calls without a second
+    /// parameter channel. `None` in sealed mode; the shims treat absence as
+    /// `Manifold::sealed()` (deny all).
+    #[cfg(feature = "daemon")]
+    pub manifold: Option<afterburner_core::Manifold>,
+    /// Per-run socket state: synthetic fd allocation, fd->conn/server maps, and
+    /// per-connection receive buffers. Populated lazily when the first socket
+    /// syscall fires. Sealed / non-daemon runs leave this `None`.
+    #[cfg(feature = "daemon")]
+    pub socket_state: Option<Box<crate::emscripten_syscall::socket::SocketState>>,
 }
 
 impl EmbedderState {
@@ -363,6 +379,12 @@ impl EmbedderState {
             side_modules: SideModuleRegistry::new(),
             main_instance: None,
             ffi_free_slots: Vec::new(),
+            #[cfg(feature = "daemon")]
+            daemon_net: None,
+            #[cfg(feature = "daemon")]
+            manifold: None,
+            #[cfg(feature = "daemon")]
+            socket_state: None,
         }
     }
 
@@ -399,6 +421,12 @@ impl EmbedderState {
             side_modules: SideModuleRegistry::new(),
             main_instance: None,
             ffi_free_slots: Vec::new(),
+            #[cfg(feature = "daemon")]
+            daemon_net: None,
+            #[cfg(feature = "daemon")]
+            manifold: None,
+            #[cfg(feature = "daemon")]
+            socket_state: None,
         }
     }
 
@@ -429,6 +457,12 @@ impl EmbedderState {
             side_modules: SideModuleRegistry::new(),
             main_instance: None,
             ffi_free_slots: Vec::new(),
+            #[cfg(feature = "daemon")]
+            daemon_net: None,
+            #[cfg(feature = "daemon")]
+            manifold: None,
+            #[cfg(feature = "daemon")]
+            socket_state: None,
         }
     }
 
@@ -680,6 +714,12 @@ impl EmbedderVm {
                 side_modules: SideModuleRegistry::new(),
                 main_instance: None,
                 ffi_free_slots: Vec::new(),
+                #[cfg(feature = "daemon")]
+                daemon_net: None,
+                #[cfg(feature = "daemon")]
+                manifold: None,
+                #[cfg(feature = "daemon")]
+                socket_state: None,
             }
         } else {
             EmbedderState {
@@ -700,6 +740,12 @@ impl EmbedderVm {
                 side_modules: SideModuleRegistry::new(),
                 main_instance: None,
                 ffi_free_slots: Vec::new(),
+                #[cfg(feature = "daemon")]
+                daemon_net: None,
+                #[cfg(feature = "daemon")]
+                manifold: None,
+                #[cfg(feature = "daemon")]
+                socket_state: None,
             }
         };
 
@@ -851,6 +897,12 @@ impl EmbedderVm {
             side_modules: SideModuleRegistry::new(),
             main_instance: None,
             ffi_free_slots: Vec::new(),
+            #[cfg(feature = "daemon")]
+            daemon_net: None,
+            #[cfg(feature = "daemon")]
+            manifold: None,
+            #[cfg(feature = "daemon")]
+            socket_state: None,
         };
 
         let mut store = Store::new(&module.engine, state);

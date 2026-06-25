@@ -733,7 +733,7 @@ pub struct PyPackage {
     pub sys_path_dir: String,
     /// Vendored Python wheels from `vendor/pip/` archive members (FORMAT_MINOR >= 3).
     /// Each entry is the raw `.whl` bytes (a zip). During boot they are mounted
-    /// into site-packages via [`mount_wheel`] before CPython's import machinery
+    /// into site-packages via `mount_wheel` before CPython's import machinery
     /// activates, so `import <pkg>` resolves them exactly as the bundled numpy/pandas
     /// set. Empty for packages with no `[pip]` dependencies.
     pub vendor_pip_wheels: Vec<Vec<u8>>,

@@ -203,7 +203,7 @@ pub fn run_ruby_with(rt: &RubyRuntime, ruby_source: &str) -> Result<RubyRunOutpu
 /// `entry_rel` is the entry file's path RELATIVE to `pkg_dir` (e.g.
 /// `"main.rb"`). Both forms of cross-file load work:
 /// - `require_relative './helper'` (resolved relative to the entry's own guest
-///   path under [`GUEST_PKG_MOUNT`]), and
+///   path under `GUEST_PKG_MOUNT`), and
 /// - `require 'helper'` (resolved via the `-I<mount>` load-path entry).
 ///
 /// This reuses the stdlib-mount machinery of [`run_ruby_with`]: it is the same
@@ -330,7 +330,7 @@ fn write_vendor_gems(vendor: &BTreeMap<String, Vec<u8>>, dest_dir: &Path) -> Res
 ///
 /// Vendored gems (keys under `"vendor/gem/**"` in `vendor`) are extracted to a
 /// temp subdirectory alongside `pkg_dir`, preopened read-only at
-/// [`GUEST_GEM_VENDOR_MOUNT`], and each gem's `lib/` root is prepended to
+/// `GUEST_GEM_VENDOR_MOUNT`, and each gem's `lib/` root is prepended to
 /// `$LOAD_PATH` via a `-I` flag - so `require 'sinatra'` (for example) resolves
 /// offline with no gem toolchain and no network. Everything the interpreter
 /// imports is already in the preopened host directories before user code runs.

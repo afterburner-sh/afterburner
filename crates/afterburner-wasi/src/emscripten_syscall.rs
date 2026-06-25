@@ -7,8 +7,10 @@
 //!
 //! Wires the real in-memory FS-backed `__syscall_*` imports (getcwd, openat,
 //! read, writev, pread64, close, lseek, fstat64, stat64, lstat64, newfstatat,
-//! ioctl, getdents64, faccessat, fcntl64, readlinkat) plus the returning-(-1)
-//! stubs for syscalls that are not needed in a sealed environment.
+//! ioctl, getdents64, faccessat, fcntl64, readlinkat) plus real socket syscalls
+//! (`socket`, `connect`, `bind`, `listen`, `accept4`, `sendmsg`, `recvmsg`,
+//! `sendto`, `recvfrom`) backed by the existing `DaemonNet` coordinator when
+//! `EmbedderState::daemon_net` is `Some`.
 
 use std::sync::Arc;
 
@@ -22,6 +24,13 @@ use crate::{
     emscripten_runtime::MechCallLog,
     pyo_trace,
 };
+
+/// Socket state types and syscall helpers.
+pub mod socket;
+
+/// Daemon-feature socket registration (wire_socket_syscalls / wire_sendto_recvfrom).
+#[cfg(feature = "daemon")]
+pub mod wire;
 
 #[cfg(test)]
 mod tests;
@@ -862,13 +871,27 @@ pub fn wire_fs_env_funcs(
     def_syscall!("__syscall_poll", 3);
     def_syscall!("__syscall_pipe", 1);
     def_syscall!("__syscall_utimensat", 4);
-    def_syscall!("__syscall_socket", 6);
-    def_syscall!("__syscall_bind", 6);
-    def_syscall!("__syscall_connect", 6);
-    def_syscall!("__syscall_listen", 6);
-    def_syscall!("__syscall_accept4", 6);
-    def_syscall!("__syscall_sendmsg", 6);
-    def_syscall!("__syscall_recvmsg", 6);
+    // ---- socket syscalls -------------------------------------------------------
+    //
+    // When the `daemon` feature is active, real implementations route to
+    // `DaemonNet`. Without the feature, sealed stubs return EPERM (-1).
+    // The two blocks are kept separate so each compiles without unused-mut
+    // or unused-variable warnings.
+
+    #[cfg(feature = "daemon")]
+    wire::wire_socket_syscalls(linker)?;
+
+    #[cfg(not(feature = "daemon"))]
+    {
+        def_syscall!("__syscall_socket", 3);
+        def_syscall!("__syscall_connect", 3);
+        def_syscall!("__syscall_bind", 3);
+        def_syscall!("__syscall_listen", 2);
+        def_syscall!("__syscall_accept4", 4);
+        def_syscall!("__syscall_sendmsg", 3);
+        def_syscall!("__syscall_recvmsg", 3);
+    }
+
     def_syscall!("__syscall_getsockopt", 6);
     def_syscall!("__syscall_getsockname", 6);
     def_syscall!("__syscall_getpeername", 6);
@@ -904,34 +927,40 @@ pub fn wire_fs_env_funcs(
             |_: Caller<'_, EmbedderState>, _path: i32, _len: i64| -> i32 { -1 },
         )
         .map_err(|e| AfterburnerError::Engine(format!("__syscall_truncate64: {e}")))?;
-    linker
-        .func_wrap(
-            "env",
-            "__syscall_sendto",
-            |_: Caller<'_, EmbedderState>,
-             _fd: i32,
-             _buf: i32,
-             _len: i32,
-             _f: i32,
-             _addr: i32,
-             _al: i32|
-             -> i32 { -1 },
-        )
-        .map_err(|e| AfterburnerError::Engine(format!("__syscall_sendto: {e}")))?;
-    linker
-        .func_wrap(
-            "env",
-            "__syscall_recvfrom",
-            |_: Caller<'_, EmbedderState>,
-             _fd: i32,
-             _buf: i32,
-             _len: i32,
-             _f: i32,
-             _addr: i32,
-             _al: i32|
-             -> i32 { -1 },
-        )
-        .map_err(|e| AfterburnerError::Engine(format!("__syscall_recvfrom: {e}")))?;
+    #[cfg(feature = "daemon")]
+    wire::wire_sendto_recvfrom(linker)?;
+
+    #[cfg(not(feature = "daemon"))]
+    {
+        linker
+            .func_wrap(
+                "env",
+                "__syscall_sendto",
+                |_: Caller<'_, EmbedderState>,
+                 _: i32,
+                 _: i32,
+                 _: i32,
+                 _: i32,
+                 _: i32,
+                 _: i32|
+                 -> i32 { -1 },
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("__syscall_sendto: {e}")))?;
+        linker
+            .func_wrap(
+                "env",
+                "__syscall_recvfrom",
+                |_: Caller<'_, EmbedderState>,
+                 _: i32,
+                 _: i32,
+                 _: i32,
+                 _: i32,
+                 _: i32,
+                 _: i32|
+                 -> i32 { -1 },
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("__syscall_recvfrom: {e}")))?;
+    }
 
     def!("__syscall_fstatfs64", |_: Caller<'_, EmbedderState>,
                                  _fd: i32,

@@ -29,6 +29,8 @@ pub mod daemon_inspector;
 #[cfg(feature = "daemon")]
 pub mod daemon_net;
 #[cfg(feature = "daemon")]
+pub mod daemon_net_gate;
+#[cfg(feature = "daemon")]
 pub mod daemon_port_claims;
 pub mod daemon_runtime;
 pub mod daemon_sab;

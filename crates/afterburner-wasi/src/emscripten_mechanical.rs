@@ -4,6 +4,8 @@
 // Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Mechanical Emscripten env.* imports: syscalls, memory ops, C++ EH, invoke trampolines.
+// vertexia: file was 1010 lines before Section 3 work (pre-existing); ceiling = split into
+// emscripten_mechanical/{core,invoke,memory,wire}.rs once the file exceeds steady growth.
 
 use std::sync::Arc;
 
@@ -503,14 +505,40 @@ pub(crate) fn wire_mechanical_env_funcs(
                         _loc: i32|
      -> i32 { 0 });
 
-    // ---- network stubs ------------------------------------------------------
+    // ---- DNS / network functions -------------------------------------------
+    //
+    // `getaddrinfo`: when `daemon` feature + manifold are available, resolve
+    // the hostname via the existing host resolver (`dns_host::lookup`) and
+    // write one IPv4 `addrinfo` + `sockaddr_in` result into a fixed scratch
+    // page at the top of the guest linear memory (last 512 bytes), which is
+    // outside the usable Emscripten heap. Without the feature, or when no
+    // manifold is set, return EAI_FAIL (8) so the caller handles it gracefully.
+    //
+    // `addrinfo` wasm32 layout (total 32 bytes):
+    //   [0]  ai_flags    i32
+    //   [4]  ai_family   i32 (AF_INET=2)
+    //   [8]  ai_socktype i32 (SOCK_STREAM=1)
+    //   [12] ai_protocol i32 (IPPROTO_TCP=6)
+    //   [16] ai_addrlen  i32 (16)
+    //   [20] ai_addr     i32 (pointer to sockaddr_in)
+    //   [24] ai_canonname i32 (0 = null)
+    //   [28] ai_next     i32 (0 = null)
+    //
+    // `sockaddr_in` follows immediately at offset 32 (16 bytes).
+    // Total scratch: 48 bytes. We write them at `mem_len - 512` and
+    // write `mem_len - 512` into `*res`.
 
+    #[cfg(feature = "daemon")]
+    wire_getaddrinfo(linker)?;
+
+    #[cfg(not(feature = "daemon"))]
     def!("getaddrinfo", |_: Caller<'_, EmbedderState>,
                          _n: i32,
                          _s: i32,
                          _h: i32,
                          _r: i32|
-     -> i32 { 8 });
+     -> i32 { 8 }); // EAI_FAIL (no network in sealed mode)
+
     def!("getnameinfo", |_: Caller<'_, EmbedderState>,
                          _sa: i32,
                          _sl: i32,
@@ -519,10 +547,18 @@ pub(crate) fn wire_mechanical_env_funcs(
                          _sv: i32,
                          _svl: i32,
                          _f: i32|
-     -> i32 { 1 });
+     -> i32 { 1 }); // EAI_NONAME - not needed for outbound client use
+
     def!("getprotobyname", |_: Caller<'_, EmbedderState>,
                             _name: i32|
-     -> i32 { 0 });
+     -> i32 { 0 }); // null - getprotobyname returning NULL means unknown protocol
+    def!("freeaddrinfo", |_: Caller<'_, EmbedderState>,
+                          _ai: i32|
+     -> i32 {
+        // No-op: the addrinfo lives in the wasm scratch page, not on the wasm heap.
+        // No guest malloc was called, so no guest free is needed.
+        0
+    });
     {
         let _log = mech_log.clone();
         def!("getentropy", move |mut caller: Caller<
@@ -1002,6 +1038,110 @@ pub fn wire_pyodide028_env_stubs(
             .map_err(|e| AfterburnerError::Engine(format!("__hiwire_deduplicate_new: {e}")))?;
     }
 
+    Ok(())
+}
+
+/// Wire a real `getaddrinfo` that resolves via the host DNS resolver.
+/// Only compiled when the `daemon` feature is active.
+///
+/// Writes one IPv4 `addrinfo` + `sockaddr_in` into a fixed 512-byte scratch
+/// page at the TOP of the guest linear memory (last 512 bytes). This region
+/// is outside the Emscripten heap (`__heap_base` + dynamic allocations are
+/// well below the memory limit), so writing there is safe as long as the
+/// guest memory is at least 512 bytes (it is always multiple MB).
+///
+/// `addrinfo` wasm32 layout (32 bytes):
+///   [0]  ai_flags     i32 = 0
+///   [4]  ai_family    i32 = AF_INET (2)
+///   [8]  ai_socktype  i32 = SOCK_STREAM (1)
+///   [12] ai_protocol  i32 = IPPROTO_TCP (6)
+///   [16] ai_addrlen   i32 = 16
+///   [20] ai_addr      i32 = pointer to sockaddr_in below
+///   [24] ai_canonname i32 = 0 (null)
+///   [28] ai_next      i32 = 0 (null)
+/// `sockaddr_in` follows at offset +32 (16 bytes).
+#[cfg(feature = "daemon")]
+fn wire_getaddrinfo(linker: &mut Linker<EmbedderState>) -> Result<()> {
+    linker
+        .func_wrap(
+            "env",
+            "getaddrinfo",
+            |mut caller: Caller<'_, EmbedderState>,
+             node: i32,
+             _service: i32,
+             _hints: i32,
+             res: i32|
+             -> i32 {
+                const EAI_FAIL: i32 = 8;
+                let manifold = match caller.data().manifold.clone() {
+                    Some(m) => m,
+                    None => return EAI_FAIL,
+                };
+                let mem_handle = match caller.data().pyodide_memory {
+                    Some(m) => m,
+                    None => return EAI_FAIL,
+                };
+                let hostname: String = {
+                    let mem = mem_handle.data(&caller);
+                    let ptr = node as u32 as usize;
+                    if ptr >= mem.len() {
+                        return EAI_FAIL;
+                    }
+                    let end = mem[ptr..].iter().position(|&b| b == 0).unwrap_or(255);
+                    match std::str::from_utf8(&mem[ptr..ptr + end]) {
+                        Ok(s) => s.to_string(),
+                        Err(_) => return EAI_FAIL,
+                    }
+                };
+                if hostname.is_empty() {
+                    return EAI_FAIL;
+                }
+                let ip = match afterburner_node_compat::dns_host::lookup(&hostname, &manifold) {
+                    Ok(ip) => ip,
+                    Err(_) => return EAI_FAIL,
+                };
+                let parts: Vec<u8> = ip.split('.').filter_map(|s| s.parse().ok()).collect();
+                if parts.len() != 4 {
+                    return EAI_FAIL;
+                }
+                let mem = mem_handle.data_mut(&mut caller);
+                let mem_len = mem.len();
+                if mem_len < 512 {
+                    return EAI_FAIL;
+                }
+                let ai_off = mem_len - 512;
+                let sa_off = ai_off + 32;
+                let sa_ptr = sa_off as i32;
+                // addrinfo:
+                mem[ai_off..ai_off + 4].copy_from_slice(&0i32.to_le_bytes()); // ai_flags
+                mem[ai_off + 4..ai_off + 8].copy_from_slice(&2i32.to_le_bytes()); // ai_family
+                mem[ai_off + 8..ai_off + 12].copy_from_slice(&1i32.to_le_bytes()); // ai_socktype
+                mem[ai_off + 12..ai_off + 16].copy_from_slice(&6i32.to_le_bytes()); // ai_protocol
+                mem[ai_off + 16..ai_off + 20].copy_from_slice(&16i32.to_le_bytes()); // ai_addrlen
+                mem[ai_off + 20..ai_off + 24].copy_from_slice(&sa_ptr.to_le_bytes()); // ai_addr
+                mem[ai_off + 24..ai_off + 28].copy_from_slice(&0i32.to_le_bytes()); // ai_canonname
+                mem[ai_off + 28..ai_off + 32].copy_from_slice(&0i32.to_le_bytes()); // ai_next
+                // sockaddr_in:
+                let family: u16 = 2;
+                mem[sa_off..sa_off + 2].copy_from_slice(&family.to_le_bytes());
+                mem[sa_off + 2..sa_off + 4].copy_from_slice(&0u16.to_be_bytes());
+                mem[sa_off + 4] = parts[0];
+                mem[sa_off + 5] = parts[1];
+                mem[sa_off + 6] = parts[2];
+                mem[sa_off + 7] = parts[3];
+                for i in 8..16 {
+                    mem[sa_off + i] = 0;
+                }
+                // Write *res = &addrinfo:
+                let ai_ptr = ai_off as i32;
+                let res_ptr = res as u32 as usize;
+                if res_ptr + 4 <= mem.len() {
+                    mem[res_ptr..res_ptr + 4].copy_from_slice(&ai_ptr.to_le_bytes());
+                }
+                0
+            },
+        )
+        .map_err(|e| AfterburnerError::Engine(format!("getaddrinfo: {e}")))?;
     Ok(())
 }
 

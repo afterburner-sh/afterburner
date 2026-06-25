@@ -34,7 +34,7 @@
 //! ## Security
 //!
 //! Every guest-supplied pointer and length is bounds-checked against the wasm
-//! memory size BEFORE any dereference (see [`mem_read`] / [`mem_write`]). A cif
+//! memory size BEFORE any dereference (see `mem_read` / `mem_write`). A cif
 //! or arg pointer that escapes the guest heap aborts the call with a trap rather
 //! than reading host memory. The function-table index handed to a dispatch is
 //! validated by wasmtime's own `Table::get` (returns `None` out of range). No
