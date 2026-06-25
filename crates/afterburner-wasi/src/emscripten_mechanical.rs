@@ -813,6 +813,16 @@ pub(crate) fn wire_mechanical_env_funcs(
     #[cfg(feature = "daemon")]
     crate::emscripten_pthread::wire_pthread_imports(linker)?;
 
+    // ---- process / pipe surface (Section 5: real multiprocessing) -----------
+    //
+    // Wire __syscall_pipe / __syscall_pipe2 / __syscall_fork / __syscall_clone /
+    // __syscall_waitid / __syscall_wait4 / posix_spawn / posix_spawnp onto
+    // DaemonWorkers (spawn + length-prefixed pipe IPC). fork is emulated as
+    // spawn + explicit state hand-off (decision D2). Available under the
+    // `daemon` feature only.
+    #[cfg(feature = "daemon")]
+    crate::emscripten_multiprocessing::wire_process_imports(linker)?;
+
     Ok(())
 }
 

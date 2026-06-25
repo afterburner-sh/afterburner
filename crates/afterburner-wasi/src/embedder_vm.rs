@@ -368,6 +368,12 @@ pub struct EmbedderState {
     /// feature only.
     #[cfg(feature = "daemon")]
     pub daemon_sab: Option<std::sync::Arc<crate::daemon_sab::DaemonSab>>,
+    /// Per-run process and pipe state: synthetic pipe-fd allocation, pipe buffers,
+    /// and child pid tracking. Populated lazily when the first pipe/fork/spawn
+    /// syscall fires. `None` in sealed / non-daemon runs; the process shims deny
+    /// with EPERM when absent. Under the `daemon` feature only.
+    #[cfg(feature = "daemon")]
+    pub process_state: Option<Box<crate::emscripten_multiprocessing::ProcessState>>,
     /// Read-write host-filesystem preopens for the Python runtime: a list of
     /// `(host_path, guest_path)` pairs, exactly as `WasiCommandOpts::preopens_rw`.
     /// A guest path under one of these preopens is routed to the real host FS
@@ -407,6 +413,8 @@ impl EmbedderState {
             daemon_workers: None,
             #[cfg(feature = "daemon")]
             daemon_sab: None,
+            #[cfg(feature = "daemon")]
+            process_state: None,
             rw_preopens: Vec::new(),
         }
     }
@@ -454,6 +462,8 @@ impl EmbedderState {
             daemon_workers: None,
             #[cfg(feature = "daemon")]
             daemon_sab: None,
+            #[cfg(feature = "daemon")]
+            process_state: None,
             rw_preopens: Vec::new(),
         }
     }
@@ -495,6 +505,8 @@ impl EmbedderState {
             daemon_workers: None,
             #[cfg(feature = "daemon")]
             daemon_sab: None,
+            #[cfg(feature = "daemon")]
+            process_state: None,
             rw_preopens: Vec::new(),
         }
     }
@@ -758,6 +770,8 @@ impl EmbedderVm {
                 daemon_workers: None,
                 #[cfg(feature = "daemon")]
                 daemon_sab: None,
+                #[cfg(feature = "daemon")]
+                process_state: None,
             }
         } else {
             EmbedderState {
@@ -789,6 +803,8 @@ impl EmbedderVm {
                 daemon_workers: None,
                 #[cfg(feature = "daemon")]
                 daemon_sab: None,
+                #[cfg(feature = "daemon")]
+                process_state: None,
             }
         };
 
@@ -951,6 +967,8 @@ impl EmbedderVm {
             daemon_workers: None,
             #[cfg(feature = "daemon")]
             daemon_sab: None,
+            #[cfg(feature = "daemon")]
+            process_state: None,
         };
 
         let mut store = Store::new(&module.engine, state);

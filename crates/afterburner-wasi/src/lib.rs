@@ -49,6 +49,8 @@ pub mod emscripten_invoke;
 pub mod emscripten_jsffi;
 pub mod emscripten_mechanical;
 #[cfg(feature = "daemon")]
+pub mod emscripten_multiprocessing;
+#[cfg(feature = "daemon")]
 pub mod emscripten_pthread;
 pub mod emscripten_runtime;
 pub mod emscripten_sidemodule;

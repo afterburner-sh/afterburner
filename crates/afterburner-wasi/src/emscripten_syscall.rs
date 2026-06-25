@@ -341,6 +341,31 @@ pub fn wire_fs_env_funcs(
                     if start + len > mem_len {
                         return EINVAL;
                     }
+                    // Pipe fds (Section 5: multiprocessing) are checked first.
+                    #[cfg(feature = "daemon")]
+                    {
+                        let is_pipe = caller
+                            .data()
+                            .process_state
+                            .as_ref()
+                            .map(|s| s.is_pipe_fd(fd))
+                            .unwrap_or(false);
+                        if is_pipe {
+                            let mut tmp = vec![0u8; len];
+                            let n = caller
+                                .data_mut()
+                                .process_state
+                                .as_mut()
+                                .map(|s| s.pipe_read(fd, &mut tmp))
+                                .unwrap_or(EBADF);
+                            if n < 0 {
+                                return n;
+                            }
+                            let mem = memory.data_mut(&mut caller);
+                            mem[start..start + n as usize].copy_from_slice(&tmp[..n as usize]);
+                            return n;
+                        }
+                    }
                     // Read from FS into a temp buffer, then write to guest memory.
                     // Host-backed fds are checked first.
                     let mut tmp = vec![0u8; len];
@@ -412,15 +437,42 @@ pub fn wire_fs_env_funcs(
                         pyo_trace!("[__syscall_writev] fd={fd} iov[{i}] buf_ptr={buf_ptr:#x} buf_len={buf_len}");
                         if fd == 1 || fd == 2 {
                             caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
-                        } else if caller.data().fs.is_fs_fd(fd) {
-                            // Host-backed fds are checked first.
-                            let n = if let Some(n) = caller.data_mut().fs.write_host(fd, &chunk) {
-                                n
-                            } else {
-                                caller.data_mut().fs.write(fd, &chunk)
-                            };
-                            if n < 0 {
-                                return n;
+                        } else {
+                            // Pipe fds (Section 5: multiprocessing) checked before FS.
+                            #[cfg(feature = "daemon")]
+                            {
+                                let is_pipe = caller
+                                    .data()
+                                    .process_state
+                                    .as_ref()
+                                    .map(|s| s.is_pipe_fd(fd))
+                                    .unwrap_or(false);
+                                if is_pipe {
+                                    let n = caller
+                                        .data_mut()
+                                        .process_state
+                                        .as_mut()
+                                        .map(|s| s.pipe_write(fd, &chunk))
+                                        .unwrap_or(EBADF);
+                                    if n < 0 {
+                                        return n;
+                                    }
+                                    total += n;
+                                    continue;
+                                }
+                            }
+                            if caller.data().fs.is_fs_fd(fd) {
+                                // Host-backed fds are checked first.
+                                let n = if let Some(n) =
+                                    caller.data_mut().fs.write_host(fd, &chunk)
+                                {
+                                    n
+                                } else {
+                                    caller.data_mut().fs.write(fd, &chunk)
+                                };
+                                if n < 0 {
+                                    return n;
+                                }
                             }
                         }
                         total += buf_len as i32;
@@ -464,18 +516,42 @@ pub fn wire_fs_env_funcs(
                     pyo_trace!("[__syscall_write] fd={fd} buf={buf:#x} count={len}");
                     if fd == 1 || fd == 2 {
                         caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
-                    } else if caller.data().fs.is_fs_fd(fd) {
-                        // Host-backed fds are checked first.
-                        let n = if let Some(n) = caller.data_mut().fs.write_host(fd, &chunk) {
-                            n
-                        } else {
-                            caller.data_mut().fs.write(fd, &chunk)
-                        };
-                        if n < 0 {
-                            return n;
-                        }
                     } else {
-                        return EBADF;
+                        // Pipe fds (Section 5: multiprocessing) are checked before FS.
+                        #[cfg(feature = "daemon")]
+                        {
+                            let is_pipe = caller
+                                .data()
+                                .process_state
+                                .as_ref()
+                                .map(|s| s.is_pipe_fd(fd))
+                                .unwrap_or(false);
+                            if is_pipe {
+                                let n = caller
+                                    .data_mut()
+                                    .process_state
+                                    .as_mut()
+                                    .map(|s| s.pipe_write(fd, &chunk))
+                                    .unwrap_or(EBADF);
+                                if n < 0 {
+                                    return n;
+                                }
+                                return n;
+                            }
+                        }
+                        if caller.data().fs.is_fs_fd(fd) {
+                            // Host-backed fds are checked first.
+                            let n = if let Some(n) = caller.data_mut().fs.write_host(fd, &chunk) {
+                                n
+                            } else {
+                                caller.data_mut().fs.write(fd, &chunk)
+                            };
+                            if n < 0 {
+                                return n;
+                            }
+                        } else {
+                            return EBADF;
+                        }
                     }
                     len as i32
                 },
