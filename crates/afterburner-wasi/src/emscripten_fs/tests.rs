@@ -689,6 +689,247 @@ fn prop_write_read_roundtrip() {
     }
 }
 
+// ---- host passthrough: resolve_to_host_path ---------------------------------
+
+#[test]
+fn resolve_to_host_path_matches_prefix() {
+    let preopens = vec![
+        (PathBuf::from("/host/data"), "/data".to_owned()),
+        (PathBuf::from("/host/tmp"), "/tmp".to_owned()),
+    ];
+    // Exact match on the preopen dir itself.
+    let hp = InMemFs::resolve_to_host_path("/data", &preopens).unwrap();
+    assert_eq!(hp, PathBuf::from("/host/data"));
+
+    // Child path under the preopen.
+    let hp2 = InMemFs::resolve_to_host_path("/data/db.sqlite", &preopens).unwrap();
+    assert_eq!(hp2, PathBuf::from("/host/data/db.sqlite"));
+
+    // Nested child.
+    let hp3 = InMemFs::resolve_to_host_path("/tmp/nested/dir/file.txt", &preopens).unwrap();
+    assert_eq!(hp3, PathBuf::from("/host/tmp/nested/dir/file.txt"));
+}
+
+#[test]
+fn resolve_to_host_path_no_match_returns_none() {
+    use std::path::PathBuf;
+    let preopens = vec![(PathBuf::from("/host/data"), "/data".to_owned())];
+    // Path not under any preopen.
+    assert!(InMemFs::resolve_to_host_path("/lib/python313.zip", &preopens).is_none());
+    // Empty preopens.
+    assert!(InMemFs::resolve_to_host_path("/data/file", &[]).is_none());
+}
+
+#[test]
+fn resolve_to_host_path_partial_name_not_matched() {
+    use std::path::PathBuf;
+    // "/dataextra" must NOT match "/data" (would need a path separator after).
+    let preopens = vec![(PathBuf::from("/host/data"), "/data".to_owned())];
+    assert!(InMemFs::resolve_to_host_path("/dataextra/file", &preopens).is_none());
+}
+
+// ---- host passthrough: open / read / write / close round-trip ---------------
+
+#[test]
+fn host_open_write_read_roundtrip() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let host_root = dir.path().to_path_buf();
+    let preopens = vec![(host_root.clone(), "/data".to_owned())];
+
+    let mut fs = InMemFs::new();
+    // Open a new file for writing under the preopen.
+    let guest_abs = "/data/round.txt".to_owned();
+    let hp = InMemFs::resolve_to_host_path(&guest_abs, &preopens).unwrap();
+    let fd = fs.open_host(guest_abs.clone(), hp, O_CREAT | O_WRONLY);
+    assert!(fd >= 3, "expected valid fd, got {fd}");
+
+    let n = fs.write_host(fd, b"persist").expect("write_host");
+    assert_eq!(n, 7);
+    fs.close_host(fd);
+
+    // Re-open for reading and verify the content.
+    let hp2 = InMemFs::resolve_to_host_path(&guest_abs, &preopens).unwrap();
+    let fd2 = fs.open_host(guest_abs, hp2, 0);
+    assert!(fd2 >= 3);
+    let mut buf = [0u8; 7];
+    let n2 = fs.read_host(fd2, &mut buf).expect("read_host");
+    assert_eq!(n2, 7);
+    assert_eq!(&buf, b"persist");
+    fs.close_host(fd2);
+}
+
+/// A write through `open_host` must persist on the real filesystem - a second
+/// `InMemFs` instance with the same tempdir sees the data (cross-run persistence).
+#[test]
+fn host_write_persists_across_inmemfs_instances() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let host_root = dir.path().to_path_buf();
+    let preopens = vec![(host_root.clone(), "/data".to_owned())];
+    let guest_abs = "/data/state.bin".to_owned();
+
+    // First "run": write to host.
+    {
+        let mut fs1 = InMemFs::new();
+        let hp = InMemFs::resolve_to_host_path(&guest_abs, &preopens).unwrap();
+        let fd = fs1.open_host(guest_abs.clone(), hp, O_CREAT | O_WRONLY);
+        assert!(fd >= 3);
+        let n = fs1.write_host(fd, b"durablestate").expect("write");
+        assert_eq!(n, 12);
+        fs1.close_host(fd);
+    }
+
+    // Second "run": fresh InMemFs, reads the same host file.
+    {
+        let mut fs2 = InMemFs::new();
+        let hp = InMemFs::resolve_to_host_path(&guest_abs, &preopens).unwrap();
+        let fd = fs2.open_host(guest_abs, hp, 0);
+        assert!(fd >= 3, "file should exist on host after first run");
+        let mut buf = [0u8; 12];
+        let n = fs2.read_host(fd, &mut buf).expect("read");
+        assert_eq!(n, 12);
+        assert_eq!(&buf, b"durablestate");
+        fs2.close_host(fd);
+    }
+}
+
+/// A write to a guest path NOT under any preopen stays in InMemFs and is
+/// not visible on the host filesystem.
+#[test]
+fn write_outside_preopen_stays_in_inmemfs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let host_root = dir.path().to_path_buf();
+    let preopens = vec![(host_root.clone(), "/data".to_owned())];
+    let guest_abs = "/tmp/secret.txt".to_owned();
+
+    let mut fs = InMemFs::new();
+    // Path not under /data -> no host path -> must go to InMemFs.
+    let host_path = InMemFs::resolve_to_host_path(&guest_abs, &preopens);
+    assert!(host_path.is_none(), "must not resolve outside preopen");
+
+    // Write through normal InMemFs path.
+    let fd = fs.open(guest_abs.clone(), O_CREAT | O_WRONLY);
+    assert!(fd >= 3);
+    fs.write(fd, b"inmem");
+    fs.close(fd);
+
+    // The file must be in InMemFs.
+    assert_eq!(fs.read_file(&guest_abs), Some(b"inmem".as_slice()));
+
+    // But NOT on the host filesystem.
+    let host_secret = host_root.join("secret.txt");
+    assert!(
+        !host_secret.exists(),
+        "file must not have leaked to host FS"
+    );
+}
+
+/// `stat_host_path` fills the struct stat buffer for an existing host file.
+#[test]
+fn stat_host_path_existing_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file_path = dir.path().join("stat_me.txt");
+    std::fs::write(&file_path, b"hello stat").expect("write");
+
+    let mut fs = InMemFs::new();
+    let mut buf = [0u8; 96];
+    let rc = fs.stat_host_path(&file_path, &mut buf);
+    assert_eq!(rc, 0, "stat_host_path failed: {rc}");
+
+    // st_mode at offset 4: must have S_IFREG bit.
+    let mode = i32::from_le_bytes(buf[4..8].try_into().unwrap());
+    assert!(mode & 0o100_000 != 0, "S_IFREG expected, mode={mode:#o}");
+
+    // st_size at offset 24: must equal 10.
+    let size = i64::from_le_bytes(buf[24..32].try_into().unwrap());
+    assert_eq!(size, 10);
+}
+
+/// `stat_host_path` on a missing path returns ENOENT.
+#[test]
+fn stat_host_path_missing_returns_enoent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("no_such_file.txt");
+    let mut fs = InMemFs::new();
+    let mut buf = [0u8; 96];
+    assert_eq!(fs.stat_host_path(&missing, &mut buf), ENOENT);
+}
+
+/// `exists_host` reflects real host filesystem existence.
+#[test]
+fn exists_host_checks_host_filesystem() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let real = dir.path().join("exists.txt");
+    std::fs::write(&real, b"x").expect("write");
+    let missing = dir.path().join("missing.txt");
+
+    assert!(InMemFs::exists_host(&real));
+    assert!(!InMemFs::exists_host(&missing));
+}
+
+/// `mkdir_host` creates a directory on the host; calling it again is idempotent.
+#[test]
+fn mkdir_host_creates_and_is_idempotent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let new_dir = dir.path().join("subdir");
+
+    assert_eq!(InMemFs::mkdir_host(&new_dir), 0);
+    assert!(new_dir.is_dir());
+
+    // Idempotent: already exists -> ok (not an error).
+    assert_eq!(InMemFs::mkdir_host(&new_dir), 0);
+}
+
+/// `list_dir_host` returns the correct file/dir entries.
+#[test]
+fn list_dir_host_returns_entries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("alpha.txt"), b"").expect("write");
+    std::fs::write(dir.path().join("beta.txt"), b"").expect("write");
+    std::fs::create_dir(dir.path().join("subdir")).expect("mkdir");
+
+    let entries = InMemFs::list_dir_host(dir.path()).expect("list_dir_host");
+    let names: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(names.contains(&"alpha.txt"));
+    assert!(names.contains(&"beta.txt"));
+    assert!(names.contains(&"subdir"));
+
+    // The subdir entry must have is_dir=true.
+    let subdir = entries.iter().find(|(n, _)| n == "subdir").unwrap();
+    assert!(subdir.1, "subdir entry must be is_dir=true");
+}
+
+/// `lseek_host` correctly repositions the file cursor for host-backed fds.
+#[test]
+fn lseek_host_repositions_cursor() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let host_root = dir.path().to_path_buf();
+    let preopens = vec![(host_root, "/data".to_owned())];
+    let guest_abs = "/data/seek.txt".to_owned();
+
+    let mut fs = InMemFs::new();
+    let hp = InMemFs::resolve_to_host_path(&guest_abs, &preopens).unwrap();
+    let fd = fs.open_host(guest_abs, hp, O_CREAT | O_WRONLY);
+    assert!(fd >= 3);
+    fs.write_host(fd, b"0123456789").expect("write");
+    // Reopen for reading.
+    fs.close_host(fd);
+
+    let guest_abs2 = "/data/seek.txt".to_owned();
+    let hp2 = InMemFs::resolve_to_host_path(&guest_abs2, &preopens).unwrap();
+    let fd2 = fs.open_host(guest_abs2, hp2, 0);
+    assert!(fd2 >= 3);
+
+    // SEEK_SET to 3.
+    let pos = fs.lseek_host(fd2, 3, 0).expect("lseek_host SEEK_SET");
+    assert_eq!(pos, 3);
+    let mut buf = [0u8; 3];
+    let n = fs.read_host(fd2, &mut buf).expect("read after seek");
+    assert_eq!(n, 3);
+    assert_eq!(&buf, b"345");
+
+    fs.close_host(fd2);
+}
+
 // ---- property: getdents visits each child exactly once then EOF -------------
 
 /// For N children, getdents (with a large buffer) must emit exactly N + 2

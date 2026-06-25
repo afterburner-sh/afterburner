@@ -665,6 +665,26 @@ pub fn run_python(python_source: &str) -> Result<PyodideRunOutput> {
     run_pyodide_with(&rt, python_source)
 }
 
+/// Run a `.py` program on the self-contained runtime with host-filesystem
+/// read-write preopens, returning stdout + exit code.
+///
+/// Each `rw_preopens` entry is a `(host_path, guest_path)` pair. A Python file
+/// syscall to a guest path under a declared preopen is routed to the
+/// corresponding directory on the real host filesystem rather than the in-memory
+/// FS, so state written in one invocation persists for the next. Paths not
+/// covered by any preopen remain sealed in the in-memory FS (deny-by-default).
+///
+/// # Errors
+///
+/// Returns `Err` when no runtime is available, or when boot / run traps.
+pub fn run_python_with_preopens(
+    python_source: &str,
+    rw_preopens: &[(std::path::PathBuf, String)],
+) -> Result<PyodideRunOutput> {
+    let rt = resolve_runtime()?;
+    run_pyodide_with_preopens(&rt, python_source, rw_preopens)
+}
+
 /// Run a Python *package* on the self-contained, zero-config runtime (or a
 /// `BURN_PYTHON_RUNTIME` override): mount the package's sibling modules into
 /// the guest filesystem, prepend `pkg.sys_path_dir` to `sys.path`, and run
@@ -742,7 +762,26 @@ pub struct PyPackage {
 /// Boot a resolved [`PyRuntime`], run `python -c <source>`, return stdout + exit
 /// code. The one canonical run path; the public entry points are thin shims.
 pub fn run_pyodide_with(rt: &PyRuntime, python_source: &str) -> Result<PyodideRunOutput> {
-    run_pyodide_core(rt, python_source, None)
+    run_pyodide_core(rt, python_source, None, &[])
+}
+
+/// Boot a resolved [`PyRuntime`], run `python -c <source>` with host-filesystem
+/// read-write preopens, return stdout + exit code.
+///
+/// Each `rw_preopens` entry is a `(host_path, guest_path)` pair: a Python file
+/// syscall to `guest_path` (or any path under it) is routed to the corresponding
+/// `host_path` on the real host filesystem instead of the in-memory FS. Paths
+/// not covered by any preopen remain in the in-memory FS (deny-by-default).
+///
+/// This is the entry point for durable-FS use cases (e.g. a SQLite database that
+/// must persist across Python invocations). The replay journal (D3/D4 from the
+/// design doc) is deferred to causarum and is NOT built here.
+pub fn run_pyodide_with_preopens(
+    rt: &PyRuntime,
+    python_source: &str,
+    rw_preopens: &[(std::path::PathBuf, String)],
+) -> Result<PyodideRunOutput> {
+    run_pyodide_core(rt, python_source, None, rw_preopens)
 }
 
 /// Run a Python *package* on a resolved [`PyRuntime`]: mount the package's
@@ -759,17 +798,19 @@ pub fn run_pyodide_package_with(
     entry_source: &str,
     pkg: &PyPackage,
 ) -> Result<PyodideRunOutput> {
-    run_pyodide_core(rt, entry_source, Some(pkg))
+    run_pyodide_core(rt, entry_source, Some(pkg), &[])
 }
 
-/// Shared boot + run core for [`run_pyodide_with`] and
-/// [`run_pyodide_package_with`]. Boots the interpreter, optionally mounts a
-/// package's sibling modules into the guest filesystem and prepends its
-/// directory to `sys.path`, then runs `python_source` via `-c`.
+/// Shared boot + run core for [`run_pyodide_with`], [`run_pyodide_with_preopens`],
+/// and [`run_pyodide_package_with`]. Boots the interpreter, optionally mounts a
+/// package's sibling modules into the guest filesystem and prepends its directory
+/// to `sys.path`, installs any rw-preopens into the store state, then runs
+/// `python_source` via `-c`.
 fn run_pyodide_core(
     rt: &PyRuntime,
     python_source: &str,
     pkg: Option<&PyPackage>,
+    rw_preopens: &[(std::path::PathBuf, String)],
 ) -> Result<PyodideRunOutput> {
     // Collect vendored wheels from the package (if any) so they are mounted into
     // site-packages during boot, before CPython's import machinery is active.
@@ -779,6 +820,11 @@ fn run_pyodide_core(
     let (mut store, instance, _got_globals) = boot_pyodide_instance(rt, vendor_wheels)?;
     // Clear any stdout emitted during boot before running user code.
     store.data_mut().wasi_stdout.clear();
+    // Install host-FS preopens into the store so the Emscripten FS syscall
+    // handlers can route guest paths to the real host filesystem.
+    if !rw_preopens.is_empty() {
+        store.data_mut().rw_preopens = rw_preopens.to_vec();
+    }
 
     // Mount the package's sibling modules into the guest in-memory FS so
     // CPython's import machinery (which reads from this same FS the stdlib and

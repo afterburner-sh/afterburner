@@ -92,6 +92,8 @@
 //! ```
 
 use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 
 use crate::emscripten_syscall::EM_STAT_STRUCT_BYTES;
 use crate::pyo_trace;
@@ -100,6 +102,8 @@ use crate::pyo_trace;
 
 /// ENOENT: no such file or directory.
 pub const ENOENT: i32 = -2;
+/// EACCES: permission denied (write outside a rw-preopen).
+pub const EACCES: i32 = -13;
 /// EBADF: bad file descriptor.
 pub const EBADF: i32 = -9;
 /// ENOTDIR: not a directory.
@@ -152,6 +156,13 @@ pub struct FdEntry {
 
 /// In-memory filesystem: a flat map from absolute canonical path to node, plus
 /// a file-descriptor table.
+///
+/// Host passthrough: fds whose fd number appears in `host_fds` route I/O to
+/// the real host filesystem via `std::fs::File`. All other fds stay in-memory.
+/// The fd number is allocated by the normal `alloc_fd` path (the `fds` table
+/// still holds the path + metadata); the host file is kept separately so the
+/// single fd namespace is shared and `fd_path` / `stat` on a host-backed fd
+/// still works via the path stored in `fds`.
 pub struct InMemFs {
     /// Absolute path -> node. Keys are canonical: no trailing `/`, single slash.
     /// The root entry is `"/"` -> `Dir`.
@@ -159,6 +170,10 @@ pub struct InMemFs {
     /// File-descriptor table. Index 0/1/2 are permanently `None` (reserved for
     /// stdin/stdout/stderr so open() never issues them).
     fds: Vec<Option<FdEntry>>,
+    /// Host-backed fds. When an fd appears here, reads and writes go to the
+    /// real `std::fs::File` rather than the in-memory node. The fd still has
+    /// an entry in `fds` for the path and metadata.
+    host_fds: HashMap<i32, std::fs::File>,
     /// Next inode number (incrementing counter, non-zero, non-persistent).
     next_ino: u64,
 }
@@ -179,6 +194,7 @@ impl InMemFs {
         Self {
             nodes,
             fds: vec![None, None, None], // reserve 0/1/2
+            host_fds: HashMap::new(),
             next_ino: 1,
         }
     }
@@ -206,6 +222,7 @@ impl InMemFs {
         Self {
             nodes,
             fds,
+            host_fds: HashMap::new(),
             next_ino: 1,
         }
     }
@@ -657,12 +674,265 @@ impl InMemFs {
         }
     }
 
+    /// Return the `dir_cursor` for a directory fd (for getdents64 pagination).
+    /// Returns 0 if the fd is invalid or not a directory fd.
+    pub fn fd_dir_cursor(&self, fd: i32) -> usize {
+        let fd_usize = fd as usize;
+        self.fds
+            .get(fd_usize)
+            .and_then(|e| e.as_ref())
+            .map(|e| e.dir_cursor)
+            .unwrap_or(0)
+    }
+
+    /// Advance the `dir_cursor` for a directory fd by `count` entries.
+    pub fn advance_fd_dir_cursor(&mut self, fd: i32, count: usize) {
+        let fd_usize = fd as usize;
+        if let Some(Some(entry)) = self.fds.get_mut(fd_usize) {
+            entry.dir_cursor += count;
+        }
+    }
+
     /// Return true if `fd` is a valid open fd referencing a filesystem node
     /// (i.e. fd >= 3 and has an entry). Used by WASI shims to decide whether
     /// to delegate to the MEMFS or handle as stdin/stdout/stderr.
     pub fn is_fs_fd(&self, fd: i32) -> bool {
         let fd_usize = fd as usize;
         fd_usize >= 3 && fd_usize < self.fds.len() && self.fds[fd_usize].is_some()
+    }
+
+    // ---- host passthrough -------------------------------------------------------
+    //
+    // A path under a declared rw-preopen is routed to the real host filesystem.
+    // The fd is allocated from the same `fds` table (same namespace) so all
+    // existing fd_path / stat callers still work; the host `File` lives in
+    // `host_fds` and is checked first in read / write / close / lseek.
+
+    /// Map a guest canonical absolute path to a host `PathBuf` if it falls under
+    /// a declared rw-preopen, otherwise `None`. The preopens list is
+    /// `(host_path, guest_path)` pairs exactly as in `WasiCommandOpts::preopens_rw`.
+    pub fn resolve_to_host_path(
+        abs_guest: &str,
+        preopens: &[(PathBuf, String)],
+    ) -> Option<PathBuf> {
+        for (host_root, guest_root) in preopens {
+            let guest_prefix = guest_root.trim_end_matches('/');
+            if abs_guest == guest_prefix {
+                return Some(host_root.clone());
+            }
+            // Use `if let` instead of `?` so a non-matching preopen continues
+            // to the next rather than exiting the function.
+            if let Some(rest) = abs_guest.strip_prefix(guest_prefix) {
+                // rest must start with '/' (not a partial segment match like
+                // "/dataextra" when the preopen is "/data").
+                if let Some(child) = rest.strip_prefix('/') {
+                    return Some(host_root.join(child));
+                }
+            }
+        }
+        None
+    }
+
+    /// Open a host-backed file or directory at `host_path` with the given
+    /// Emscripten `flags` (O_RDONLY/O_WRONLY/O_RDWR, O_CREAT, O_TRUNC). Records
+    /// the `guest_abs` path in the fd table so `fd_path` / stat work. Returns the
+    /// allocated fd, or a negative errno.
+    pub fn open_host(&mut self, guest_abs: String, host_path: PathBuf, flags: i32) -> i32 {
+        let want_write = flags & O_WRONLY != 0 || flags & O_RDWR != 0;
+        let creat = flags & O_CREAT != 0;
+        let trunc = flags & O_TRUNC != 0;
+
+        // Check if it is a directory first (directories can only be opened read-only).
+        if host_path.is_dir() {
+            if want_write {
+                return EISDIR;
+            }
+            let fd = self.alloc_fd(guest_abs);
+            // Directory fds have no host file handle; list_dir_host reads the dir.
+            pyo_trace!("[host-open-dir] {:?} -> fd={fd}", host_path);
+            return fd;
+        }
+
+        // Regular file: build the open options from Emscripten flags.
+        let mut oo = std::fs::OpenOptions::new();
+        oo.read(!want_write || flags & O_RDWR != 0);
+        if want_write {
+            oo.write(true);
+        }
+        if creat {
+            oo.create(true);
+        }
+        if trunc {
+            oo.truncate(true);
+        }
+        if !creat && !trunc {
+            oo.create(false);
+        }
+
+        // For a write-only file that does not exist yet, `create` must be set.
+        let file = match oo.open(&host_path) {
+            Ok(f) => f,
+            Err(e) => {
+                pyo_trace!("[host-open] {:?} flags={flags} err={e}", host_path);
+                return io_err_to_errno(&e);
+            }
+        };
+
+        let fd = self.alloc_fd(guest_abs);
+        self.host_fds.insert(fd, file);
+        pyo_trace!("[host-open-file] {:?} flags={flags} -> fd={fd}", host_path);
+        fd
+    }
+
+    /// Read from a host-backed fd. Returns bytes read, or a negative errno.
+    /// Returns `None` if `fd` is not a host-backed fd.
+    pub fn read_host(&mut self, fd: i32, dst: &mut [u8]) -> Option<i32> {
+        let file = self.host_fds.get_mut(&fd)?;
+        let n = match file.read(dst) {
+            Ok(n) => n as i32,
+            Err(e) => io_err_to_errno(&e),
+        };
+        Some(n)
+    }
+
+    /// Write to a host-backed fd. Returns bytes written, or a negative errno.
+    /// Returns `None` if `fd` is not a host-backed fd.
+    pub fn write_host(&mut self, fd: i32, src: &[u8]) -> Option<i32> {
+        let file = self.host_fds.get_mut(&fd)?;
+        let n = match file.write(src) {
+            Ok(n) => n as i32,
+            Err(e) => io_err_to_errno(&e),
+        };
+        Some(n)
+    }
+
+    /// Seek a host-backed fd. Returns the new offset, or a negative i64 errno.
+    /// Returns `None` if `fd` is not a host-backed fd.
+    pub fn lseek_host(&mut self, fd: i32, offset: i64, whence: i32) -> Option<i64> {
+        let file = self.host_fds.get_mut(&fd)?;
+        let pos = match whence {
+            0 => SeekFrom::Start(offset.max(0) as u64),
+            1 => SeekFrom::Current(offset),
+            2 => SeekFrom::End(offset),
+            _ => return Some(EINVAL as i64),
+        };
+        let new_off = match file.seek(pos) {
+            Ok(n) => n as i64,
+            Err(e) => io_err_to_errno(&e) as i64,
+        };
+        Some(new_off)
+    }
+
+    /// Close a host-backed fd. Returns `Some(0)` on success, `Some(errno)` on
+    /// error. Returns `None` if `fd` is not a host-backed fd.
+    pub fn close_host(&mut self, fd: i32) -> Option<i32> {
+        let file = self.host_fds.remove(&fd)?;
+        drop(file);
+        // Also release the fds-table slot so the fd can be reused.
+        let fd_usize = fd as usize;
+        if fd_usize < self.fds.len() {
+            self.fds[fd_usize] = None;
+        }
+        Some(0)
+    }
+
+    /// Fill an Emscripten stat buffer for a host path. Returns 0 or a negative errno.
+    pub fn stat_host_path(
+        &mut self,
+        host_path: &Path,
+        buf: &mut [u8; EM_STAT_STRUCT_BYTES],
+    ) -> i32 {
+        match std::fs::metadata(host_path) {
+            Err(e) => io_err_to_errno(&e),
+            Ok(meta) => {
+                let ino = self.alloc_ino();
+                let (mode, size) = if meta.is_dir() {
+                    (S_IFDIR | S_IRWXU, 0u64)
+                } else {
+                    (S_IFREG | S_IRWXU, meta.len())
+                };
+                write_stat_buf(buf, ino, mode, size);
+                0
+            }
+        }
+    }
+
+    /// Fill an Emscripten stat buffer for a host-backed fd. Returns 0 or a
+    /// negative errno. Returns `None` if `fd` is not a host-backed fd.
+    pub fn fstat_host(&mut self, fd: i32, buf: &mut [u8; EM_STAT_STRUCT_BYTES]) -> Option<i32> {
+        // We need the host file metadata. For host dirs we have no File handle, so
+        // fall back to the path stored in the fds table.
+        if self.host_fds.contains_key(&fd) {
+            let meta = match self.host_fds[&fd].metadata() {
+                Ok(m) => m,
+                Err(e) => return Some(io_err_to_errno(&e)),
+            };
+            let ino = self.alloc_ino();
+            let (mode, size) = if meta.is_dir() {
+                (S_IFDIR | S_IRWXU, 0u64)
+            } else {
+                (S_IFREG | S_IRWXU, meta.len())
+            };
+            write_stat_buf(buf, ino, mode, size);
+            return Some(0);
+        }
+        // Host directory fds: no File in host_fds, but the path is in fds.
+        None
+    }
+
+    /// List directory entries for a host-backed directory fd, for getdents64.
+    /// Returns the (name, is_dir) list, or `None` if fd is not a host dir fd.
+    ///
+    /// A fd is a "host dir" if it has an entry in `fds` but NOT in `host_fds`
+    /// AND the guest path has a corresponding host path. The caller supplies
+    /// the host_path for the lookup.
+    pub fn list_dir_host(host_path: &Path) -> Option<Vec<(String, bool)>> {
+        if !host_path.is_dir() {
+            return None;
+        }
+        let rd = std::fs::read_dir(host_path).ok()?;
+        let mut entries: Vec<(String, bool)> = rd
+            .filter_map(|e| {
+                let e = e.ok()?;
+                let name = e.file_name().to_string_lossy().into_owned();
+                let is_dir = e.file_type().ok().map(|t| t.is_dir()).unwrap_or(false);
+                Some((name, is_dir))
+            })
+            .collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        Some(entries)
+    }
+
+    /// Check whether a host path exists (for faccessat under a rw-preopen).
+    pub fn exists_host(host_path: &Path) -> bool {
+        host_path.exists()
+    }
+
+    /// Create a directory (and parents) on the host. Returns 0 or a negative errno.
+    pub fn mkdir_host(host_path: &Path) -> i32 {
+        match std::fs::create_dir_all(host_path) {
+            Ok(()) => 0,
+            Err(e) => io_err_to_errno(&e),
+        }
+    }
+}
+
+// ---- host I/O error mapping ------------------------------------------------
+
+/// Map a `std::io::Error` to the nearest Linux errno value (negated) that
+/// Emscripten's musl layer expects. The mapping is intentionally minimal: only
+/// the errors the host FS operations can plausibly return are covered.
+pub(crate) fn io_err_to_errno(e: &std::io::Error) -> i32 {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::NotFound => ENOENT,
+        ErrorKind::PermissionDenied => EACCES,
+        ErrorKind::AlreadyExists => -17, // EEXIST
+        ErrorKind::InvalidInput | ErrorKind::InvalidData => EINVAL,
+        ErrorKind::IsADirectory => EISDIR,
+        ErrorKind::NotADirectory => ENOTDIR,
+        // Treat everything else as EIO (-5) so the guest sees a real error.
+        _ => -5,
     }
 }
 

@@ -19,7 +19,7 @@ use wasmtime::{Caller, Linker};
 
 use crate::{
     embedder_vm::EmbedderState,
-    emscripten_fs::{EBADF, EINVAL, ENOENT, ENOTTY},
+    emscripten_fs::{EBADF, EINVAL, ENOENT, ENOTDIR, ENOTTY, InMemFs},
     emscripten_mechanical::read_cstr,
     emscripten_runtime::MechCallLog,
     pyo_trace,
@@ -215,6 +215,8 @@ pub fn wire_fs_env_funcs(
 
     // __syscall_openat(dirfd: i32, pathptr: i32, flags: i32, mode: i32) -> i32
     // AT_FDCWD = -100; resolves relative paths from "/".
+    // Paths under a declared rw-preopen go to the real host filesystem;
+    // everything else stays in InMemFs (deny-by-default).
     {
         let _log = mech_log.clone();
         linker
@@ -250,7 +252,13 @@ pub fn wire_fs_env_funcs(
                         }
                         log.push_back(format!("openat:{abs}"));
                     }
-                    let fd = caller.data_mut().fs.open(abs.clone(), flags);
+                    // Route to host FS if path is under a rw-preopen.
+                    let host_path = InMemFs::resolve_to_host_path(&abs, &caller.data().rw_preopens);
+                    let fd = if let Some(hp) = host_path {
+                        caller.data_mut().fs.open_host(abs.clone(), hp, flags)
+                    } else {
+                        caller.data_mut().fs.open(abs.clone(), flags)
+                    };
                     // Extra log for .so / C-extension paths.
                     if abs.ends_with(".so") || abs.contains("_speedups") {
                         pyo_trace!("[openat-SO] {:?} flags={flags} -> fd={fd}", abs);
@@ -293,9 +301,16 @@ pub fn wire_fs_env_funcs(
                         }
                     };
                     let abs = caller.data().fs.resolve(&base, &path_str);
-                    caller.data_mut().fs.mkdir_p(&abs);
-                    pyo_trace!("[mkdirat] {abs:?} -> 0");
-                    0
+                    let host_path = InMemFs::resolve_to_host_path(&abs, &caller.data().rw_preopens);
+                    if let Some(hp) = host_path {
+                        let rc = InMemFs::mkdir_host(&hp);
+                        pyo_trace!("[mkdirat-host] {abs:?} -> rc={rc}");
+                        rc
+                    } else {
+                        caller.data_mut().fs.mkdir_p(&abs);
+                        pyo_trace!("[mkdirat] {abs:?} -> 0");
+                        0
+                    }
                 },
             )
             .map_err(|e| AfterburnerError::Engine(format!("__syscall_mkdirat: {e}")))?;
@@ -327,8 +342,13 @@ pub fn wire_fs_env_funcs(
                         return EINVAL;
                     }
                     // Read from FS into a temp buffer, then write to guest memory.
+                    // Host-backed fds are checked first.
                     let mut tmp = vec![0u8; len];
-                    let n = caller.data_mut().fs.read(fd, &mut tmp);
+                    let n = if let Some(n) = caller.data_mut().fs.read_host(fd, &mut tmp) {
+                        n
+                    } else {
+                        caller.data_mut().fs.read(fd, &mut tmp)
+                    };
                     if n < 0 {
                         return n;
                     }
@@ -393,7 +413,12 @@ pub fn wire_fs_env_funcs(
                         if fd == 1 || fd == 2 {
                             caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
                         } else if caller.data().fs.is_fs_fd(fd) {
-                            let n = caller.data_mut().fs.write(fd, &chunk);
+                            // Host-backed fds are checked first.
+                            let n = if let Some(n) = caller.data_mut().fs.write_host(fd, &chunk) {
+                                n
+                            } else {
+                                caller.data_mut().fs.write(fd, &chunk)
+                            };
                             if n < 0 {
                                 return n;
                             }
@@ -440,7 +465,12 @@ pub fn wire_fs_env_funcs(
                     if fd == 1 || fd == 2 {
                         caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
                     } else if caller.data().fs.is_fs_fd(fd) {
-                        let n = caller.data_mut().fs.write(fd, &chunk);
+                        // Host-backed fds are checked first.
+                        let n = if let Some(n) = caller.data_mut().fs.write_host(fd, &chunk) {
+                            n
+                        } else {
+                            caller.data_mut().fs.write(fd, &chunk)
+                        };
                         if n < 0 {
                             return n;
                         }
@@ -472,11 +502,24 @@ pub fn wire_fs_env_funcs(
                         return 0;
                     }
                     // Save current offset, seek to `offset`, read, restore.
-                    let saved = caller.data_mut().fs.lseek(fd, 0, 1);
+                    // Host-backed fds use lseek_host; in-memory fds use InMemFs::lseek.
+                    let saved = if caller.data().fs.is_fs_fd(fd) {
+                        if let Some(s) = caller.data_mut().fs.lseek_host(fd, 0, 1) {
+                            s
+                        } else {
+                            caller.data_mut().fs.lseek(fd, 0, 1)
+                        }
+                    } else {
+                        return EBADF;
+                    };
                     if saved < 0 {
                         return saved as i32;
                     }
-                    let new_off = caller.data_mut().fs.lseek(fd, offset, 0);
+                    let new_off = if let Some(o) = caller.data_mut().fs.lseek_host(fd, offset, 0) {
+                        o
+                    } else {
+                        caller.data_mut().fs.lseek(fd, offset, 0)
+                    };
                     if new_off < 0 {
                         return new_off as i32;
                     }
@@ -486,13 +529,25 @@ pub fn wire_fs_env_funcs(
                     let mem_len = memory.data_size(&caller);
                     let start = buf as u32 as usize;
                     if start + len > mem_len {
-                        let _ = caller.data_mut().fs.lseek(fd, saved, 0);
+                        let _ = if let Some(s) = caller.data_mut().fs.lseek_host(fd, saved, 0) {
+                            s
+                        } else {
+                            caller.data_mut().fs.lseek(fd, saved, 0)
+                        };
                         return EINVAL;
                     }
                     let mut tmp = vec![0u8; len];
-                    let n = caller.data_mut().fs.read(fd, &mut tmp);
+                    let n = if let Some(n) = caller.data_mut().fs.read_host(fd, &mut tmp) {
+                        n
+                    } else {
+                        caller.data_mut().fs.read(fd, &mut tmp)
+                    };
                     // Restore offset.
-                    let _ = caller.data_mut().fs.lseek(fd, saved, 0);
+                    let _ = if let Some(s) = caller.data_mut().fs.lseek_host(fd, saved, 0) {
+                        s
+                    } else {
+                        caller.data_mut().fs.lseek(fd, saved, 0)
+                    };
                     if n < 0 {
                         return n;
                     }
@@ -513,7 +568,12 @@ pub fn wire_fs_env_funcs(
                 "__syscall_close",
                 move |mut caller: Caller<'_, EmbedderState>, fd: i32| -> i32 {
                     _log.push("__syscall_close", fd, 0);
-                    caller.data_mut().fs.close(fd)
+                    // Host-backed fds are closed first; otherwise delegate to InMemFs.
+                    if let Some(rc) = caller.data_mut().fs.close_host(fd) {
+                        rc
+                    } else {
+                        caller.data_mut().fs.close(fd)
+                    }
                 },
             )
             .map_err(|e| AfterburnerError::Engine(format!("__syscall_close: {e}")))?;
@@ -533,7 +593,13 @@ pub fn wire_fs_env_funcs(
                       whence: i32|
                       -> i32 {
                     _log.push("__syscall_lseek", fd, whence);
-                    let new_off = caller.data_mut().fs.lseek(fd, offset, whence);
+                    // Host-backed fds are checked first.
+                    let new_off =
+                        if let Some(o) = caller.data_mut().fs.lseek_host(fd, offset, whence) {
+                            o
+                        } else {
+                            caller.data_mut().fs.lseek(fd, offset, whence)
+                        };
                     if new_off < 0 {
                         new_off as i32
                     } else {
@@ -553,10 +619,25 @@ pub fn wire_fs_env_funcs(
                 "__syscall_fstat64",
                 move |mut caller: Caller<'_, EmbedderState>, fd: i32, stat_ptr: i32| -> i32 {
                     _log.push("__syscall_fstat64", fd, stat_ptr);
-                    // Resolve path for logging before the mutable borrow.
                     let path_for_log = caller.data().fs.fd_path(fd).map(str::to_owned);
                     let mut buf = [0u8; EM_STAT_STRUCT_BYTES];
-                    let rc = caller.data_mut().fs.fstat_into(fd, &mut buf);
+                    // Try host-backed stat first; fall back to InMemFs for in-memory fds.
+                    // For host directory fds (no File in host_fds) we fall through to the
+                    // path-based stat below.
+                    let rc = if let Some(rc) = caller.data_mut().fs.fstat_host(fd, &mut buf) {
+                        rc
+                    } else {
+                        // Check if this is a host dir fd by looking up the guest path and
+                        // resolving to a host path.
+                        let host_path = path_for_log.as_deref().and_then(|p| {
+                            InMemFs::resolve_to_host_path(p, &caller.data().rw_preopens)
+                        });
+                        if let Some(hp) = host_path {
+                            caller.data_mut().fs.stat_host_path(&hp, &mut buf)
+                        } else {
+                            caller.data_mut().fs.fstat_into(fd, &mut buf)
+                        }
+                    };
                     let mode_size = path_for_log
                         .as_deref()
                         .and_then(|p| caller.data().fs.stat_mode_size(p));
@@ -607,7 +688,13 @@ pub fn wire_fs_env_funcs(
                         log.push_back(format!("stat64:{abs}"));
                     }
                     let mut buf = [0u8; EM_STAT_STRUCT_BYTES];
-                    let rc = caller.data_mut().fs.stat_into(&abs, &mut buf);
+                    // Route to host if path is under a rw-preopen.
+                    let host_path = InMemFs::resolve_to_host_path(&abs, &caller.data().rw_preopens);
+                    let rc = if let Some(hp) = host_path {
+                        caller.data_mut().fs.stat_host_path(&hp, &mut buf)
+                    } else {
+                        caller.data_mut().fs.stat_into(&abs, &mut buf)
+                    };
                     let mode_size = caller.data().fs.stat_mode_size(&abs);
                     log_stat("stat64", &abs, rc, mode_size);
                     if rc != 0 {
@@ -629,7 +716,7 @@ pub fn wire_fs_env_funcs(
     }
 
     // __syscall_lstat64(pathptr: i32, stat_ptr: i32) -> i32
-    // No symlinks in our FS, so identical to stat64.
+    // No symlinks in our FS, so identical to stat64 (with host passthrough too).
     {
         let _log = mech_log.clone();
         linker
@@ -644,7 +731,12 @@ pub fn wire_fs_env_funcs(
                     };
                     let abs = caller.data().fs.resolve("/", &path_str);
                     let mut buf = [0u8; EM_STAT_STRUCT_BYTES];
-                    let rc = caller.data_mut().fs.stat_into(&abs, &mut buf);
+                    let host_path = InMemFs::resolve_to_host_path(&abs, &caller.data().rw_preopens);
+                    let rc = if let Some(hp) = host_path {
+                        caller.data_mut().fs.stat_host_path(&hp, &mut buf)
+                    } else {
+                        caller.data_mut().fs.stat_into(&abs, &mut buf)
+                    };
                     let mode_size = caller.data().fs.stat_mode_size(&abs);
                     log_stat("lstat64", &abs, rc, mode_size);
                     if rc != 0 {
@@ -693,7 +785,12 @@ pub fn wire_fs_env_funcs(
                     };
                     let abs = caller.data().fs.resolve(&base, &path_str);
                     let mut buf = [0u8; EM_STAT_STRUCT_BYTES];
-                    let rc = caller.data_mut().fs.stat_into(&abs, &mut buf);
+                    let host_path = InMemFs::resolve_to_host_path(&abs, &caller.data().rw_preopens);
+                    let rc = if let Some(hp) = host_path {
+                        caller.data_mut().fs.stat_host_path(&hp, &mut buf)
+                    } else {
+                        caller.data_mut().fs.stat_into(&abs, &mut buf)
+                    };
                     let mode_size = caller.data().fs.stat_mode_size(&abs);
                     log_stat("newfstatat", &abs, rc, mode_size);
                     if rc != 0 {
@@ -738,6 +835,7 @@ pub fn wire_fs_env_funcs(
     // Serialize directory entries as `struct linux_dirent64` into guest memory,
     // advancing the per-fd directory cursor. Returns 0 at end-of-directory so
     // callers (CPython's readdir loop) terminate correctly.
+    // Host-backed directories (path under a rw-preopen) use std::fs::read_dir.
     {
         let _log = mech_log.clone();
         linker
@@ -751,12 +849,63 @@ pub fn wire_fs_env_funcs(
                       -> i32 {
                     _log.push("__syscall_getdents64", fd, dirp);
                     let buf_cap = count as u32 as usize;
-                    let mut tmp = vec![0u8; buf_cap];
-                    let n = caller.data_mut().fs.getdents64_into(fd, &mut tmp);
-                    pyo_trace!("[getdents64] fd={fd} count={count} -> n={n}");
-                    if n <= 0 {
-                        // 0 = end-of-directory (correct termination), negative = error.
-                        return n;
+
+                    // Detect whether the fd's guest path resolves to a host dir.
+                    let host_path =
+                        caller.data().fs.fd_path(fd).and_then(|p| {
+                            InMemFs::resolve_to_host_path(p, &caller.data().rw_preopens)
+                        });
+
+                    // Produce the serialized dirent bytes into `tmp`.
+                    let tmp: Vec<u8> = if let Some(hp) = host_path {
+                        let entries = match InMemFs::list_dir_host(&hp) {
+                            Some(e) => e,
+                            None => return ENOTDIR,
+                        };
+                        let cursor = caller.data().fs.fd_dir_cursor(fd);
+                        let total = 2 + entries.len();
+                        if cursor >= total {
+                            return 0;
+                        }
+                        let mut out = vec![0u8; buf_cap];
+                        let mut pos = 0usize;
+                        let mut written = 0usize;
+                        for (i, idx) in (cursor..total).enumerate() {
+                            let ino = 200u64 + cursor as u64 + i as u64;
+                            let (name, is_dir): (&str, bool) = if idx == 0 {
+                                (".", true)
+                            } else if idx == 1 {
+                                ("..", true)
+                            } else {
+                                let (ref n, d) = entries[idx - 2];
+                                (n.as_str(), d)
+                            };
+                            let off = (idx + 1) as u64;
+                            let w = crate::emscripten_fs::write_dirent64(
+                                &mut out, pos, ino, off, name, is_dir,
+                            );
+                            if w == 0 {
+                                break;
+                            }
+                            pos += w;
+                            written += 1;
+                        }
+                        caller.data_mut().fs.advance_fd_dir_cursor(fd, written);
+                        pyo_trace!("[getdents64-host] fd={fd} count={count} -> n={pos}");
+                        out[..pos].to_vec()
+                    } else {
+                        let mut out = vec![0u8; buf_cap];
+                        let n = caller.data_mut().fs.getdents64_into(fd, &mut out);
+                        pyo_trace!("[getdents64] fd={fd} count={count} -> n={n}");
+                        if n <= 0 {
+                            return n;
+                        }
+                        out[..n as usize].to_vec()
+                    };
+
+                    let n = tmp.len() as i32;
+                    if n == 0 {
+                        return 0;
                     }
                     let Some(memory) = caller.data().pyodide_memory else {
                         return EBADF;
@@ -766,7 +915,7 @@ pub fn wire_fs_env_funcs(
                     if start + n as usize > mem.len() {
                         return EINVAL;
                     }
-                    mem[start..start + n as usize].copy_from_slice(&tmp[..n as usize]);
+                    mem[start..start + n as usize].copy_from_slice(&tmp);
                     n
                 },
             )
@@ -801,11 +950,14 @@ pub fn wire_fs_env_funcs(
                         }
                     };
                     let abs = caller.data().fs.resolve(&base, &path_str);
-                    if caller.data_mut().fs.exists(&abs) {
-                        0
+                    // Check host FS first for paths under a rw-preopen.
+                    let host_path = InMemFs::resolve_to_host_path(&abs, &caller.data().rw_preopens);
+                    let exists = if let Some(hp) = host_path {
+                        InMemFs::exists_host(&hp)
                     } else {
-                        ENOENT
-                    }
+                        caller.data_mut().fs.exists(&abs)
+                    };
+                    if exists { 0 } else { ENOENT }
                 },
             )
             .map_err(|e| AfterburnerError::Engine(format!("__syscall_faccessat: {e}")))?;

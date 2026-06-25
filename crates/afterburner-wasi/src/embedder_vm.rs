@@ -38,7 +38,7 @@ use crate::emscripten_fs::InMemFs;
 use crate::emscripten_sidemodule::SideModuleRegistry;
 use afterburner_core::log::Level;
 use afterburner_core::{AfterburnerError, Result, ab_event};
-use std::path::PathBuf;
+use std::path::PathBuf; // also used by WasiCommandOpts and EmbedderState::rw_preopens
 use std::sync::Arc;
 use wasmtime::{
     Config, Engine, InstancePre, Linker, Module, OptLevel, Store, Trap, WasmBacktraceDetails,
@@ -368,6 +368,11 @@ pub struct EmbedderState {
     /// feature only.
     #[cfg(feature = "daemon")]
     pub daemon_sab: Option<std::sync::Arc<crate::daemon_sab::DaemonSab>>,
+    /// Read-write host-filesystem preopens for the Python runtime: a list of
+    /// `(host_path, guest_path)` pairs, exactly as `WasiCommandOpts::preopens_rw`.
+    /// A guest path under one of these preopens is routed to the real host FS
+    /// instead of `InMemFs`. Empty by default (deny-by-default / sealed).
+    pub rw_preopens: Vec<(PathBuf, String)>,
 }
 
 impl EmbedderState {
@@ -402,6 +407,7 @@ impl EmbedderState {
             daemon_workers: None,
             #[cfg(feature = "daemon")]
             daemon_sab: None,
+            rw_preopens: Vec::new(),
         }
     }
 
@@ -448,6 +454,7 @@ impl EmbedderState {
             daemon_workers: None,
             #[cfg(feature = "daemon")]
             daemon_sab: None,
+            rw_preopens: Vec::new(),
         }
     }
 
@@ -488,6 +495,7 @@ impl EmbedderState {
             daemon_workers: None,
             #[cfg(feature = "daemon")]
             daemon_sab: None,
+            rw_preopens: Vec::new(),
         }
     }
 
@@ -731,6 +739,7 @@ impl EmbedderVm {
                 pyodide_c_longjmp_tag: None,
                 wasi_stdout: Vec::new(),
                 fs: InMemFs::new(),
+                rw_preopens: Vec::new(),
                 last_invoke_idx: u64::MAX,
                 cxa_thrown_ptr: 0,
                 cxa_throw_count: 0,
@@ -761,6 +770,7 @@ impl EmbedderVm {
                 pyodide_c_longjmp_tag: None,
                 wasi_stdout: Vec::new(),
                 fs: InMemFs::new(),
+                rw_preopens: Vec::new(),
                 last_invoke_idx: u64::MAX,
                 cxa_thrown_ptr: 0,
                 cxa_throw_count: 0,
@@ -922,6 +932,7 @@ impl EmbedderVm {
             pyodide_c_longjmp_tag: None,
             wasi_stdout: Vec::new(),
             fs: InMemFs::new(),
+            rw_preopens: Vec::new(),
             last_invoke_idx: u64::MAX,
             cxa_thrown_ptr: 0,
             cxa_throw_count: 0,
