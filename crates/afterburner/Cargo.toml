@@ -109,7 +109,12 @@ sha1 = { workspace = true }
 kovan-channel.workspace = true
 
 [features]
-default = ["wasm", "native", "thrust", "embed-core", "embed-ruby"]
+# embed-core/embed-ruby are deliberately NOT in `default`: they need `wasm-opt`
+# (Binaryen) + network at build time, which CI and many dev environments lack.
+# The shipped CLI bakes them in via `release-cli`; default/CI builds use the
+# lazy `~/.burn` runtime fetch instead. (Putting them in default breaks CI:
+# build.rs panics when wasm-opt is absent.)
+default = ["wasm", "native", "thrust"]
 wasm = ["dep:afterburner-wasi"]
 # Bake the Python core (exnref wasm + stdlib zip) into the binary; passes through
 # to afterburner-wasi. Needs `wasm-opt` + network at build time.
