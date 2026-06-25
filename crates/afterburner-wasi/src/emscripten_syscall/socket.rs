@@ -187,6 +187,10 @@ impl SocketState {
 /// `__syscall_close` handlers so neither duplicates the release logic.
 ///
 /// Returns 0 always; the callers return early with 0 after calling this.
+/// Only compiled under the `daemon` feature because it touches `socket_state`,
+/// `daemon_net`, `daemon_dgram_py`, and `daemon_unix`, all of which are
+/// daemon-only fields on `EmbedderState`.
+#[cfg(feature = "daemon")]
 pub(crate) fn release_socket_fd(
     caller: &mut wasmtime::Caller<'_, crate::embedder_vm::EmbedderState>,
     fd: i32,

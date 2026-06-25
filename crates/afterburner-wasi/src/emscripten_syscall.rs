@@ -1323,6 +1323,10 @@ pub fn wire_fs_env_funcs(
     // (POLLIN on a server fd) or buffered data (POLLIN on a conn fd).
     // Without daemon net the wasm program cannot do socket I/O, so
     // poll returns -1 (ENOSYS) to surface the error early.
+    #[cfg(not(feature = "daemon"))]
+    def_syscall!("__syscall_poll", 3);
+
+    #[cfg(feature = "daemon")]
     {
         linker
             .func_wrap(
@@ -1584,6 +1588,12 @@ pub fn wire_fs_env_funcs(
     }
 
     def_syscall!("__syscall_getsockopt", 6);
+    // __syscall_getsockname: daemon build resolves port from socket_state;
+    // non-daemon stub returns EBADF (-9) because no socket fds exist.
+    #[cfg(not(feature = "daemon"))]
+    def_syscall!("__syscall_getsockname", 6);
+
+    #[cfg(feature = "daemon")]
     {
         let _log = mech_log.clone();
         linker
