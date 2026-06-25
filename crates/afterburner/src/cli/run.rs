@@ -310,24 +310,79 @@ fn afb_entry_source(afb: &afterburner_cloud::afterburner_afb::Afb) -> Result<&st
 }
 
 /// Run a Python source `.afb` on the bundled CPython runtime.
+///
+/// Collects any `vendor/pip/*.whl` members from `afb.vendor` (FORMAT_MINOR >= 3)
+/// and passes them to the Python runner so they are mounted into site-packages
+/// before CPython's import machinery activates. Packages without `[pip]`
+/// dependencies have an empty vendor map and run identically to before.
 #[cfg(feature = "wasm")]
 fn run_python_afb(
     afb_path: &Path,
     afb: &afterburner_cloud::afterburner_afb::Afb,
     user_args: &[String],
 ) -> Result<()> {
+    use afterburner_wasi::pyodide_runner::{PyPackage, run_python_package};
+    use std::collections::BTreeMap;
+    use std::io::Write;
+
     let entry_source = afb_entry_source(afb)
         .with_context(|| format!("reading Python entry of {}", afb_path.display()))?;
-    run_python_package_from_sources(entry_source, &afb.source, user_args)
+
+    // Collect vendored pip wheels (vendor/pip/*.whl) from the archive, in
+    // sorted key order for deterministic mount sequence.
+    let vendor_pip_wheels: Vec<Vec<u8>> = afb
+        .vendor
+        .iter()
+        .filter(|(k, _)| k.starts_with("vendor/pip/") && k.ends_with(".whl"))
+        .map(|(_, v)| v.clone())
+        .collect();
+
+    // Guest layout: every `source/<rel>` member lands at `/pkg/source/<rel>`,
+    // and `/pkg/source` is the sys.path entry, so `import sibling` resolves a
+    // sibling module (the entry runs via `-c`, but its siblings are imported
+    // from disk).
+    const GUEST_PKG_ROOT: &str = "/pkg";
+    let sys_path_dir = format!("{GUEST_PKG_ROOT}/source");
+
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for (rel, data) in &afb.source {
+        files.insert(format!("{GUEST_PKG_ROOT}/{rel}"), data.clone());
+    }
+    let pkg = PyPackage {
+        files,
+        sys_path_dir,
+        vendor_pip_wheels,
+    };
+
+    let out = run_python_package(entry_source, &pkg)
+        .map_err(|e| anyhow::anyhow!("python runtime error: {e}"))?;
+
+    if !out.stdout.is_empty() {
+        std::io::stdout()
+            .write_all(&out.stdout)
+            .context("writing python stdout")?;
+    }
+    if out.exit_code != 0 {
+        std::process::exit(out.exit_code);
+    }
+    let _ = user_args;
+    Ok(())
 }
 
 /// Run a Ruby source `.afb` on the bundled CRuby runtime.
+///
+/// When the archive carries `vendor/gem/**` members (FORMAT_MINOR >= 3), they
+/// are mounted read-only at the guest path and prepended to `$LOAD_PATH` via
+/// `-I` so `require 'gemname'` resolves offline without a gem toolchain.
 #[cfg(feature = "wasm")]
 fn run_ruby_afb(
     afb_path: &Path,
     afb: &afterburner_cloud::afterburner_afb::Afb,
     user_args: &[String],
 ) -> Result<()> {
+    use afterburner_wasi::ruby_runner::{resolve_ruby_runtime, run_ruby_afb_with};
+    use std::io::Write;
+
     let entry_rel = &afb.manifest.package.entry;
     if !afb.source.contains_key(entry_rel) {
         anyhow::bail!(
@@ -335,7 +390,41 @@ fn run_ruby_afb(
             afb_path.display()
         );
     }
-    run_ruby_package_from_sources(entry_rel, &afb.source, user_args)
+
+    let rt = resolve_ruby_runtime()
+        .with_context(|| format!("resolving Ruby runtime for {}", afb_path.display()))?;
+
+    // Materialize the `source/` tree to a temp dir (the CRuby WASI path reads
+    // via preopens; the vendor extraction is handled inside run_ruby_afb_with).
+    let tmp_root = std::env::temp_dir().join(format!("burn-rb-pkg-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp_root);
+    for (rel, data) in &afb.source {
+        let dest = tmp_root.join(rel);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        fs::write(&dest, data).with_context(|| format!("writing {}", dest.display()))?;
+    }
+
+    let run_result = run_ruby_afb_with(&rt, &tmp_root, entry_rel, &afb.vendor);
+    let _ = fs::remove_dir_all(&tmp_root);
+    let out = run_result.map_err(|e| anyhow::anyhow!("ruby runtime error: {e}"))?;
+
+    if !out.stdout.is_empty() {
+        std::io::stdout()
+            .write_all(&out.stdout)
+            .context("writing ruby stdout")?;
+    }
+    if !out.stderr.is_empty() {
+        std::io::stderr()
+            .write_all(&out.stderr)
+            .context("writing ruby stderr")?;
+    }
+    if out.exit_code != 0 {
+        std::process::exit(out.exit_code);
+    }
+    let _ = user_args;
+    Ok(())
 }
 
 /// Run a Python package from its `source/` map (archive-relative path ->
@@ -373,6 +462,7 @@ fn run_python_package_from_sources(
     let pkg = PyPackage {
         files,
         sys_path_dir,
+        vendor_pip_wheels: Vec::new(),
     };
 
     let out = run_python_package(entry_source, &pkg)

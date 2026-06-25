@@ -39,6 +39,11 @@ pub struct EcosystemRelease {
 pub struct EcosystemPackage {
     pub name: String,
     pub version: String,
+    /// Integrity string used to verify this artifact (SRI for npm: e.g.
+    /// `"sha512-..."` or `"sha256-..."`; sha1 hex for legacy npm; sha256 hex
+    /// for pip/gem). Stored in `burn.lock` `[[npm]]`/`[[pip]]`/`[[gem]]`
+    /// sections so locked installs can re-verify without re-resolving (G1).
+    pub integrity: String,
     /// Extracted file tree keyed by package-root-relative paths.
     pub files: BTreeMap<String, Vec<u8>>,
 }
@@ -176,6 +181,7 @@ pub fn resolve_all(
         out.packages.push(EcosystemPackage {
             name: name.clone(),
             version: rel.version.clone(),
+            integrity: rel.integrity.clone(),
             files,
         });
     }

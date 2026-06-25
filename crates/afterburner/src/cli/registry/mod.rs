@@ -507,9 +507,11 @@ pub fn install(
     locked: bool,
 ) -> Result<()> {
     let resolved = config::resolve(registry, None)?;
+    // G9: capture npm_registry from config before moving `resolved` into the client.
+    let npm_registry_cfg = resolved.npm_registry.clone();
     let client = RegistryClient::from_resolved(resolved);
 
-    let plan = build_install_plan(pkg, &client, locked)?;
+    let mut plan = build_install_plan(pkg, &client, locked)?;
     let items = plan.lockfile.install_items();
     if items.is_empty() {
         if plan.npm.is_empty() {
@@ -517,7 +519,18 @@ pub fn install(
             return Ok(());
         }
         // No afb deps, but there may be npm deps to install.
-        install_npm_deps(&plan.npm, plan.write_lock_to.as_deref())?;
+        let npm_res = install_npm_deps(
+            &plan.npm,
+            plan.write_lock_to.as_deref(),
+            npm_registry_cfg.as_deref(),
+        )?;
+        // G1: write npm pins into the lockfile even when there are no afb deps.
+        if plan.write_lock_to.is_some() && !npm_res.packages.is_empty() {
+            plan.lockfile.npm = Lockfile::npm_pins_from_resolution(&npm_res);
+            let path = plan.write_lock_to.as_ref().unwrap().join(LOCKFILE_NAME);
+            std::fs::write(&path, plan.lockfile.to_toml()?)
+                .with_context(|| format!("writing {}", path.display()))?;
+        }
         return Ok(());
     }
 
@@ -534,12 +547,6 @@ pub fn install(
         out
     })?;
 
-    if let Some(dir) = &plan.write_lock_to {
-        let path = dir.join(LOCKFILE_NAME);
-        std::fs::write(&path, plan.lockfile.to_toml()?)
-            .with_context(|| format!("writing {}", path.display()))?;
-    }
-
     // Make every installed package require()-able from here: link each one
     // into ./node_modules/<ns>/<name> (extracted from the content-addressed
     // cache). Package installs link next to their manifest; a bare
@@ -553,11 +560,32 @@ pub fn install(
 
     report_install(&plan.lockfile, &summary);
 
+    // G8: for the registry-arg arm (`burn install ns/pkg`), plan.npm is empty
+    // at plan-build time (packages not yet cached); re-read from the now-cached
+    // afb manifests so the transitive npm deps are not silently dropped.
+    if plan.npm.is_empty() && plan.write_lock_to.is_none() {
+        plan.npm = npm_deps_from_cached_items(&items);
+    }
+
     // npm dependencies (the `[npm]` section) - resolved + extracted +
     // cached by the NATIVE installer (no `npm` binary, no process spawn),
     // then linked into ./node_modules so `burn run` / `burn test` resolve
     // them exactly like Node would.
-    install_npm_deps(&plan.npm, plan.write_lock_to.as_deref())?;
+    let npm_res = install_npm_deps(
+        &plan.npm,
+        plan.write_lock_to.as_deref(),
+        npm_registry_cfg.as_deref(),
+    )?;
+
+    // G1: record npm pins in the lockfile so the next install can be locked.
+    if let Some(dir) = &plan.write_lock_to {
+        if !npm_res.packages.is_empty() {
+            plan.lockfile.npm = Lockfile::npm_pins_from_resolution(&npm_res);
+        }
+        let path = dir.join(LOCKFILE_NAME);
+        std::fs::write(&path, plan.lockfile.to_toml()?)
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -567,15 +595,28 @@ pub fn install(
 /// resolved set is additionally materialized as `dir/node_modules` symlinks
 /// into the cache - the build artifact the runtime resolves bare specifiers
 /// from. No Node toolchain involved.
+///
+/// `npm_registry` is the config-file override (G9); falls back to
+/// `BURN_NPM_REGISTRY` env and then the compiled-in default.
+/// Returns the resolved packages for lockfile recording (G1).
 fn install_npm_deps(
     npm: &std::collections::BTreeMap<String, String>,
     link_into: Option<&std::path::Path>,
-) -> Result<()> {
+    npm_registry: Option<&str>,
+) -> Result<afterburner_cloud::ecosystem::EcosystemResolution> {
+    use afterburner_cloud::ecosystem::EcosystemResolution;
     if npm.is_empty() {
-        return Ok(());
+        return Ok(EcosystemResolution::default());
     }
-    let base = std::env::var("BURN_NPM_REGISTRY")
-        .unwrap_or_else(|_| afterburner_cloud::npm::DEFAULT_NPM_REGISTRY.to_string());
+    // G9: config override > env var > compiled-in default.
+    let base = npm_registry
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("BURN_NPM_REGISTRY")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| afterburner_cloud::npm::DEFAULT_NPM_REGISTRY.to_string());
     let client = afterburner_cloud::npm::NpmClient::new(base);
     let res = style::spin("resolving npm", || client.resolve_all(npm))?;
     let n = res.packages.len();
@@ -605,7 +646,7 @@ fn install_npm_deps(
             style::gold("npm"),
         );
     }
-    Ok(())
+    Ok(res)
 }
 
 /// Link every locked registry dependency into `dir/node_modules/<ns>/<name>`
@@ -646,7 +687,9 @@ pub fn ensure_npm_linked(dir: &std::path::Path) -> Result<()> {
         }
     }
     if !local.manifest.npm.is_empty() {
-        install_npm_deps(&local.manifest.npm, Some(dir))?;
+        // npm_registry: no config resolution here (self-heal path); env var
+        // and default handle registry selection.
+        install_npm_deps(&local.manifest.npm, Some(dir), None)?;
     }
     Ok(())
 }
@@ -669,15 +712,20 @@ fn build_install_plan(
 
     match pkg {
         Some(spec) => {
+            // G8: `burn install ns/pkg` must carry the package's [npm] deps,
+            // not silently drop them. After resolution we read the npm deps
+            // from every installed package's cached .afb manifest and union
+            // them so the caller can install them.
             let coord = Coord::parse(spec)?;
             let req = Req::from_cli_version(coord.version.as_deref())?;
             let res = style::spin("resolving", || {
                 resolve(&[(coord.qualified(), req)], &source, &runtime)
             })?;
+            let npm = npm_deps_from_resolution(&res);
             Ok(InstallPlan {
                 lockfile: Lockfile::from_resolution(&res),
                 write_lock_to: None,
-                npm: Default::default(),
+                npm,
             })
         }
         None => {
@@ -689,9 +737,14 @@ fn build_install_plan(
                         "--locked needs an existing {LOCKFILE_NAME}; run `burn install` first"
                     )
                 })?;
-                // `--locked`: npm set comes from the on-disk manifest too.
+                // `--locked`: npm set from manifest via load_npm_deps (G7).
                 let npm = pkg::LocalPackage::load(&dir)
-                    .map(|l| l.manifest.npm.clone())
+                    .ok()
+                    .and_then(|l| {
+                        afterburner_cloud::native_manifest::load_npm_deps(&dir, &l.manifest.npm)
+                            .ok()
+                            .map(|r| r.deps)
+                    })
                     .unwrap_or_default();
                 return Ok(InstallPlan {
                     lockfile: Lockfile::parse(&text)?,
@@ -701,15 +754,84 @@ fn build_install_plan(
             }
             let local = pkg::LocalPackage::load(&dir)?;
             let roots = manifest_roots(&local.manifest)?;
-            let npm = local.manifest.npm.clone();
+            // G7: read npm deps via load_npm_deps so package.json is honoured.
+            let npm_deps =
+                afterburner_cloud::native_manifest::load_npm_deps(&dir, &local.manifest.npm)
+                    .with_context(|| "resolving [npm] dependencies")?;
             let res = style::spin("resolving", || resolve(&roots, &source, &runtime))?;
             Ok(InstallPlan {
                 lockfile: Lockfile::from_resolution(&res),
                 write_lock_to: Some(dir),
-                npm,
+                npm: npm_deps.deps,
             })
         }
     }
+}
+
+/// Collect the union of `[npm]` deps declared in every resolved package's
+/// cached `.afb` manifest from a PubGrub [`Resolution`].  The packages may
+/// not be in cache yet at plan-build time; those are silently skipped
+/// (returns an empty or partial map).  The caller retries after
+/// `install_concurrent` with [`npm_deps_from_cached_items`] instead.
+fn npm_deps_from_resolution(
+    res: &afterburner_cloud::resolve::Resolution,
+) -> std::collections::BTreeMap<String, String> {
+    use afterburner_cloud::cache;
+    let mut npm: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for (_, pkg) in &res.selected {
+        let digest = pkg.digest.trim_start_matches("sha256:");
+        if !cache::contains(digest) {
+            continue;
+        }
+        let path = match cache::path_for(digest) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let afb = match afterburner_cloud::afterburner_afb::Afb::from_bytes(&bytes) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        for (name, spec) in afb.manifest.npm {
+            npm.entry(name).or_insert(spec);
+        }
+    }
+    npm
+}
+
+/// Collect npm deps from already-downloaded [`InstallItem`] digests (G8).
+///
+/// Called AFTER `install_concurrent` so all digests are guaranteed to be in
+/// the cache.  Returns the union of `[npm]` from each installed package's
+/// `.afb` manifest, so a `burn install ns/pkg` that installs a package with
+/// `[npm]` deps now correctly installs them too.
+fn npm_deps_from_cached_items(
+    items: &[afterburner_cloud::InstallItem],
+) -> std::collections::BTreeMap<String, String> {
+    use afterburner_cloud::cache;
+    let mut npm: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for item in items {
+        let digest = item.digest.trim_start_matches("sha256:");
+        let path = match cache::path_for(digest) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let afb = match afterburner_cloud::afterburner_afb::Afb::from_bytes(&bytes) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        for (name, spec) in afb.manifest.npm {
+            npm.entry(name).or_insert(spec);
+        }
+    }
+    npm
 }
 
 fn manifest_roots(m: &Manifest) -> Result<Vec<(String, Req)>> {

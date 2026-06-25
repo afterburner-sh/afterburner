@@ -155,8 +155,7 @@ fn classify(text: &str) -> (String, String) {
     } else if lc.contains("urlopen error")
         || lc.contains("name or service not known")
         || lc.contains("connection refused")
-        || lc.contains("socket")
-            && (lc.contains("not permitted") || lc.contains("operation not"))
+        || lc.contains("socket") && (lc.contains("not permitted") || lc.contains("operation not"))
         || lc.contains("network is unreachable")
         || lc.contains("getaddrinfo")
     {
@@ -170,8 +169,7 @@ fn classify(text: &str) -> (String, String) {
         "so-load"
     } else if lc.contains("function not implemented")
         || lc.contains("not implemented on wasm")
-        || lc.contains("oserror")
-            && (lc.contains("[errno 38]") || lc.contains("[errno 52]"))
+        || lc.contains("oserror") && (lc.contains("[errno 38]") || lc.contains("[errno 52]"))
         || lc.contains("operationnotsupported")
         || lc.contains("__main_argc_argv trapped")
         || lc.contains("run_main trapped")
@@ -355,9 +353,16 @@ fn run_child(self_exe: &str, name: &str, timeout_s: u64) -> Option<PkgResult> {
     Some(PkgResult {
         name: name.to_owned(),
         import_name: name.to_owned(),
-        category: if cat == "other" { "missing-host-fn".to_owned() } else { cat },
+        category: if cat == "other" {
+            "missing-host-fn".to_owned()
+        } else {
+            cat
+        },
         reason: if reason.is_empty() {
-            format!("child crashed (exit {:?}) with no result line", output.status.code())
+            format!(
+                "child crashed (exit {:?}) with no result line",
+                output.status.code()
+            )
         } else {
             format!("child crashed: {reason}")
         },
@@ -473,7 +478,11 @@ fn main() {
             "[{}] {} {}",
             if res.pass { "PASS" } else { "FAIL" },
             res.name,
-            if res.pass { String::new() } else { format!("({}) {}", res.category, res.reason) },
+            if res.pass {
+                String::new()
+            } else {
+                format!("({}) {}", res.category, res.reason)
+            },
         );
         return;
     }
@@ -494,7 +503,9 @@ fn main() {
     let names: Vec<String> = m.packages.iter().map(|p| p.name.clone()).collect();
     let next = Arc::new(AtomicUsize::new(0));
     let done = Arc::new(AtomicUsize::new(0));
-    let results = Arc::new(std::sync::Mutex::new(Vec::<PkgResult>::with_capacity(total)));
+    let results = Arc::new(std::sync::Mutex::new(Vec::<PkgResult>::with_capacity(
+        total,
+    )));
 
     std::thread::scope(|scope| {
         for _ in 0..jobs {

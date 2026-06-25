@@ -187,15 +187,17 @@ fn backward_minimal_required_only_package() {
 }
 
 #[test]
-fn backward_reader_baseline_is_1_2() {
+fn backward_reader_baseline_is_1_3() {
     // FORMAT_MINOR 1: semver-range deps (additive).
     // FORMAT_MINOR 2: precompiled/ members + runtime.target (additive).
+    // FORMAT_MINOR 3: vendor/pip/** + vendor/gem/** members (additive).
     assert_eq!(FORMAT_MAJOR, 1);
-    assert_eq!(FORMAT_MINOR, 2);
-    assert_eq!(reader_format_version(), "1.2");
+    assert_eq!(FORMAT_MINOR, 3);
+    assert_eq!(reader_format_version(), "1.3");
     // A package at the exact reader version is the trivial backward case.
     Afb::from_bytes(&raw_pkg(&body(&reader_format_version(), "", "", ""))).unwrap();
-    // Packages at older minors (1.1, 1.0) must still parse successfully.
+    // Packages at older minors (1.2, 1.1, 1.0) must still parse successfully.
+    Afb::from_bytes(&raw_pkg(&body("1.2", "", "", ""))).unwrap();
     Afb::from_bytes(&raw_pkg(&body("1.1", "", "", ""))).unwrap();
     Afb::from_bytes(&raw_pkg(&body("1.0", "", "", ""))).unwrap();
 }
@@ -248,23 +250,23 @@ fn malformed_format_version_is_rejected() {
 
 #[test]
 fn min_reader_gate_is_enforced() {
-    // Newer than this reader (1.2, FORMAT_MINOR=2) - hard refuse.
-    for mr in ["1.3", "1.99", "2.0", "9.9"] {
+    // Newer than this reader (1.3, FORMAT_MINOR=3) - hard refuse.
+    for mr in ["1.4", "1.99", "2.0", "9.9"] {
         let afb = raw_pkg(&body("1.0", &format!("min_reader = \"{mr}\""), "", ""));
         assert!(
             matches!(Afb::from_bytes(&afb), Err(AfbError::ReaderTooOld { .. })),
             "min_reader {mr} must trip ReaderTooOld"
         );
     }
-    // Satisfied: exactly the reader version (1.2) or older.
-    for mr in ["1.2", "1.1", "1.0", "0.9", "0.0"] {
+    // Satisfied: exactly the reader version (1.3) or older.
+    for mr in ["1.3", "1.2", "1.1", "1.0", "0.9", "0.0"] {
         let afb = raw_pkg(&body("1.0", &format!("min_reader = \"{mr}\""), "", ""));
         assert!(
             Afb::from_bytes(&afb).is_ok(),
             "min_reader {mr} should be satisfied"
         );
     }
-    // Malformed min_reader → ManifestParse.
+    // Malformed min_reader -> ManifestParse.
     assert!(matches!(
         Afb::from_bytes(&raw_pkg(&body("1.0", "min_reader = \"abc\"", "", ""))),
         Err(AfbError::ManifestParse(_))

@@ -133,6 +133,8 @@ libc.workspace = true
 
 [dev-dependencies]
 afterburner-ignite.workspace = true
+afterburner-afb.workspace = true
+toml.workspace = true
 rsa.workspace = true
 p256.workspace = true
 rand.workspace = true

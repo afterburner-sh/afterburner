@@ -152,6 +152,27 @@ impl Lockfile {
         Ok(lf)
     }
 
+    /// Build `[[npm]]` lock entries from a resolved npm closure (closes G1).
+    ///
+    /// Each entry records `name`, `version`, and the SRI integrity string that
+    /// was verified during resolution.  Sorted by name for a stable diff-friendly
+    /// lockfile.
+    pub fn npm_pins_from_resolution(
+        res: &crate::ecosystem::EcosystemResolution,
+    ) -> Vec<LockedNpmPackage> {
+        let mut entries: Vec<LockedNpmPackage> = res
+            .packages
+            .iter()
+            .map(|p| LockedNpmPackage {
+                name: p.name.clone(),
+                version: p.version.clone(),
+                integrity: p.integrity.clone(),
+            })
+            .collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+        entries
+    }
+
     /// `(name, digest-hex)` pairs to fetch - the input to a concurrent install.
     /// Digests are bare hex (no `sha256:` prefix).
     pub fn fetch_set(&self) -> Vec<(String, String)> {
@@ -362,5 +383,53 @@ mod tests {
             msg.contains("burn install"),
             "error must hint at `burn install`: {msg}"
         );
+    }
+
+    // ---- G1: npm_pins_from_resolution ----------------------------------------
+
+    #[test]
+    fn npm_pins_from_resolution_round_trips_through_toml() {
+        use crate::ecosystem::{EcosystemPackage, EcosystemResolution};
+        use std::collections::BTreeMap;
+
+        let mut res = EcosystemResolution::default();
+        res.packages.push(EcosystemPackage {
+            name: "lodash".to_string(),
+            version: "4.17.21".to_string(),
+            integrity: "sha512-abc==".to_string(),
+            files: BTreeMap::new(),
+        });
+        res.packages.push(EcosystemPackage {
+            name: "axios".to_string(),
+            version: "1.6.0".to_string(),
+            integrity: "sha512-xyz==".to_string(),
+            files: BTreeMap::new(),
+        });
+
+        let pins = Lockfile::npm_pins_from_resolution(&res);
+        assert_eq!(pins.len(), 2);
+        // Sorted by name: axios before lodash.
+        assert_eq!(pins[0].name, "axios");
+        assert_eq!(pins[0].integrity, "sha512-xyz==");
+        assert_eq!(pins[1].name, "lodash");
+        assert_eq!(pins[1].integrity, "sha512-abc==");
+
+        // Embed in a full lockfile, round-trip through TOML.
+        let lock = Lockfile {
+            version: 2,
+            packages: vec![],
+            npm: pins,
+            pip: vec![],
+            gem: vec![],
+        };
+        let toml_str = lock.to_toml().expect("serialize");
+        assert!(
+            toml_str.contains("[[npm]]"),
+            "must emit [[npm]] sections: {toml_str}"
+        );
+        let back = Lockfile::parse(&toml_str).expect("parse");
+        assert_eq!(back.npm.len(), 2);
+        assert_eq!(back.npm[0].name, "axios");
+        assert_eq!(back.npm[0].integrity, "sha512-xyz==");
     }
 }

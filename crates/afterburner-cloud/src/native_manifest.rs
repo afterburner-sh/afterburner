@@ -3,7 +3,7 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
-//! Native-manifest interop for `[pip]` and `[gem]` (design section 13.5).
+//! Native-manifest interop for `[pip]`, `[gem]`, and `[npm]` (design section 13.5).
 //!
 //! When `[pip]` is absent in `afb.toml`, `burn install` reads
 //! `requirements.txt` or `pyproject.toml [project].dependencies` (PEP 621) as
@@ -13,8 +13,11 @@
 //! uses `Gemfile.lock` for the resolved pins) as the source of truth for gem
 //! dependencies.
 //!
-//! **Canonical source rule (E3):** `[pip]`/`[gem]` in `afb.toml` are the
-//! declared source when present. If a native manifest is ALSO present and
+//! When `[npm]` is absent in `afb.toml`, `burn install` reads `package.json`
+//! `dependencies` as the source of truth for npm dependencies (closes G7).
+//!
+//! **Canonical source rule (E3):** `[pip]`/`[gem]`/`[npm]` in `afb.toml` are
+//! the declared source when present. If a native manifest is ALSO present and
 //! disagrees with `afb.toml`, the result is a LOUD error, never a silent
 //! reconcile. The error names the first disagreeing package and tells the user
 //! which file to fix.
@@ -39,6 +42,17 @@
 //! is not a replacement for the `Gemfile` specifier source. When a `Gemfile.lock`
 //! is present alongside a `Gemfile`, the lock's pins are used for the packages
 //! the Gemfile declares (more deterministic, mirrors bundler behaviour).
+//!
+//! ## npm source precedence (G7)
+//!
+//! 1. `[npm]` in `afb.toml` - canonical when present (non-empty).
+//! 2. `package.json` `"dependencies"` field next to `afb.toml`.
+//! 3. If neither, `[npm]` stays empty.
+//!
+//! Only the `"dependencies"` key is read; `"devDependencies"`,
+//! `"peerDependencies"`, and `"optionalDependencies"` are ignored.
+//! When both `[npm]` and `package.json` are present and disagree, the result
+//! is a LOUD error (same as pip/gem).
 
 use crate::error::{CloudError, Result};
 use std::collections::BTreeMap;
@@ -65,6 +79,16 @@ pub struct GemDeps {
     /// Resolved `name -> specifier` map.
     pub deps: BTreeMap<String, String>,
     /// Which source was authoritative.
+    pub source_name: &'static str,
+}
+
+/// The result of loading npm dependencies from all available sources (G7).
+#[derive(Debug, Clone)]
+pub struct NpmDeps {
+    /// Resolved `name -> semver range` map.
+    pub deps: BTreeMap<String, String>,
+    /// Which source was authoritative (`"[npm] in afb.toml"` or
+    /// `"package.json dependencies"`).
     pub source_name: &'static str,
 }
 
@@ -188,6 +212,52 @@ pub fn load_gem_deps(dir: &Path, afb_gem: &BTreeMap<String, String>) -> Result<G
         Ok(GemDeps {
             deps: afb_gem.clone(),
             source_name: "[gem] in afb.toml",
+        })
+    }
+}
+
+/// Load npm dependencies for a package directory (closes G7).
+///
+/// When `afb_npm` is non-empty, it is the declared canonical source.  If
+/// `package.json` is ALSO present and disagrees on any package name, the
+/// error is LOUD (names the first disagreement and tells the user which file
+/// to fix).
+///
+/// When `afb_npm` is empty, `package.json` `"dependencies"` is tried; the
+/// `"devDependencies"`, `"peerDependencies"`, and `"optionalDependencies"`
+/// keys are intentionally ignored.
+pub fn load_npm_deps(dir: &Path, afb_npm: &BTreeMap<String, String>) -> Result<NpmDeps> {
+    let pkgjson_path = dir.join("package.json");
+    let native: Option<BTreeMap<String, String>> = if pkgjson_path.exists() {
+        let text = std::fs::read_to_string(&pkgjson_path).map_err(CloudError::Io)?;
+        let parsed = parse_package_json_deps(&text)?;
+        if parsed.is_empty() {
+            None
+        } else {
+            Some(parsed)
+        }
+    } else {
+        None
+    };
+
+    if afb_npm.is_empty() {
+        match native {
+            Some(deps) => Ok(NpmDeps {
+                deps,
+                source_name: "package.json dependencies",
+            }),
+            None => Ok(NpmDeps {
+                deps: BTreeMap::new(),
+                source_name: "[npm] in afb.toml",
+            }),
+        }
+    } else {
+        if let Some(ref native_deps) = native {
+            check_npm_disagree(afb_npm, native_deps, "package.json")?;
+        }
+        Ok(NpmDeps {
+            deps: afb_npm.clone(),
+            source_name: "[npm] in afb.toml",
         })
     }
 }
@@ -594,6 +664,64 @@ fn check_gem_disagree(
     Ok(())
 }
 
+// ---- package.json deps parser -----------------------------------------------
+
+/// Parse a `package.json` file and return the `"dependencies"` map
+/// (`name -> semver range`).  Only the `"dependencies"` key is read;
+/// `"devDependencies"`, `"peerDependencies"`, and `"optionalDependencies"` are
+/// intentionally ignored (closes G7).
+///
+/// Returns an empty map when `"dependencies"` is absent or null.
+pub(crate) fn parse_package_json_deps(json: &str) -> Result<BTreeMap<String, String>> {
+    let v: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| CloudError::Package(format!("parsing package.json: {e}")))?;
+    let deps = match v.get("dependencies") {
+        Some(serde_json::Value::Object(m)) => m,
+        Some(serde_json::Value::Null) | None => return Ok(BTreeMap::new()),
+        Some(other) => {
+            return Err(CloudError::Package(format!(
+                "package.json: `dependencies` must be an object, got {}",
+                other.to_string().get(..40).unwrap_or(&other.to_string())
+            )));
+        }
+    };
+    deps.iter()
+        .map(|(name, val)| {
+            let spec = val.as_str().ok_or_else(|| {
+                CloudError::Package(format!(
+                    "package.json dependencies.{name}: expected a string, got {val:?}"
+                ))
+            })?;
+            Ok((name.clone(), spec.to_string()))
+        })
+        .collect()
+}
+
+/// Check that `afb_npm` and `native_deps` agree on every package they share.
+///
+/// A package present in only one source is allowed (afb.toml canonical table
+/// wins; extra native entries are no-ops).  A name in both with DIFFERENT
+/// specifiers is a loud error, never a silent reconcile.
+pub(crate) fn check_npm_disagree(
+    afb_npm: &BTreeMap<String, String>,
+    native_deps: &BTreeMap<String, String>,
+    native_source: &str,
+) -> Result<()> {
+    for (name, native_spec) in native_deps {
+        if let Some(afb_spec) = afb_npm.get(name)
+            && afb_spec != native_spec
+        {
+            return Err(CloudError::Package(format!(
+                "afb.toml [npm] and {native_source} disagree on `{name}`: \
+                 afb.toml says {afb_spec:?}, {native_source} says {native_spec:?}. \
+                 Fix one of the two files, or delete {native_source} and use \
+                 [npm] in afb.toml as the sole source of truth."
+            )));
+        }
+    }
+    Ok(())
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -972,5 +1100,120 @@ gem "rack"
             "must name the disagreeing gem: {msg}"
         );
         assert!(msg.contains("Gemfile"), "must name the native file: {msg}");
+    }
+
+    // ---- package.json parser + load_npm_deps (G7) --------------------------
+
+    #[test]
+    fn parse_package_json_deps_basic() {
+        let json = r#"{"name":"app","version":"1.0.0","dependencies":{"lodash":"^4.17.0","axios":"^1.0"}}"#;
+        let deps = parse_package_json_deps(json).unwrap();
+        assert_eq!(deps.get("lodash").map(String::as_str), Some("^4.17.0"));
+        assert_eq!(deps.get("axios").map(String::as_str), Some("^1.0"));
+    }
+
+    #[test]
+    fn parse_package_json_deps_missing_key_returns_empty() {
+        let json = r#"{"name":"app"}"#;
+        let deps = parse_package_json_deps(json).unwrap();
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn parse_package_json_deps_ignores_dev_deps() {
+        let json = r#"{"devDependencies":{"jest":"^29.0"},"dependencies":{"lodash":"^4"}}"#;
+        let deps = parse_package_json_deps(json).unwrap();
+        assert_eq!(deps.get("lodash").map(String::as_str), Some("^4"));
+        assert!(
+            !deps.contains_key("jest"),
+            "devDependencies must be ignored"
+        );
+    }
+
+    #[test]
+    fn check_npm_disagree_is_loud_on_mismatch() {
+        let mut afb = BTreeMap::new();
+        afb.insert("lodash".to_string(), "^4.17.0".to_string());
+        let mut native = BTreeMap::new();
+        native.insert("lodash".to_string(), "^3.0.0".to_string());
+        let err = check_npm_disagree(&afb, &native, "package.json").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("disagree") && msg.contains("lodash"),
+            "must name the disagreeing package: {msg}"
+        );
+        assert!(
+            msg.contains("package.json") && msg.contains("afb.toml"),
+            "must name both files: {msg}"
+        );
+    }
+
+    #[test]
+    fn check_npm_disagree_is_silent_when_both_agree() {
+        let mut afb = BTreeMap::new();
+        afb.insert("lodash".to_string(), "^4.17.0".to_string());
+        let mut native = BTreeMap::new();
+        native.insert("lodash".to_string(), "^4.17.0".to_string());
+        check_npm_disagree(&afb, &native, "package.json")
+            .expect("matching specs must not be an error");
+    }
+
+    #[test]
+    fn load_npm_from_package_json_when_afb_npm_absent() {
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "package.json",
+            r#"{"name":"app","dependencies":{"lodash":"^4.17.0"}}"#,
+        );
+        let result = load_npm_deps(tmp.path(), &BTreeMap::new()).unwrap();
+        assert_eq!(result.source_name, "package.json dependencies");
+        assert_eq!(
+            result.deps.get("lodash").map(String::as_str),
+            Some("^4.17.0")
+        );
+    }
+
+    #[test]
+    fn load_npm_afb_wins_over_package_json_when_agree() {
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "package.json",
+            r#"{"dependencies":{"lodash":"^4.17.0"}}"#,
+        );
+        let mut afb_npm = BTreeMap::new();
+        afb_npm.insert("lodash".to_string(), "^4.17.0".to_string());
+        let result = load_npm_deps(tmp.path(), &afb_npm).unwrap();
+        assert_eq!(result.source_name, "[npm] in afb.toml");
+    }
+
+    #[test]
+    fn load_npm_loud_on_disagree_with_package_json() {
+        let tmp = TempDir::new().unwrap();
+        write_file(
+            tmp.path(),
+            "package.json",
+            r#"{"dependencies":{"lodash":"^4.17.0"}}"#,
+        );
+        let mut afb_npm = BTreeMap::new();
+        afb_npm.insert("lodash".to_string(), "^3.0.0".to_string());
+        let err = load_npm_deps(tmp.path(), &afb_npm).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("disagree") && msg.contains("lodash"),
+            "must name the disagreeing package: {msg}"
+        );
+        assert!(
+            msg.contains("package.json") && msg.contains("afb.toml"),
+            "must name both files: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_npm_empty_when_no_sources() {
+        let tmp = TempDir::new().unwrap();
+        let result = load_npm_deps(tmp.path(), &BTreeMap::new()).unwrap();
+        assert!(result.deps.is_empty());
     }
 }

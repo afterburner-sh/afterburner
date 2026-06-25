@@ -453,6 +453,162 @@ fn build_still_includes_source_after_omit_source_call() {
     );
 }
 
+// ---- vendor/ (FORMAT_MINOR 3) -----------------------------------------------
+
+/// A wheel filename that uses the emscripten soabi tag (sandbox-native).
+const EMSCRIPTEN_WHL_MEMBER: &str = "vendor/pip/numpy-1.26.4-cpython-312-wasm32-emscripten.so";
+/// A pure-Python wheel (no native code at all).
+const PURE_WHL_MEMBER: &str = "vendor/pip/requests-2.31.0-py3-none-any.whl";
+/// A Ruby gem member.
+const GEM_MEMBER: &str = "vendor/gem/sinatra-3.1.0.gem";
+
+/// Fake wheel bytes - non-trivial binary content so the round-trip is
+/// meaningful.
+fn fake_whl() -> Vec<u8> {
+    (0u8..=255u8).cycle().take(512).collect()
+}
+
+#[test]
+fn vendor_roundtrip_byte_identical() {
+    let whl_bytes = fake_whl();
+    let gem_bytes: Vec<u8> = (128u8..=255u8).collect();
+
+    let (bytes, d) = Builder::new(hello_manifest(), Manifold::sealed())
+        .source("source/main.js", HELLO_SOURCE)
+        .vendor(PURE_WHL_MEMBER, whl_bytes.clone())
+        .vendor(GEM_MEMBER, gem_bytes.clone())
+        .build()
+        .expect("packs with vendor members");
+
+    let afb = Afb::from_bytes(&bytes).expect("unpacks");
+    assert_eq!(afb.digest, d, "digest must match");
+
+    // vendor bytes come back byte-identical.
+    assert_eq!(
+        afb.vendor.get(PURE_WHL_MEMBER).map(Vec::as_slice),
+        Some(whl_bytes.as_slice()),
+        "wheel bytes must survive the round trip"
+    );
+    assert_eq!(
+        afb.vendor.get(GEM_MEMBER).map(Vec::as_slice),
+        Some(gem_bytes.as_slice()),
+        "gem bytes must survive the round trip"
+    );
+
+    // source is still intact.
+    assert_eq!(afb.entry_source().unwrap(), HELLO_SOURCE);
+}
+
+#[test]
+fn vendor_roundtrip_reproducible() {
+    let whl_bytes = fake_whl();
+
+    let build = || {
+        Builder::new(hello_manifest(), Manifold::sealed())
+            .source("source/main.js", HELLO_SOURCE)
+            .vendor(PURE_WHL_MEMBER, whl_bytes.clone())
+            .build()
+            .expect("packs")
+    };
+
+    let (a, da) = build();
+    let (b, db) = build();
+    assert_eq!(
+        a, b,
+        "identical inputs including vendor member must yield byte-identical .afb"
+    );
+    assert_eq!(da, db);
+}
+
+#[test]
+fn vendor_sandbox_abi_so_is_accepted() {
+    // An emscripten soabi .so in vendor/pip/ passes the native-artifact gate.
+    let so_bytes: Vec<u8> = vec![0x7f, b'E', b'L', b'F', 0, 0, 0, 0];
+    let (bytes, _) = Builder::new(hello_manifest(), Manifold::sealed())
+        .source("source/main.js", HELLO_SOURCE)
+        .vendor(EMSCRIPTEN_WHL_MEMBER, so_bytes)
+        .build()
+        .expect("emscripten soabi .so must be accepted");
+    let afb = Afb::from_bytes(&bytes).expect("unpacks");
+    assert!(afb.vendor.contains_key(EMSCRIPTEN_WHL_MEMBER));
+}
+
+#[test]
+fn vendor_manylinux_so_is_refused() {
+    // A manylinux .so inside a vendor/pip/ member is host-native: refused.
+    let manylinux = "vendor/pip/numpy-1.26.4-cp312-cp312-manylinux_2_17_x86_64.so";
+    let result = Builder::new(hello_manifest(), Manifold::sealed())
+        .source("source/main.js", HELLO_SOURCE)
+        .vendor(manylinux, vec![0u8; 16])
+        .build();
+    assert!(
+        matches!(result, Err(afterburner_afb::AfbError::NativeAddon { .. })),
+        "manylinux .so must be refused at pack time, got: {result:?}"
+    );
+}
+
+#[test]
+fn vendor_old_afb_has_empty_vendor_map() {
+    // An old-style .afb (no vendor/ member) unpacks to an empty vendor map.
+    let (bytes, _) = build_hello();
+    let afb = Afb::from_bytes(&bytes).expect("unpacks");
+    assert!(
+        afb.vendor.is_empty(),
+        "no vendor/ in a legacy package: map must be empty"
+    );
+}
+
+#[test]
+fn format_minor_3_additive_read() {
+    // A package that declares version "1.3" (FORMAT_MINOR=3) with vendor/
+    // members is accepted by this reader, and the vendor map is populated.
+    let whl_bytes = fake_whl();
+
+    // Use pack_members to build a raw archive at version "1.3".
+    let manifest_toml = r#"[format]
+version = "1.3"
+
+[package]
+name = "hello"
+namespace = "burn"
+version = "0.1.0"
+language = "js"
+entry = "source/main.js"
+description = "vendor test"
+
+[runtime]
+min = "0.1.0"
+"#;
+    let manifold_json = serde_json::to_vec(&Manifold::sealed()).unwrap();
+
+    let mut ar = tar::Builder::new(Vec::<u8>::new());
+
+    // Helper to append.
+    let mut append_raw = |path: &str, data: &[u8]| {
+        let mut h = tar::Header::new_ustar();
+        h.set_size(data.len() as u64);
+        h.set_mode(0o644);
+        h.set_mtime(0);
+        h.set_entry_type(tar::EntryType::Regular);
+        ar.append_data(&mut h, path, data).unwrap();
+    };
+
+    append_raw("afb.toml", manifest_toml.as_bytes());
+    append_raw("manifold.json", &manifold_json);
+    append_raw("source/main.js", HELLO_SOURCE.as_bytes());
+    append_raw(PURE_WHL_MEMBER, &whl_bytes);
+
+    let afb_bytes = zstd::encode_all(ar.into_inner().unwrap().as_slice(), 19).unwrap();
+    let afb = Afb::from_bytes(&afb_bytes).expect("version 1.3 must be accepted");
+
+    assert_eq!(afb.manifest.format.version, "1.3");
+    assert_eq!(
+        afb.vendor.get(PURE_WHL_MEMBER).map(Vec::as_slice),
+        Some(whl_bytes.as_slice()),
+        "vendor member must be materialized from a 1.3 archive"
+    );
+}
+
 // ---- helpers --------------------------------------------------------------
 
 fn append(ar: &mut tar::Builder<Vec<u8>>, path: &str, data: &[u8]) {

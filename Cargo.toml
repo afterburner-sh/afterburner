@@ -114,6 +114,7 @@ uuid = { version = "1", features = ["v4"] }
 ureq = { version = "2", features = ["json"] }
 tempfile = "3"
 flate2 = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 brotli = { version = "8", default-features = false, features = ["std"] }
 kovan-map = "0.1.14"
 kovan-channel = "0.1.14"

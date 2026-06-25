@@ -12,8 +12,9 @@
 //! virtual `node_modules`.
 //!
 //! Security:
-//! * **Integrity-verified.** Each tarball is checked against the registry's
-//!   `dist.shasum` (SHA-1) before it is trusted or cached.
+//! * **Integrity-verified.** Each tarball is checked against `dist.integrity`
+//!   (sha512 SRI, closes G2) when present, falling back to `dist.shasum`
+//!   (sha1) for older packages that lack it.
 //! * **No native code.** Every extracted file is run through the
 //!   native-artifact gate ([`afterburner_afb::native`]); a `.node`/`.so`/
 //!   `binding.gyp`/etc. aborts the install, naming the package + file.
@@ -89,7 +90,8 @@ impl EcosystemClient for NpmClient {
             .map(|(vstr, entry)| EcosystemRelease {
                 version: vstr.clone(),
                 artifact_url: entry.dist.tarball.clone(),
-                integrity: entry.dist.shasum.clone(),
+                // Prefer sha512 SRI (dist.integrity) over the sha1 shasum (G2).
+                integrity: entry.dist.sri().to_string(),
                 deps: entry.dependencies.clone(),
             })
             .collect();
@@ -113,7 +115,9 @@ impl EcosystemClient for NpmClient {
             MAX_TARBALL_COMPRESSED,
             &rel.artifact_url,
         )?;
-        verify_shasum_bytes(&rel.artifact_url, &rel.integrity, &bytes)?;
+        // Use the stronger verifier when the integrity field is an SRI string
+        // (sha512- or sha256-prefix); fall back to sha1 for legacy entries.
+        verify_integrity(&rel.artifact_url, &rel.integrity, &bytes)?;
         Ok(bytes)
     }
 
@@ -183,8 +187,26 @@ struct VersionEntry {
 #[derive(serde::Deserialize, Clone)]
 struct Dist {
     tarball: String,
+    /// Modern SRI field (sha512 or sha256): `"sha512-<base64>"`.  Preferred
+    /// over `shasum` when present (closes G2).
+    #[serde(default)]
+    integrity: String,
+    /// Legacy SHA-1 hex field.  Used only when `integrity` is absent.
     #[serde(default)]
     shasum: String,
+}
+
+impl Dist {
+    /// Return the canonical SRI integrity string to store in the lockfile and
+    /// to use for verification.  Prefers `integrity` (sha512) over the sha1
+    /// `shasum` fallback.
+    fn sri(&self) -> &str {
+        if !self.integrity.is_empty() {
+            &self.integrity
+        } else {
+            &self.shasum
+        }
+    }
 }
 
 /// Whether `version` satisfies npm `range`.
@@ -260,19 +282,49 @@ fn encode_name(name: &str) -> String {
 
 // ---- integrity + extraction ------------------------------------------------
 
-fn verify_shasum_bytes(ctx: &str, shasum: &str, bytes: &[u8]) -> Result<()> {
-    // Re-derive name/version from context string for error messages; ctx is the
-    // tarball URL which suffices as a human label.
-    if shasum.is_empty() {
+/// Verify `bytes` against `integrity`, which is either:
+/// - An SRI string (`"sha512-<base64>"` or `"sha256-<base64>"`): the modern
+///   npm lockfile v3 format (closes G2).
+/// - A bare hex sha1 string: the legacy `dist.shasum` field for older packages.
+///
+/// The SRI form is strongly preferred.  A sha1-only record is accepted as-is
+/// because the npm registry still publishes sha1 for packages that pre-date
+/// the integrity field, and refusing them would block installs.  New packages
+/// always have sha512; the lockfile records whichever form was used.
+pub fn verify_integrity(ctx: &str, integrity: &str, bytes: &[u8]) -> Result<()> {
+    if integrity.is_empty() {
         return Err(CloudError::Package(format!(
-            "npm {ctx}: registry returned no integrity shasum"
+            "npm {ctx}: registry returned no integrity field (dist.integrity or dist.shasum)"
         )));
     }
+    if let Some(b64) = integrity.strip_prefix("sha512-") {
+        use sha2::{Digest, Sha512};
+        let got = sha2_base64(&Sha512::digest(bytes));
+        if got != b64 {
+            return Err(CloudError::DigestMismatch {
+                expected: format!("sha512-{b64} ({ctx})"),
+                got: format!("sha512-{got}"),
+            });
+        }
+        return Ok(());
+    }
+    if let Some(b64) = integrity.strip_prefix("sha256-") {
+        use sha2::{Digest, Sha256};
+        let got = sha2_base64(&Sha256::digest(bytes));
+        if got != b64 {
+            return Err(CloudError::DigestMismatch {
+                expected: format!("sha256-{b64} ({ctx})"),
+                got: format!("sha256-{got}"),
+            });
+        }
+        return Ok(());
+    }
+    // Legacy sha1 hex fallback (dist.shasum).
     use sha1::{Digest, Sha1};
     let got = hex_lower(&Sha1::digest(bytes));
-    if !got.eq_ignore_ascii_case(shasum) {
+    if !got.eq_ignore_ascii_case(integrity) {
         return Err(CloudError::DigestMismatch {
-            expected: format!("sha1:{shasum} ({ctx})"),
+            expected: format!("sha1:{integrity} ({ctx})"),
             got: format!("sha1:{got}"),
         });
     }
@@ -281,7 +333,34 @@ fn verify_shasum_bytes(ctx: &str, shasum: &str, bytes: &[u8]) -> Result<()> {
 
 /// Verify a sha1 shasum for a named package version (used by legacy callers).
 pub fn verify_shasum(name: &str, version: &str, shasum: &str, bytes: &[u8]) -> Result<()> {
-    verify_shasum_bytes(&format!("{name}@{version}"), shasum, bytes)
+    verify_integrity(&format!("{name}@{version}"), shasum, bytes)
+}
+
+/// Standard-library-free base64 encode (standard alphabet, padded).
+fn sha2_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let (a, b, c) = (
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        );
+        let n = (u32::from(a) << 16) | (u32::from(b) << 8) | u32::from(c);
+        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(n & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 /// Decompress + untar an npm tarball, stripping the leading `package/`
@@ -549,5 +628,73 @@ mod tests {
     fn empty_shasum_refused() {
         let err = verify_shasum("x", "1.0.0", "", b"hello").unwrap_err();
         assert!(matches!(err, CloudError::Package(_)));
+    }
+
+    // ---- G2: sha512 SRI integrity (verify_integrity) -----------------------
+
+    #[test]
+    fn sri_sha512_correct_passes() {
+        use sha2::{Digest, Sha512};
+        let bytes = b"test content";
+        let b64 = sha2_base64(&Sha512::digest(bytes));
+        let integrity = format!("sha512-{b64}");
+        verify_integrity("ctx", &integrity, bytes).expect("valid sha512 SRI must pass");
+    }
+
+    #[test]
+    fn sri_sha512_tampered_fails() {
+        use sha2::{Digest, Sha512};
+        let real = b"real content";
+        let b64 = sha2_base64(&Sha512::digest(real));
+        let integrity = format!("sha512-{b64}");
+        let err = verify_integrity("ctx", &integrity, b"TAMPERED").unwrap_err();
+        assert!(
+            matches!(err, CloudError::DigestMismatch { .. }),
+            "tampered payload must fail: {err}"
+        );
+    }
+
+    #[test]
+    fn sri_sha256_correct_passes() {
+        use sha2::{Digest, Sha256};
+        let bytes = b"another test";
+        let b64 = sha2_base64(&Sha256::digest(bytes));
+        let integrity = format!("sha256-{b64}");
+        verify_integrity("ctx", &integrity, bytes).expect("valid sha256 SRI must pass");
+    }
+
+    #[test]
+    fn sri_sha256_tampered_fails() {
+        use sha2::{Digest, Sha256};
+        let real = b"real content";
+        let b64 = sha2_base64(&Sha256::digest(real));
+        let integrity = format!("sha256-{b64}");
+        let err = verify_integrity("ctx", &integrity, b"TAMPERED").unwrap_err();
+        assert!(matches!(err, CloudError::DigestMismatch { .. }), "{err}");
+    }
+
+    #[test]
+    fn legacy_sha1_hex_still_accepted() {
+        // The verify_integrity path falls through to sha1 for legacy shasum values.
+        use sha1::{Digest, Sha1};
+        let bytes = b"legacy";
+        let shasum = hex_lower(&Sha1::digest(bytes));
+        verify_integrity("ctx", &shasum, bytes).expect("legacy sha1 hex must still verify");
+    }
+
+    #[test]
+    fn dist_sri_prefers_integrity_over_shasum() {
+        let dist = Dist {
+            tarball: "http://x".to_string(),
+            integrity: "sha512-abc".to_string(),
+            shasum: "sha1hex".to_string(),
+        };
+        assert_eq!(dist.sri(), "sha512-abc");
+        let dist_no_integrity = Dist {
+            tarball: "http://x".to_string(),
+            integrity: String::new(),
+            shasum: "sha1hex".to_string(),
+        };
+        assert_eq!(dist_no_integrity.sri(), "sha1hex");
     }
 }
