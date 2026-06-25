@@ -8,6 +8,16 @@
 //! `wire_socket_syscalls` and `wire_sendto_recvfrom` register the real
 //! socket syscall implementations against `DaemonNet`. Only compiled when
 //! the `daemon` feature is active.
+//!
+//! ## Emscripten socket syscall ABI
+//!
+//! Every socket import in the Pyodide wasm binary (0.28.3 and 3.14) is typed
+//! as `(func (param i32 i32 i32 i32 i32 i32) (result i32))` - exactly 6 i32
+//! params regardless of the underlying POSIX syscall's actual argument count.
+//! Emscripten pads shorter calls with trailing zeros, e.g. `__syscall_socket`
+//! is called as `socket(domain, type, proto, 0, 0, 0)`.  All `func_wrap`
+//! signatures here must match this 6-arg shape or instantiation will fail with
+//! "incompatible import type".
 
 use afterburner_core::{AfterburnerError, Result};
 use wasmtime::{Caller, Linker};
@@ -18,7 +28,11 @@ use super::socket;
 
 /// Wire the real socket syscalls (socket/connect/bind/listen/accept4/sendmsg/recvmsg)
 /// to `DaemonNet`. Only compiled when the `daemon` feature is active.
+///
+/// Every function is registered with 6 i32 params to match the Emscripten
+/// legacy-syscall ABI (type 10 = `(i32 i32 i32 i32 i32 i32) -> i32`).
 pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result<()> {
+    // __syscall_socket(domain, type, protocol, 0, 0, 0) -> fd
     linker
         .func_wrap(
             "env",
@@ -26,7 +40,10 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
             |mut caller: Caller<'_, EmbedderState>,
              domain: i32,
              sock_type: i32,
-             _protocol: i32|
+             _protocol: i32,
+             _p3: i32,
+             _p4: i32,
+             _p5: i32|
              -> i32 {
                 let has_net = caller.data().daemon_net.is_some();
                 if !has_net {
@@ -45,6 +62,7 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
         )
         .map_err(|e| AfterburnerError::Engine(format!("__syscall_socket: {e}")))?;
 
+    // __syscall_connect(sockfd, addr_ptr, addrlen, 0, 0, 0) -> 0 | err
     linker
         .func_wrap(
             "env",
@@ -52,7 +70,10 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
             |mut caller: Caller<'_, EmbedderState>,
              sockfd: i32,
              addr_ptr: i32,
-             _addrlen: i32|
+             _addrlen: i32,
+             _p3: i32,
+             _p4: i32,
+             _p5: i32|
              -> i32 {
                 let net = match caller.data().daemon_net.clone() {
                     Some(n) => n,
@@ -93,6 +114,7 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
         )
         .map_err(|e| AfterburnerError::Engine(format!("__syscall_connect: {e}")))?;
 
+    // __syscall_bind(sockfd, addr_ptr, addrlen, 0, 0, 0) -> 0 | err
     linker
         .func_wrap(
             "env",
@@ -100,7 +122,10 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
             |mut caller: Caller<'_, EmbedderState>,
              sockfd: i32,
              addr_ptr: i32,
-             _addrlen: i32|
+             _addrlen: i32,
+             _p3: i32,
+             _p4: i32,
+             _p5: i32|
              -> i32 {
                 let manifold = match caller.data().manifold.clone() {
                     Some(m) => m,
@@ -130,11 +155,19 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
         )
         .map_err(|e| AfterburnerError::Engine(format!("__syscall_bind: {e}")))?;
 
+    // __syscall_listen(sockfd, backlog, 0, 0, 0, 0) -> 0 | err
     linker
         .func_wrap(
             "env",
             "__syscall_listen",
-            |mut caller: Caller<'_, EmbedderState>, sockfd: i32, _backlog: i32| -> i32 {
+            |mut caller: Caller<'_, EmbedderState>,
+             sockfd: i32,
+             _backlog: i32,
+             _p2: i32,
+             _p3: i32,
+             _p4: i32,
+             _p5: i32|
+             -> i32 {
                 let net = match caller.data().daemon_net.clone() {
                     Some(n) => n,
                     None => return socket::EPERM,
@@ -176,6 +209,7 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
         )
         .map_err(|e| AfterburnerError::Engine(format!("__syscall_listen: {e}")))?;
 
+    // __syscall_accept4(sockfd, addr_ptr, addrlen_ptr, flags, 0, 0) -> new_fd | err
     linker
         .func_wrap(
             "env",
@@ -184,7 +218,9 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
              sockfd: i32,
              addr_ptr: i32,
              addrlen_ptr: i32,
-             _flags: i32|
+             _flags: i32,
+             _p4: i32,
+             _p5: i32|
              -> i32 {
                 let net = match caller.data().daemon_net.clone() {
                     Some(n) => n,
@@ -231,6 +267,7 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
         )
         .map_err(|e| AfterburnerError::Engine(format!("__syscall_accept4: {e}")))?;
 
+    // __syscall_sendmsg(sockfd, msg_ptr, flags, 0, 0, 0) -> bytes_sent | err
     linker
         .func_wrap(
             "env",
@@ -238,7 +275,10 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
             |mut caller: Caller<'_, EmbedderState>,
              sockfd: i32,
              msg_ptr: i32,
-             _flags: i32|
+             _flags: i32,
+             _p3: i32,
+             _p4: i32,
+             _p5: i32|
              -> i32 {
                 let net = match caller.data().daemon_net.clone() {
                     Some(n) => n,
@@ -278,6 +318,7 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
         )
         .map_err(|e| AfterburnerError::Engine(format!("__syscall_sendmsg: {e}")))?;
 
+    // __syscall_recvmsg(sockfd, msg_ptr, flags, 0, 0, 0) -> bytes_recv | err
     linker
         .func_wrap(
             "env",
@@ -285,7 +326,10 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
             |mut caller: Caller<'_, EmbedderState>,
              sockfd: i32,
              msg_ptr: i32,
-             _flags: i32|
+             _flags: i32,
+             _p3: i32,
+             _p4: i32,
+             _p5: i32|
              -> i32 {
                 let net = match caller.data().daemon_net.clone() {
                     Some(n) => n,
@@ -326,11 +370,51 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
         )
         .map_err(|e| AfterburnerError::Engine(format!("__syscall_recvmsg: {e}")))?;
 
+    // __syscall_shutdown(sockfd, how, 0, 0, 0, 0) -> 0 | err
+    // Close the connection on the DaemonNet side; Python's socket.shutdown()
+    // calls this before close() on graceful teardown.
+    linker
+        .func_wrap(
+            "env",
+            "__syscall_shutdown",
+            |caller: Caller<'_, EmbedderState>,
+             sockfd: i32,
+             _how: i32,
+             _p2: i32,
+             _p3: i32,
+             _p4: i32,
+             _p5: i32|
+             -> i32 {
+                let net = match caller.data().daemon_net.clone() {
+                    Some(n) => n,
+                    None => return socket::EPERM,
+                };
+                let conn_id = caller
+                    .data()
+                    .socket_state
+                    .as_deref()
+                    .and_then(|s| s.conn_fds.get(&sockfd).copied());
+                match conn_id {
+                    Some(cid) => {
+                        net.destroy(cid);
+                        0
+                    }
+                    None => socket::EBADF,
+                }
+            },
+        )
+        .map_err(|e| AfterburnerError::Engine(format!("__syscall_shutdown: {e}")))?;
+
     Ok(())
 }
 
 /// Wire `__syscall_sendto` and `__syscall_recvfrom` to `DaemonNet`.
 /// Only compiled when the `daemon` feature is active.
+///
+/// Both are already typed as `(i32 i32 i32 i32 i32 i32) -> i32` in the wasm
+/// module (type 10) and their POSIX signatures happen to use all 6 params:
+/// `sendto(fd, buf, len, flags, addr, addrlen)` and
+/// `recvfrom(fd, buf, len, flags, addr, addrlen)`.
 pub(super) fn wire_sendto_recvfrom(linker: &mut Linker<EmbedderState>) -> Result<()> {
     linker
         .func_wrap(

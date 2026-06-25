@@ -3,6 +3,14 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
+//! INERT on the stock pyodide (verified 2026-06-25). The bundled single-threaded
+//! `pyodide-exnref.wasm` imports ZERO thread-creation functions (no `pthread_create`,
+//! no `emscripten_futex_*`), so none of the functions wired in this module are ever
+//! called on the current build. This surface is kept for a future `-pthread`
+//! (threaded, shared-memory) pyodide; today it is dead code, not live threading.
+//! Real Python threading is upstream-blocked on wasmtime (emscripten pthreads need a
+//! JS Worker host). See `docs/wasi-component-roadmap.md`.
+//!
 //! Real OS-backed pthread surface for the Python runtime (Section 4 of the
 //! concurrency design).
 //!
@@ -137,7 +145,6 @@ pub(crate) fn wire_pthread_imports(linker: &mut wasmtime::Linker<EmbedderState>)
                     &worker_data,
                     &mut last_error,
                 );
-
                 if worker_id < 0 {
                     // Map DaemonWorkers error codes to pthread errno.
                     let errno = match worker_id {

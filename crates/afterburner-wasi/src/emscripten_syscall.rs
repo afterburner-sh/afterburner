@@ -6,20 +6,53 @@
 //! Filesystem and POSIX syscall implementations for the Emscripten env.* layer.
 //!
 //! Wires the real in-memory FS-backed `__syscall_*` imports (getcwd, openat,
-//! read, writev, pread64, close, lseek, fstat64, stat64, lstat64, newfstatat,
-//! ioctl, getdents64, faccessat, fcntl64, readlinkat) plus real socket syscalls
-//! (`socket`, `connect`, `bind`, `listen`, `accept4`, `sendmsg`, `recvmsg`,
-//! `sendto`, `recvfrom`) backed by the existing `DaemonNet` coordinator when
-//! `EmbedderState::daemon_net` is `Some`.
+//! read, writev, pread64, pwrite64, close, lseek, fstat64, stat64, lstat64,
+//! newfstatat, ioctl, getdents64, faccessat, fcntl64, readlinkat) plus real
+//! socket syscalls (`socket`, `connect`, `bind`, `listen`, `accept4`,
+//! `sendmsg`, `recvmsg`, `sendto`, `recvfrom`) backed by the existing
+//! `DaemonNet` coordinator when `EmbedderState::daemon_net` is `Some`.
+//!
+//! ## Advisory record locking (`_try_fcntl64`)
+//!
+//! SQLite's default (delete) journal mode uses POSIX advisory record locks
+//! (F_SETLK / F_SETLKW / F_GETLK) on the database file and its rollback
+//! journal to serialize concurrent writers. The runtime is a single OS process
+//! with a single SQLite connection per invocation, so no real inter-process
+//! locking is needed; instead a process-wide in-memory lock table tracks held
+//! locks. `ADVISORY_LOCKS` is a `Mutex<HashMap>` (not a kovan lock-free map)
+//! because the read-check-then-insert sequence for F_GETLK / F_SETLK must be
+//! atomic across the check and the mutation.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use afterburner_core::{AfterburnerError, Result};
 use wasmtime::{Caller, Linker};
 
+// ---- process-wide advisory lock table ----------------------------------------
+
+/// Key for an advisory lock entry: (host_path_string, byte_range_start, byte_range_len).
+///
+/// SQLite locks specific byte ranges (e.g. bytes 1073741824..1073741824+510
+/// for the SHARED lock range, byte 1073741826 for RESERVED, etc.) on the db
+/// file and on the rollback journal. We key on the guest absolute path (which
+/// is unique per file in the single-connection scenario) and the lock range.
+/// l_len == 0 means "to EOF"; we store it as-is and treat 0 as a wildcard
+/// only for conflict detection (conservative: never conflicts in single-conn).
+type LockKey = (String, i64, i64);
+
+/// F_RDLCK / F_WRLCK / F_UNLCK values stored in the table.
+type LockType = i16;
+
+/// Process-wide advisory lock table.
+/// vertexia: Mutex<HashMap> for atomic check-and-set; upgrade to per-path
+/// fine-grained locking if multi-connection contention ever matters.
+static ADVISORY_LOCKS: LazyLock<Mutex<HashMap<LockKey, LockType>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 use crate::{
     embedder_vm::EmbedderState,
-    emscripten_fs::{EBADF, EINVAL, ENOENT, ENOTDIR, ENOTTY, InMemFs},
+    emscripten_fs::{EBADF, EINVAL, ENOENT, ENOTDIR, ENOTTY, InMemFs, io_err_to_errno},
     emscripten_mechanical::read_cstr,
     emscripten_runtime::MechCallLog,
     pyo_trace,
@@ -65,9 +98,9 @@ fn log_stat(tag: &str, abs: &str, rc: i32, mode_size: Option<(u32, u64)>) {
 /// Wire all `__syscall_*` filesystem and POSIX imports into `linker`.
 ///
 /// Real in-memory FS implementations are provided for the syscalls that CPython
-/// needs to initialize and run (getcwd, openat, read, writev, pread64, close,
-/// lseek, fstat64, stat64, lstat64, newfstatat, ioctl, getdents64, faccessat,
-/// fcntl64, readlinkat). All other syscalls return -1 (ENOSYS).
+/// needs to initialize and run (getcwd, openat, read, writev, pread64, pwrite64,
+/// close, lseek, fstat64, stat64, lstat64, newfstatat, ioctl, getdents64,
+/// faccessat, fcntl64, readlinkat). All other syscalls return -1 (ENOSYS).
 pub fn wire_fs_env_funcs(
     linker: &mut Linker<EmbedderState>,
     mech_log: Arc<MechCallLog>,
@@ -230,9 +263,15 @@ pub fn wire_fs_env_funcs(
                       _mode: i32|
                       -> i32 {
                     _log.push("__syscall_openat", dirfd, pathptr);
+                    pyo_trace!("[openat-ENTER] dirfd={dirfd} pathptr={pathptr:#x} flags={flags}");
                     let path_str = match read_cstr(&caller, pathptr) {
                         Some(s) => s,
-                        None => return ENOENT,
+                        None => {
+                            pyo_trace!(
+                                "[openat] dirfd={dirfd} pathptr={pathptr:#x} -> ENOENT (bad ptr)"
+                            );
+                            return ENOENT;
+                        }
                     };
                     // Resolve the base: AT_FDCWD (-100) means "/" in our sealed env.
                     let base = if path_str.starts_with('/') || dirfd == -100 {
@@ -461,18 +500,21 @@ pub fn wire_fs_env_funcs(
                                     continue;
                                 }
                             }
-                            if caller.data().fs.is_fs_fd(fd) {
-                                // Host-backed fds are checked first.
-                                let n = if let Some(n) =
-                                    caller.data_mut().fs.write_host(fd, &chunk)
-                                {
-                                    n
-                                } else {
-                                    caller.data_mut().fs.write(fd, &chunk)
+                            if caller.data().fs.is_host_fd(fd) {
+                                let n = match caller.data_mut().fs.write_host(fd, &chunk) {
+                                    Some(n) => n,
+                                    None => return EBADF,
                                 };
+                                if n < 0 {
+                                    return -n;
+                                }
+                            } else if caller.data().fs.is_fs_fd(fd) {
+                                let n = caller.data_mut().fs.write(fd, &chunk);
                                 if n < 0 {
                                     return n;
                                 }
+                            } else {
+                                return EBADF;
                             }
                         }
                         total += buf_len as i32;
@@ -513,7 +555,6 @@ pub fn wire_fs_env_funcs(
                         return EINVAL;
                     }
                     let chunk: Vec<u8> = memory.data(&caller)[start..start + len].to_vec();
-                    pyo_trace!("[__syscall_write] fd={fd} buf={buf:#x} count={len}");
                     if fd == 1 || fd == 2 {
                         caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
                     } else {
@@ -539,13 +580,16 @@ pub fn wire_fs_env_funcs(
                                 return n;
                             }
                         }
-                        if caller.data().fs.is_fs_fd(fd) {
-                            // Host-backed fds are checked first.
-                            let n = if let Some(n) = caller.data_mut().fs.write_host(fd, &chunk) {
-                                n
-                            } else {
-                                caller.data_mut().fs.write(fd, &chunk)
+                        if caller.data().fs.is_host_fd(fd) {
+                            let n = match caller.data_mut().fs.write_host(fd, &chunk) {
+                                Some(n) => n,
+                                None => return EBADF,
                             };
+                            if n < 0 {
+                                return -n;
+                            }
+                        } else if caller.data().fs.is_fs_fd(fd) {
+                            let n = caller.data_mut().fs.write(fd, &chunk);
                             if n < 0 {
                                 return n;
                             }
@@ -579,12 +623,13 @@ pub fn wire_fs_env_funcs(
                     }
                     // Save current offset, seek to `offset`, read, restore.
                     // Host-backed fds use lseek_host; in-memory fds use InMemFs::lseek.
-                    let saved = if caller.data().fs.is_fs_fd(fd) {
-                        if let Some(s) = caller.data_mut().fs.lseek_host(fd, 0, 1) {
-                            s
-                        } else {
-                            caller.data_mut().fs.lseek(fd, 0, 1)
+                    let saved = if caller.data().fs.is_host_fd(fd) {
+                        match caller.data_mut().fs.lseek_host(fd, 0, 1) {
+                            Some(s) => s,
+                            None => return EBADF,
                         }
+                    } else if caller.data().fs.is_fs_fd(fd) {
+                        caller.data_mut().fs.lseek(fd, 0, 1)
                     } else {
                         return EBADF;
                     };
@@ -635,6 +680,57 @@ pub fn wire_fs_env_funcs(
             .map_err(|e| AfterburnerError::Engine(format!("__syscall_pread64: {e}")))?;
     }
 
+    // __syscall_pwrite64(fd: i32, buf: i32, count: i32, offset: i64) -> i32
+    // Positional write without advancing the fd's current offset.
+    // SQLite's delete-journal mode uses this to write journal pages.
+    // Host-backed fds use pwrite_host (write_at); in-memory fds use InMemFs::pwrite.
+    {
+        let _log = mech_log.clone();
+        linker
+            .func_wrap(
+                "env",
+                "__syscall_pwrite64",
+                move |mut caller: Caller<'_, EmbedderState>,
+                      fd: i32,
+                      buf: i32,
+                      count: i32,
+                      offset: i64|
+                      -> i32 {
+                    _log.push("__syscall_pwrite64", fd, buf);
+                    let len = count as u32 as usize;
+                    if len == 0 {
+                        return 0;
+                    }
+                    let Some(memory) = caller.data().pyodide_memory else {
+                        return EBADF;
+                    };
+                    let start = buf as u32 as usize;
+                    let mem_len = memory.data_size(&caller);
+                    if start + len > mem_len {
+                        return EINVAL;
+                    }
+                    let chunk: Vec<u8> = memory.data(&caller)[start..start + len].to_vec();
+                    let off = offset.max(0) as u64;
+                    let is_host = caller.data().fs.is_host_fd(fd);
+                    pyo_trace!("[pwrite64] fd={fd} len={len} off={off} is_host={is_host}");
+                    if is_host {
+                        let rc = match caller.data_mut().fs.pwrite_host(fd, &chunk, off) {
+                            Some(n) if n >= 0 => n,
+                            Some(_) => EBADF,
+                            None => EBADF,
+                        };
+                        pyo_trace!("[pwrite64] fd={fd} -> rc={rc}");
+                        rc
+                    } else if caller.data().fs.is_fs_fd(fd) {
+                        caller.data_mut().fs.pwrite(fd, &chunk, off)
+                    } else {
+                        EBADF
+                    }
+                },
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("__syscall_pwrite64: {e}")))?;
+    }
+
     // __syscall_close(fd: i32) -> i32
     {
         let _log = mech_log.clone();
@@ -644,6 +740,7 @@ pub fn wire_fs_env_funcs(
                 "__syscall_close",
                 move |mut caller: Caller<'_, EmbedderState>, fd: i32| -> i32 {
                     _log.push("__syscall_close", fd, 0);
+                    pyo_trace!("[__syscall_close] fd={fd}");
                     // Host-backed fds are closed first; otherwise delegate to InMemFs.
                     if let Some(rc) = caller.data_mut().fs.close_host(fd) {
                         rc
@@ -766,8 +863,11 @@ pub fn wire_fs_env_funcs(
                     let mut buf = [0u8; EM_STAT_STRUCT_BYTES];
                     // Route to host if path is under a rw-preopen.
                     let host_path = InMemFs::resolve_to_host_path(&abs, &caller.data().rw_preopens);
+                    pyo_trace!("[stat64] pathptr={pathptr:#x} stat_ptr={stat_ptr:#x} preopens={:?} abs={:?} host_path={:?}", caller.data().rw_preopens, abs, host_path);
                     let rc = if let Some(hp) = host_path {
-                        caller.data_mut().fs.stat_host_path(&hp, &mut buf)
+                        let r = caller.data_mut().fs.stat_host_path(&hp, &mut buf);
+                        pyo_trace!("[stat64-host] hp={hp:?} -> rc={r}");
+                        r
                     } else {
                         caller.data_mut().fs.stat_into(&abs, &mut buf)
                     };
@@ -793,6 +893,13 @@ pub fn wire_fs_env_funcs(
 
     // __syscall_lstat64(pathptr: i32, stat_ptr: i32) -> i32
     // No symlinks in our FS, so identical to stat64 (with host passthrough too).
+    //
+    // For paths under a rw-preopen whose parent directory exists but the file
+    // itself does not yet exist on the host, we return a fake "empty regular
+    // file" stat instead of ENOENT. This lets musl's realpath() succeed for
+    // to-be-created files (musl realpath fails on ENOENT for the last component,
+    // unlike glibc which succeeds). sqlite3's unixFullPathname calls realpath
+    // and would return SQLITE_CANTOPEN if realpath fails here.
     {
         let _log = mech_log.clone();
         linker
@@ -809,7 +916,7 @@ pub fn wire_fs_env_funcs(
                     let mut buf = [0u8; EM_STAT_STRUCT_BYTES];
                     let host_path = InMemFs::resolve_to_host_path(&abs, &caller.data().rw_preopens);
                     let rc = if let Some(hp) = host_path {
-                        caller.data_mut().fs.stat_host_path(&hp, &mut buf)
+                        caller.data_mut().fs.stat_host_path_for_lstat(&hp, &mut buf)
                     } else {
                         caller.data_mut().fs.stat_into(&abs, &mut buf)
                     };
@@ -1033,22 +1140,59 @@ pub fn wire_fs_env_funcs(
                     } else {
                         caller.data_mut().fs.exists(&abs)
                     };
-                    if exists { 0 } else { ENOENT }
+                    let rc = if exists { 0 } else { ENOENT };
+                    pyo_trace!("[faccessat] {:?} mode={_mode} -> rc={rc}", abs);
+                    rc
                 },
             )
             .map_err(|e| AfterburnerError::Engine(format!("__syscall_faccessat: {e}")))?;
     }
 
     // __syscall_fcntl64(fd: i32, cmd: i32, arg: i32) -> i32
-    // F_GETFL=3 returns O_RDONLY=0; everything else returns 0 (no-op).
+    // F_GETFL=3: return O_RDWR(2) for host-backed fds (they are always opened
+    // read-write), O_RDONLY(0) for MEMFS fds.
+    // F_GETLK(5) / F_GETLK64(12): write F_UNLCK into the flock64 struct at arg
+    // so SQLite's conflict check always reports no existing lock.
+    // F_SETLK(6) / F_SETLKW(7) / F_SETLK64(13) / F_SETLKW64(14): always
+    // succeed (single-connection; no real inter-process locking needed).
+    // All other commands return 0.
     {
         let _log = mech_log.clone();
         linker
             .func_wrap(
                 "env",
                 "__syscall_fcntl64",
-                move |_caller: Caller<'_, EmbedderState>, fd: i32, cmd: i32, _arg: i32| -> i32 {
+                move |mut caller: Caller<'_, EmbedderState>, fd: i32, cmd: i32, arg: i32| -> i32 {
                     _log.push("__syscall_fcntl64", fd, cmd);
+                    const F_GETFL: i32 = 3;
+                    const F_GETLK: i32 = 5;
+                    const F_SETLK: i32 = 6;
+                    const F_SETLKW: i32 = 7;
+                    const F_GETLK64: i32 = 12;
+                    const F_SETLK64: i32 = 13;
+                    const F_SETLKW64: i32 = 14;
+                    const O_RDWR: i32 = 2;
+                    const F_UNLCK: i16 = 2;
+                    pyo_trace!("[__syscall_fcntl64] fd={fd} cmd={cmd} arg={arg}");
+                    if cmd == F_GETFL && caller.data().fs.is_host_fd(fd) {
+                        // Host-backed files are always opened O_RDWR.
+                        return O_RDWR;
+                    }
+                    if (cmd == F_GETLK || cmd == F_GETLK64)
+                        && arg != 0
+                        && let Some(mem) = caller.data().pyodide_memory
+                    {
+                        // Write l_type=F_UNLCK so SQLite sees no conflicting lock.
+                        let p = arg as u32 as usize;
+                        let data = mem.data_mut(&mut caller);
+                        if p + 2 <= data.len() {
+                            let bytes = (F_UNLCK as u16).to_le_bytes();
+                            data[p] = bytes[0];
+                            data[p + 1] = bytes[1];
+                        }
+                    }
+                    // F_SETLK / F_SETLKW and all other commands: succeed silently.
+                    let _ = (F_SETLK, F_SETLKW, F_SETLK64, F_SETLKW64);
                     0
                 },
             )
@@ -1079,7 +1223,57 @@ pub fn wire_fs_env_funcs(
     // __syscall_mkdirat has a real handler above (creates the directory in
     // MEMFS); omit it from the stub list so the real handler is not shadowed.
     def_syscall!("__syscall_mknodat", 4);
-    def_syscall!("__syscall_unlinkat", 3);
+
+    // __syscall_unlinkat(dirfd, pathptr, flags) -> i32
+    // Delete a file. For host-backed paths (rw-preopens) this removes the
+    // actual host file. sqlite3 uses this to delete the rollback journal when
+    // committing a transaction; without it, no transaction can commit.
+    {
+        let _log = mech_log.clone();
+        linker
+            .func_wrap(
+                "env",
+                "__syscall_unlinkat",
+                move |mut caller: Caller<'_, EmbedderState>,
+                      dirfd: i32,
+                      pathptr: i32,
+                      _flags: i32|
+                      -> i32 {
+                    _log.push("__syscall_unlinkat", dirfd, pathptr);
+                    let path_str = match read_cstr(&caller, pathptr) {
+                        Some(s) => s,
+                        None => return ENOENT,
+                    };
+                    let base = if path_str.starts_with('/') || dirfd == -100 {
+                        "/".to_owned()
+                    } else {
+                        match caller.data().fs.fd_path(dirfd) {
+                            Some(p) => p.to_owned(),
+                            None => return EBADF,
+                        }
+                    };
+                    let abs = caller.data().fs.resolve(&base, &path_str);
+                    pyo_trace!("[unlinkat] abs={abs:?}");
+                    // Route host-backed paths to the real filesystem.
+                    if let Some(host_path) =
+                        InMemFs::resolve_to_host_path(&abs, &caller.data().rw_preopens)
+                    {
+                        // On Linux, deleting an open file unlinks the directory
+                        // entry; the data persists until the last fd is closed.
+                        // We do not need to close open handles here.
+                        pyo_trace!("[unlinkat-host] host_path={host_path:?}");
+                        match std::fs::remove_file(&host_path) {
+                            Ok(()) => 0,
+                            Err(e) => io_err_to_errno(&e),
+                        }
+                    } else {
+                        // MEMFS unlink.
+                        caller.data_mut().fs.unlink(&abs)
+                    }
+                },
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("__syscall_unlinkat: {e}")))?;
+    }
     def_syscall!("__syscall_rmdir", 1);
     def_syscall!("__syscall_renameat", 4);
     def_syscall!("__syscall_symlink", 2);
@@ -1095,8 +1289,265 @@ pub fn wire_fs_env_funcs(
     def_syscall!("__syscall_dup3", 3);
     // __syscall_fcntl64 and __syscall_faccessat have real implementations above;
     // omit them from the stub list so the real handlers are not shadowed.
-    def_syscall!("__syscall_fdatasync", 1);
-    def_syscall!("__syscall_poll", 3);
+    // fdatasync: flush journal pages to disk. Return success (0) to allow
+    // sqlite3 to proceed; real data is written to host files, no kernel
+    // flush is needed inside the sandbox.
+    {
+        let _log = mech_log.clone();
+        linker
+            .func_wrap(
+                "env",
+                "__syscall_fdatasync",
+                move |_: Caller<'_, EmbedderState>, fd: i32| -> i32 {
+                    _log.push("__syscall_fdatasync", fd, 0);
+                    0
+                },
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("__syscall_fdatasync: {e}")))?;
+    }
+    // __syscall_poll(fds_ptr: i32, nfds: i32, timeout_ms: i32) -> i32
+    // struct pollfd { fd: i32, events: i16, revents: i16 } = 8 bytes
+    // POLLIN = 1; return count of ready fds, -1 on error.
+    //
+    // When the daemon net is present, we wait for incoming connections
+    // (POLLIN on a server fd) or buffered data (POLLIN on a conn fd).
+    // Without daemon net the wasm program cannot do socket I/O, so
+    // poll returns -1 (ENOSYS) to surface the error early.
+    {
+        linker
+            .func_wrap(
+                "env",
+                "__syscall_poll",
+                |mut caller: Caller<'_, EmbedderState>,
+                 fds_ptr: i32,
+                 nfds: i32,
+                 timeout_ms: i32|
+                 -> i32 {
+                    let net = match caller.data().daemon_net.clone() {
+                        Some(n) => n,
+                        None => return -1,
+                    };
+                    let n = nfds as usize;
+                    let struct_size = 8usize; // sizeof(struct pollfd) on wasm32
+                    let bytes_needed = n * struct_size;
+                    let mem_handle = match caller.data().pyodide_memory {
+                        Some(m) => m,
+                        None => return EINVAL,
+                    };
+                    let fds_bytes = {
+                        let data = mem_handle.data(&caller);
+                        let off = fds_ptr as usize;
+                        if off + bytes_needed > data.len() {
+                            return EINVAL;
+                        }
+                        data[off..off + bytes_needed].to_vec()
+                    };
+                    const POLLIN: u16 = 1;
+                    // Determine which fds are server (listener) vs conn (data),
+                    // and separate those with immediate readiness from those that need blocking.
+                    let mut server_fds_asked: Vec<(usize, i32, u16)> = Vec::new();
+                    let mut conn_fds_waiting: Vec<(usize, i32)> = Vec::new(); // (slot, conn_id)
+                    let mut revents_ready: Vec<(usize, u16)> = Vec::new();
+                    for i in 0..n {
+                        let base = i * struct_size;
+                        let fd = i32::from_le_bytes(fds_bytes[base..base + 4].try_into().unwrap());
+                        let events =
+                            u16::from_le_bytes(fds_bytes[base + 4..base + 6].try_into().unwrap());
+                        if fd < 0 {
+                            continue;
+                        }
+                        let server_id_opt = caller
+                            .data()
+                            .socket_state
+                            .as_ref()
+                            .and_then(|s| s.server_fds.get(&fd).copied());
+                        let conn_id_opt = caller
+                            .data()
+                            .socket_state
+                            .as_ref()
+                            .and_then(|s| s.conn_fds.get(&fd).copied());
+                        if let Some(server_id) = server_id_opt {
+                            if events & POLLIN != 0 {
+                                let queued = caller
+                                    .data_mut()
+                                    .socket_state
+                                    .as_deref_mut()
+                                    .map(|s| {
+                                        !s.accept_queues.entry(server_id).or_default().is_empty()
+                                    })
+                                    .unwrap_or(false);
+                                if queued {
+                                    revents_ready.push((i, POLLIN));
+                                } else {
+                                    server_fds_asked.push((i, fd, events));
+                                }
+                            }
+                        } else if let Some(conn_id) = conn_id_opt
+                            && events & POLLIN != 0
+                        {
+                            let has_data = caller
+                                .data()
+                                .socket_state
+                                .as_ref()
+                                .map(|s| s.has_buffered(conn_id))
+                                .unwrap_or(false);
+                            if has_data {
+                                revents_ready.push((i, POLLIN));
+                            } else {
+                                conn_fds_waiting.push((i, conn_id));
+                            }
+                        }
+                    }
+                    // Write revents for immediately ready fds and return.
+                    if !revents_ready.is_empty() {
+                        let mem = match caller.data().pyodide_memory {
+                            Some(m) => m,
+                            None => return revents_ready.len() as i32,
+                        };
+                        let data = mem.data_mut(&mut caller);
+                        for (slot, rev) in &revents_ready {
+                            let off = fds_ptr as usize + slot * struct_size + 6;
+                            if off + 2 <= data.len() {
+                                data[off..off + 2].copy_from_slice(&rev.to_le_bytes());
+                            }
+                        }
+                        return revents_ready.len() as i32;
+                    }
+                    // Nothing immediately ready. Decide what to block on.
+                    let has_server_wait = !server_fds_asked.is_empty();
+                    let has_conn_wait = !conn_fds_waiting.is_empty();
+                    if !has_server_wait && !has_conn_wait {
+                        return 0;
+                    }
+                    let timeout_dur = if timeout_ms < 0 {
+                        std::time::Duration::from_secs(3600)
+                    } else {
+                        std::time::Duration::from_millis(timeout_ms as u64)
+                    };
+                    // If there are connection fds waiting for data (no server fds), block on data.
+                    if !has_server_wait {
+                        // Block waiting for a Data event on any of the conn_fds_waiting.
+                        let waiting_conn_ids: Vec<i32> =
+                            conn_fds_waiting.iter().map(|(_, cid)| *cid).collect();
+                        let net2 = Arc::clone(&net);
+                        let maybe_data = net.runtime().block_on(async move {
+                            tokio::time::timeout(timeout_dur, async move {
+                                loop {
+                                    if let Some(crate::daemon_net::NetEvent::Data {
+                                        conn_id,
+                                        payload_b64,
+                                    }) = net2.try_recv_event()
+                                        && waiting_conn_ids.contains(&conn_id)
+                                    {
+                                        return Some((conn_id, payload_b64));
+                                    }
+                                    tokio::task::yield_now().await;
+                                }
+                            })
+                            .await
+                            .ok()
+                            .flatten()
+                        });
+                        match maybe_data {
+                            None => return 0,
+                            Some((cid, payload_b64)) => {
+                                // Push data to recv_bufs for recvmsg to consume.
+                                use base64::{Engine as _, engine::general_purpose::STANDARD};
+                                if let Ok(bytes) = STANDARD.decode(&payload_b64)
+                                    && let Some(s) = caller.data_mut().socket_state.as_deref_mut()
+                                {
+                                    s.push_data(cid, bytes);
+                                }
+                                // Find slot for this conn_id and set revents.
+                                let slot = conn_fds_waiting
+                                    .iter()
+                                    .find(|(_, c)| *c == cid)
+                                    .map(|(s, _)| *s);
+                                let mem = match caller.data().pyodide_memory {
+                                    Some(m) => m,
+                                    None => return 1,
+                                };
+                                let data = mem.data_mut(&mut caller);
+                                if let Some(slot_idx) = slot {
+                                    let off = fds_ptr as usize + slot_idx * struct_size + 6;
+                                    if off + 2 <= data.len() {
+                                        data[off..off + 2].copy_from_slice(&POLLIN.to_le_bytes());
+                                    }
+                                }
+                                return 1;
+                            }
+                        }
+                    }
+                    // Block waiting for a server connection event, skipping non-connection
+                    // events (like Listening) that DaemonNet fires first.
+                    let (slot_idx, server_virt_fd, _) = server_fds_asked[0];
+                    let server_id = caller
+                        .data()
+                        .socket_state
+                        .as_ref()
+                        .and_then(|s| s.server_fds.get(&server_virt_fd).copied())
+                        .unwrap_or(-1);
+                    if server_id < 0 {
+                        return -1;
+                    }
+                    let net2 = Arc::clone(&net);
+                    // Also route Data events to conn recv_bufs while waiting for a new connection.
+                    let maybe_conn = net.runtime().block_on(async move {
+                        tokio::time::timeout(timeout_dur, async move {
+                            loop {
+                                if let Some(ev) = net2.try_recv_event() {
+                                    match ev {
+                                        crate::daemon_net::NetEvent::Connection {
+                                            server_id,
+                                            conn_id,
+                                            ..
+                                        } => {
+                                            return Some((server_id, conn_id));
+                                        }
+                                        crate::daemon_net::NetEvent::Data {
+                                            conn_id,
+                                            payload_b64,
+                                        } => {
+                                            // Discard buffered data - will come via recvmsg.
+                                            drop((conn_id, payload_b64));
+                                        }
+                                        _ => {} // Listening and other events skipped.
+                                    }
+                                }
+                                tokio::task::yield_now().await;
+                            }
+                        })
+                        .await
+                        .ok()
+                        .flatten()
+                    });
+                    match maybe_conn {
+                        None => 0,
+                        Some((sid, conn_id)) => {
+                            // Queue the connection for accept4 to pick up.
+                            let state = caller.data_mut().socket_state.as_deref_mut().unwrap();
+                            state
+                                .accept_queues
+                                .entry(sid)
+                                .or_default()
+                                .push_back(conn_id);
+                            // Set revents = POLLIN for this server fd.
+                            let mem = match caller.data().pyodide_memory {
+                                Some(m) => m,
+                                None => return 1,
+                            };
+                            let data = mem.data_mut(&mut caller);
+                            let off = fds_ptr as usize + slot_idx * struct_size + 6;
+                            if off + 2 <= data.len() {
+                                data[off..off + 2].copy_from_slice(&POLLIN.to_le_bytes());
+                            }
+                            1
+                        }
+                    }
+                },
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("__syscall_poll: {e}")))?;
+    }
     def_syscall!("__syscall_pipe", 1);
     def_syscall!("__syscall_utimensat", 4);
     // ---- socket syscalls -------------------------------------------------------
@@ -1111,18 +1562,90 @@ pub fn wire_fs_env_funcs(
 
     #[cfg(not(feature = "daemon"))]
     {
-        def_syscall!("__syscall_socket", 3);
-        def_syscall!("__syscall_connect", 3);
-        def_syscall!("__syscall_bind", 3);
-        def_syscall!("__syscall_listen", 2);
-        def_syscall!("__syscall_accept4", 4);
-        def_syscall!("__syscall_sendmsg", 3);
-        def_syscall!("__syscall_recvmsg", 3);
+        // All socket syscalls are typed (i32 i32 i32 i32 i32 i32) -> i32 in both
+        // the 0.28.3 and 3.14 runtimes (emscripten type 10). Use the 6-param stub.
+        def_syscall!("__syscall_socket", 6);
+        def_syscall!("__syscall_connect", 6);
+        def_syscall!("__syscall_bind", 6);
+        def_syscall!("__syscall_listen", 6);
+        def_syscall!("__syscall_accept4", 6);
+        def_syscall!("__syscall_sendmsg", 6);
+        def_syscall!("__syscall_recvmsg", 6);
     }
 
     def_syscall!("__syscall_getsockopt", 6);
-    def_syscall!("__syscall_getsockname", 6);
+    {
+        let _log = mech_log.clone();
+        linker
+            .func_wrap(
+                "env",
+                "__syscall_getsockname",
+                move |mut caller: Caller<'_, EmbedderState>,
+                      sockfd: i32,
+                      addr_ptr: i32,
+                      addrlen_ptr: i32,
+                      _c: i32,
+                      _d: i32,
+                      _e: i32|
+                      -> i32 {
+                    _log.push("__syscall_getsockname", sockfd, addr_ptr);
+                    // Resolve port: for server fds use the bound port; for
+                    // connection fds (accepted) return port 0 as local port.
+                    let port: u16 = {
+                        let placeholder = {
+                            let state = caller
+                                .data_mut()
+                                .socket_state
+                                .get_or_insert_with(socket::SocketState::new);
+                            state.server_fds.get(&sockfd).copied()
+                        };
+                        if let Some(p) = placeholder {
+                            if p < 0 { (-p) as u16 } else { p as u16 }
+                        } else {
+                            // Check if it's a connection fd (accepted socket).
+                            let is_conn = caller
+                                .data()
+                                .socket_state
+                                .as_ref()
+                                .and_then(|s| s.conn_fds.get(&sockfd).copied())
+                                .is_some();
+                            if !is_conn {
+                                return socket::EBADF;
+                            }
+                            0 // local port for accepted connections
+                        }
+                    };
+                    // Write sockaddr_in (16 bytes): family(2 LE), port(2 BE), addr(4 BE), pad(8)
+                    let mut sa = [0u8; 16];
+                    sa[0..2].copy_from_slice(&2u16.to_le_bytes()); // AF_INET
+                    sa[2..4].copy_from_slice(&port.to_be_bytes()); // port big-endian
+                    sa[4..8].copy_from_slice(&0x7f000001u32.to_be_bytes()); // 127.0.0.1
+                    let mem = match caller.data().pyodide_memory {
+                        Some(m) => m,
+                        None => return EINVAL,
+                    };
+                    let data = mem.data_mut(&mut caller);
+                    let addr_off = addr_ptr as usize;
+                    if addr_off + 16 > data.len() {
+                        return EINVAL;
+                    }
+                    data[addr_off..addr_off + 16].copy_from_slice(&sa);
+                    // Write addrlen = 16
+                    let al_off = addrlen_ptr as usize;
+                    if al_off + 4 <= data.len() {
+                        data[al_off..al_off + 4].copy_from_slice(&16i32.to_le_bytes());
+                    }
+                    0
+                },
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("__syscall_getsockname: {e}")))?;
+    }
     def_syscall!("__syscall_getpeername", 6);
+    // __syscall_shutdown is imported by the 3.14 runtime (not the 0.28.3 one).
+    // In daemon mode wire.rs registers a real implementation; without daemon,
+    // a sealed stub returning -1 is sufficient.
+    #[cfg(not(feature = "daemon"))]
+    def_syscall!("__syscall_shutdown", 6);
 
     // Syscalls with i64 params (not expressible via def_syscall!).
     linker
@@ -1141,11 +1664,146 @@ pub fn wire_fs_env_funcs(
             },
         )
         .map_err(|e| AfterburnerError::Engine(format!("__syscall_fallocate: {e}")))?;
+    // _try_fcntl64(fd, cmd, arg, lock_ptr) - Emscripten file-locking wrapper.
+    // SQLite's delete-journal mode calls F_SETLK64 (cmd=13) / F_SETLKW64 (14)
+    // to acquire advisory locks and F_GETLK64 (cmd=12) to check for conflicts.
+    // `arg` is a pointer to struct flock64 in guest memory (wasm32 layout):
+    //   offset 0:  l_type  (i16) - F_RDLCK=0, F_WRLCK=1, F_UNLCK=2
+    //   offset 2:  l_whence (i16)
+    //   offset 4:  padding  (4 bytes, wasm32 i64 alignment)
+    //   offset 8:  l_start  (i64)
+    //   offset 16: l_len    (i64)
+    //   offset 24: l_pid    (i32)
+    // Single-connection guarantee: F_SETLK always succeeds; F_GETLK always
+    // reports F_UNLCK (no conflict). We track the held locks in ADVISORY_LOCKS
+    // so F_UNLCK correctly removes them and the table stays consistent.
+    linker
+        .func_wrap(
+            "env",
+            "_try_fcntl64",
+            |mut caller: Caller<'_, EmbedderState>,
+             fd: i32,
+             cmd: i32,
+             arg: i32,
+             _lock_ptr: i32|
+             -> i32 {
+                // Linux cmd values (both 32- and 64-bit variants).
+                const F_GETLK: i32 = 5;
+                const F_SETLK: i32 = 6;
+                const F_SETLKW: i32 = 7;
+                const F_GETLK64: i32 = 12;
+                const F_SETLK64: i32 = 13;
+                const F_SETLKW64: i32 = 14;
+                const F_RDLCK: i16 = 0;
+                const F_WRLCK: i16 = 1;
+                const F_UNLCK: i16 = 2;
+
+                let is_getlk = cmd == F_GETLK || cmd == F_GETLK64;
+                let is_setlk =
+                    cmd == F_SETLK || cmd == F_SETLKW || cmd == F_SETLK64 || cmd == F_SETLKW64;
+
+                if !is_getlk && !is_setlk {
+                    return 0;
+                }
+
+                // Read the flock64 struct from guest memory.
+                // `_try_fcntl64(fd, cmd, arg, lock_ptr)` where:
+                // - `arg` = the varargs area pointer (stack slot holding the flock64
+                //   struct pointer, passed as the third argument to fcntl()).
+                //   The actual flock64 is at `*arg` (the i32 at that address).
+                // - `lock_ptr` = an Emscripten-internal copy area; NOT the user pointer.
+                // Dereference: struct_ptr = *((i32*)(wasm_mem + arg))
+                let struct_ptr: i32 = if arg != 0 {
+                    caller.data().pyodide_memory.and_then(|mem| {
+                        let p = arg as u32 as usize;
+                        let data = mem.data(&caller);
+                        if p + 4 <= data.len() {
+                            Some(i32::from_le_bytes(data[p..p+4].try_into().ok()?))
+                        } else {
+                            None
+                        }
+                    }).unwrap_or(0)
+                } else {
+                    0
+                };
+                let flock = if struct_ptr != 0 {
+                    caller.data().pyodide_memory.and_then(|mem| {
+                        let p = struct_ptr as u32 as usize;
+                        let data = mem.data(&caller);
+                        if p + 28 > data.len() {
+                            return None;
+                        }
+                        let l_type = i16::from_le_bytes(data[p..p + 2].try_into().ok()?);
+                        // l_whence at p+2, skip padding at p+4..p+8
+                        let l_start = i64::from_le_bytes(data[p + 8..p + 16].try_into().ok()?);
+                        let l_len = i64::from_le_bytes(data[p + 16..p + 24].try_into().ok()?);
+                        Some((l_type, l_start, l_len))
+                    })
+                } else {
+                    None
+                };
+
+                let (l_type, l_start, l_len) = match flock {
+                    Some(f) => f,
+                    None => return 0, // no struct pointer: succeed silently
+                };
+                pyo_trace!("[_try_fcntl64] fd={fd} cmd={cmd} l_type={l_type} l_start={l_start} l_len={l_len}");
+
+                // Resolve the host path string for the lock key.
+                let path_key: String = caller
+                    .data()
+                    .fs
+                    .fd_path(fd)
+                    .map(|p| p.to_owned())
+                    .unwrap_or_else(|| format!("fd:{fd}"));
+
+                let key: LockKey = (path_key, l_start, l_len);
+
+                if is_getlk {
+                    // F_GETLK: report no conflict (single-connection; table is
+                    // always consistent with our own locks). Write F_UNLCK back.
+                    if struct_ptr != 0
+                        && let Some(mem) = caller.data().pyodide_memory
+                    {
+                        let p = struct_ptr as u32 as usize;
+                        let data = mem.data_mut(&mut caller);
+                        if p + 2 <= data.len() {
+                            let bytes = (F_UNLCK as u16).to_le_bytes();
+                            data[p] = bytes[0];
+                            data[p + 1] = bytes[1];
+                        }
+                    }
+                    return 0;
+                }
+
+                // F_SETLK / F_SETLKW: update the lock table.
+                if let Ok(mut table) = ADVISORY_LOCKS.lock() {
+                    if l_type == F_UNLCK {
+                        table.remove(&key);
+                    } else if l_type == F_RDLCK || l_type == F_WRLCK {
+                        table.insert(key, l_type);
+                    }
+                }
+                0
+            },
+        )
+        .map_err(|e| AfterburnerError::Engine(format!("_try_fcntl64: {e}")))?;
     linker
         .func_wrap(
             "env",
             "__syscall_ftruncate64",
-            |_: Caller<'_, EmbedderState>, _fd: i32, _len: i64| -> i32 { -1 },
+            |mut caller: Caller<'_, EmbedderState>, fd: i32, len: i64| -> i32 {
+                let len_u64 = len.max(0) as u64;
+                pyo_trace!("[ftruncate64] fd={fd} len={len}");
+                if caller.data().fs.is_host_fd(fd) {
+                    return match caller.data_mut().fs.truncate_host(fd, len_u64) {
+                        Some(0) => 0,
+                        Some(e) => e,
+                        None => -9, // EBADF
+                    };
+                }
+                0
+            },
         )
         .map_err(|e| AfterburnerError::Engine(format!("__syscall_ftruncate64: {e}")))?;
     linker
@@ -1195,11 +1853,15 @@ pub fn wire_fs_env_funcs(
                                  _sz: i32,
                                  _buf: i32|
      -> i32 { -1 });
-    def!("__syscall_statfs64", |_: Caller<'_, EmbedderState>,
-                                _p: i32,
+    def!("__syscall_statfs64", |caller: Caller<'_, EmbedderState>,
+                                p: i32,
                                 _sz: i32,
                                 _buf: i32|
-     -> i32 { -1 });
+     -> i32 {
+        let path = read_cstr(&caller, p).unwrap_or_else(|| format!("ptr={p:#x}"));
+        pyo_trace!("[statfs64] {:?} -> -1", path);
+        -1
+    });
     def!("__syscall__newselect", |_: Caller<'_, EmbedderState>,
                                   _n: i32,
                                   _r: i32,

@@ -880,6 +880,7 @@ fn run_pyodide_core(
     // Install host-FS preopens into the store so the Emscripten FS syscall
     // handlers can route guest paths to the real host filesystem.
     if !rw_preopens.is_empty() {
+        crate::pyo_trace!("[run_pyodide_core] setting rw_preopens={rw_preopens:?}");
         store.data_mut().rw_preopens = rw_preopens.to_vec();
     }
 
@@ -1356,6 +1357,54 @@ mod tests {
         assert!(
             text.contains("VENDOR_PIP_OK vendor_ok"),
             "vendored stubpkg must be importable offline; stdout={text:?}"
+        );
+    }
+
+    /// Sanity check: Python `open('/data/test.txt', 'w')` writes a file to
+    /// the host filesystem via a rw-preopen. This verifies the N3 host-FS
+    /// routing works before any sqlite3 test is run.
+    ///
+    /// Uses the 3.14 runtime when `BURN_PYTHON_RUNTIME` / `BURN_PYTHON_STDLIB_VER`
+    /// are set, otherwise the default (0.28.3) runtime.
+    #[test]
+    #[ignore = "requires /tmp/pyodide-exnref.wasm and /tmp/python_stdlib.zip"]
+    fn host_preopen_file_write_roundtrip() {
+        let runtime_path =
+            std::env::var("BURN_PYTHON_RUNTIME").unwrap_or_else(|_| TEST_WASM_PATH.to_owned());
+        if !std::path::Path::new(&runtime_path).exists() {
+            eprintln!("skip: python runtime not found at {runtime_path}");
+            return;
+        }
+        let rt = match resolve_runtime() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip: {e}");
+                return;
+            }
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let host_dir = tmp.path().to_path_buf();
+        let out = run_pyodide_with_preopens(
+            &rt,
+            r#"
+with open('/data/hello.txt', 'w') as f:
+    f.write('host-ok\n')
+with open('/data/hello.txt', 'r') as f:
+    print(f.read().strip())
+"#,
+            &[(host_dir.clone(), "/data".to_owned())],
+        )
+        .expect("run_pyodide_with_preopens failed");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert_eq!(out.exit_code, 0, "expected exit 0; stdout={text:?}");
+        assert!(
+            text.contains("host-ok"),
+            "expected 'host-ok' in stdout; got: {text:?}"
+        );
+        assert!(
+            host_dir.join("hello.txt").exists(),
+            "file not found on host at {:?}",
+            host_dir.join("hello.txt")
         );
     }
 }

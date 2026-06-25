@@ -228,10 +228,6 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                       iovs_len: i32,
                       nwritten_ptr: i32|
      -> i32 {
-        pyo_trace!(
-            "[fd_write] fd={fd} iovs_ptr={iovs_ptr:#x} iovs_len={iovs_len} nwritten_ptr={nwritten_ptr:#x} mem={}",
-            caller.data().pyodide_memory.is_some()
-        );
         let iovs_len = iovs_len as u32 as usize;
         // Read the entire iovec array (8 bytes * iovs_len).
         let iov_bytes = match read_bytes(&caller, iovs_ptr, iovs_len * 8) {
@@ -263,6 +259,15 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                     eprint!("{}", String::from_utf8_lossy(&chunk));
                 }
                 caller.data_mut().wasi_stdout.extend_from_slice(&chunk);
+            } else if caller.data().fs.is_host_fd(fd) {
+                // Write to a host-backed file (rw-preopen path).
+                let n = match caller.data_mut().fs.write_host(fd, &chunk) {
+                    Some(n) => n,
+                    None => return EBADF,
+                };
+                if n < 0 {
+                    return -n;
+                }
             } else if caller.data().fs.is_fs_fd(fd) {
                 // Write to the MEMFS file opened by __syscall_openat.
                 // This path is used by Python's os.write() for non-stdout fds.
@@ -293,6 +298,7 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                      iovs_len: i32,
                      nread_ptr: i32|
      -> i32 {
+        pyo_trace!("[fd_read] fd={fd}");
         // stdin/stdout/stderr: return EOF (0 bytes).
         if fd < 3 {
             if !write_u32(&mut caller, nread_ptr, 0) {
@@ -300,7 +306,8 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
             }
             return 0;
         }
-        if !caller.data().fs.is_fs_fd(fd) {
+        let is_host = caller.data().fs.is_host_fd(fd);
+        if !is_host && !caller.data().fs.is_fs_fd(fd) {
             return EBADF;
         }
         let iovs_len = iovs_len as u32 as usize;
@@ -319,7 +326,14 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
             }
             // Read into a host-side temp buffer, then copy into guest memory.
             let mut tmp = vec![0u8; buf_len];
-            let n = caller.data_mut().fs.read(fd, &mut tmp);
+            let n = if is_host {
+                match caller.data_mut().fs.read_host(fd, &mut tmp) {
+                    Some(n) => n,
+                    None => return EBADF,
+                }
+            } else {
+                caller.data_mut().fs.read(fd, &mut tmp)
+            };
             if n < 0 {
                 // Translate negative errno to WASI positive errno.
                 return EBADF;
@@ -342,6 +356,8 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
     //
     // Positional read: read at `offset` without advancing the fd offset.
     // For fds 0/1/2: return 0 bytes (no stdin data).
+    // For host-backed fds: use pread_host (read_at without moving position).
+    // For in-memory fds: use InMemFs::pread.
     def!("fd_pread", |mut caller: Caller<'_, EmbedderState>,
                       fd: i32,
                       iovs_ptr: i32,
@@ -349,13 +365,15 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                       offset: i64,
                       nread_ptr: i32|
      -> i32 {
+        pyo_trace!("[fd_pread] fd={fd} iovs_len={iovs_len} offset={offset}");
         if fd < 3 {
             if !write_u32(&mut caller, nread_ptr, 0) {
                 return EBADF;
             }
             return 0;
         }
-        if !caller.data().fs.is_fs_fd(fd) {
+        let is_host = caller.data().fs.is_host_fd(fd);
+        if !is_host && !caller.data().fs.is_fs_fd(fd) {
             return EBADF;
         }
         let iovs_len = iovs_len as u32 as usize;
@@ -374,7 +392,14 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                 continue;
             }
             let mut tmp = vec![0u8; buf_len];
-            let n = caller.data_mut().fs.pread(fd, &mut tmp, cur_offset);
+            let n = if is_host {
+                match caller.data_mut().fs.pread_host(fd, &mut tmp, cur_offset) {
+                    Some(n) => n,
+                    None => return EBADF,
+                }
+            } else {
+                caller.data_mut().fs.pread(fd, &mut tmp, cur_offset)
+            };
             if n < 0 {
                 return EBADF;
             }
@@ -394,15 +419,65 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
     });
 
     // fd_pwrite(fd, iovs_ptr, iovs_len, offset, nwritten_ptr) -> i32
+    //
+    // Positional write: write at `offset` without advancing the fd offset.
+    // sqlite3 uses this for all database-page writes. Without a working
+    // pwrite, CREATE TABLE returns a disk I/O error.
+    // For host-backed fds: use pwrite_host (write_at without moving position).
+    // For in-memory fds: use InMemFs::pwrite.
     def!("fd_pwrite", |mut caller: Caller<'_, EmbedderState>,
-                       _fd: i32,
-                       _iovs_ptr: i32,
-                       _iovs_len: i32,
-                       _offset: i64,
+                       fd: i32,
+                       iovs_ptr: i32,
+                       iovs_len: i32,
+                       offset: i64,
                        nwritten_ptr: i32|
      -> i32 {
-        pyo_trace!("[fd_pwrite] fd={_fd} iovs_len={_iovs_len} offset={_offset}");
-        if !write_u32(&mut caller, nwritten_ptr, 0) {
+        pyo_trace!("[fd_pwrite] fd={fd} iovs_len={iovs_len} offset={offset}");
+        if fd < 3 {
+            // stdin/stdout/stderr: pretend to write but do nothing.
+            if !write_u32(&mut caller, nwritten_ptr, 0) {
+                return EBADF;
+            }
+            return 0;
+        }
+        let is_host = caller.data().fs.is_host_fd(fd);
+        if !is_host && !caller.data().fs.is_fs_fd(fd) {
+            return EBADF;
+        }
+        let iovs_len = iovs_len as u32 as usize;
+        let iov_bytes = match read_bytes(&caller, iovs_ptr, iovs_len * 8) {
+            Some(b) => b,
+            None => return EBADF,
+        };
+        let mut total: u32 = 0;
+        let mut cur_offset = offset as u64;
+        for i in 0..iovs_len {
+            let base = i * 8;
+            let buf_ptr = u32::from_le_bytes(iov_bytes[base..base + 4].try_into().unwrap()) as i32;
+            let buf_len =
+                u32::from_le_bytes(iov_bytes[base + 4..base + 8].try_into().unwrap()) as usize;
+            if buf_len == 0 {
+                continue;
+            }
+            let data = match read_bytes(&caller, buf_ptr, buf_len) {
+                Some(b) => b,
+                None => return EBADF,
+            };
+            let n = if is_host {
+                match caller.data_mut().fs.pwrite_host(fd, &data, cur_offset) {
+                    Some(n) => n,
+                    None => return EBADF,
+                }
+            } else {
+                caller.data_mut().fs.pwrite(fd, &data, cur_offset)
+            };
+            if n < 0 {
+                return EBADF;
+            }
+            total += n as u32;
+            cur_offset += n as u64;
+        }
+        if !write_u32(&mut caller, nwritten_ptr, total) {
             return EBADF;
         }
         0
@@ -421,7 +496,15 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                      whence: i32,
                      newoffset_ptr: i32|
      -> i32 {
-        let new_off: i64 = if fd >= 3 && caller.data().fs.is_fs_fd(fd) {
+        pyo_trace!("[fd_seek] fd={fd} offset={offset} whence={whence}");
+        let new_off: i64 = if fd >= 3 && caller.data().fs.is_host_fd(fd) {
+            let r = caller.data_mut().fs.lseek_host(fd, offset, whence);
+            match r {
+                Some(n) if n < 0 => return EINVAL,
+                Some(n) => n,
+                None => return EBADF,
+            }
+        } else if fd >= 3 && caller.data().fs.is_fs_fd(fd) {
             let r = caller.data_mut().fs.lseek(fd, offset, whence);
             if r < 0 {
                 // Translate to WASI EINVAL for invalid argument errors.
@@ -445,8 +528,9 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
     def!("fd_close", |mut caller: Caller<'_, EmbedderState>,
                       fd: i32|
      -> i32 {
+        pyo_trace!("[fd_close] fd={fd}");
         if fd >= 3 {
-            let rc = caller.data_mut().fs.close(fd);
+            let rc = caller.data_mut().fs.wasi_close(fd);
             if rc < 0 {
                 return EBADF;
             }
@@ -470,8 +554,9 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                            fd: i32,
                            stat_ptr: i32|
      -> i32 {
+        pyo_trace!("[fd_fdstat_get] fd={fd}");
         let filetype: u8 = if fd >= 3 {
-            if !caller.data().fs.is_fs_fd(fd) {
+            if !caller.data().fs.is_fs_fd(fd) && !caller.data().fs.is_host_fd(fd) {
                 return EBADF;
             }
             4 // regular file

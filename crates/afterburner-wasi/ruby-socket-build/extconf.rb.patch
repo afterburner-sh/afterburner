@@ -1,0 +1,51 @@
+--- /tmp/extconf.orig	2026-06-25 21:38:11.117443040 +0200
++++ ruby-3.4.1/ext/socket/extconf.rb	2026-06-25 21:31:00.329442808 +0200
+@@ -1,6 +1,29 @@
+ # frozen_string_literal: false
+ require 'mkmf'
+ 
++# === afterburner socket shim (wasm32-wasip1) ===
++# wasi-libc declares the BSD socket API under __wasilibc_use_wasip2 and ships
++# <netdb.h> in its wasip2 include tree; sockshim.c supplies the libc-missing
++# symbols as env.sock_* WASM imports. Pre-seed mkmf so the link-based have_func
++# probes pass during cross-compile (the conftests cannot see sockshim.o).
++if RUBY_PLATFORM =~ /wasm|wasi/
++  wasi_sysroot = ENV["WASI_SYSROOT"]
++  $CPPFLAGS << " -include #{File.expand_path(__dir__)}/sockcompat.h"
++  $CPPFLAGS << " -I#{wasi_sysroot}/include/wasm32-wasip2" if wasi_sysroot
++  # wasi-libc netdb.h declares `const char *gai_strerror(int)`; make the bundled
++  # addrinfo.h (GETADDRINFO_EMU path) use the same const-qualified signature.
++  $defs << "-DGAI_STRERROR_CONST"
++  # Treat the shimmed funcs as present (avoids conftest link failures).
++  %w[socket connect bind listen setsockopt getsockname getpeername socketpair
++     sendto recvfrom sendmsg recvmsg gethostname getservbyport send recv accept accept4 shutdown
++     getsockopt inet_ntop inet_pton].each do |f|
++    $defs << "-DHAVE_#{f.upcase}"
++  end
++  # Build and link the shim object alongside the extension.
++  $objs ||= []
++end
++
++
+ AF_INET6_SOCKET_CREATION_TEST = <<EOF
+ #include <sys/types.h>
+ #ifndef _WIN32
+@@ -461,7 +484,7 @@
+   have_library("socket", "socket(0,0,0)", headers) # SunOS
+ end
+ 
+-if have_func(test_func, headers)
++if (RUBY_PLATFORM =~ /wasm|wasi/) || have_func(test_func, headers)
+ 
+   have_func("sendmsg(0, (struct msghdr *)NULL, 0)", headers) # POSIX
+   have_recvmsg = have_func("recvmsg(0, (struct msghdr *)NULL, 0)", headers) # POSIX
+@@ -636,7 +659,8 @@
+     "option.#{$OBJEXT}",
+     "ancdata.#{$OBJEXT}",
+     "raddrinfo.#{$OBJEXT}",
+-    "ifaddr.#{$OBJEXT}"
++    "ifaddr.#{$OBJEXT}",
++    "sockshim.#{$OBJEXT}"
+   ]
+ 
+   if getaddr_info_ok == :wide

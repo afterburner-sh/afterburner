@@ -3,6 +3,13 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
+//! INERT on the stock pyodide (verified 2026-06-25). The bundled single-threaded
+//! `pyodide-exnref.wasm` imports ZERO process-creation functions (no `fork`, `clone`,
+//! `execve`, or `posix_spawn`), so none of the functions wired in this module are ever
+//! called on the current build. This surface is kept for a future process-capable
+//! pyodide; today it is dead code, not live multiprocessing. See
+//! `docs/wasi-component-roadmap.md`.
+//!
 //! Real OS-backed multiprocessing surface for the Python runtime (Section 5 of
 //! the concurrency design).
 //!

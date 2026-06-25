@@ -93,6 +93,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use crate::emscripten_syscall::EM_STAT_STRUCT_BYTES;
@@ -352,14 +353,15 @@ impl InMemFs {
 
     fn alloc_fd(&mut self, path: String) -> i32 {
         let entry = FdEntry {
-            path,
+            path: path.clone(),
             offset: 0,
             dir_cursor: 0,
         };
         // Reuse a slot if one is free, starting from index 3 to preserve
-        // the 0/1/2 reservation for stdin/stdout/stderr.
+        // the 0/1/2 reservation for stdin/stdout/stderr. Skip slots whose fd
+        // number is still live in host_fds as a defensive guard.
         for (i, slot) in self.fds.iter_mut().enumerate().skip(3) {
-            if slot.is_none() {
+            if slot.is_none() && !self.host_fds.contains_key(&(i as i32)) {
                 *slot = Some(entry);
                 return i as i32;
             }
@@ -464,7 +466,64 @@ impl InMemFs {
             return EBADF;
         }
         self.fds[fd_usize] = None;
+        // Drop the host File handle if this was a host-backed fd.
+        self.host_fds.remove(&fd);
         0
+    }
+
+    /// WASI `fd_close` variant used by the WASI `fd_close` import.
+    ///
+    /// Python's threading / subprocess machinery issues a bulk `fd_close` sweep
+    /// over all open fds when it starts a subprocess or resets the interpreter.
+    /// Host-backed fds (SQLite database files, preopened directories) are opened
+    /// via the Emscripten `env.__syscall_openat` path and closed via
+    /// `env.__syscall_close`; the WASI close sweep must not destroy those live
+    /// file handles mid-transaction.
+    ///
+    /// For host-backed fds that are SQLite journals (path ends with "-journal"):
+    /// honour the close (SQLite explicitly closes the journal at commit). Keeping
+    /// the journal fd alive would leak the fd slot and cause the next transaction's
+    /// journal to land on a different fd number, confusing SQLite's internal state.
+    ///
+    /// For all other host-backed fds (the db file itself, preopened directories):
+    /// this call is a no-op so Python's sweep cannot kill a live db connection.
+    ///
+    /// For MEMFS fds: the slot is released as usual.
+    pub fn wasi_close(&mut self, fd: i32) -> i32 {
+        let fd_usize = fd as usize;
+        if fd_usize < 3 || fd_usize >= self.fds.len() {
+            return EBADF;
+        }
+        if self.fds[fd_usize].is_none() {
+            return EBADF;
+        }
+        if self.host_fds.contains_key(&fd) {
+            // Journal fds (path ends with "-journal"): honour the close so the
+            // fd slot is freed and the next write transaction can reuse it.
+            let is_journal = self.fds[fd_usize]
+                .as_ref()
+                .is_some_and(|e| e.path.ends_with("-journal"));
+            if is_journal {
+                pyo_trace!("[wasi_close] fd={fd} journal - closing (freeing slot for next tx)");
+                self.host_fds.remove(&fd);
+                self.fds[fd_usize] = None;
+                return 0;
+            }
+            // Database file or directory fd: no-op to survive Python's sweep.
+            pyo_trace!("[wasi_close] fd={fd} host-backed db/dir - no-op (protected)");
+            return 0;
+        }
+        // MEMFS-only fd: release the slot.
+        self.fds[fd_usize] = None;
+        0
+    }
+
+    /// Remove a MEMFS node. Returns 0 or a negative errno.
+    pub fn unlink(&mut self, abs_path: &str) -> i32 {
+        match self.nodes.remove(abs_path) {
+            Some(_) => 0,
+            None => ENOENT,
+        }
     }
 
     /// Fill an Emscripten stat buffer (Emscripten doStat layout) for the node at
@@ -701,6 +760,11 @@ impl InMemFs {
         fd_usize >= 3 && fd_usize < self.fds.len() && self.fds[fd_usize].is_some()
     }
 
+    /// Returns true if `fd` is a host-backed (rw-preopen) file descriptor.
+    pub fn is_host_fd(&self, fd: i32) -> bool {
+        self.host_fds.contains_key(&fd)
+    }
+
     // ---- host passthrough -------------------------------------------------------
     //
     // A path under a declared rw-preopen is routed to the real host filesystem.
@@ -773,14 +837,20 @@ impl InMemFs {
         let file = match oo.open(&host_path) {
             Ok(f) => f,
             Err(e) => {
-                pyo_trace!("[host-open] {:?} flags={flags} err={e}", host_path);
+                pyo_trace!("[host-open-fail] {:?} flags={flags} err={e}", host_path);
                 return io_err_to_errno(&e);
             }
         };
 
-        let fd = self.alloc_fd(guest_abs);
+        let fd = self.alloc_fd(guest_abs.clone());
+        {
+            let meta_check = std::fs::metadata(&host_path);
+            pyo_trace!(
+                "[host-open] guest={guest_abs:?} host={host_path:?} flags={flags} -> fd={fd} meta_exists={}",
+                meta_check.is_ok()
+            );
+        }
         self.host_fds.insert(fd, file);
-        pyo_trace!("[host-open-file] {:?} flags={flags} -> fd={fd}", host_path);
         fd
     }
 
@@ -806,6 +876,30 @@ impl InMemFs {
         Some(n)
     }
 
+    /// Positional write (pwrite) to a host-backed fd at `offset` without changing
+    /// the fd's current position. Returns bytes written, or a negative errno.
+    /// Returns `None` if `fd` is not a host-backed fd.
+    pub fn pwrite_host(&mut self, fd: i32, src: &[u8], offset: u64) -> Option<i32> {
+        let file = self.host_fds.get_mut(&fd)?;
+        let n = match file.write_at(src, offset) {
+            Ok(n) => n as i32,
+            Err(e) => io_err_to_errno(&e),
+        };
+        Some(n)
+    }
+
+    /// Positional read (pread) from a host-backed fd at `offset` without changing
+    /// the fd's current position. Returns bytes read, or a negative errno.
+    /// Returns `None` if `fd` is not a host-backed fd.
+    pub fn pread_host(&mut self, fd: i32, dst: &mut [u8], offset: u64) -> Option<i32> {
+        let file = self.host_fds.get_mut(&fd)?;
+        let n = match file.read_at(dst, offset) {
+            Ok(n) => n as i32,
+            Err(e) => io_err_to_errno(&e),
+        };
+        Some(n)
+    }
+
     /// Seek a host-backed fd. Returns the new offset, or a negative i64 errno.
     /// Returns `None` if `fd` is not a host-backed fd.
     pub fn lseek_host(&mut self, fd: i32, offset: i64, whence: i32) -> Option<i64> {
@@ -821,6 +915,16 @@ impl InMemFs {
             Err(e) => io_err_to_errno(&e) as i64,
         };
         Some(new_off)
+    }
+
+    /// Truncate a host-backed fd to `len` bytes. Returns `Some(0)` on success,
+    /// `Some(negative_errno)` on error, `None` if not a host-backed fd.
+    pub fn truncate_host(&mut self, fd: i32, len: u64) -> Option<i32> {
+        let file = self.host_fds.get_mut(&fd)?;
+        match file.set_len(len) {
+            Ok(()) => Some(0),
+            Err(e) => Some(io_err_to_errno(&e)),
+        }
     }
 
     /// Close a host-backed fd. Returns `Some(0)` on success, `Some(errno)` on
@@ -843,9 +947,29 @@ impl InMemFs {
         buf: &mut [u8; EM_STAT_STRUCT_BYTES],
     ) -> i32 {
         match std::fs::metadata(host_path) {
-            Err(e) => io_err_to_errno(&e),
+            Err(e) => {
+                // Only trace for paths that look like the SQLite journal.
+                if host_path.to_string_lossy().contains("accept_test") {
+                    pyo_trace!("[stat_host_path] ENOENT for {:?} err={e}", host_path);
+                    if let Some(parent) = host_path.parent() {
+                        let parent_exists = parent.exists();
+                        pyo_trace!("[stat_host_path] parent={parent:?} exists={parent_exists}");
+                        if parent_exists && let Ok(rd) = std::fs::read_dir(parent) {
+                            let names: Vec<_> = rd
+                                .filter_map(|e| e.ok())
+                                .map(|e| e.file_name().to_string_lossy().to_string())
+                                .collect();
+                            pyo_trace!("[stat_host_path] parent contents: {names:?}");
+                        }
+                    }
+                }
+                io_err_to_errno(&e)
+            }
             Ok(meta) => {
-                let ino = self.alloc_ino();
+                // Use the real host inode so SQLite's DBMOVED check (which
+                // compares the inode recorded at open time against the inode
+                // seen at pagerOpenJournal time) does not fire a false positive.
+                let ino = meta.ino();
                 let (mode, size) = if meta.is_dir() {
                     (S_IFDIR | S_IRWXU, 0u64)
                 } else {
@@ -854,6 +978,49 @@ impl InMemFs {
                 write_stat_buf(buf, ino, mode, size);
                 0
             }
+        }
+    }
+
+    /// Variant of `stat_host_path` used by `__syscall_lstat64`.
+    ///
+    /// For paths under a rw-preopen that do not yet exist on the host, if the
+    /// parent directory exists we return a fake "empty regular file" stat (mode
+    /// `S_IFREG|0644`, size 0) instead of ENOENT. This is required because musl's
+    /// `realpath()` fails with ENOENT when the last path component does not exist,
+    /// whereas glibc's realpath succeeds. sqlite3's `unixFullPathname` calls
+    /// `realpath`; without this fix it returns `SQLITE_CANTOPEN` before ever
+    /// issuing `openat`.
+    pub fn stat_host_path_for_lstat(
+        &mut self,
+        host_path: &Path,
+        buf: &mut [u8; EM_STAT_STRUCT_BYTES],
+    ) -> i32 {
+        match std::fs::metadata(host_path) {
+            Ok(meta) => {
+                // Use the real host inode for stable identity across stat calls.
+                let ino = meta.ino();
+                let (mode, size) = if meta.is_dir() {
+                    (S_IFDIR | S_IRWXU, 0u64)
+                } else {
+                    (S_IFREG | S_IRWXU, meta.len())
+                };
+                write_stat_buf(buf, ino, mode, size);
+                0
+            }
+            Err(e) if io_err_to_errno(&e) == ENOENT => {
+                // File does not exist yet. If the parent directory is present (and
+                // is the rw-preopen root or a subdir of it), report a zero-size
+                // regular file so realpath continues instead of failing.
+                let parent_exists = host_path.parent().is_some_and(|p| p.is_dir());
+                if parent_exists {
+                    let ino = self.alloc_ino();
+                    write_stat_buf(buf, ino, S_IFREG | 0o644, 0);
+                    0
+                } else {
+                    ENOENT
+                }
+            }
+            Err(e) => io_err_to_errno(&e),
         }
     }
 
@@ -867,7 +1034,9 @@ impl InMemFs {
                 Ok(m) => m,
                 Err(e) => return Some(io_err_to_errno(&e)),
             };
-            let ino = self.alloc_ino();
+            // Use the real host inode so SQLite's DBMOVED check agrees with
+            // the inode seen via stat64 on the same path.
+            let ino = meta.ino();
             let (mode, size) = if meta.is_dir() {
                 (S_IFDIR | S_IRWXU, 0u64)
             } else {
