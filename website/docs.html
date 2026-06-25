@@ -1140,6 +1140,8 @@
       <a class="sb-link" href="#packages-afbtoml">afb.toml manifest</a>
       <a class="sb-link" href="#packages-manifold">manifold.json</a>
       <a class="sb-link" href="#packages-deps">Declaring deps</a>
+      <a class="sb-link" href="#packages-pip">Python packages</a>
+      <a class="sb-link" href="#packages-gem">Ruby packages</a>
       <a class="sb-link" href="#packages-afb">The .afb format</a>
       <a class="sb-link" href="#packages-registry">Registry</a>
       <a class="sb-link" href="#packages-precompiled">Precompiled WASM</a>
@@ -1924,6 +1926,66 @@ $ <span class="tok-mod">burn</span> install --locked              <span class="t
       </div>
       <p><code>burn install</code> resolves the full transitive graph with a conflict-driven version solver (the class Cargo uses), topologically orders it, and writes <code>burn.lock</code> pinning every package to an exact content digest. Registry dependencies are pinned by SHA-256, so a coordinate can never silently resolve to different bytes; npm dependencies resolve to an exact version + integrity hash. Resolved packages land in a shared content-addressed cache, fetched at most once per machine. Importing is just <code>require()</code> (or a TS/JS <code>import</code>): a registry dependency by its <code>namespace/name</code>, an npm package by its bare name.</p>
 
+      <h3 id="packages-pip"><svg class="lang-ico"><use href="#lang-python"/></svg>Python packages (<code>[pip]</code>)</h3>
+      <p>Python packages from <a href="https://pypi.org" style="color:var(--action)">PyPI</a> are declared in the <code>[pip]</code> table in <code>afb.toml</code>. Each entry is <code>package-name = "specifier"</code> where the specifier is a <a href="https://peps.python.org/pep-0440/" style="color:var(--action)">PEP 440</a> version specifier string. <code>burn install</code> resolves the dependency closure, verifies each wheel's SHA-256 digest, and vendors pre-built sandbox-compatible wheels into <code>vendor/pip/**</code> inside the <code>.afb</code> - so the resolved wheels ship with the package, not fetched at runtime.</p>
+
+      <div class="callout callout--note">
+        <div class="callout__icon">i</div>
+        <div>
+          <strong>How this relates to micropip.</strong>
+          <p>In a browser, Pyodide installs packages at runtime with <code>micropip</code>, which fetches wheels asynchronously over the network. afterburner runs Pyodide headless on a sandboxed WebAssembly runtime with no JavaScript event loop and no implicit network, so it does the equivalent ahead of time: you declare packages in <code>[pip]</code>, <code>burn install</code> resolves and vendors the wheels into the <code>.afb</code>, and at startup they are mounted into the interpreter's <code>site-packages</code> with their native side-modules pre-loaded (the synchronous stand-in for Pyodide's <code>loadPackage</code>). A core scientific set (numpy, pandas, python-dateutil, pytz, six) is bundled and imports out of the box. There is no runtime <code>micropip.install()</code>: packages are declared and vendored, never fetched mid-run, which is what keeps a run sealed and reproducible.</p>
+        </div>
+      </div>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">afb.toml</span><button class="copy-btn">Copy</button></div>
+<pre>[pip]
+requests = <span class="tok-str">"&gt;=2.31,&lt;3"</span>    <span class="tok-com"># range: at least 2.31, less than 3</span>
+numpy    = <span class="tok-str">"==1.26.4"</span>      <span class="tok-com"># exact pin</span>
+rich     = <span class="tok-str">"~=13.6"</span>        <span class="tok-com"># compatible release: &gt;= 13.6, == 13.*</span>
+httpx    = <span class="tok-str">"*"</span>             <span class="tok-com"># any version</span></pre>
+      </div>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> install      <span class="tok-com"># resolve + vendor [pip] wheels into vendor/pip/**</span>
+$ <span class="tok-mod">burn</span> run          <span class="tok-com"># import requests, numpy, etc. from the vendored wheels</span></pre>
+      </div>
+
+      <div class="callout callout--note">
+        <div class="callout__icon">i</div>
+        <div>
+          <strong>Supported specifier forms (v1).</strong>
+          <p>All standard PEP 440 operators are accepted: <code>==</code>, <code>!=</code>, <code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code>, <code>~=</code> (compatible release), <code>===</code> (arbitrary equality), and the bare <code>*</code> wildcard. The <code>.*</code> suffix is valid on <code>==</code> and <code>!=</code> only (e.g. <code>== 1.4.*</code>). Comma-separated conjunctions are supported (e.g. <code>&gt;=2.31,&lt;3</code>).</p>
+          <p><strong>Not supported in v1</strong> (refused with an error): git requirements (<code>git+https://...</code>), direct URL requirements (<code>https://...</code>), local path requirements (<code>./pkg</code>, <code>/abs/path</code>), editable installs (<code>-e</code>), sdist/wheel file references (<code>.tar.gz</code>, <code>.whl</code>), PEP 508 environment markers (<code>; python_version &gt;= "3.8"</code>), and extras (<code>requests[security]</code>). Use the base package name with a registry specifier instead.</p>
+        </div>
+      </div>
+
+      <p>The <code>[dependencies]</code> table is for other <code>.afb</code> packages (resolved at install time, not packed). The <code>[pip]</code> table is for PyPI packages (vendors wheels into the <code>.afb</code> itself). Both are declared in the same <code>afb.toml</code> and resolved by <code>burn install</code>.</p>
+
+      <h3 id="packages-gem"><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby packages (<code>[gem]</code>)</h3>
+      <p>Ruby gems from <a href="https://rubygems.org" style="color:var(--action)">RubyGems</a> are declared in the <code>[gem]</code> table in <code>afb.toml</code>. Each entry is <code>gem-name = "requirement"</code> where the requirement is a <a href="https://guides.rubygems.org/patterns/#pessimistic-version-constraint" style="color:var(--action)">RubyGems version requirement</a>. <code>burn install</code> resolves the closure, verifies each gem's SHA-256 digest, and vendors the gems into <code>vendor/gem/**</code> inside the <code>.afb</code> - the same vendoring model as <code>[pip]</code>.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">afb.toml</span><button class="copy-btn">Copy</button></div>
+<pre>[gem]
+sinatra = <span class="tok-str">"~&gt; 3.1"</span>        <span class="tok-com"># pessimistic: &gt;= 3.1, &lt; 4 (stay on 3.x)</span>
+faraday = <span class="tok-str">"&gt;= 2.7"</span>        <span class="tok-com"># at least 2.7, any patch</span>
+json    = <span class="tok-str">"~&gt; 2.7.1"</span>      <span class="tok-com"># pessimistic on patch: &gt;= 2.7.1, &lt; 2.8</span>
+nokogiri = <span class="tok-str">"&gt;= 0"</span>        <span class="tok-com"># any version (Bundler convention for "unconstrained")</span></pre>
+      </div>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> install      <span class="tok-com"># resolve + vendor [gem] packages into vendor/gem/**</span>
+$ <span class="tok-mod">burn</span> run          <span class="tok-com"># require 'sinatra', 'faraday', etc. from the vendored gems</span></pre>
+      </div>
+
+      <div class="callout callout--note">
+        <div class="callout__icon">i</div>
+        <div>
+          <strong>Supported requirement forms (v1).</strong>
+          <p>All standard RubyGems operators are accepted: <code>=</code> (exact), <code>!=</code> (exclusion), <code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code>, and <code>~&gt;</code> (pessimistic). Comma-separated conjunctions are supported (e.g. <code>&gt;= 2.7, &lt; 3</code>). <code>~&gt;</code> requires at least two version components (e.g. <code>~&gt; 3.1</code> is valid; <code>~&gt; 3</code> is not). The conventional <code>&gt;= 0</code> form means any version.</p>
+          <p><strong>Not supported in v1</strong> (refused with an error): git requirements (<code>git:...</code>, <code>git@...</code>), direct URL requirements (<code>https://...</code>), and local path requirements (<code>./path</code>, <code>/abs/path</code>). Use a registry requirement instead.</p>
+        </div>
+      </div>
+
       <h3 id="packages-afb">The .afb format</h3>
       <p>A <code>.afb</code> is <strong>not "plain JavaScript"</strong> - that was the old single-language story. It is a <strong>zstd-compressed <code>ustar</code> tar archive</strong>, content-addressed by the SHA-256 of its compressed bytes, carrying the manifest, the manifold, the <code>source/</code> tree, and - optionally - a precompiled WASM module. The binding contract is in <a href="https://github.com/afterburner-sh/afterburner/blob/master/crates/afterburner-afb/FORMAT.md" style="color: var(--action);"><code>afterburner-afb/FORMAT.md</code></a>.</p>
       <div class="table-scroll"><table class="doc-table">
@@ -2137,6 +2199,8 @@ $ <span class="tok-mod">burn</span> compile -o ./dist/        <span class="tok-c
           <tr><td><code>[runtime] target</code></td><td>No</td><td>Precompiled module target: <code>wasm32-wasip1</code> or <code>wasm32-wasip1-dyn</code> (format minor &gt;= 2).</td></tr>
           <tr><td><code>[dependencies]</code></td><td>No</td><td><code>"ns/name" =</code> a semver range, a <code>sha256:</code> pin, or a <code>{ path }</code> / <code>{ git, tag|branch|rev }</code> table.</td></tr>
           <tr><td><code>[npm]</code></td><td>No</td><td><code>"pkg" = "^range"</code>; vendored into <code>source/node_modules/**</code> by <code>burn install</code>.</td></tr>
+          <tr><td><code>[pip]</code></td><td>No</td><td><code>"pkg" = "specifier"</code>; PEP 440 registry specifiers only (no git/URL/path/markers/extras in v1). <code>burn install</code> resolves + vendors wheels into <code>vendor/pip/**</code> inside the <code>.afb</code>. See <a href="#packages-pip" style="color:var(--action)">Python packages</a>.</td></tr>
+          <tr><td><code>[gem]</code></td><td>No</td><td><code>"gem" = "requirement"</code>; RubyGems registry requirements only (no git/URL/path in v1). <code>burn install</code> resolves + vendors gems into <code>vendor/gem/**</code> inside the <code>.afb</code>. See <a href="#packages-gem" style="color:var(--action)">Ruby packages</a>.</td></tr>
           <tr><td><code>[metadata]</code></td><td>No</td><td>Free-form table the reader never interprets; round-trips verbatim.</td></tr>
         </tbody>
       </table></div>
@@ -2290,61 +2354,51 @@ $ ./target/release/<span class="tok-mod">burn</span> version</pre>
   </main>
 
   <!-- =========== TOC =========== -->
-  <aside class="toc">
+  <aside class="toc" id="docsToc">
     <h4>On this page</h4>
-    <ul>
-      <li><a href="#introduction">Introduction</a></li>
-      <li><a href="#installation">Installation</a></li>
-      <li><a href="#run">Run any language</a></li>
-      <li><a href="#repl">The REPL</a></li>
-      <li><a href="#first-package">Your first package</a></li>
-      <li><a href="#languages">Supported languages</a></li>
-      <li class="toc-sub"><a href="#lang-rust">Rust</a></li>
-      <li class="toc-sub"><a href="#lang-go">Go</a></li>
-      <li class="toc-sub"><a href="#lang-c">C / C++</a></li>
-      <li class="toc-sub"><a href="#lang-python">Python</a></li>
-      <li class="toc-sub"><a href="#lang-ruby">Ruby</a></li>
-      <li><a href="#wasm-everywhere">WASM everywhere</a></li>
-      <li><a href="#determinism">Determinism</a></li>
-      <li><a href="#sandbox">Capability sandbox</a></li>
-      <li><a href="#fuel">Fuel &amp; limits</a></li>
-      <li><a href="#tiers">Adaptive execution</a></li>
-      <li><a href="#scheduler">Scheduler</a></li>
-      <li><a href="#state">Cross-call state</a></li>
-      <li><a href="#packages">Packages &amp; deps</a></li>
-      <li class="toc-sub"><a href="#packages-afbtoml">afb.toml manifest</a></li>
-      <li class="toc-sub"><a href="#packages-manifold">manifold.json</a></li>
-      <li class="toc-sub"><a href="#packages-afb">The .afb format</a></li>
-      <li class="toc-sub"><a href="#packages-registry">Registry</a></li>
-      <li><a href="#programmatic">Programmatic API</a></li>
-      <li><a href="#extend">Extension points</a></li>
-      <li><a href="#cli">burn CLI</a></li>
-      <li class="toc-sub"><a href="#cli-flags">Flag reference</a></li>
-      <li class="toc-sub"><a href="#afbtoml-ref">afb.toml keys</a></li>
-      <li><a href="#ai-agents">AI coding agents</a></li>
-      <li><a href="#node-compat">Node compat</a></li>
-      <li><a href="#env">Environment vars</a></li>
-      <li><a href="#crates">Workspace crates</a></li>
-      <li><a href="#build">Building from source</a></li>
-    </ul>
+    <ul id="tocList"></ul>
   </aside>
 
 </div>
 
 <script>
-  /* sidebar + toc highlight on scroll */
-  const sections = [...document.querySelectorAll('.doc h2[id]')];
-  const sbLinks  = [...document.querySelectorAll('.sb-link[href^="#"]')];
-  const tocLinks = [...document.querySelectorAll('.toc a[href^="#"]')];
+  /* populate TOC from actual doc headings (h2 + h3 within .doc) */
+  (function buildToc() {
+    const list = document.getElementById('tocList');
+    if (!list) return;
+    const headings = [...document.querySelectorAll('.doc h2[id], .doc h3[id]')];
+    list.innerHTML = headings.map(h => {
+      const isSub = h.tagName === 'H3';
+      const label = h.textContent.replace(/^#\s*/, '').trim();
+      return '<li' + (isSub ? ' class="toc-sub"' : '') + '>' +
+        '<a href="#' + h.id + '">' + label + '</a></li>';
+    }).join('');
+  })();
+
+  /* sidebar highlight on scroll (h2 only - section-level) */
+  const h2sections = [...document.querySelectorAll('.doc h2[id]')];
+  const sbLinks    = [...document.querySelectorAll('.sb-link[href^="#"]')];
+
+  /* toc highlight on scroll (h2 + h3 - fine-grained, matches populated list) */
+  const allHeadings = [...document.querySelectorAll('.doc h2[id], .doc h3[id]')];
 
   function highlight() {
     const top = window.scrollY + 110;
-    let current = sections[0]?.id;
-    for (const s of sections) {
-      if (s.offsetTop <= top) current = s.id;
+
+    /* sidebar: track h2 */
+    let curH2 = h2sections[0]?.id;
+    for (const s of h2sections) {
+      if (s.offsetTop <= top) curH2 = s.id;
     }
-    sbLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + current));
-    tocLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + current));
+    sbLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + curH2));
+
+    /* toc: track h2 + h3 */
+    let curAny = allHeadings[0]?.id;
+    for (const s of allHeadings) {
+      if (s.offsetTop <= top) curAny = s.id;
+    }
+    const tocLinks = [...document.querySelectorAll('#tocList a[href^="#"]')];
+    tocLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + curAny));
   }
   document.addEventListener('scroll', highlight, { passive: true });
   highlight();
