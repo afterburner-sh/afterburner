@@ -211,6 +211,8 @@ mod tests {
             },
             dependencies: BTreeMap::new(),
             npm: BTreeMap::new(),
+            pip: BTreeMap::new(),
+            gem: BTreeMap::new(),
             signature: None,
             metadata: toml::Table::new(),
             extra: toml::Table::new(),

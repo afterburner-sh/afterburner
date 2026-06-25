@@ -18,6 +18,7 @@ pub mod manifest;
 pub mod native;
 pub mod pack;
 pub mod resolve;
+pub mod specifier;
 pub mod unpack;
 pub mod version;
 
@@ -27,6 +28,10 @@ pub use error::{AfbError, Result};
 pub use lock::{Lock, parse_lock, render_lock};
 pub use manifest::{DepReq, Manifest, parse_dep_req};
 pub use resolve::Resolved;
+pub use specifier::{
+    GemClause, GemOp, GemRequirement, Pep440Clause, Pep440Op, Pep440Specifier,
+    parse_gem_requirement, parse_pip_specifier,
+};
 
 use std::collections::BTreeMap;
 

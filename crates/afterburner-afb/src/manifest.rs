@@ -180,6 +180,23 @@ pub struct Manifest {
     /// manifold - it can reach nothing the package itself is not granted.
     #[serde(default, rename = "npm", skip_serializing_if = "BTreeMap::is_empty")]
     pub npm: BTreeMap<String, String>,
+    /// PyPI packages this one depends on, declared `name = "PEP 440 specifier"`
+    /// (e.g. `requests = ">=2.31,<3"`, `numpy = "==1.26.4"`, `rich = "*"`).
+    /// `burn install` resolves the closure, verifies each wheel with sha256,
+    /// and vendors pre-built sandbox-ABI wheels into `vendor/pip/**` inside
+    /// the `.afb`. Only registry specifiers are accepted; git/URL/path forms
+    /// are refused with an actionable error. Resolved pins (`==X.Y.Z`) ride
+    /// the built `.afb`; ranges are the source-manifest form.
+    #[serde(default, rename = "pip", skip_serializing_if = "BTreeMap::is_empty")]
+    pub pip: BTreeMap<String, String>,
+    /// RubyGems packages this one depends on, declared
+    /// `name = "RubyGems requirement"` (e.g. `sinatra = "~> 3.1"`,
+    /// `faraday = ">= 2.7"`). `burn install` resolves the closure,
+    /// verifies each gem with sha256, and vendors stock gems into
+    /// `vendor/gem/**` inside the `.afb`. Only registry requirements are
+    /// accepted; git/path gem forms are refused with an actionable error.
+    #[serde(default, rename = "gem", skip_serializing_if = "BTreeMap::is_empty")]
+    pub gem: BTreeMap<String, String>,
     /// Phase-2 signature block. Parsed (strictly) if present so a signed
     /// package round-trips; v0.1 does not verify it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -298,6 +315,8 @@ impl Manifest {
             "runtime",
             "dependencies",
             "npm",
+            "pip",
+            "gem",
             "signature",
             "metadata",
         ] {
@@ -668,5 +687,79 @@ min = "0.1.0"
         assert!(rdeps.contains_key("x/foo"), "range dep must appear");
         assert!(!rdeps.contains_key("x/sib"), "path dep must be excluded");
         assert!(!rdeps.contains_key("x/bar"), "git dep must be excluded");
+    }
+
+    // --- [pip] and [gem] manifest tests ------------------------------------
+
+    #[test]
+    fn pip_table_roundtrips() {
+        let src = format!(
+            "{good}\n[pip]\nrequests = \">=2.31,<3\"\nnumpy = \"==1.26.4\"\n",
+            good = good()
+        );
+        let m = Manifest::parse(&src).expect("pip table should parse");
+        assert_eq!(m.pip.get("requests").map(String::as_str), Some(">=2.31,<3"));
+        assert_eq!(m.pip.get("numpy").map(String::as_str), Some("==1.26.4"));
+        assert!(m.gem.is_empty(), "gem should be empty when absent");
+        let back = Manifest::parse(&m.to_toml_string().unwrap()).unwrap();
+        assert_eq!(back.pip, m.pip);
+    }
+
+    #[test]
+    fn gem_table_roundtrips() {
+        let src = format!(
+            "{good}\n[gem]\nsinatra = \"~> 3.1\"\nfaraday = \">= 2.7\"\n",
+            good = good()
+        );
+        let m = Manifest::parse(&src).expect("gem table should parse");
+        assert_eq!(m.gem.get("sinatra").map(String::as_str), Some("~> 3.1"));
+        assert_eq!(m.gem.get("faraday").map(String::as_str), Some(">= 2.7"));
+        assert!(m.pip.is_empty(), "pip should be empty when absent");
+        let back = Manifest::parse(&m.to_toml_string().unwrap()).unwrap();
+        assert_eq!(back.gem, m.gem);
+    }
+
+    #[test]
+    fn pip_and_gem_together_roundtrip() {
+        let src = format!(
+            "{good}\n[pip]\nrich = \"*\"\n[gem]\nsinatra = \"~> 3.1\"\n",
+            good = good()
+        );
+        let m = Manifest::parse(&src).expect("pip+gem together should parse");
+        assert_eq!(m.pip.get("rich").map(String::as_str), Some("*"));
+        assert_eq!(m.gem.get("sinatra").map(String::as_str), Some("~> 3.1"));
+        let back = Manifest::parse(&m.to_toml_string().unwrap()).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn pip_absent_means_empty_not_extra() {
+        // A manifest without [pip] must not capture it into extra.
+        let m = Manifest::parse(good()).unwrap();
+        assert!(m.pip.is_empty());
+        assert!(!m.extra.contains_key("pip"), "pip must not appear in extra");
+    }
+
+    #[test]
+    fn gem_absent_means_empty_not_extra() {
+        let m = Manifest::parse(good()).unwrap();
+        assert!(m.gem.is_empty());
+        assert!(!m.extra.contains_key("gem"), "gem must not appear in extra");
+    }
+
+    #[test]
+    fn pip_wildcard_roundtrips() {
+        let src = format!("{good}\n[pip]\npkg = \"*\"\n", good = good());
+        let m = Manifest::parse(&src).unwrap();
+        assert_eq!(m.pip["pkg"], "*");
+        assert_eq!(Manifest::parse(&m.to_toml_string().unwrap()).unwrap(), m);
+    }
+
+    #[test]
+    fn gem_pessimistic_roundtrips() {
+        let src = format!("{good}\n[gem]\nrails = \"~> 7.0\"\n", good = good());
+        let m = Manifest::parse(&src).unwrap();
+        assert_eq!(m.gem["rails"], "~> 7.0");
+        assert_eq!(Manifest::parse(&m.to_toml_string().unwrap()).unwrap(), m);
     }
 }
