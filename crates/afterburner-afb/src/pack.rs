@@ -74,6 +74,24 @@ impl Builder {
         self
     }
 
+    /// Add a vendored ecosystem artifact at an archive-relative path (must be
+    /// under `vendor/`). The path is inserted into the same sorted `files` map,
+    /// so the reproducible-digest invariant (zstd-19, entries in sorted order,
+    /// mtime=0) holds automatically - exactly as for `precompiled/` members.
+    ///
+    /// Convention for `rel_path` (FORMAT_MINOR 3):
+    /// - `"vendor/pip/<wheel-filename>.whl"` for a resolved Python wheel.
+    /// - `"vendor/gem/<gem-filename>.gem"` for a resolved Ruby gem.
+    ///
+    /// The native-artifact gate in [`build`](Builder::build) permits `.so`
+    /// files inside `vendor/pip/` or `vendor/gem/` ONLY when they carry the
+    /// emscripten sandbox ABI tag (`cpython-<xy>-wasm32-emscripten`). All
+    /// other host-native artifacts are refused with an actionable error.
+    pub fn vendor(mut self, rel_path: impl Into<String>, bytes: Vec<u8>) -> Self {
+        self.files.insert(rel_path.into(), bytes);
+        self
+    }
+
     /// Build a WASM-only `.afb`: identical to [`build`](Builder::build) except
     /// that every `source/*` entry is dropped.
     ///

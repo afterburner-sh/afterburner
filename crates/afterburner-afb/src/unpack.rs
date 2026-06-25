@@ -106,6 +106,7 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
     let mut manifold_json: Option<String> = None;
     let mut source: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut precompiled: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut vendor: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
     let to_afb_err = |e: io::Error| {
         if tripped.get() {
@@ -148,14 +149,15 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
             });
         }
 
-        // Materialize required members plus precompiled/ (FORMAT_MINOR >= 2).
-        // Any other regular file is skipped, but its bytes still flow through
-        // the capped decoder as the iterator advances, so a bomb hidden in an
-        // ignored entry is still caught.
+        // Materialize required members, precompiled/ (FORMAT_MINOR >= 2), and
+        // vendor/ (FORMAT_MINOR >= 3). Any other regular file is skipped, but
+        // its bytes still flow through the capped decoder as the iterator
+        // advances, so a bomb hidden in an ignored entry is still caught.
         let wanted = rel == "afb.toml"
             || rel == "manifold.json"
             || rel.starts_with("source/")
-            || rel.starts_with("precompiled/");
+            || rel.starts_with("precompiled/")
+            || rel.starts_with("vendor/");
         if !wanted {
             continue;
         }
@@ -179,6 +181,10 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
             // precompiled/* stored byte-exact (binary WASM).
             _ if rel.starts_with("precompiled/") => {
                 precompiled.insert(rel, buf);
+            }
+            // vendor/* stored byte-exact (wheels, gems - FORMAT_MINOR >= 3).
+            _ if rel.starts_with("vendor/") => {
+                vendor.insert(rel, buf);
             }
             // source/* files are stored byte-exact, so binary assets are allowed.
             _ => {
@@ -215,5 +221,6 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
         manifold,
         source,
         precompiled,
+        vendor,
     })
 }
