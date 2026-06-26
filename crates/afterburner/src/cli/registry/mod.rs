@@ -290,7 +290,18 @@ pub fn package(
         PackageMode::FullWasm
     } else if do_compile {
         PackageMode::SourceBased
+    } else if !lang.is_interpretable() {
+        // Native (Rust/Go/C/C++): compiled to wasm, no source interpreter.
+        // Full-WASM is the only valid mode; do not prompt.
+        PackageMode::FullWasm
+    } else if !lang.is_js_family() {
+        // Python/Ruby: purely interpreted, no standalone wasm artifact. Source
+        // is the only valid mode; do not prompt (offering full-WASM here errors).
+        PackageMode::SourceBased
     } else {
+        // JS/TS: can ship as source (QuickJS) or compiled to wasm (Javy) - the
+        // only language where both modes are real, so this is the only case
+        // that prompts.
         use std::io::IsTerminal;
         if std::io::stdin().is_terminal() {
             prompt_package_mode()?
