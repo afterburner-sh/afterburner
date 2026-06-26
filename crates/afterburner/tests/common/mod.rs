@@ -248,3 +248,64 @@ pub fn wait_for_listener(port: u16, timeout: Duration) -> bool {
 pub fn extract_body(resp: &str) -> &str {
     resp.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("")
 }
+
+/// Run `burn` capturing output, but kill it and FAIL LOUD if it does not exit
+/// within `timeout`. A wedged runtime event loop makes `output()` block forever
+/// (the in-program `setTimeout` watchdog cannot fire, because the wedged thing is
+/// the event loop), which turns a rare flake into a 45-minute CI hang. This caps
+/// it: a wedge becomes a fast, debuggable test failure with the captured output.
+pub fn run_burn_capped(
+    args: &[&str],
+    envs: &[(&str, &str)],
+    timeout: Duration,
+) -> std::process::Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_burn"));
+    cmd.args(args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn burn");
+    // Drain both pipes on threads so a full pipe buffer never deadlocks the wait.
+    let mut out_pipe = child.stdout.take().expect("stdout pipe");
+    let mut err_pipe = child.stderr.take().expect("stderr pipe");
+    let out_h = thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = out_pipe.read_to_end(&mut b);
+        b
+    });
+    let err_h = thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = err_pipe.read_to_end(&mut b);
+        b
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait burn") {
+            let stdout = out_h.join().unwrap_or_default();
+            let stderr = err_h.join().unwrap_or_default();
+            return std::process::Output {
+                status,
+                stdout,
+                stderr,
+            };
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = out_h.join().unwrap_or_default();
+            let stderr = err_h.join().unwrap_or_default();
+            panic!(
+                "burn subprocess wedged: no exit within {timeout:?}, killed.\n\
+                 The runtime event loop hung, so the in-program watchdog never fired.\n\
+                 args: {args:?}\n--- stdout so far ---\n{}\n--- stderr so far ---\n{}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
+            );
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}

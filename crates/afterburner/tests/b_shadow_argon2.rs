@@ -11,20 +11,18 @@
 
 #![cfg(all(feature = "bin", feature = "shadow-argon2"))]
 
+mod common;
+
 use std::process::{Command, Stdio};
 
 const BURN: &str = env!("CARGO_BIN_EXE_burn");
 
 fn run_burn_eval(src: &str) -> std::process::Output {
-    Command::new(BURN)
-        .env("BURN_QUIET", "1")
-        .env("BURN_SHARDS", "2")
-        .arg("-e")
-        .arg(src)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("spawn burn")
+    common::run_burn_capped(
+        &["-e", src],
+        &[("BURN_QUIET", "1"), ("BURN_SHARDS", "2")],
+        std::time::Duration::from_secs(60),
+    )
 }
 
 fn assert_ok(out: &std::process::Output, what: &str) {
@@ -209,6 +207,8 @@ fn shadow_wins_over_node_modules_argon2() {
     )
     .unwrap();
 
+    // vertexia: run_burn_capped does not accept current_dir; use Command directly.
+    // Upgrade path: extend run_burn_capped with an optional cwd parameter.
     let out = Command::new(BURN)
         .env("BURN_QUIET", "1")
         .env("BURN_SHARDS", "2")
