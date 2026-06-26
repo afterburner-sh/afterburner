@@ -1127,29 +1127,28 @@
     }
 
     .bench__hot {
-      display: flex;
-      align-items: baseline;
-      gap: 12px;
-      flex-wrap: wrap;
       margin-bottom: 28px;
       padding-bottom: 22px;
       border-bottom: 1px solid var(--stroke);
     }
 
     .bench__hot-stat {
+      display: block;
       font-family: var(--font-display);
       font-size: 36px;
       font-weight: 300;
       letter-spacing: -0.03em;
       color: var(--action);
       line-height: 1;
+      margin-bottom: 12px;
     }
 
     .bench__hot-sub {
+      display: block;
       font-size: 13px;
       color: var(--fg-muted);
-      line-height: 1.45;
-      max-width: 520px;
+      line-height: 1.5;
+      max-width: 640px;
     }
 
     .bench__chart {
@@ -2447,6 +2446,7 @@
       }
 
       .live__inner {
+        grid-template-columns: 1fr;
         gap: 28px;
       }
 
@@ -2521,23 +2521,23 @@
       }
 
       .bench__chart::before {
+        /* gridlines hidden at this width - column widths change and re-alignment
+           would need matching margin updates; hiding is cleaner at phone size */
         display: none;
       }
 
       .bench__row {
-        grid-template-columns: 1fr;
-        gap: 4px;
-        align-items: stretch;
+        grid-template-columns: 92px 1fr 64px;
+        gap: 10px;
+        align-items: center;
       }
 
       .bench__name {
-        text-align: left;
         font-size: 12px;
       }
 
       .bench__value {
-        text-align: right;
-        font-size: 12.5px;
+        font-size: 12px;
       }
 
       .bench__track {
@@ -2723,6 +2723,23 @@
         font-size: 26px;
       }
 
+      .bench__row {
+        grid-template-columns: 78px 1fr 58px;
+        gap: 8px;
+      }
+
+      .bench__name {
+        font-size: 11px;
+      }
+
+      .bench__value {
+        font-size: 11px;
+      }
+
+      .bench__hot-stat {
+        font-size: 24px;
+      }
+
       .installer__tab {
         font-size: 10.5px;
         gap: 4px;
@@ -2747,7 +2764,8 @@
     .pkg__grid>*,
     .use__grid>*,
     .features__grid>*,
-    .footer__top>* {
+    .footer__top>*,
+    .bench__row>* {
       min-width: 0;
     }
 
@@ -3078,29 +3096,29 @@
     </div>
   </section>
 
-  <!-- ============= BENCH (warm-start latency + throughput vs containers + microVMs) ============= -->
+  <!-- ============= BENCH (run latency + throughput vs sandboxes) ============= -->
   <section class="bench" id="bench">
     <div class="container">
       <div class="bench__head reveal">
         <span class="kicker">// No boot tax</span>
-        <h2>A warm start in <em class="grad-text">about a millisecond.</em></h2>
-        <p>A container or a microVM boots a fresh sandbox for every run. A resident runtime skips that: the compiled program stays loaded, so a warm run starts in about a millisecond and the same isolated run lands hundreds of times a second.</p>
+        <h2>A run in <em class="grad-text">about a millisecond.</em></h2>
+        <p>Firecracker, Daytona, a Docker container: each boots a fresh sandbox for every run. A resident runtime skips that, so a run takes about a millisecond and turns around hundreds of times a second.</p>
       </div>
 
       <div class="bench__card reveal" id="benchSandboxCard">
         <div class="bench__hot">
-          <span class="bench__hot-stat">~1 ms warm start</span>
-          <span class="bench__hot-sub">and about 920 runs a second per core once resident. a container or microVM boots from scratch every run, paying the cold start each time.</span>
+          <span class="bench__hot-stat">~1 ms per run</span>
+          <span class="bench__hot-sub">Firecracker, Daytona, E2B and a container each boot a fresh sandbox for every run, paying the startup each time. A resident runtime does about 920 a second per core.</span>
         </div>
 
-        <p style="font-family: var(--font-mono); font-size: 13px; color: var(--fg); margin: 0 0 4px;">warm-start latency, ms (lower is better)</p>
+        <p style="font-family: var(--font-mono); font-size: 13px; color: var(--fg); margin: 0 0 4px;">time to a run, ms (lower is better)</p>
         <div class="bench__chart" id="benchLatChart"></div>
 
-        <p style="font-family: var(--font-mono); font-size: 13px; color: var(--fg); margin: 28px 0 4px;">fresh isolated runs per second (more is better)</p>
+        <p style="font-family: var(--font-mono); font-size: 13px; color: var(--fg); margin: 28px 0 4px;">runs per second (more is better)</p>
         <div class="bench__chart" id="benchTputChart"></div>
 
         <div class="bench__legend">
-          <span>measured locally. References: <a href="https://arxiv.org/html/2602.15214v1" target="_blank" rel="noopener">container cold-start</a> (~1.9 s) &nbsp;&middot;&nbsp; <a href="https://firecracker-microvm.github.io/" target="_blank" rel="noopener">microVM boot</a> (~125 ms).</span>
+          <span>afterburner measured locally. Published startup figures: <a href="https://assets.amazon.science/96/c6/302e527240a3b1f86c86c3e8fc3d/firecracker-lightweight-virtualization-for-serverless-applications.pdf" target="_blank" rel="noopener">Firecracker</a> ~125 ms, <a href="https://www.daytona.io/" target="_blank" rel="noopener">Daytona</a> &lt;90 ms, <a href="https://e2b.dev/" target="_blank" rel="noopener">E2B</a> ~150 ms, Docker container ~1-2 s.</span>
         </div>
       </div>
     </div>
@@ -3482,6 +3500,20 @@
             recompile and no config. Drop it in a container, send it over a release pipeline, or cache it by digest.
             One artifact, any supported host.</p>
           <div class="tags"><span class="tag">packaging</span><span class="tag">portability</span></div>
+        </div>
+        <div class="use__card reveal">
+          <div class="use__art">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+              stroke-linejoin="round">
+              <path d="M9 3l1.6 4.4L15 9l-4.4 1.6L9 15l-1.6-4.4L3 9l4.4-1.6z" />
+              <path d="M18 13l.8 2.2L21 16l-2.2.8L18 19l-.8-2.2L15 16l2.2-.8z" />
+            </svg>
+          </div>
+          <h3>Sandboxed runs for AI agents</h3>
+          <p>An agent emits Python, JavaScript, or Go you have never seen. <code>burn run --sandbox</code> runs it sealed,
+            no network or filesystem until you grant it, and deterministic every time, so a bad generation hits an empty
+            box instead of yours.</p>
+          <div class="tags"><span class="tag">AI agents</span><span class="tag">untrusted code</span></div>
         </div>
       </div>
     </div>
@@ -3954,7 +3986,7 @@ puts "ruby: sum(1..=100)=#{total} fib(20)=#{fib(20)}"`
     })();
 
     /* ============= BENCH (latency + throughput) - animated horizontal bars =============
-       Two metric groups (warm-start latency, fresh runs/sec) animate on viewport
+       Two metric groups (run latency, runs/sec) animate on viewport
        entry. Width transitions via CSS cubic-bezier; the count-up tracks the same
        curve with rAF. afterburner bars render in the brand gradient; the rest muted. */
     (() => {
@@ -3966,14 +3998,18 @@ puts "ruby: sum(1..=100)=#{total} fib(20)=#{fib(20)}"`
 
       const GROUPS = [
         { el: 'benchLatChart', max: 2000, suffix: ' ms', bars: [
-          { name: 'warm start', value:    1, brand: true  },
-          { name: 'microVM',    value:  125, brand: false },
-          { name: 'container',  value: 1900, brand: false },
+          { name: 'Afterburner', value:    1, brand: true  },
+          { name: 'Daytona',     value:   90, brand: false },
+          { name: 'Firecracker', value:  125, brand: false },
+          { name: 'E2B',         value:  150, brand: false },
+          { name: 'Docker',      value: 2000, brand: false },
         ] },
         { el: 'benchTputChart', max: 1000, suffix: ' /s', bars: [
-          { name: 'cached run', value:  920, brand: true  },
-          { name: 'microVM',    value:    8, brand: false },
-          { name: 'container',  value:  0.5, brand: false },
+          { name: 'Afterburner', value: 920, brand: true  },
+          { name: 'Daytona',     value:  11, brand: false },
+          { name: 'Firecracker', value:   8, brand: false },
+          { name: 'E2B',         value:   7, brand: false },
+          { name: 'Docker',      value: 0.5, brand: false },
         ] },
       ];
 
