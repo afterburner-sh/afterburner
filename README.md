@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>A sandboxed JavaScript VM for Rust. Execute untrusted scripts with memory limits, timeouts, capability-gated I/O, and threading, with its own package format, registry, and package manager.</strong>
+  <strong>A polyglot, deterministic, sandboxed WebAssembly runtime. Run or compile Rust, Go, Python, JavaScript, TypeScript, Ruby, and C/C++ to one sealed, reproducible artifact, with memory limits, timeouts, and capability-gated I/O.</strong>
 </p>
 
 <p align="center">
@@ -16,7 +16,7 @@
 
 ---
 
-Afterburner is a JavaScript runtime built in Rust, and the way you build on it is by writing **packages**: small, capability-sealed units of JavaScript or TypeScript that you scaffold, test, build into a single `.afb` file, and publish to a registry. It ships its own package format, registry, and Cargo-style package manager, so the whole workflow is one toolchain. (You can also embed the engine as a Rust library; see [Library usage](#library-usage-embedding-the-engine) below.)
+Afterburner is a polyglot, deterministic WebAssembly runtime, and the way you build on it is by writing **packages**: small, sandboxed, capability-sealed units of Rust, Go, Python, JavaScript, TypeScript, Ruby, or C/C++ that you scaffold, test, build into a single `.afb` file, and publish to a registry. It ships its own package format, registry, and Cargo-style package manager, so the whole workflow is one toolchain. (You can also embed the engine as a Rust library; see [Library usage](#library-usage-embedding-the-engine) below.)
 
 ## Quickstart: build a package
 
