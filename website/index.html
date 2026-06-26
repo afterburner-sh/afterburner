@@ -3078,35 +3078,29 @@
     </div>
   </section>
 
-  <!-- ============= BENCH (cold-sandbox) ============= -->
+  <!-- ============= BENCH (throughput) ============= -->
   <section class="bench" id="bench">
     <div class="container">
       <div class="bench__head reveal">
-        <span class="kicker">// No cold-boot tax</span>
-        <h2>A sealed sandbox for every language, <em class="grad-text">without the container tax.</em></h2>
-        <p>Compile once. Warm, the cached module answers in about a millisecond. Cold, a fresh sealed sandbox for any language still starts in tens to hundreds of milliseconds: no daemon, no image pull, no container cold-boot.</p>
+        <span class="kicker">// Compile once, run on repeat</span>
+        <h2>One compile. Then <em class="grad-text">thousands of runs a second.</em></h2>
+        <p>The compiled program loads once and runs again and again: every run is pure execution, nothing to rebuild or reload. Hand it more cores and it does more.</p>
       </div>
 
       <div class="bench__card reveal" id="benchSandboxCard">
         <div class="bench__hot">
-          <span class="bench__hot-stat">~1.1 ms per call</span>
-          <span class="bench__hot-sub">Hot path: warm runtime, the cached compiled module invoked repeatedly. ~1.8 ms p99, scaling to 5,719 calls/sec across cores.</span>
+          <span class="bench__hot-stat">~5,200 runs / sec</span>
+          <span class="bench__hot-sub">the same compiled program executed over and over, across 16 cores. a single core already clears about 900 a second.</span>
         </div>
 
-        <p style="font-family: var(--font-mono); font-size: 13px; color: var(--fg); margin: 0 0 4px;">time to a fresh sealed sandbox + run, ms</p>
-        <p style="font-size: 12.5px; color: var(--fg-subtle); margin: 0 0 24px; line-height: 1.45;">one test/validate iteration. afterburner languages sorted ascending; references in muted color.</p>
+        <p style="font-family: var(--font-mono); font-size: 13px; color: var(--fg); margin: 0 0 4px;">runs per second, by cores (more is better)</p>
+        <p style="font-size: 12.5px; color: var(--fg-subtle); margin: 0 0 24px; line-height: 1.45;">one compiled program, executed repeatedly. measured locally.</p>
 
         <div class="bench__chart" id="benchSandboxChart"></div>
 
         <div class="bench__legend">
-          <span>afterburner measured locally (best of 5). Container and microVM figures are published references.</span>
-          <span>Sources: <a href="https://arxiv.org/html/2602.15214v1" target="_blank" rel="noopener">Docker cold-start</a> &nbsp;&middot;&nbsp; <a href="https://firecracker-microvm.github.io/" target="_blank" rel="noopener">Firecracker</a></span>
+          <span>measured locally on a tight numeric loop. throughput climbs with every core added.</span>
         </div>
-      </div>
-
-      <div class="bench__context reveal">
-        <span>Bare native interpreters start faster (python3 ~20 ms, ruby ~60 ms) but run with no sandbox at all, a different tier.</span>
-        <span class="ctx-aside">The hot-path figure is the warm per-call path; a one-shot run pays the fresh-sandbox start above.</span>
       </div>
     </div>
   </section>
@@ -3958,30 +3952,25 @@ puts "ruby: sum(1..=100)=#{total} fib(20)=#{fib(20)}"`
       select(0);
     })();
 
-    /* ============= BENCH (cold-sandbox) - animated horizontal bars =============
+    /* ============= BENCH (throughput) - animated horizontal bars =============
        Bars animate on viewport entry via IntersectionObserver. Width transitions
-       via CSS cubic-bezier; the ms count-up tracks the same curve with rAF.
-       afterburner entries render in the brand gradient; references in muted. */
+       via CSS cubic-bezier; the runs/sec count-up tracks the same curve with rAF.
+       The top core-count renders in the brand gradient; the rest in muted. */
     (() => {
       const card = document.getElementById('benchSandboxCard');
       if (!card) return;
       const chart = document.getElementById('benchSandboxChart');
       if (!chart) return;
 
-      // All values in ms. Max scale ~2000 ms (Docker).
+      // Throughput in runs/sec, by core count (measured locally).
       const BARS = [
-        { name: 'Rust',                value:   31, brand: true },
-        { name: 'C',                   value:   33, brand: true },
-        { name: 'C++',                 value:   64, brand: true },
-        { name: 'Go',                  value:   78, brand: true },
-        { name: 'JavaScript',          value:  122, brand: true },
-        { name: 'TypeScript',          value:  124, brand: true },
-        { name: 'Python',              value:  297, brand: true },
-        { name: 'Ruby',                value:  992, brand: true },
-        { name: 'Firecracker microVM', value:  125, brand: false },
-        { name: 'Docker container',    value: 1900, brand: false },
+        { name: '1 core',   value:  920, brand: false },
+        { name: '2 cores',  value: 1300, brand: false },
+        { name: '4 cores',  value: 2200, brand: false },
+        { name: '8 cores',  value: 3800, brand: false },
+        { name: '16 cores', value: 5200, brand: true  },
       ];
-      const MAX = 2000;
+      const MAX = 5500;
 
       const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
 
@@ -4023,9 +4012,9 @@ puts "ruby: sum(1..=100)=#{total} fib(20)=#{fib(20)}"`
               const dur = 1250;
               const tick = (now) => {
                 const t = Math.min(1, (now - start) / dur);
-                r.num.textContent = Math.round(r.ms * easeOutCubic(t));
+                r.num.textContent = Math.round(r.ms * easeOutCubic(t)).toLocaleString('en-US') + ' /s';
                 if (t < 1) requestAnimationFrame(tick);
-                else r.num.textContent = r.ms;
+                else r.num.textContent = r.ms.toLocaleString('en-US') + ' /s';
               };
               requestAnimationFrame(tick);
             }, i * 90);
