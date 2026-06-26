@@ -2617,7 +2617,8 @@
         <p class="hero__sub">
           Every language, in one polyglot WebAssembly runtime: compile a real multi-module project to wasm and run it
           side by side with your scripts, all on one engine. Sealed by default, deterministic to the last bit,
-          fuel-metered. <code>burn run</code> a file, a package, or a <code>repl</code>.
+          fuel-metered. <code>burn compile</code> turns any program into a single portable artifact;
+          <code>burn run</code> executes it anywhere with no recompile and zero config.
         </p>
         <div class="installer">
           <h3 class="installer__label">Install Burn</h3>
@@ -2878,6 +2879,13 @@
             through <code>burn thrust</code> for UDF mode, <code>burn check</code> to compile without running,
             <code>burn bench</code> to measure.</p>
         </div>
+        <div class="feat reveal">
+          <div class="feat__num">10</div>
+          <h3>Compile to a portable wasm artifact</h3>
+          <p><code>burn compile</code> turns your program into a single portable artifact <code>burn run</code> executes
+            anywhere with no recompile and zero config. Drop it in a container and go. Runtimes auto-fetch on first
+            use; deps with only a native build are rejected at compile time with a clear message.</p>
+        </div>
       </div>
     </div>
   </section>
@@ -2908,6 +2916,7 @@
                 transform.ts</span></span></button>
           <button class="demo__tab" data-tab="5"><span class="num">6</span><span>Publish &amp; install<span
                 class="sub">burn publish · install</span></span></button>
+          <button class="demo__tab" data-tab="6"><span class="num">7</span><span>Compile to wasm<span class="sub">burn compile · burn run</span></span></button>
         </div>
 
         <div class="demo__panel">
@@ -3047,7 +3056,7 @@
           </div>
           <div class="knob__name">Reproducible execution</div>
           <p class="knob__desc">Canonical NaN, relaxed-SIMD pinned to one result, threads disabled. The same module
-            yields byte-identical output across host CPUs. Replay a run and get the same answer.</p>
+            yields byte-identical output across host CPUs. Run it again and get the same answer.</p>
           <div class="knob__field"><span class="dim">canonical NaN · </span><span class="val">threads off</span><span
               class="dim"> · pinned SIMD</span></div>
           <div class="knob__vis">
@@ -3141,6 +3150,20 @@
             <code>burn run --allow-fs=./out --allow-env=CI build.ts</code> beats a brittle 200-line Bash file.</p>
           <div class="tags"><span class="tag">automation</span><span class="tag">CI</span></div>
         </div>
+        <div class="use__card reveal">
+          <div class="use__art">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+              stroke-linejoin="round">
+              <rect x="2" y="2" width="20" height="20" rx="2" />
+              <path d="M8 12h8M12 8v8" />
+            </svg>
+          </div>
+          <h3>Ship a portable artifact, not a source tree</h3>
+          <p><code>burn compile</code> produces a single portable artifact any host can <code>burn run</code> with no
+            recompile and no config. Drop it in a container, send it over a release pipeline, or cache it by digest.
+            One artifact, any supported host.</p>
+          <div class="tags"><span class="tag">packaging</span><span class="tag">portability</span></div>
+        </div>
       </div>
     </div>
   </section>
@@ -3213,6 +3236,7 @@
           <h4>Docs</h4>
           <ul>
             <li><a href="docs.html">Get started</a></li>
+            <li><a href="docs.html#compile">Compile to wasm</a></li>
             <li><a href="docs.html#cli">burn CLI</a></li>
             <li><a href="docs.html#manifold">Capabilities</a></li>
             <li><a href="docs.html#languages">Languages</a></li>
@@ -3341,9 +3365,8 @@
     /* ============= LANGUAGE SHOWCASE =============
        Every language compiles to WebAssembly with its native toolchain
        and has a REPL. Samples mirror examples/languages/* in the repo.
-       Honesty: the six compiled/scripted languages run + REPL today;
-       Ruby's compile + REPL are wired but pending the ruby.wasm payload,
-       so it is shown as "coming soon" and never asserted to run. */
+       All eight languages run + REPL + compile today; Python and Ruby
+       auto-fetch their runtimes on first use. */
     const LANGS = [
       {
         id: 'rust', name: 'Rust', tile: 'Rs', tileBg: '#DE4A1F', file: 'main.rs',
@@ -3511,8 +3534,8 @@ console.log(\`js: sum(1..=100)=\${sum} fib(20)=\${fib(20)}\`);`
         id: 'python', name: 'Python', tile: 'Py', tileBg: '#3776AB', file: 'main.py',
         tool: 'python', repl: true,
         cmd: 'burn run main.py', out: 'python: sum(1..=100)=5050 fib(20)=6765',
-        blurb: 'Real Python: <code>numpy</code> and <code>pandas</code> work for compute.',
-        caps: [['on', 'numpy / pandas'], ['on', 'interactive REPL']],
+        blurb: 'Real Python: <code>numpy</code> and <code>pandas</code> work for compute. The Python runtime auto-fetches on first use - no setup required.',
+        caps: [['on', 'numpy / pandas'], ['on', 'interactive REPL'], ['on', 'burn compile -> .afb']],
         code:
 `# Python
 def fib(n):
@@ -3529,12 +3552,12 @@ print(f"python: sum(1..=100)={total} fib(20)={fib(20)}")`
       },
       {
         id: 'ruby', name: 'Ruby', tile: 'Rb', tileBg: '#CC342D', file: 'main.rb',
-        tool: 'coming soon', repl: false,
-        cmd: 'burn run main.rb', out: 'coming soon: ruby.wasm payload pending',
-        blurb: 'Ruby support is wired end to end and ships the moment the <code>ruby.wasm</code> CRuby payload lands. The sample below already runs on every other language today.',
-        caps: [['soon', 'compile: coming soon'], ['soon', 'REPL: coming soon'], ['on', 'wired, payload pending']],
+        tool: 'ruby', repl: true,
+        cmd: 'burn run main.rb', out: 'ruby: sum(1..=100)=5050 fib(20)=6765',
+        blurb: 'Ruby compiles to a single <code>wasm32-wasip1</code> module (interpreter + source + stdlib + gems, packed into one portable artifact). The Ruby runtime auto-fetches on first use - no setup required.',
+        caps: [['on', 'compiles to wasm'], ['on', 'burn repl --lang ruby'], ['on', 'auto-fetched runtime']],
         code:
-`# Ruby on burn: wired, pending the ruby.wasm payload.
+`# Ruby on burn: run, REPL, and compile all work.
 def fib(n)
   return n if n < 2
   a, b = 0, 1
@@ -3742,6 +3765,7 @@ puts "ruby: sum(1..=100)=#{total} fib(20)=#{fib(20)}"`
       'C', 'C++', 'Rust', 'Go', 'TypeScript', 'JavaScript', 'Python',
       'cargo build', 'go build', 'clang', 'clang++',
       'burn run', 'burn repl', 'burn compile', 'burn publish', 'burn install',
+      'portable wasm artifact', 'zero config', 'no recompile', 'drop in a container',
       'canonical NaN', 'threads off', 'fuel-metered', 'sealed by default',
       '--allow-net', '--allow-fs', '--allow-env', '.afb', 'content-addressed',
       'multi-module', 'deterministic', 'reproducible', 'one runtime',
@@ -3843,6 +3867,29 @@ $ burn install                    # resolve into the shared cache
 # afb.toml:
 #   [dependencies]
 #   "examples/geo" = "sha256:..."`
+      },
+      {
+        file: 'shell', lang: 'sh',
+        output: 'portable artifact runs anywhere - no recompile, zero config',
+        code:
+`# burn compile turns any program into a portable artifact.
+# burn run executes it on any host with no recompile, zero config.
+
+# JS / TS: a single wasm module (JS engine compiled in)
+$ burn compile app.ts             # -> app-0.1.0.afb (wasm inside)
+$ burn run app-0.1.0.afb         # instant: no compile step
+
+# Rust / Go / C / C++: native compile to wasm
+$ burn compile main.go            # -> output.afb  (wasm32-wasip1)
+$ burn run output.afb
+
+# Python: a self-contained .afb bundle
+# (Python runtime + stdlib + your source + wheels, one portable artifact)
+$ burn compile main.py            # -> main-0.1.0.afb
+$ burn run main-0.1.0.afb
+
+# A dep that has no wasm build is rejected at compile time:
+# error: numpy-1.23 has no wasm32 wheel; rebuild or use a wasm-compatible version`
       },
     ];
     const demoCode = document.getElementById('demoCode');

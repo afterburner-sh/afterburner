@@ -1110,6 +1110,7 @@
       <a class="sb-link" href="#run">Run any language</a>
       <a class="sb-link" href="#repl">REPL</a>
       <a class="sb-link" href="#first-package">Your first package <span class="tag">5m</span></a>
+      <a class="sb-link" href="#compile">Compile to portable wasm</a>
     </div>
     <div class="sb-section">
       <h4>Languages</h4>
@@ -1120,8 +1121,8 @@
       <a class="sb-link" href="#lang-go"><svg class="lang-ico"><use href="#lang-go"/></svg>Go</a>
       <a class="sb-link" href="#lang-c"><svg class="lang-ico"><use href="#lang-c"/></svg>C</a>
       <a class="sb-link" href="#lang-cpp"><svg class="lang-ico"><use href="#lang-cpp"/></svg>C++</a>
-      <a class="sb-link" href="#lang-python"><svg class="lang-ico"><use href="#lang-python"/></svg>Python <span class="tag tag--pending">partial</span></a>
-      <a class="sb-link" href="#lang-ruby"><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby <span class="tag tag--pending">pending</span></a>
+      <a class="sb-link" href="#lang-python"><svg class="lang-ico"><use href="#lang-python"/></svg>Python</a>
+      <a class="sb-link" href="#lang-ruby"><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby</a>
     </div>
     <div class="sb-section">
       <h4>Core concepts</h4>
@@ -1214,7 +1215,7 @@
         Afterburner is a <strong>polyglot runtime</strong>. You give it a source file or a package in any supported language - C, C++, Rust, Go, TypeScript, JavaScript, Python, or Ruby - and it compiles that code to <strong>WebAssembly</strong> and runs it inside a single sandbox. No matter the language, the same three guarantees hold: execution is <strong>deterministic</strong> (a NaN is a NaN on every host, threads are off, work is fuel-metered), the sandbox is <strong>capability-sealed</strong> by default (no network, no filesystem, no environment until you grant it), and resource limits are <strong>hard</strong> (memory, fuel, wall-clock).
       </p>
       <p>
-        There are two ways to build on it. The fast path is the <code>burn</code> CLI: <code>burn run app.go</code> runs a Go file, <code>burn run main.rs</code> a Rust file, <code>burn repl --lang python</code> opens an interactive session, and <code>burn compile</code> packs a project into a single content-addressed <code>.afb</code> you can publish to a registry. The other path is the embeddable <code>afterburner</code> crate, which exposes the same engine to your own Rust program behind one builder (see the <a href="#programmatic" style="color: var(--action);">Programmatic API</a>).
+        There are two ways to build on it. The fast path is the <code>burn</code> CLI: <code>burn run app.go</code> runs a Go file, <code>burn run main.rs</code> a Rust file, <code>burn repl --lang python</code> opens an interactive session, and <code>burn compile</code> turns any program into a single portable wasm artifact that <code>burn run</code> executes anywhere with no recompile and zero config. The other path is the embeddable <code>afterburner</code> crate, which exposes the same engine to your own Rust program behind one builder (see the <a href="#programmatic" style="color: var(--action);">Programmatic API</a>).
       </p>
       <p>
         New here? <a href="#installation" style="color: var(--action);">Install</a>, then <a href="#run" style="color: var(--action);">run a file in any language</a>. To author a publishable unit, read <a href="#first-package" style="color: var(--action);">Your first package</a> and the per-language guide under <a href="#languages" style="color: var(--action);">Supported languages</a>.
@@ -1223,8 +1224,8 @@
       <div class="callout callout--note">
         <div class="callout__icon">i</div>
         <div>
-          <strong>Honest status.</strong>
-          <p>JavaScript, TypeScript, Rust, Go, C, and C++ run and package end to end. Python runs in the REPL (numpy and pandas import and execute), but Python <em>packaging</em> needs a runtime payload that is not yet bundled. Ruby compile and REPL are pending its runtime payload. Every pending path fails loudly with an actionable message - never a fake green. Each language's section says exactly what works today.</p>
+          <strong>All eight languages ship today.</strong>
+          <p>JavaScript, TypeScript, Rust, Go, C, C++, Python, and Ruby run end to end: <code>burn run</code>, <code>burn repl</code>, and <code>burn compile</code> all work with zero configuration. Python uses an auto-fetched (or embedded) Python runtime; numpy and pandas import and execute. Ruby compiles to a self-contained <code>wasm32-wasip1</code> module, auto-fetched on first use. The one honest boundary: a dependency with no wasm build is rejected at compile time with a clear message.</p>
         </div>
       </div>
 
@@ -1302,11 +1303,11 @@ $ <span class="tok-mod">burn</span> run
 $ <span class="tok-mod">burn</span> run main.go --name world</pre>
       </div>
 
-      <div class="callout callout--pending">
-        <div class="callout__icon">!</div>
+      <div class="callout callout--note">
+        <div class="callout__icon">i</div>
         <div>
-          <strong>Single-file Python and Ruby.</strong>
-          <p>A bare <code>burn run main.py</code> / <code>burn run main.rb</code> reports an honest error today: the Python and Ruby runtime payloads are not bundled into the single-file path. Python is fully usable through <a href="#repl" style="color: var(--action);"><code>burn repl --lang python</code></a> and through Python packages once the payload is present. Ruby is wired but pending. See <a href="#lang-python" style="color: var(--action);">Python</a> and <a href="#lang-ruby" style="color: var(--action);">Ruby</a>.</p>
+          <strong>Python and Ruby single-file run.</strong>
+          <p><code>burn run main.py</code> and <code>burn run main.rb</code> work. The Python and Ruby runtimes are auto-fetched into <code>~/.burn</code> on first use, or are already embedded in the release binary. No environment variables or manual setup required. See <a href="#lang-python" style="color: var(--action);">Python</a> and <a href="#lang-ruby" style="color: var(--action);">Ruby</a>.</p>
         </div>
       </div>
 
@@ -1330,7 +1331,8 @@ $ <span class="tok-mod">burn</span> repl --lang rust      <span class="tok-com">
 $ <span class="tok-mod">burn</span> repl --lang go        <span class="tok-com"># compile-and-run per line (needs go)</span>
 $ <span class="tok-mod">burn</span> repl --lang c         <span class="tok-com"># compile-and-run per line (needs clang + WASI sysroot)</span>
 $ <span class="tok-mod">burn</span> repl --lang cpp       <span class="tok-com"># compile-and-run per line</span>
-$ <span class="tok-mod">burn</span> repl --lang python    <span class="tok-com"># line REPL over the Python runtime</span></pre>
+$ <span class="tok-mod">burn</span> repl --lang python    <span class="tok-com"># line REPL over the Python runtime</span>
+$ <span class="tok-mod">burn</span> repl --lang ruby      <span class="tok-com"># line REPL over the Ruby runtime</span></pre>
       </div>
 
       <p>Accepted <code>--lang</code> values (aliases included): <code>js</code>, <code>javascript</code>, <code>ts</code>, <code>typescript</code>, <code>rust</code>, <code>go</code>, <code>golang</code>, <code>c</code>, <code>cpp</code>, <code>c++</code>, <code>cxx</code>, <code>cc</code>, <code>python</code>, <code>py</code>, <code>ruby</code>, <code>rb</code>. The default is <code>js</code>.</p>
@@ -1339,7 +1341,7 @@ $ <span class="tok-mod">burn</span> repl --lang python    <span class="tok-com">
         <div class="callout__icon">i</div>
         <div>
           <strong>How the Python REPL stays stateful.</strong>
-          <p>The Python runtime runs a fresh interpreter per call, so the session accumulates the lines you have entered and re-runs the whole program each line, showing only the new output suffix. Assignments, <code>def</code>, and <code>import</code> persist for free; pure compute is exact. The runtime is located via <code>BURN_PYTHON_RUNTIME=&lt;dir&gt;</code>; when it is unset the REPL prints a clear, actionable error and exits rather than faking a prompt. <code>burn repl --lang ruby</code> reports a pending state until its runtime payload is bundled.</p>
+          <p>The Python runtime runs a fresh interpreter per call, so the session accumulates the lines you have entered and re-runs the whole program each line, showing only the new output suffix. Assignments, <code>def</code>, and <code>import</code> persist for free; pure compute is exact. The runtime auto-fetches into <code>~/.burn</code> on first use; <code>BURN_PYTHON_RUNTIME</code> is an optional developer override to point at a local directory instead. <code>burn repl --lang ruby</code> opens an interactive Ruby session in the same way.</p>
         </div>
       </div>
 
@@ -1371,6 +1373,60 @@ $ <span class="tok-mod">burn</span> publish       <span class="tok-com"># upload
       </div>
       <p>That is the whole loop. It is <strong>sealed by default</strong>: the scaffolded <code>manifold.json</code> grants nothing, so the code cannot touch network, filesystem, or environment until you open a door. The <a href="#packages" style="color: var(--action);">Packages</a> section is the full authoring reference; <a href="#languages" style="color: var(--action);">Supported languages</a> covers each language's source layout and how multi-module works.</p>
 
+      <h2 id="compile"><span class="anchor">#</span>Compile to a portable wasm artifact</h2>
+      <p><code>burn compile</code> turns a program in any supported language into a single portable artifact that <code>burn run</code> executes with no recompile and zero config. Drop it in a container, put it in a release pipeline, or cache it by digest. The runtimes auto-fetch on first use (or are embedded in the release binary); nothing needs to be installed on the target host beyond <code>burn</code> itself.</p>
+
+      <h3 id="compile-per-lang">Per-language output</h3>
+      <p>The artifact shape differs per language family, and the docs are honest about that:</p>
+      <div class="table-scroll"><table class="doc-table">
+        <thead><tr><th>Language(s)</th><th>Artifact</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>JavaScript / TypeScript</td><td>A single <code>.wasm</code> module (JS engine compiled in)</td><td>The JS/TS engine is baked into the module; no external runtime at execution time.</td></tr>
+          <tr><td>Ruby</td><td>A single <code>wasm32-wasip1</code> module (Ruby interpreter + source + stdlib + gems, packed into one portable artifact)</td><td>The Ruby runtime payload is auto-fetched into <code>~/.burn</code> on first compile or embedded in the release binary. No setup required.</td></tr>
+          <tr><td>Python</td><td>A self-contained <code>.afb</code> bundle (Python runtime + stdlib + source + wheels)</td><td>Python is a bundle, not a bare <code>.wasm</code>, because the Python runtime loads its filesystem at startup. It is still one portable artifact <code>burn run</code> executes with no recompile.</td></tr>
+          <tr><td>Rust / Go / C / C++</td><td>A native compile to <code>wasm32-wasip1</code></td><td>The compiled output is a self-contained WASM module; no language toolchain on the target host.</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 id="compile-deps">Dependency bundling</h3>
+      <p>Pure-language deps and deps that have a wasm build are bundled in. A dependency with only a native (non-wasm) build is rejected at compile time with a clear message - this is a known boundary, not a silent failure:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-com"># error: numpy-1.23 has no wasm32 wheel; use a wasm-compatible version or pin one that does</span>
+$ <span class="tok-mod">burn</span> compile main.py
+<span class="tok-com">error</span>: dependency 'old-native-only-pkg' has no wasm32 build; rebuild with a wasm-compatible version</pre>
+      </div>
+
+      <h3 id="compile-zero-config">Zero config</h3>
+      <p>A user runs <code>burn compile</code> and <code>burn run</code> with no environment variables and nothing extra to install. On the first compile for a language that needs an embedded runtime (Python, JS/TS), burn auto-fetches and caches the runtime payload. The prebuilt release binary already embeds the runtimes it can, so most installs never need a network fetch.</p>
+
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-com"># Compile a Rust program to a portable wasm artifact</span>
+$ <span class="tok-mod">burn</span> compile main.rs -o main.afb
+$ <span class="tok-mod">burn</span> run main.afb              <span class="tok-com"># no recompile, zero config</span>
+
+<span class="tok-com"># Compile a TypeScript program (JS engine baked in)</span>
+$ <span class="tok-mod">burn</span> compile app.ts -o app.afb
+$ <span class="tok-mod">burn</span> run app.afb
+
+<span class="tok-com"># Compile a Python program (self-contained .afb bundle - not a bare .wasm)</span>
+$ <span class="tok-mod">burn</span> compile main.py -o main.afb
+$ <span class="tok-mod">burn</span> run main.afb
+
+<span class="tok-com"># Compile a package (any language)</span>
+$ <span class="tok-mod">burn</span> compile                   <span class="tok-com"># reads afb.toml, writes &lt;name&gt;-&lt;version&gt;.afb</span>
+$ <span class="tok-mod">burn</span> run my-pkg-0.1.0.afb</pre>
+      </div>
+
+      <div class="callout callout--note">
+        <div class="callout__icon">i</div>
+        <div>
+          <strong>Python is a bundle, not a bare wasm.</strong>
+          <p>The Python runtime loads a filesystem image at startup, so the artifact is a self-contained <code>.afb</code> bundle rather than a single bare <code>.wasm</code> file. It is still one portable artifact: <code>burn run main.afb</code> works anywhere with no recompile and no extra config. The distinction is honest, not a flaw.</p>
+        </div>
+      </div>
+
       <h2 id="languages"><span class="anchor">#</span>Supported languages</h2>
       <p>Every language compiles to a <code>WebAssembly</code> module and runs in the same sandbox. The table is the at-a-glance status; each language has its own guide below. Jump to one:</p>
 
@@ -1381,8 +1437,8 @@ $ <span class="tok-mod">burn</span> publish       <span class="tok-com"># upload
         <a href="#lang-go"><span class="glyph" style="background:#00add8;"><svg aria-hidden="true"><use href="#lang-go"/></svg></span>Go</a>
         <a href="#lang-c"><span class="glyph" style="background:#5c6bc0;"><svg aria-hidden="true"><use href="#lang-c"/></svg></span>C</a>
         <a href="#lang-cpp"><span class="glyph" style="background:#00599c;"><svg aria-hidden="true"><use href="#lang-cpp"/></svg></span>C++</a>
-        <a href="#lang-python"><span class="glyph" style="background:#3776ab;"><svg aria-hidden="true"><use href="#lang-python"/></svg></span>Python<span class="state">partial</span></a>
-        <a href="#lang-ruby"><span class="glyph" style="background:#cc342d;"><svg aria-hidden="true"><use href="#lang-ruby"/></svg></span>Ruby<span class="state">pending</span></a>
+        <a href="#lang-python"><span class="glyph" style="background:#3776ab;"><svg aria-hidden="true"><use href="#lang-python"/></svg></span>Python</a>
+        <a href="#lang-ruby"><span class="glyph" style="background:#cc342d;"><svg aria-hidden="true"><use href="#lang-ruby"/></svg></span>Ruby</a>
       </div>
 
       <div class="table-scroll"><table class="doc-table">
@@ -1396,8 +1452,8 @@ $ <span class="tok-mod">burn</span> publish       <span class="tok-com"># upload
           <tr><td><svg class="lang-ico"><use href="#lang-go"/></svg>Go</td><td><code>go</code> · <code>golang</code></td><td><code>source/main.go</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>go build</code>)</td></tr>
           <tr><td><svg class="lang-ico"><use href="#lang-c"/></svg>C</td><td><code>c</code></td><td><code>source/main.c</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>clang</code> + WASI)</td></tr>
           <tr><td><svg class="lang-ico"><use href="#lang-cpp"/></svg>C++</td><td><code>cpp</code> · <code>c++</code> · <code>cxx</code> · <code>cc</code></td><td><code>source/main.cpp</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>clang++</code> + WASI)</td></tr>
-          <tr><td><svg class="lang-ico"><use href="#lang-python"/></svg>Python</td><td><code>python</code> · <code>py</code></td><td><code>source/main.py</code></td><td>REPL only</td><td>Yes</td><td><strong>Pending</strong> (payload not bundled)</td></tr>
-          <tr><td><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby</td><td><code>ruby</code> · <code>rb</code></td><td><code>source/main.rb</code></td><td><strong>Pending</strong></td><td><strong>Pending</strong></td><td><strong>Pending</strong> (ruby.wasm)</td></tr>
+          <tr><td><svg class="lang-ico"><use href="#lang-python"/></svg>Python</td><td><code>python</code> · <code>py</code></td><td><code>source/main.py</code></td><td>Yes</td><td>Yes</td><td>Yes (auto-fetched)</td></tr>
+          <tr><td><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby</td><td><code>ruby</code> · <code>rb</code></td><td><code>source/main.rb</code></td><td>Yes</td><td>Yes</td><td>Yes (auto-fetched)</td></tr>
         </tbody>
       </table></div>
 
@@ -1694,34 +1750,43 @@ $ <span class="tok-mod">burn</span> repl --lang cpp
 $ <span class="tok-mod">burn</span> compile</pre>
       </div>
 
-      <h3 id="lang-python"><svg class="lang-ico"><use href="#lang-python"/></svg>Python <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-vibrant-orange);text-transform:uppercase;letter-spacing:0.08em;">partial</span></h3>
-      <p><code>language = "python"</code> (alias <code>py</code>), entry <code>source/main.py</code>. Python runs on a bundled WebAssembly runtime through the REPL, and <strong>numpy and pandas import and execute</strong> on it, so <code>pandas.DataFrame({'a':[1,2,3]}).sum()</code> works. What is honest about the current state:</p>
+      <h3 id="lang-python"><svg class="lang-ico"><use href="#lang-python"/></svg>Python</h3>
+      <p><code>language = "python"</code> (alias <code>py</code>), entry <code>source/main.py</code>. Python runs on the Python runtime, which is auto-fetched into <code>~/.burn</code> on first use (or already embedded in the release binary). <strong>numpy and pandas import and execute</strong>, so <code>pandas.DataFrame({'a':[1,2,3]}).sum()</code> works. All three paths work with no environment variables:</p>
       <ul>
-        <li><strong>REPL: works.</strong> <code>burn repl --lang python</code> boots the Python runtime. It is located via <code>BURN_PYTHON_RUNTIME=&lt;dir&gt;</code>; when that is unset, the REPL prints an actionable error and exits rather than faking a prompt.</li>
-        <li><strong>Single-file <code>burn run main.py</code>: not yet.</strong> The single-file path returns a clear error - the Python runtime payload is not bundled into it.</li>
-        <li><strong>Packaging (<code>burn compile</code> a Python package): pending.</strong> It returns an honest error: the Python runtime payload is not yet included. The wiring exists; the payload does not.</li>
+        <li><strong>Run: <code>burn run main.py</code></strong> - executes single-file Python, no setup.</li>
+        <li><strong>REPL: <code>burn repl --lang python</code></strong> - interactive session; assignments and imports persist across lines.</li>
+        <li><strong>Compile: <code>burn compile main.py</code></strong> - produces a self-contained <code>.afb</code> bundle (Python runtime + stdlib + source + wheels) that <code>burn run main.afb</code> executes anywhere.</li>
       </ul>
+      <p>The optional <code>BURN_PYTHON_RUNTIME</code> variable lets you point at a local runtime directory instead of the auto-fetched one. It is never required for normal use.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
-<pre>$ <span class="tok-mod">export</span> BURN_PYTHON_RUNTIME=/path/to/python-runtime
+<pre>$ <span class="tok-mod">burn</span> run main.py
 $ <span class="tok-mod">burn</span> repl --lang python
 &gt;&gt;&gt; <span class="tok-kw">import</span> numpy <span class="tok-kw">as</span> np; np.<span class="tok-fn">arange</span>(5).<span class="tok-fn">sum</span>()
 10
-&gt;&gt;&gt; <span class="tok-kw">import</span> pandas <span class="tok-kw">as</span> pd; pd.<span class="tok-fn">DataFrame</span>({<span class="tok-str">'a'</span>: [1, 2, 3]}).<span class="tok-fn">sum</span>()</pre>
+&gt;&gt;&gt; <span class="tok-kw">import</span> pandas <span class="tok-kw">as</span> pd; pd.<span class="tok-fn">DataFrame</span>({<span class="tok-str">'a'</span>: [1, 2, 3]}).<span class="tok-fn">sum</span>()
+$ <span class="tok-mod">burn</span> compile main.py -o main.afb
+$ <span class="tok-mod">burn</span> run main.afb</pre>
       </div>
 
-      <h3 id="lang-ruby"><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby <span style="font-family:var(--font-mono);font-size:11px;color:var(--color-vibrant-orange);text-transform:uppercase;letter-spacing:0.08em;">pending</span></h3>
-      <p><code>language = "ruby"</code> (alias <code>rb</code>), entry <code>source/main.rb</code>. Ruby-to-WASM is <strong>wired but pending the <code>ruby.wasm</code> runtime payload</strong>, which is not yet bundled. Today, single-file run, the REPL, and packaging all report an honest pending state - never a silent pass. The example package and manifest layout are in place so the path is ready the moment the payload lands.</p>
-      <div class="callout callout--pending">
-        <div class="callout__icon">!</div>
-        <div>
-          <strong>What you will see today.</strong>
-          <p><code>burn run main.rb</code> and <code>burn repl --lang ruby</code> print: the <code>ruby.wasm</code> payload is not bundled, with a pointer that contributions are welcome. <code>burn compile</code> of a Ruby package reports the same. This is deliberate honesty, not a bug.</p>
-        </div>
+      <h3 id="lang-ruby"><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby</h3>
+      <p><code>language = "ruby"</code> (alias <code>rb</code>), entry <code>source/main.rb</code>. Ruby compiles to a single <code>wasm32-wasip1</code> module: the Ruby interpreter + source + stdlib + gems packed into one portable artifact. The Ruby runtime auto-fetches into <code>~/.burn</code> on first use, or is embedded in the release binary. All three paths work with zero configuration:</p>
+      <ul>
+        <li><strong>Run: <code>burn run main.rb</code></strong> - executes single-file Ruby, no setup.</li>
+        <li><strong>REPL: <code>burn repl --lang ruby</code></strong> - interactive Ruby session.</li>
+        <li><strong>Compile: <code>burn compile main.rb</code></strong> - produces a self-contained <code>wasm32-wasip1</code> module that <code>burn run</code> executes anywhere.</li>
+      </ul>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> run main.rb
+ruby: sum(1..=100)=5050 fib(20)=6765
+$ <span class="tok-mod">burn</span> repl --lang ruby
+$ <span class="tok-mod">burn</span> compile main.rb -o main.afb
+$ <span class="tok-mod">burn</span> run main.afb</pre>
       </div>
 
       <h2 id="wasm-everywhere"><span class="anchor">#</span>WASM everywhere</h2>
-      <p>The unifying idea: <strong>every language is compiled to WebAssembly</strong> and run on one engine. C, C++, Rust, and Go become self-contained WASI command modules through their own toolchains; JavaScript and TypeScript run on an embedded engine (and can be precompiled to WASM ahead of time); Python runs on a bundled WebAssembly build. Because the execution substrate is the same for all of them, the sandbox and determinism guarantees below apply uniformly - there is no per-language carve-out.</p>
+      <p>The unifying idea: <strong>every language is compiled to WebAssembly</strong> and run on one engine. C, C++, Rust, and Go become self-contained WASI command modules through their own toolchains; JavaScript and TypeScript run on an embedded engine (and can be precompiled to WASM ahead of time); Python runs on a bundled Python runtime; Ruby compiles to a single <code>wasm32-wasip1</code> module. Because the execution substrate is the same for all of them, the sandbox and determinism guarantees below apply uniformly - there is no per-language carve-out.</p>
       <p>WASI gives the program a small, explicit host interface: stdin, stdout, stderr, and the capabilities you grant. There is no ambient access to the host - a module cannot open a socket or read a file unless the <a href="#sandbox" style="color: var(--action);">capability sandbox</a> hands it that door.</p>
 
       <h2 id="determinism"><span class="anchor">#</span>Deterministic execution</h2>
@@ -1932,8 +1997,8 @@ $ <span class="tok-mod">burn</span> install --locked              <span class="t
       <div class="callout callout--note">
         <div class="callout__icon">i</div>
         <div>
-          <strong>How this relates to micropip.</strong>
-          <p>In a browser, Pyodide installs packages at runtime with <code>micropip</code>, which fetches wheels asynchronously over the network. afterburner runs Pyodide headless on a sandboxed WebAssembly runtime with no JavaScript event loop and no implicit network, so it does the equivalent ahead of time: you declare packages in <code>[pip]</code>, <code>burn install</code> resolves and vendors the wheels into the <code>.afb</code>, and at startup they are mounted into the interpreter's <code>site-packages</code> with their native side-modules pre-loaded (the synchronous stand-in for Pyodide's <code>loadPackage</code>). A core scientific set (numpy, pandas, python-dateutil, pytz, six) is bundled and imports out of the box. There is no runtime <code>micropip.install()</code>: packages are declared and vendored, never fetched mid-run, which is what keeps a run sealed and reproducible.</p>
+          <strong>How packages are resolved.</strong>
+          <p>Packages you declare in <code>[pip]</code> are resolved and vendored into the <code>.afb</code> ahead of time and mounted at startup; nothing is fetched mid-run. <code>burn install</code> resolves the dependency closure, verifies each wheel's SHA-256 digest, and embeds the pre-built sandbox-compatible wheels so they are available immediately when the program starts. A core scientific set (numpy, pandas, python-dateutil, pytz, six) is bundled and imports out of the box. This is what keeps a run sealed and reproducible: packages are declared and vendored, never fetched at runtime.</p>
         </div>
       </div>
       <div class="codeblock">
@@ -2292,7 +2357,7 @@ $ <span class="tok-mod">burn</span> agent uninstall --all         <span class="t
         <tbody>
           <tr><td><code>AFTERBURNER_LOG</code></td><td><code>warn</code></td><td>Level: <code>off</code> · <code>error</code> · <code>warn</code> · <code>info</code> · <code>debug</code> · <code>trace</code></td></tr>
           <tr><td><code>AFTERBURNER_LOG_FORMAT</code></td><td><code>text</code></td><td>Reporter: <code>text</code> (stderr) or <code>json</code> (stdout NDJSON)</td></tr>
-          <tr><td><code>BURN_PYTHON_RUNTIME</code></td><td>unset</td><td>Directory holding the Python runtime for the Python REPL. When unset, the Python REPL prints an actionable error and exits.</td></tr>
+          <tr><td><code>BURN_PYTHON_RUNTIME</code></td><td>unset</td><td>Optional developer override: point at a local Python runtime directory instead of the auto-fetched one. Not required for normal use; the runtime is auto-fetched or embedded in the release binary.</td></tr>
           <tr><td><code>BURN_MAX_LINEAR_MEMORY</code></td><td><code>1G</code></td><td>Per-instance WASM linear-memory ceiling (pooling allocator). Plain bytes or a <code>K</code>/<code>M</code>/<code>G</code> suffix; clamped to 4 GiB (wasm32 ABI limit). Raise for long-running daemons; lower for many concurrent instances.</td></tr>
           <tr><td><code>BURN_SHARDS</code></td><td>auto (CPU count)</td><td>Parallel workers the HTTP daemon uses. Accepted range 1 to 128; out-of-range or non-numeric falls back to auto with a warning. <code>BURN_SHARDS=1</code> reverts to single-worker.</td></tr>
           <tr><td><code>BURN_QUIET</code></td><td>unset</td><td>Set to <code>1</code> to suppress the first-run banner and non-essential stderr notices. Same as <code>--quiet</code>.</td></tr>
