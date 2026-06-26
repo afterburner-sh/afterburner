@@ -71,6 +71,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> 
     wrap_net(linker)?;
     wrap_tls(linker)?;
     wrap_dgram(linker)?;
+    wrap_unix(linker)?;
     wrap_child_process(linker)?;
     wrap_shadow_sqlite3(linker)?;
     wrap_shadow_sharp(linker)?;
@@ -631,6 +632,220 @@ fn wrap_dgram(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
             |_: Caller<'_, HostState>, _id: i32, _o_p: i32, _o_l: i32| -> i32 { E_NO_DAEMON },
         )
         .map_err(link_err)?;
+    Ok(())
+}
+
+// ---- unix (AF_UNIX) -------------------------------------------------------
+//
+// Seven host imports back the `net` polyfill's AF_UNIX path:
+//
+//   __host_unix_connect(path)             -> conn_id | error
+//   __host_unix_write(conn_id, payload_b64) -> 0 | error
+//   __host_unix_end(conn_id)              -> 0 | error
+//   __host_unix_destroy(conn_id)          -> 0 | error
+//   __host_unix_pending(conn_id)          -> 0 (streams don't expose pending)
+//   __host_unix_listen(path)              -> server_id | error
+//   __host_unix_close_server(server_id)   -> 0 | error
+//
+// Non-unix builds and non-daemon builds register stubs returning
+// E_NO_DAEMON so the single plugin .wasm import list is always satisfied.
+
+#[cfg(not(all(feature = "daemon", unix)))]
+fn wrap_unix(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    const E_NO_DAEMON: i32 = -1;
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_connect",
+            |_: Caller<'_, HostState>, _p: i32, _l: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_write",
+            |_: Caller<'_, HostState>, _id: i32, _p: i32, _l: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_end",
+            |_: Caller<'_, HostState>, _id: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_destroy",
+            |_: Caller<'_, HostState>, _id: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_pending",
+            |_: Caller<'_, HostState>, _id: i32| -> i32 { 0 },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_listen",
+            |_: Caller<'_, HostState>, _p: i32, _l: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_close_server",
+            |_: Caller<'_, HostState>, _id: i32| -> i32 { E_NO_DAEMON },
+        )
+        .map_err(link_err)?;
+    Ok(())
+}
+
+#[cfg(all(feature = "daemon", unix))]
+fn wrap_unix(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+    use crate::daemon_unix::errors as uerr;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_connect",
+            |mut caller: Caller<'_, HostState>, path_ptr: i32, path_len: i32| -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return uerr::E_OTHER;
+                };
+                let Some(path) = read_str(&memory, &caller, path_ptr, path_len) else {
+                    record(&mut caller, "unix_connect: invalid path");
+                    return uerr::E_BAD_PATH;
+                };
+                let Some(unix) = caller.data().daemon_unix.clone() else {
+                    record(&mut caller, "net.connect({path}) requires daemon mode");
+                    return uerr::E_NO_DAEMON;
+                };
+                unix.connect_stream(&path)
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_write",
+            |mut caller: Caller<'_, HostState>,
+             conn_id: i32,
+             payload_ptr: i32,
+             payload_len: i32|
+             -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return uerr::E_OTHER;
+                };
+                let Some(payload_b64) = read_str(&memory, &caller, payload_ptr, payload_len) else {
+                    record(&mut caller, "unix_write: invalid payload");
+                    return uerr::E_BAD_PAYLOAD;
+                };
+                let Some(unix) = caller.data().daemon_unix.clone() else {
+                    return uerr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let bytes = match crate::daemon_net::decode_payload(&payload_b64, &mut last_error) {
+                    Some(b) => b,
+                    None => {
+                        caller.data_mut().last_error = last_error;
+                        return uerr::E_BAD_PAYLOAD;
+                    }
+                };
+                let result = unix.write(conn_id, bytes, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_end",
+            |mut caller: Caller<'_, HostState>, conn_id: i32| -> i32 {
+                let Some(unix) = caller.data().daemon_unix.clone() else {
+                    return uerr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result = unix.end(conn_id, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_destroy",
+            |caller: Caller<'_, HostState>, conn_id: i32| -> i32 {
+                let Some(unix) = caller.data().daemon_unix.clone() else {
+                    return uerr::E_NO_DAEMON;
+                };
+                unix.destroy(conn_id)
+            },
+        )
+        .map_err(link_err)?;
+
+    // Unix streams don't expose pending byte count publicly;
+    // return 0 unconditionally.
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_pending",
+            |_caller: Caller<'_, HostState>, _conn_id: i32| -> i32 { 0 },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_listen",
+            |mut caller: Caller<'_, HostState>, path_ptr: i32, path_len: i32| -> i32 {
+                let Some(memory) = guest_memory(&mut caller) else {
+                    return uerr::E_OTHER;
+                };
+                let Some(path) = read_str(&memory, &caller, path_ptr, path_len) else {
+                    record(&mut caller, "unix_listen: invalid path");
+                    return uerr::E_BAD_PATH;
+                };
+                let Some(unix) = caller.data().daemon_unix.clone() else {
+                    record(&mut caller, "net.createServer({path}) requires daemon mode");
+                    return uerr::E_NO_DAEMON;
+                };
+                let mut last_error = String::new();
+                let result = unix.listen(&path, &mut last_error);
+                if !last_error.is_empty() {
+                    caller.data_mut().last_error = last_error;
+                }
+                result
+            },
+        )
+        .map_err(link_err)?;
+
+    linker
+        .func_wrap(
+            NS,
+            "host_unix_close_server",
+            |caller: Caller<'_, HostState>, server_id: i32| -> i32 {
+                let Some(unix) = caller.data().daemon_unix.clone() else {
+                    return uerr::E_NO_DAEMON;
+                };
+                unix.close_server(server_id)
+            },
+        )
+        .map_err(link_err)?;
+
     Ok(())
 }
 

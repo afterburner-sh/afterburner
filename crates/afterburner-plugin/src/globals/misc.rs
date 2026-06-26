@@ -888,6 +888,50 @@ fn install_diagnostics<'js>(globals: &Object<'js>) {
         }),
     );
 
+    // ---- unix (AF_UNIX stream) ---------------------------------------
+    //
+    // Same wire convention as host_net_*: base64 payloads, i32 ids.
+    // Path arguments are plain UTF-8 strings; no port or opts.
+    let _ = globals.set(
+        "__host_unix_connect",
+        Func::from(|path: String| -> f64 {
+            let pb = path.as_bytes();
+            unsafe { host_unix_connect(pb.as_ptr(), pb.len() as u32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_unix_write",
+        Func::from(|conn_id: f64, payload_b64: String| -> f64 {
+            let pb = payload_b64.as_bytes();
+            unsafe { host_unix_write(conn_id as i32, pb.as_ptr(), pb.len() as u32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_unix_end",
+        Func::from(|conn_id: f64| -> f64 { unsafe { host_unix_end(conn_id as i32) as f64 } }),
+    );
+    let _ = globals.set(
+        "__host_unix_destroy",
+        Func::from(|conn_id: f64| -> f64 { unsafe { host_unix_destroy(conn_id as i32) as f64 } }),
+    );
+    let _ = globals.set(
+        "__host_unix_pending",
+        Func::from(|conn_id: f64| -> f64 { unsafe { host_unix_pending(conn_id as i32) as f64 } }),
+    );
+    let _ = globals.set(
+        "__host_unix_listen",
+        Func::from(|path: String| -> f64 {
+            let pb = path.as_bytes();
+            unsafe { host_unix_listen(pb.as_ptr(), pb.len() as u32) as f64 }
+        }),
+    );
+    let _ = globals.set(
+        "__host_unix_close_server",
+        Func::from(|server_id: f64| -> f64 {
+            unsafe { host_unix_close_server(server_id as i32) as f64 }
+        }),
+    );
+
     // ---- child_process (sync) ---------------------------------------
     let _ = globals.set(
         "__host_child_process_exec_sync",

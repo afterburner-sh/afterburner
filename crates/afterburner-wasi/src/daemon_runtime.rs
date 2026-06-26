@@ -298,6 +298,12 @@ impl DaemonRuntime {
         {
             return true;
         }
+        #[cfg(all(feature = "daemon", unix))]
+        if let Some(u) = &self.store.data().daemon_unix
+            && u.has_refs()
+        {
+            return true;
+        }
         // Outbound HTTP keeps the daemon alive while a request is in
         // flight - without this the script-mode wrapper would exit
         // the moment the synchronous user fn returns, even though
@@ -398,6 +404,30 @@ impl DaemonRuntime {
     #[cfg(feature = "daemon")]
     pub fn try_recv_dgram_event(&self) -> Option<crate::daemon_dgram::DgramEvent> {
         self.store.data().daemon_dgram.as_ref()?.try_recv_event()
+    }
+
+    /// Install a Unix-domain socket coordinator on this daemon's Store.
+    /// Same lifecycle as `install_net` - CLI (parent + worker) calls this
+    /// before `run_init` so user code that calls `net.connect({path})` /
+    /// `net.createServer({path})` during top-level evaluation already
+    /// sees the host imports wired.
+    #[cfg(all(feature = "daemon", unix))]
+    pub fn install_unix(&mut self, unix: Arc<crate::daemon_unix::DaemonUnix>) {
+        self.store.data_mut().daemon_unix = Some(unix);
+    }
+
+    #[cfg(all(feature = "daemon", unix))]
+    pub fn try_recv_unix_event(&self) -> Option<crate::daemon_unix::UnixEvent> {
+        self.store.data().daemon_unix.as_ref()?.try_recv_event()
+    }
+
+    /// Drop the registry entry for `conn_id` after dispatching `Close`
+    /// to JS.
+    #[cfg(all(feature = "daemon", unix))]
+    pub fn mark_unix_closed(&self, conn_id: i32) {
+        if let Some(u) = &self.store.data().daemon_unix {
+            u.mark_closed(conn_id);
+        }
     }
 
     /// Install the inspector / Chrome DevTools Protocol coordinator

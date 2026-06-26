@@ -299,6 +299,11 @@ impl DaemonUnix {
             .abort_handle();
         self.servers.insert(server_id, ListenerHandle { abort });
         self.alive_servers.fetch_add(1, Ordering::Release);
+        // Announce listening so the JS `'listening'` event fires. The envelope
+        // translation (unix-listening) and the JS dispatcher already exist;
+        // without this send, `server.listen({path})`'s callback never runs.
+        // Mirrors daemon_net.listen and bind_dgram's DgramBound emit.
+        self.events_tx.send(UnixEvent::Listening { server_id });
         server_id
     }
 
@@ -531,6 +536,10 @@ async fn drive_socket(
     let mut had_error = false;
     let mut writer_open = true;
     let mut was_over_hwm = false;
+    // The peer can half-close its write side (we read EOF) while our writer
+    // still has a queued echo to flush. Track read-EOF separately so we drain
+    // pending writes before tearing the connection down.
+    let mut read_eof = false;
 
     'outer: loop {
         while let Some(cmd) = write_rx.try_recv() {
@@ -563,32 +572,41 @@ async fn drive_socket(
             }
         }
 
-        if !writer_open && pending.load(Ordering::Acquire) == 0 {
-            // Half-closed, queue empty; keep reader alive.
+        // Break only once the peer half-closed our read AND our writer is
+        // done (sock.end() processed above), so an echo queued *after* read-EOF
+        // still flushes. `writer_open` flips false only after every pending
+        // WriteCmd::Bytes drained and the half-close shut the writer down.
+        if read_eof && !writer_open {
+            break 'outer;
         }
 
-        tokio::select! {
-            res = read_half.read(&mut read_buf) => {
-                match res {
-                    Ok(0) => {
-                        evt_tx.send(UnixEvent::End { conn_id });
-                        break 'outer;
-                    }
-                    Ok(n) => {
-                        let payload_b64 = base64_encode(&read_buf[..n]);
-                        evt_tx.send(UnixEvent::Data { conn_id, payload_b64 });
-                    }
-                    Err(e) => {
-                        evt_tx.send(UnixEvent::Error {
-                            conn_id,
-                            message: e.to_string(),
-                        });
-                        had_error = true;
-                        break 'outer;
+        if read_eof {
+            // Read half is closed; just wait for the writer to drain.
+            wake.notified().await;
+        } else {
+            tokio::select! {
+                res = read_half.read(&mut read_buf) => {
+                    match res {
+                        Ok(0) => {
+                            evt_tx.send(UnixEvent::End { conn_id });
+                            read_eof = true;
+                        }
+                        Ok(n) => {
+                            let payload_b64 = base64_encode(&read_buf[..n]);
+                            evt_tx.send(UnixEvent::Data { conn_id, payload_b64 });
+                        }
+                        Err(e) => {
+                            evt_tx.send(UnixEvent::Error {
+                                conn_id,
+                                message: e.to_string(),
+                            });
+                            had_error = true;
+                            break 'outer;
+                        }
                     }
                 }
+                _ = wake.notified() => {}
             }
-            _ = wake.notified() => {}
         }
     }
 

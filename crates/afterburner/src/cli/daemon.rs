@@ -211,6 +211,10 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
         invocation,
         shutdown: Arc::clone(&shutdown),
         queue_depth_per_shard: None,
+        #[cfg(unix)]
+        unix_coord: Some(afterburner_wasi::daemon_unix::DaemonUnix::new(
+            rt.handle().clone(),
+        )),
     }) {
         Ok(p) => p,
         Err(e) => {

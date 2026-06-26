@@ -532,3 +532,222 @@ fn ip_helpers() {
         "stdout: {stdout}"
     );
 }
+
+/// Spin up a Unix-domain echo server in JS inside burn, then connect
+/// from a native Rust thread and round-trip a payload.
+///
+/// Pattern mirrors `server_accepts_connection_and_echoes` for TCP.
+#[test]
+#[serial]
+#[cfg(unix)]
+fn unix_domain_stream_round_trip() {
+    use std::os::unix::net::UnixStream;
+
+    // Unique socket path scoped to this test run.
+    let path = format!("/tmp/burn-test-unix-{}.sock", std::process::id());
+    let path_clone = path.clone();
+
+    let parent = format!(
+        r#"
+            const net = require('net');
+            const server = net.createServer((sock) => {{
+                sock.on('data', (chunk) => sock.write(chunk));
+                sock.on('end', () => sock.end());
+            }});
+            server.listen({{ path: '{path}' }}, () => {{
+                console.log('UNIX_LISTENING');
+            }});
+        "#,
+        path = path,
+    );
+
+    let mut child = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args(["-A", "-e", &parent])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn burn unix server");
+
+    // Wait for the 'listening' banner.
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (tx, rx) = mpsc::channel::<()>();
+    let _reader = thread::spawn(move || {
+        use std::io::BufRead;
+        let r = std::io::BufReader::new(stdout);
+        for line in r.lines().map_while(Result::ok) {
+            if line.contains("UNIX_LISTENING") {
+                let _ = tx.send(());
+                return;
+            }
+        }
+    });
+    rx.recv_timeout(Duration::from_secs(30))
+        .expect("burn unix server announced listening");
+
+    // Connect from this thread and exchange bytes.
+    let mut conn = UnixStream::connect(&path_clone).expect("connect to burn unix server");
+    conn.write_all(b"hello-unix").expect("write");
+    conn.flush().ok();
+    // Half-close the write side so the server sees EOF and echoes.
+    conn.shutdown(Shutdown::Write).ok();
+
+    let mut got = Vec::new();
+    let mut buf = [0u8; 64];
+    conn.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    loop {
+        match conn.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    assert_eq!(got, b"hello-unix", "echo mismatch: {:?}", got);
+
+    child.kill().ok();
+    child.wait().ok();
+    let _ = std::fs::remove_file(&path_clone);
+}
+
+/// A JS client inside burn connects to a Unix-domain echo server
+/// running in this test thread, sends a payload, and checks the echo.
+///
+/// Pattern mirrors `round_trip_echo` for TCP.
+#[test]
+#[serial]
+#[cfg(unix)]
+fn unix_domain_client_connect() {
+    use std::os::unix::net::UnixListener;
+
+    let path = format!("/tmp/burn-test-unix-client-{}.sock", std::process::id());
+    let _ = std::fs::remove_file(&path);
+
+    // Native listener.
+    let listener = UnixListener::bind(&path).expect("bind unix listener");
+    let path_for_server = path.clone();
+
+    let _server = thread::spawn(move || {
+        // Accept one connection and echo bytes back (unix_domain_client_connect
+        // only sends a single short message then exits).
+        if let Some(Ok(mut s)) = listener.incoming().next() {
+            let mut buf = [0u8; 4096];
+            loop {
+                match s.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if s.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        let _ = path_for_server;
+    });
+
+    let parent = format!(
+        r#"
+            const net = require('net');
+            const {{ Buffer }} = require('buffer');
+            const sock = net.connect({{ path: '{path}' }});
+            const got = [];
+            sock.on('connect', () => {{
+                sock.write(Buffer.from('unix-client-test'));
+            }});
+            sock.on('data', (chunk) => {{
+                got.push(chunk.toString('utf8'));
+                const full = got.join('');
+                if (full.length >= 'unix-client-test'.length) {{
+                    if (full === 'unix-client-test') {{
+                        console.log('UNIX_CLIENT_OK');
+                    }} else {{
+                        console.error('MISMATCH: ' + JSON.stringify(full));
+                    }}
+                    sock.destroy();
+                    process.exit(0);
+                }}
+            }});
+            sock.on('error', (e) => {{
+                console.error('error:', e.message);
+                process.exit(2);
+            }});
+            setTimeout(() => process.exit(99), 30000);
+        "#,
+        path = path,
+    );
+    let out = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args(["-A", "-e", &parent])
+        .output()
+        .expect("spawn burn unix client");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_file(&path);
+    assert!(out.status.success(), "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("UNIX_CLIENT_OK"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+/// A JS `dgram` socket binds, and a native UDP client sends it a datagram which
+/// the JS echoes back. Exercises inbound `'message'` delivery (the daemon-event
+/// translator routing host UDP recv to the dgram handler).
+#[test]
+#[serial]
+fn dgram_inbound_message_round_trip() {
+    use std::net::UdpSocket;
+
+    // PID-derived port to avoid collisions across parallel test binaries.
+    let port: u16 = 40000 + (std::process::id() % 10000) as u16;
+
+    let parent = format!(
+        r#"
+            const dgram = require('dgram');
+            const sock = dgram.createSocket('udp4');
+            sock.on('message', (msg, rinfo) => {{
+                sock.send(msg, rinfo.port, rinfo.address);
+            }});
+            sock.on('listening', () => console.log('DGRAM_LISTENING'));
+            sock.on('error', (e) => {{ console.error('error:', e.message); process.exit(2); }});
+            sock.bind({port}, '127.0.0.1');
+        "#,
+        port = port,
+    );
+
+    let mut child = Command::new(BURN)
+        .env("BURN_QUIET", "1")
+        .args(["-A", "-e", &parent])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn burn dgram server");
+
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (tx, rx) = mpsc::channel::<()>();
+    let _reader = thread::spawn(move || {
+        use std::io::BufRead;
+        let r = std::io::BufReader::new(stdout);
+        for line in r.lines().map_while(Result::ok) {
+            if line.contains("DGRAM_LISTENING") {
+                let _ = tx.send(());
+                return;
+            }
+        }
+    });
+    rx.recv_timeout(Duration::from_secs(30))
+        .expect("burn dgram server announced listening");
+
+    let client = UdpSocket::bind("127.0.0.1:0").expect("bind client");
+    client.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    client
+        .send_to(b"ping-dgram", ("127.0.0.1", port))
+        .expect("send_to");
+    let mut buf = [0u8; 64];
+    let (n, _from) = client.recv_from(&mut buf).expect("recv_from echo");
+    assert_eq!(&buf[..n], b"ping-dgram", "dgram inbound echo mismatch");
+
+    child.kill().ok();
+    child.wait().ok();
+}

@@ -138,6 +138,12 @@ pub struct HostState {
     /// mode. Gated behind `daemon` because it's tokio-backed.
     #[cfg(feature = "daemon")]
     pub daemon_dgram: Option<Arc<crate::daemon_dgram::DaemonDgram>>,
+    /// Optional AF_UNIX socket coordinator. Same lifecycle as
+    /// `daemon_dgram` - installed only by the CLI's daemon path so
+    /// `net.connect({path})` / `net.createServer({path})` work in
+    /// daemon mode and cleanly error in library mode.
+    #[cfg(all(feature = "daemon", unix))]
+    pub daemon_unix: Option<Arc<crate::daemon_unix::DaemonUnix>>,
     /// Outbound HTTP coordinator - async per-shard. JS calls
     /// `http.request` end up here (via `__host_http_request_async`),
     /// the request runs on the daemon's Tokio runtime, and the
@@ -263,6 +269,8 @@ impl HostState {
             daemon_tls: None,
             #[cfg(feature = "daemon")]
             daemon_dgram: None,
+            #[cfg(all(feature = "daemon", unix))]
+            daemon_unix: None,
             #[cfg(feature = "daemon")]
             daemon_http_outbound: None,
             #[cfg(feature = "daemon")]
