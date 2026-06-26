@@ -4,7 +4,32 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Docs · Afterburner</title>
+<meta name="description" content="One sandboxed, deterministic WebAssembly runtime for every language. Run or compile any of them to a self-contained wasm artifact with zero setup." />
+<link rel="canonical" href="https://afterburner.sh/docs.html" />
+<meta name="theme-color" content="#ff6118" />
+
+<!-- Open Graph -->
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="Afterburner" />
+<meta property="og:url" content="https://afterburner.sh/docs.html" />
+<meta property="og:title" content="Docs · Afterburner" />
+<meta property="og:description" content="One sandboxed, deterministic WebAssembly runtime for every language. Run or compile any of them to a self-contained wasm artifact with zero setup." />
+<meta property="og:image" content="https://afterburner.sh/art/og-image.png" />
+<meta property="og:image:secure_url" content="https://afterburner.sh/art/og-image.png" />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="634" />
+<meta property="og:image:alt" content="Afterburner: one sandboxed, deterministic WASM runtime for every language" />
+
+<!-- Twitter / X -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="Docs · Afterburner" />
+<meta name="twitter:description" content="One sandboxed, deterministic WebAssembly runtime for every language. Run or compile any of them to a self-contained wasm artifact with zero setup." />
+<meta name="twitter:image" content="https://afterburner.sh/art/og-image.png" />
+<meta name="twitter:image:alt" content="Afterburner: one sandboxed, deterministic WASM runtime for every language" />
 <link rel="stylesheet" href="design-system.css?v=3" />
+<!-- devicon v2.17.0 - self-hosted, no CDN dependency -->
+<link rel="stylesheet" href="vendor/devicon/devicon.min.css" />
 <link rel="icon" type="image/png" href="art/afterburner-square.png" />
 <style>
   body { background: var(--bg); }
@@ -128,7 +153,7 @@
   /* ============= LAYOUT ============= */
   .layout {
     display: grid;
-    grid-template-columns: 260px minmax(0, 1fr) 220px;
+    grid-template-columns: 260px minmax(0, 1fr);
     gap: 56px;
     max-width: 1380px;
     margin: 0 auto;
@@ -217,6 +242,52 @@
     color: var(--action);
     background: rgba(83, 58, 253, 0.1);
   }
+
+  /* collapsible sidebar tree */
+  .sb-group { margin-bottom: 24px; }
+  .sb-group-header {
+    display: flex; align-items: center; justify-content: space-between;
+    width: 100%; border: 0; background: none; padding: 4px 12px 6px;
+    cursor: pointer; text-align: left;
+    font-family: var(--font-mono);
+    font-size: 11px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.12em;
+    color: var(--fg-subtle);
+    border-radius: var(--radius-tag);
+    transition: color 0.12s ease;
+  }
+  .sb-group-header:hover { color: var(--fg); }
+  .sb-group-header .sb-chevron {
+    font-style: normal; font-size: 9px; flex-shrink: 0;
+    transition: transform 0.15s ease;
+    color: var(--stroke-strong);
+  }
+  .sb-group.collapsed .sb-chevron { transform: rotate(-90deg); }
+  .sb-group-body { overflow: hidden; }
+  .sb-group.collapsed .sb-group-body { display: none; }
+  /* L2 sub-group (collapsible sub-header inside a section body) */
+  .sb-sub-group { margin: 2px 0; }
+  .sb-sub-header {
+    display: flex; align-items: center; justify-content: space-between;
+    width: 100%; border: 0; background: none;
+    padding: 6px 12px 6px 20px;
+    cursor: pointer; text-align: left;
+    font-size: 13px; font-weight: 500;
+    color: var(--fg-muted);
+    border-radius: var(--radius-tag);
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .sb-sub-header:hover { background: var(--bg-section); color: var(--fg); }
+  .sb-sub-header .sb-chevron {
+    font-style: normal; font-size: 9px; flex-shrink: 0;
+    transition: transform 0.15s ease;
+    color: var(--stroke-strong);
+  }
+  .sb-sub-group.collapsed .sb-sub-header .sb-chevron { transform: rotate(-90deg); }
+  .sb-sub-body { overflow: hidden; }
+  .sb-sub-group.collapsed .sb-sub-body { display: none; }
+  /* L3 links - indented further */
+  .sb-sub-body .sb-link { padding-left: 28px; }
 
   /* ============= MAIN ============= */
   .main { min-width: 0; }
@@ -579,6 +650,7 @@
     letter-spacing: -0.02em;
   }
   .lang-matrix .glyph svg { width: 16px; height: 16px; fill: currentColor; display: block; }
+  .lang-matrix .glyph i { font-size: 16px; color: #fff; display: block; line-height: 1; }
   .lang-matrix .state {
     margin-left: auto;
     font-family: var(--font-mono);
@@ -588,13 +660,23 @@
     color: var(--color-vibrant-orange);
   }
 
-  /* a language label always carries its mark: 1em inline icon, brand-tinted */
-  .lang-ico {
-    width: 1em;
-    height: 1em;
-    vertical-align: -0.125em;
+  /* a language label always carries its mark: devicon glyph, muted inline */
+  .lang-i {
+    display: inline-block;
+    font-size: 14px;
+    vertical-align: middle;
     margin-right: 0.4em;
-    fill: currentColor;
+    color: var(--fg-muted);
+    flex-shrink: 0;
+  }
+  /* sidebar language devicons */
+  .sb-link i[class^="devicon-"],
+  .sb-link i[class*=" devicon-"] {
+    display: inline-block;
+    font-size: 14px;
+    vertical-align: middle;
+    margin-right: 0.35em;
+    color: var(--fg-muted);
     flex-shrink: 0;
   }
 
@@ -626,38 +708,6 @@
   .langtabs__panel { display: none; }
   .langtabs__panel.active { display: block; }
   .langtabs__panel .codeblock { margin-top: 14px; }
-
-  /* TOC right rail */
-  .toc {
-    position: sticky;
-    top: 80px;
-    max-height: calc(100vh - 100px);
-    overflow-y: auto;
-    font-size: 13px;
-  }
-  .toc h4 {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: var(--fg-subtle);
-    margin: 0 0 12px;
-  }
-  .toc ul { list-style: none; padding: 0; margin: 0; }
-  .toc li { margin-bottom: 4px; }
-  .toc a {
-    display: block;
-    padding: 4px 0 4px 12px;
-    color: var(--fg-muted);
-    border-left: 2px solid var(--stroke);
-    transition: color 0.12s ease, border-color 0.12s ease;
-    font-size: 12.5px;
-  }
-  .toc a:hover { color: var(--fg); }
-  .toc a.active { color: var(--action); border-left-color: var(--action); font-weight: 500; }
-  .toc .toc-sub { padding-left: 12px; }
-  .toc .toc-sub a { font-size: 12px; }
 
   /* arch list */
   .arch-mini {
@@ -731,7 +781,6 @@
   /* responsive */
   @media (max-width: 1180px) {
     .layout { grid-template-columns: 240px minmax(0, 1fr); }
-    .toc { display: none; }
   }
   @media (max-width: 860px) {
     /* minmax(0,1fr): a plain 1fr track refuses to shrink below its
@@ -1039,22 +1088,6 @@
 </head>
 <body>
 
-<!-- ============= LANGUAGE ICON SPRITE =============
-     Defined once, reused everywhere via <use href="#lang-XX"/> so a language
-     label always carries its mark (matrix, support table, hello-world tabs,
-     per-language guide headings, sidebar nav). Single currentColor paths so
-     each mark tints to its tile or the surrounding text. Go is the gopher
-     (one evenodd silhouette: ears, eyes + snout cut out). -->
-<svg aria-hidden="true" style="display:none" width="0" height="0">
-  <symbol id="lang-rust" viewBox="0 0 24 24"><path d="M23.835 11.703l-1.008-.623.028-.226.866-.808a.349.349 0 00-.115-.578l-1.105-.414a8.793 8.793 0 00-.073-.225l.69-.96a.349.349 0 00-.226-.55l-1.166-.19a9.038 9.038 0 00-.137-.213l.49-1.072a.349.349 0 00-.329-.495l-1.184.041a6.79 6.79 0 00-.185-.185l.04-1.184a.346.346 0 00-.494-.328l-1.072.49-.213-.138-.19-1.166a.349.349 0 00-.55-.226l-.96.69a8.967 8.967 0 00-.225-.072L15.106.927a.349.349 0 00-.578-.115l-.808.866-.226-.028L12.871.642a.349.349 0 00-.581 0l-.623 1.008-.226-.028-.808-.866a.349.349 0 00-.578.115l-.414 1.105-.225.072-.96-.69a.349.349 0 00-.55.226l-.19 1.166-.213.138-1.072-.49a.346.346 0 00-.494.328l.04 1.184a6.79 6.79 0 00-.185.185l-1.184-.041a.349.349 0 00-.329.495l.49 1.072a9.038 9.038 0 00-.137.213l-1.166.19a.349.349 0 00-.226.55l.69.96a8.793 8.793 0 00-.073.225l-1.105.414a.349.349 0 00-.115.578l.866.808-.028.226-1.008.623a.349.349 0 000 .581l1.008.623-.028.226-.866.808a.349.349 0 00.115.578l1.105.414.073.225-.69.96a.349.349 0 00.226.55l1.166.19.137.213-.49 1.072a.346.346 0 00.329.495l1.184-.041.185.185-.04 1.184a.349.349 0 00.494.328l1.072-.49.213.138.19 1.166a.349.349 0 00.55.226l.96-.69.225.073.414 1.104a.35.35 0 00.578.115l.808-.866.226.028.623 1.008a.349.349 0 00.581 0l.623-1.008.226-.028.808.866a.35.35 0 00.578-.115l.414-1.104.225-.073.96.69a.349.349 0 00.55-.226l.19-1.166.213-.138 1.072.49a.346.346 0 00.494-.328l-.04-1.184.185-.185 1.184.041a.349.349 0 00.329-.495l-.49-1.072.137-.213 1.166-.19a.349.349 0 00.226-.55l-.69-.96.073-.225 1.105-.414a.349.349 0 00.115-.578l-.866-.808.028-.226 1.008-.623a.349.349 0 000-.581zm-6.742 8.355a.714.714 0 01.299-1.396.714.714 0 01-.3 1.396zm-.342-2.314a.65.65 0 00-.771.5l-.358 1.669a8.18 8.18 0 01-3.385.72 8.18 8.18 0 01-3.45-.756l-.358-1.669a.65.65 0 00-.772-.5l-1.473.317a8.18 8.18 0 01-.761-.898h7.167c.081 0 .136-.014.136-.088v-2.536c0-.074-.055-.088-.136-.088h-2.096v-1.608h2.268c.207 0 1.106.059 1.393 1.209.09.353.288 1.503.424 1.871.134.412.683 1.234 1.268 1.234h3.572a.726.726 0 00.125-.013 8.207 8.207 0 01-.811.95zm-9.733 2.297a.714.714 0 11-.3-1.396.714.714 0 01.3 1.396zM5.367 8.95a.714.714 0 11-.3 1.396.714.714 0 01.3-1.396zm-.821 1.951l1.534-.682a.65.65 0 00.33-.858l-.316-.715h1.244v5.602H4.99a8.222 8.222 0 01-.265-3.135zm5.62-.452v-1.65h2.957c.153 0 1.08.177 1.08.87 0 .575-.71.781-1.296.781zm10.757 1.501c0 .218-.008.434-.024.648h-.901c-.09 0-.127.059-.127.147v.413c0 .973-.548 1.184-1.029 1.238-.457.052-.964-.191-1.027-.472-.27-1.518-.72-1.842-1.43-2.403.882-.56 1.799-1.387 1.799-2.494 0-1.195-.82-1.947-1.379-2.318-.784-.516-1.651-.62-1.886-.62H5.197a8.215 8.215 0 014.598-2.593l1.028 1.078a.65.65 0 00.918.021l1.15-1.1a8.216 8.216 0 015.624 4.003l-.788 1.78a.65.65 0 00.33.858l1.616.718c.028.285.043.573.043.864zM11.733 3.36a.714.714 0 11.991 1.028.714.714 0 01-.991-1.028zm9.13 7.342a.714.714 0 11.989-1.026.714.714 0 01-.989 1.026z"/></symbol>
-  <symbol id="lang-go" viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M8.2 4.05A1.6 1.6 0 0 0 5.4 5.65c0 .42.16.8.43 1.09A6.85 6.85 0 0 0 4.05 11.1v3.25c0 3.5 3.56 5.85 7.95 5.85s7.95-2.35 7.95-5.85V11.1a6.85 6.85 0 0 0-1.78-4.36c.27-.29.43-.67.43-1.09a1.6 1.6 0 0 0-2.8-1.6A8.6 8.6 0 0 0 12 3.95c-1.34 0-2.62.04-3.8.1Zm1.1 4.05a2.05 2.05 0 1 0 0 4.1 2.05 2.05 0 0 0 0-4.1Zm0 1.15a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8Zm5.4-1.15a2.05 2.05 0 1 0 0 4.1 2.05 2.05 0 0 0 0-4.1Zm0 1.15a.9.9 0 1 1 0 1.8.9.9 0 0 1 0-1.8Zm-3.52 4.25h1.64a.6.6 0 0 1 .58.74l-.2.85a.8.8 0 0 1-1.56 0l-.2-.85a.6.6 0 0 1 .58-.74Z"/></symbol>
-  <symbol id="lang-ts" viewBox="0 0 24 24"><path d="M1.125 0C.502 0 0 .502 0 1.125v21.75C0 23.498.502 24 1.125 24h21.75c.623 0 1.125-.502 1.125-1.125V1.125C24 .502 23.498 0 22.875 0zm17.363 9.75c.612 0 1.154.037 1.627.111a6.38 6.38 0 0 1 1.306.34v2.458a3.95 3.95 0 0 0-.643-.361 5.093 5.093 0 0 0-.717-.26 5.453 5.453 0 0 0-1.426-.2c-.3 0-.573.028-.819.086a2.1 2.1 0 0 0-.623.242c-.17.104-.3.229-.393.374a.888.888 0 0 0-.14.49c0 .196.053.373.156.529.104.156.252.304.443.444s.423.276.696.41c.273.135.582.274.926.416.47.197.892.407 1.266.628.374.222.695.473.963.753.268.279.472.598.614.957.142.359.214.776.214 1.253 0 .657-.125 1.21-.373 1.656a3.033 3.033 0 0 1-1.012 1.085 4.38 4.38 0 0 1-1.487.596c-.566.12-1.163.18-1.79.18a9.916 9.916 0 0 1-1.84-.164 5.544 5.544 0 0 1-1.512-.493v-2.63a5.033 5.033 0 0 0 3.237 1.2c.333 0 .624-.03.872-.09.249-.06.456-.144.623-.25.166-.108.29-.234.373-.38a1 1 0 0 0 .125-.493c0-.237-.067-.444-.2-.621-.135-.177-.318-.339-.55-.484a5.61 5.61 0 0 0-.831-.443 30.6 30.6 0 0 0-1.05-.45c-.918-.383-1.602-.852-2.053-1.405-.45-.553-.676-1.222-.676-2.005 0-.614.123-1.141.369-1.582.246-.441.58-.804 1.004-1.089a4.494 4.494 0 0 1 1.47-.629 7.536 7.536 0 0 1 1.77-.201zm-15.113.188h9.563v2.166H9.506v9.646H6.789v-9.646H3.375z"/></symbol>
-  <symbol id="lang-c" viewBox="0 0 24 24"><path d="M16.5921 9.1962s-.354-3.298-3.627-3.39c-3.2741-.09-4.9552 2.474-4.9552 6.14 0 3.6651 1.857 6.5972 5.0451 6.5972 3.184 0 3.5381-3.665 3.5381-3.665l6.1041.365s.36 3.31-2.196 5.836c-2.552 2.5241-5.6901 2.9371-7.8762 2.9201-2.19-.017-5.0281.034-7.8662-2.838-2.834-2.8711-3.518-5.5292-3.518-9.4842 0-3.9601 1.0061-6.8472 3.5371-9.3563 1.852-1.8351 4.464-2.8401 7.4172-2.8401 2.953 0 6.5161 1.0911 8.5252 3.766 1.825 2.4291 1.751 4.9182 1.751 4.9182z"/></symbol>
-  <symbol id="lang-cpp" viewBox="0 0 24 24"><path d="M22.394 6c-.167-.29-.398-.543-.652-.69L12.926.22c-.509-.294-1.34-.294-1.848 0L2.26 5.31c-.508.293-.923 1.013-.923 1.6v10.18c0 .294.104.62.271.91.167.29.398.543.652.69l8.816 5.09c.508.293 1.34.293 1.848 0l8.816-5.09c.254-.147.485-.4.652-.69.167-.29.27-.616.27-.91V6.91c.003-.294-.1-.62-.268-.91zM12 19.11c-3.92 0-7.109-3.19-7.109-7.11 0-3.92 3.19-7.11 7.11-7.11a7.13 7.13 0 016.156 3.553l-3.076 1.78a3.567 3.567 0 00-3.08-1.78A3.56 3.56 0 008.444 12 3.56 3.56 0 0012 15.555a3.57 3.57 0 003.08-1.778l3.078 1.78A7.135 7.135 0 0112 19.11zm7.11-6.715h-.79v.79h-.79v-.79h-.79v-.79h.79v-.79h.79v.79h.79zm2.962 0h-.79v.79h-.79v-.79h-.79v-.79h.79v-.79h.79v.79h.79z"/></symbol>
-  <symbol id="lang-js" viewBox="0 0 24 24"><path d="M0 0h24v24H0V0zm22.034 18.276c-.175-1.095-.888-2.015-3.003-2.873-.736-.345-1.554-.585-1.797-1.14-.091-.33-.105-.51-.046-.705.15-.646.915-.84 1.515-.66.39.12.75.42.976.9 1.034-.676 1.034-.676 1.755-1.125-.27-.42-.404-.601-.586-.78-.63-.705-1.469-1.065-2.834-1.034l-.705.089c-.676.165-1.32.525-1.71 1.005-1.14 1.291-.811 3.541.569 4.471 1.365 1.02 3.361 1.244 3.616 2.205.24 1.17-.87 1.545-1.966 1.41-.811-.18-1.26-.586-1.755-1.336l-1.83 1.051c.21.48.45.689.81 1.109 1.74 1.756 6.09 1.666 6.871-1.004.029-.09.24-.705.074-1.65l.046.067zm-8.983-7.245h-2.248c0 1.938-.009 3.864-.009 5.805 0 1.232.063 2.363-.138 2.711-.33.689-1.18.601-1.566.48-.396-.196-.597-.466-.83-.855-.063-.105-.11-.196-.127-.196l-1.825 1.125c.305.63.75 1.172 1.324 1.517.855.51 2.004.675 3.207.405.783-.226 1.458-.691 1.811-1.411.51-.93.402-2.07.397-3.346.012-2.054 0-4.109 0-6.179l.004-.056z"/></symbol>
-  <symbol id="lang-python" viewBox="0 0 24 24"><path d="M14.25.18l.9.2.73.26.59.3.45.32.34.34.25.34.16.33.1.3.04.26.02.2-.01.13V8.5l-.05.63-.13.55-.21.46-.26.38-.3.31-.33.25-.35.19-.35.14-.33.1-.3.07-.26.04-.21.02H8.77l-.69.05-.59.14-.5.22-.41.27-.33.32-.27.35-.2.36-.15.37-.1.35-.07.32-.04.27-.02.21v3.06H3.17l-.21-.03-.28-.07-.32-.12-.35-.18-.36-.26-.36-.36-.35-.46-.32-.59-.28-.73-.21-.88-.14-1.05-.05-1.23.06-1.22.16-1.04.24-.87.32-.71.36-.57.4-.44.42-.33.42-.24.4-.16.36-.1.32-.05.24-.01h.16l.06.01h8.16v-.83H6.18l-.01-2.75-.02-.37.05-.34.11-.31.17-.28.25-.26.31-.23.38-.2.44-.18.51-.15.58-.12.64-.1.71-.06.77-.04.84-.02 1.27.05zm-6.3 1.98l-.23.33-.08.41.08.41.23.34.33.22.41.09.41-.09.33-.22.23-.34.08-.41-.08-.41-.23-.33-.33-.22-.41-.09-.41.09zM21.1 6.11l.28.06.32.12.35.18.36.27.36.35.35.47.32.59.28.73.21.88.14 1.04.05 1.23-.06 1.23-.16 1.04-.24.86-.32.71-.36.57-.4.45-.42.33-.42.24-.4.16-.36.09-.32.05-.24.02-.16-.01h-8.22v.82h5.84l.01 2.76.02.36-.05.34-.11.31-.17.29-.25.25-.31.24-.38.2-.44.17-.51.15-.58.13-.64.09-.71.07-.77.04-.84.01-1.27-.04-1.07-.14-.9-.2-.73-.25-.59-.3-.45-.33-.34-.34-.25-.34-.16-.33-.1-.3-.04-.25-.02-.2.01-.13v-5.34l.05-.64.13-.54.21-.46.26-.38.3-.32.33-.24.35-.2.35-.14.33-.1.3-.06.26-.04.21-.02.13-.01h5.84l.69-.05.59-.14.5-.21.41-.28.33-.32.27-.35.2-.36.15-.36.1-.35.07-.32.04-.28.02-.21V6.07h2.09l.14.01zm-6.47 14.25l-.23.33-.08.41.08.41.23.33.33.23.41.08.41-.08.33-.23.23-.33.08-.41-.08-.41-.23-.33-.33-.23-.41-.08-.41.08z"/></symbol>
-  <symbol id="lang-ruby" viewBox="0 0 24 24"><path d="M20.156.083c3.033.525 3.893 2.598 3.829 4.77L24 4.822 22.635 22.71 4.89 23.926h.016C3.433 23.864.15 23.729 0 19.139l1.645-3 2.819 6.586.503 1.172 2.805-9.144-.03.007.016-.03 9.255 2.956-1.396-5.431-.99-3.9 8.82-.569-.615-.499L16.5 2.114 20.159.073l-.003.01zM0 19.089zm5.13-9.165c2.745-2.722 6.286-4.335 7.647-2.96 1.358 1.374-.087 4.704-2.834 7.424-2.746 2.72-6.243 4.418-7.601 3.043-1.36-1.373.039-4.789 2.785-7.51l.003.003z"/></symbol>
-</svg>
 
 <!-- ============= NAV ============= -->
 <nav class="nav">
@@ -1103,68 +1136,132 @@
       <a class="sb-link" href="https://registry.afterburner.sh">Package Registry</a>
       <a class="sb-link" href="https://github.com/afterburner-sh/afterburner">GitHub</a>
     </div>
-    <div class="sb-section">
-      <h4>Get started</h4>
-      <a class="sb-link active" href="#introduction">Introduction</a>
-      <a class="sb-link" href="#installation">Installation</a>
-      <a class="sb-link" href="#run">Run any language</a>
-      <a class="sb-link" href="#repl">REPL</a>
-      <a class="sb-link" href="#first-package">Your first package <span class="tag">5m</span></a>
-      <a class="sb-link" href="#compile">Compile to portable wasm</a>
+
+    <!-- L1: Get started -->
+    <div class="sb-group sb-section">
+      <button class="sb-group-header" type="button" aria-expanded="true">
+        Get started
+        <i class="sb-chevron" aria-hidden="true">&#9660;</i>
+      </button>
+      <div class="sb-group-body">
+        <a class="sb-link" href="#run">Run any language</a>
+        <a class="sb-link" href="#repl">REPL</a>
+        <a class="sb-link" href="#first-package">Your first package <span class="tag">5m</span></a>
+        <a class="sb-link" href="#compile">Compile to portable wasm</a>
+      </div>
     </div>
-    <div class="sb-section">
-      <h4>Languages</h4>
-      <a class="sb-link" href="#languages">Supported languages</a>
-      <a class="sb-link" href="#lang-js"><svg class="lang-ico"><use href="#lang-js"/></svg>JavaScript</a>
-      <a class="sb-link" href="#lang-ts"><svg class="lang-ico"><use href="#lang-ts"/></svg>TypeScript</a>
-      <a class="sb-link" href="#lang-rust"><svg class="lang-ico"><use href="#lang-rust"/></svg>Rust</a>
-      <a class="sb-link" href="#lang-go"><svg class="lang-ico"><use href="#lang-go"/></svg>Go</a>
-      <a class="sb-link" href="#lang-c"><svg class="lang-ico"><use href="#lang-c"/></svg>C</a>
-      <a class="sb-link" href="#lang-cpp"><svg class="lang-ico"><use href="#lang-cpp"/></svg>C++</a>
-      <a class="sb-link" href="#lang-python"><svg class="lang-ico"><use href="#lang-python"/></svg>Python</a>
-      <a class="sb-link" href="#lang-ruby"><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby</a>
+
+    <!-- L1: Languages -->
+    <div class="sb-group sb-section">
+      <button class="sb-group-header" type="button" aria-expanded="true">
+        Languages
+        <i class="sb-chevron" aria-hidden="true">&#9660;</i>
+      </button>
+      <div class="sb-group-body">
+        <!-- L2 sub-group: Supported languages -->
+        <div class="sb-sub-group">
+          <button class="sb-sub-header" type="button" aria-expanded="true">
+            Supported languages
+            <i class="sb-chevron" aria-hidden="true">&#9660;</i>
+          </button>
+          <div class="sb-sub-body">
+            <a class="sb-link" href="#lang-js"><i class="devicon-javascript-plain" aria-hidden="true"></i>JavaScript</a>
+            <a class="sb-link" href="#lang-ts"><i class="devicon-typescript-plain" aria-hidden="true"></i>TypeScript</a>
+            <a class="sb-link" href="#lang-rust"><i class="devicon-rust-original" aria-hidden="true"></i>Rust</a>
+            <a class="sb-link" href="#lang-go"><i class="devicon-go-plain" aria-hidden="true"></i>Go</a>
+            <a class="sb-link" href="#lang-c"><i class="devicon-c-plain" aria-hidden="true"></i>C</a>
+            <a class="sb-link" href="#lang-cpp"><i class="devicon-cplusplus-plain" aria-hidden="true"></i>C++</a>
+            <a class="sb-link" href="#lang-python"><i class="devicon-python-plain" aria-hidden="true"></i>Python</a>
+            <a class="sb-link" href="#lang-ruby"><i class="devicon-ruby-plain" aria-hidden="true"></i>Ruby</a>
+          </div>
+        </div>
+      </div>
     </div>
-    <div class="sb-section">
-      <h4>Core concepts</h4>
-      <a class="sb-link" href="#wasm-everywhere">WASM everywhere</a>
-      <a class="sb-link" href="#determinism">Deterministic execution</a>
-      <a class="sb-link" href="#sandbox">Capability sandbox</a>
-      <a class="sb-link" href="#fuel">Fuel, memory &amp; timeouts</a>
-      <a class="sb-link" href="#tiers">Adaptive execution</a>
-      <a class="sb-link" href="#scheduler">Scheduler</a>
-      <a class="sb-link" href="#state">Cross-call state</a>
+
+    <!-- L1: Core concepts -->
+    <div class="sb-group sb-section">
+      <button class="sb-group-header" type="button" aria-expanded="true">
+        Core concepts
+        <i class="sb-chevron" aria-hidden="true">&#9660;</i>
+      </button>
+      <div class="sb-group-body">
+        <a class="sb-link" href="#wasm-everywhere">WASM everywhere</a>
+        <a class="sb-link" href="#determinism">Deterministic execution</a>
+        <a class="sb-link" href="#sandbox">Capability sandbox</a>
+        <a class="sb-link" href="#fuel">Fuel, memory &amp; timeouts</a>
+        <a class="sb-link" href="#tiers">Adaptive execution</a>
+        <a class="sb-link" href="#scheduler">Scheduler</a>
+        <a class="sb-link" href="#state">Cross-call state</a>
+      </div>
     </div>
-    <div class="sb-section">
-      <h4>Packages</h4>
-      <a class="sb-link" href="#packages">Packages &amp; deps</a>
-      <a class="sb-link" href="#packages-anatomy">Package anatomy</a>
-      <a class="sb-link" href="#packages-afbtoml">afb.toml manifest</a>
-      <a class="sb-link" href="#packages-manifold">manifold.json</a>
-      <a class="sb-link" href="#packages-deps">Declaring deps</a>
-      <a class="sb-link" href="#packages-pip">Python packages</a>
-      <a class="sb-link" href="#packages-gem">Ruby packages</a>
-      <a class="sb-link" href="#packages-afb">The .afb format</a>
-      <a class="sb-link" href="#packages-registry">Registry</a>
-      <a class="sb-link" href="#packages-precompiled">Precompiled WASM</a>
+
+    <!-- L1: Packages -->
+    <div class="sb-group sb-section">
+      <button class="sb-group-header" type="button" aria-expanded="true">
+        Packages
+        <i class="sb-chevron" aria-hidden="true">&#9660;</i>
+      </button>
+      <div class="sb-group-body">
+        <!-- L2 sub-group: Packages & deps -->
+        <div class="sb-sub-group">
+          <button class="sb-sub-header" type="button" aria-expanded="true">
+            Packages &amp; deps
+            <i class="sb-chevron" aria-hidden="true">&#9660;</i>
+          </button>
+          <div class="sb-sub-body">
+            <a class="sb-link" href="#packages-anatomy">Package anatomy</a>
+            <a class="sb-link" href="#packages-afbtoml">afb.toml manifest</a>
+            <a class="sb-link" href="#packages-manifold">manifold.json</a>
+            <a class="sb-link" href="#packages-deps">Declaring deps</a>
+            <a class="sb-link" href="#packages-pip">Python packages</a>
+            <a class="sb-link" href="#packages-gem">Ruby packages</a>
+          </div>
+        </div>
+        <a class="sb-link" href="#packages-afb">The .afb format</a>
+        <a class="sb-link" href="#packages-registry">Registry</a>
+        <a class="sb-link" href="#packages-precompiled">Precompiled WASM</a>
+      </div>
     </div>
-    <div class="sb-section">
-      <h4>Embed in Rust</h4>
-      <a class="sb-link" href="#programmatic">Programmatic API</a>
-      <a class="sb-link" href="#extend">Extension points</a>
-      <a class="sb-link" href="#extend-cache">BurnCacheBackend</a>
-      <a class="sb-link" href="#extend-host">HostContext</a>
-      <a class="sb-link" href="#extend-flow">FlowEngine</a>
+
+    <!-- L1: Embed in Rust -->
+    <div class="sb-group sb-section">
+      <button class="sb-group-header" type="button" aria-expanded="true">
+        Embed in Rust
+        <i class="sb-chevron" aria-hidden="true">&#9660;</i>
+      </button>
+      <div class="sb-group-body">
+        <a class="sb-link" href="#programmatic">Programmatic API</a>
+        <!-- L2 sub-group: Extension points -->
+        <div class="sb-sub-group">
+          <button class="sb-sub-header" type="button" aria-expanded="true">
+            Extension points
+            <i class="sb-chevron" aria-hidden="true">&#9660;</i>
+          </button>
+          <div class="sb-sub-body">
+            <a class="sb-link" href="#extend-cache">BurnCacheBackend</a>
+            <a class="sb-link" href="#extend-host">HostContext</a>
+            <a class="sb-link" href="#extend-flow">FlowEngine</a>
+          </div>
+        </div>
+      </div>
     </div>
-    <div class="sb-section">
-      <h4>Reference</h4>
-      <a class="sb-link" href="#cli">burn CLI</a>
-      <a class="sb-link" href="#cli-flags">Flag reference</a>
-      <a class="sb-link" href="#afbtoml-ref">afb.toml keys</a>
-      <a class="sb-link" href="#ai-agents">AI coding agents</a>
-      <a class="sb-link" href="#node-compat">Node compat surface</a>
-      <a class="sb-link" href="#env">Environment vars</a>
-      <a class="sb-link" href="#crates">Workspace crates</a>
-      <a class="sb-link" href="#build">Building from source</a>
+
+    <!-- L1: Reference -->
+    <div class="sb-group sb-section">
+      <button class="sb-group-header" type="button" aria-expanded="true">
+        Reference
+        <i class="sb-chevron" aria-hidden="true">&#9660;</i>
+      </button>
+      <div class="sb-group-body">
+        <a class="sb-link" href="#cli">burn CLI</a>
+        <a class="sb-link" href="#cli-flags">Flag reference</a>
+        <a class="sb-link" href="#afbtoml-ref">afb.toml keys</a>
+        <a class="sb-link" href="#ai-agents">AI coding agents</a>
+        <a class="sb-link" href="#node-compat">Node compat surface</a>
+        <a class="sb-link" href="#env">Environment vars</a>
+        <a class="sb-link" href="#crates">Workspace crates</a>
+        <a class="sb-link" href="#build">Building from source</a>
+      </div>
     </div>
   </aside>
 
@@ -1431,14 +1528,14 @@ $ <span class="tok-mod">burn</span> run my-pkg-0.1.0.afb</pre>
       <p>Every language compiles to a <code>WebAssembly</code> module and runs in the same sandbox. The table is the at-a-glance status; each language has its own guide below. Jump to one:</p>
 
       <div class="lang-matrix">
-        <a href="#lang-js"><span class="glyph" style="background:#d6a915;"><svg aria-hidden="true"><use href="#lang-js"/></svg></span>JavaScript</a>
-        <a href="#lang-ts"><span class="glyph" style="background:#2f74c0;"><svg aria-hidden="true"><use href="#lang-ts"/></svg></span>TypeScript</a>
-        <a href="#lang-rust"><span class="glyph" style="background:#b7410e;"><svg aria-hidden="true"><use href="#lang-rust"/></svg></span>Rust</a>
-        <a href="#lang-go"><span class="glyph" style="background:#00add8;"><svg aria-hidden="true"><use href="#lang-go"/></svg></span>Go</a>
-        <a href="#lang-c"><span class="glyph" style="background:#5c6bc0;"><svg aria-hidden="true"><use href="#lang-c"/></svg></span>C</a>
-        <a href="#lang-cpp"><span class="glyph" style="background:#00599c;"><svg aria-hidden="true"><use href="#lang-cpp"/></svg></span>C++</a>
-        <a href="#lang-python"><span class="glyph" style="background:#3776ab;"><svg aria-hidden="true"><use href="#lang-python"/></svg></span>Python</a>
-        <a href="#lang-ruby"><span class="glyph" style="background:#cc342d;"><svg aria-hidden="true"><use href="#lang-ruby"/></svg></span>Ruby</a>
+        <a href="#lang-js"><span class="glyph" style="background:#d6a915;"><i class="devicon-javascript-plain" aria-hidden="true"></i></span>JavaScript</a>
+        <a href="#lang-ts"><span class="glyph" style="background:#2f74c0;"><i class="devicon-typescript-plain" aria-hidden="true"></i></span>TypeScript</a>
+        <a href="#lang-rust"><span class="glyph" style="background:#b7410e;"><i class="devicon-rust-original" aria-hidden="true"></i></span>Rust</a>
+        <a href="#lang-go"><span class="glyph" style="background:#00add8;"><i class="devicon-go-plain" aria-hidden="true"></i></span>Go</a>
+        <a href="#lang-c"><span class="glyph" style="background:#5c6bc0;"><i class="devicon-c-plain" aria-hidden="true"></i></span>C</a>
+        <a href="#lang-cpp"><span class="glyph" style="background:#00599c;"><i class="devicon-cplusplus-plain" aria-hidden="true"></i></span>C++</a>
+        <a href="#lang-python"><span class="glyph" style="background:#3776ab;"><i class="devicon-python-plain" aria-hidden="true"></i></span>Python</a>
+        <a href="#lang-ruby"><span class="glyph" style="background:#cc342d;"><i class="devicon-ruby-plain" aria-hidden="true"></i></span>Ruby</a>
       </div>
 
       <div class="table-scroll"><table class="doc-table">
@@ -1446,14 +1543,14 @@ $ <span class="tok-mod">burn</span> run my-pkg-0.1.0.afb</pre>
           <tr><th>Language</th><th><code>language</code> value</th><th>Entry</th><th>Run a file</th><th>REPL</th><th>Compile / package</th></tr>
         </thead>
         <tbody>
-          <tr><td><svg class="lang-ico"><use href="#lang-js"/></svg>JavaScript</td><td><code>js</code> · <code>javascript</code></td><td><code>source/main.js</code></td><td>Yes</td><td>Yes</td><td>Yes (engine; precompile optional)</td></tr>
-          <tr><td><svg class="lang-ico"><use href="#lang-ts"/></svg>TypeScript</td><td><code>ts</code> · <code>typescript</code></td><td><code>source/main.ts</code></td><td>Yes</td><td>Yes</td><td>Yes (oxc strips types)</td></tr>
-          <tr><td><svg class="lang-ico"><use href="#lang-rust"/></svg>Rust</td><td><code>rust</code></td><td><code>source/main.rs</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>cargo</code> / <code>rustc</code>)</td></tr>
-          <tr><td><svg class="lang-ico"><use href="#lang-go"/></svg>Go</td><td><code>go</code> · <code>golang</code></td><td><code>source/main.go</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>go build</code>)</td></tr>
-          <tr><td><svg class="lang-ico"><use href="#lang-c"/></svg>C</td><td><code>c</code></td><td><code>source/main.c</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>clang</code> + WASI)</td></tr>
-          <tr><td><svg class="lang-ico"><use href="#lang-cpp"/></svg>C++</td><td><code>cpp</code> · <code>c++</code> · <code>cxx</code> · <code>cc</code></td><td><code>source/main.cpp</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>clang++</code> + WASI)</td></tr>
-          <tr><td><svg class="lang-ico"><use href="#lang-python"/></svg>Python</td><td><code>python</code> · <code>py</code></td><td><code>source/main.py</code></td><td>Yes</td><td>Yes</td><td>Yes (auto-fetched)</td></tr>
-          <tr><td><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby</td><td><code>ruby</code> · <code>rb</code></td><td><code>source/main.rb</code></td><td>Yes</td><td>Yes</td><td>Yes (auto-fetched)</td></tr>
+          <tr><td><i class="devicon-javascript-plain lang-i" aria-hidden="true"></i>JavaScript</td><td><code>js</code> · <code>javascript</code></td><td><code>source/main.js</code></td><td>Yes</td><td>Yes</td><td>Yes (engine; precompile optional)</td></tr>
+          <tr><td><i class="devicon-typescript-plain lang-i" aria-hidden="true"></i>TypeScript</td><td><code>ts</code> · <code>typescript</code></td><td><code>source/main.ts</code></td><td>Yes</td><td>Yes</td><td>Yes (oxc strips types)</td></tr>
+          <tr><td><i class="devicon-rust-original lang-i" aria-hidden="true"></i>Rust</td><td><code>rust</code></td><td><code>source/main.rs</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>cargo</code> / <code>rustc</code>)</td></tr>
+          <tr><td><i class="devicon-go-plain lang-i" aria-hidden="true"></i>Go</td><td><code>go</code> · <code>golang</code></td><td><code>source/main.go</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>go build</code>)</td></tr>
+          <tr><td><i class="devicon-c-plain lang-i" aria-hidden="true"></i>C</td><td><code>c</code></td><td><code>source/main.c</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>clang</code> + WASI)</td></tr>
+          <tr><td><i class="devicon-cplusplus-plain lang-i" aria-hidden="true"></i>C++</td><td><code>cpp</code> · <code>c++</code> · <code>cxx</code> · <code>cc</code></td><td><code>source/main.cpp</code></td><td>Yes</td><td>Yes</td><td>Yes (<code>clang++</code> + WASI)</td></tr>
+          <tr><td><i class="devicon-python-plain lang-i" aria-hidden="true"></i>Python</td><td><code>python</code> · <code>py</code></td><td><code>source/main.py</code></td><td>Yes</td><td>Yes</td><td>Yes (auto-fetched)</td></tr>
+          <tr><td><i class="devicon-ruby-plain lang-i" aria-hidden="true"></i>Ruby</td><td><code>ruby</code> · <code>rb</code></td><td><code>source/main.rb</code></td><td>Yes</td><td>Yes</td><td>Yes (auto-fetched)</td></tr>
         </tbody>
       </table></div>
 
@@ -1461,14 +1558,14 @@ $ <span class="tok-mod">burn</span> run my-pkg-0.1.0.afb</pre>
 
       <div class="langtabs" id="hello-tabs">
         <div class="langtabs__bar" role="tablist" aria-label="Hello-world per language">
-          <button class="langtabs__tab active" data-tab="js" role="tab"><svg class="lang-ico"><use href="#lang-js"/></svg>JavaScript</button>
-          <button class="langtabs__tab" data-tab="ts" role="tab"><svg class="lang-ico"><use href="#lang-ts"/></svg>TypeScript</button>
-          <button class="langtabs__tab" data-tab="rust" role="tab"><svg class="lang-ico"><use href="#lang-rust"/></svg>Rust</button>
-          <button class="langtabs__tab" data-tab="go" role="tab"><svg class="lang-ico"><use href="#lang-go"/></svg>Go</button>
-          <button class="langtabs__tab" data-tab="c" role="tab"><svg class="lang-ico"><use href="#lang-c"/></svg>C</button>
-          <button class="langtabs__tab" data-tab="cpp" role="tab"><svg class="lang-ico"><use href="#lang-cpp"/></svg>C++</button>
-          <button class="langtabs__tab" data-tab="py" role="tab"><svg class="lang-ico"><use href="#lang-python"/></svg>Python</button>
-          <button class="langtabs__tab" data-tab="rb" role="tab"><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby</button>
+          <button class="langtabs__tab active" data-tab="js" role="tab"><i class="devicon-javascript-plain lang-i" aria-hidden="true"></i>JavaScript</button>
+          <button class="langtabs__tab" data-tab="ts" role="tab"><i class="devicon-typescript-plain lang-i" aria-hidden="true"></i>TypeScript</button>
+          <button class="langtabs__tab" data-tab="rust" role="tab"><i class="devicon-rust-original lang-i" aria-hidden="true"></i>Rust</button>
+          <button class="langtabs__tab" data-tab="go" role="tab"><i class="devicon-go-plain lang-i" aria-hidden="true"></i>Go</button>
+          <button class="langtabs__tab" data-tab="c" role="tab"><i class="devicon-c-plain lang-i" aria-hidden="true"></i>C</button>
+          <button class="langtabs__tab" data-tab="cpp" role="tab"><i class="devicon-cplusplus-plain lang-i" aria-hidden="true"></i>C++</button>
+          <button class="langtabs__tab" data-tab="py" role="tab"><i class="devicon-python-plain lang-i" aria-hidden="true"></i>Python</button>
+          <button class="langtabs__tab" data-tab="rb" role="tab"><i class="devicon-ruby-plain lang-i" aria-hidden="true"></i>Ruby</button>
         </div>
 
         <div class="langtabs__panel active" data-tab="js">
@@ -1616,7 +1713,7 @@ total = (1..100).<span class="tok-fn">sum</span>
       </div>
 
       <!-- ===== per-language guides ===== -->
-      <h3 id="lang-js"><svg class="lang-ico"><use href="#lang-js"/></svg>JavaScript</h3>
+      <h3 id="lang-js"><i class="devicon-javascript-plain lang-i" aria-hidden="true"></i>JavaScript</h3>
       <p><code>language = "js"</code> (alias <code>javascript</code>), entry <code>source/main.js</code>. JavaScript runs on the engine directly - no external toolchain to run it. <code>burn compile</code> can additionally precompile to WASM for sub-millisecond cold starts. A package's entry assigns its export with <code>module.exports</code>; sibling files are plain <code>require('./lib/util')</code>, and npm packages declared under <code>[npm]</code> are imported by bare specifier. See <a href="#node-compat" style="color: var(--action);">the Node compat surface</a> for the built-in module list.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
@@ -1626,7 +1723,7 @@ $ <span class="tok-mod">burn</span> init ./pkg --namespace ns --name app        
 $ <span class="tok-mod">burn</span> compile                                       <span class="tok-com"># .afb (+ precompiled WASM, opt-in)</span></pre>
       </div>
 
-      <h3 id="lang-ts"><svg class="lang-ico"><use href="#lang-ts"/></svg>TypeScript</h3>
+      <h3 id="lang-ts"><i class="devicon-typescript-plain lang-i" aria-hidden="true"></i>TypeScript</h3>
       <p><code>language = "typescript"</code> (alias <code>ts</code>), entry <code>source/main.ts</code>. Types are stripped to JavaScript with <a href="https://oxc.rs" style="color: var(--action);">oxc</a> at compile time (type-stripping, not a full <code>tsc</code> type-check), so the published module is plain WASM-bound JS. Everything from the JavaScript guide applies; scaffold with <code>--ts</code> (shorthand for <code>--lang typescript</code>), which also writes a <code>tsconfig.json</code>.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
@@ -1635,7 +1732,7 @@ $ <span class="tok-mod">burn</span> repl --lang ts
 $ <span class="tok-mod">burn</span> init ./pkg --namespace ns --name app --ts</pre>
       </div>
 
-      <h3 id="lang-rust"><svg class="lang-ico"><use href="#lang-rust"/></svg>Rust</h3>
+      <h3 id="lang-rust"><i class="devicon-rust-original lang-i" aria-hidden="true"></i>Rust</h3>
       <p><code>language = "rust"</code>, entry <code>source/main.rs</code>. Compiles to WebAssembly with <code>cargo build</code> (a single bare file goes through <code>rustc</code>) to a WASI command module. Multi-module is <strong>Cargo-resolved</strong>: a standalone <code>Cargo.toml</code> at the package root points <code>[[bin]] path</code> at <code>source/main.rs</code>, and the usual <code>mod</code> system resolves the tree under <code>source/</code> - sibling files (<code>source/geometry.rs</code> via <code>mod geometry;</code>) and directory modules (<code>source/stats/mod.rs</code> via <code>mod stats;</code>).</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">Cargo.toml (package root, beside afb.toml)</span><button class="copy-btn">Copy</button></div>
@@ -1669,7 +1766,7 @@ $ <span class="tok-mod">burn</span> repl --lang rust       <span class="tok-com"
 $ <span class="tok-mod">burn</span> compile                <span class="tok-com"># package -> WebAssembly module in the .afb</span></pre>
       </div>
 
-      <h3 id="lang-go"><svg class="lang-ico"><use href="#lang-go"/></svg>Go</h3>
+      <h3 id="lang-go"><i class="devicon-go-plain lang-i" aria-hidden="true"></i>Go</h3>
       <p><code>language = "go"</code> (alias <code>golang</code>), entry <code>source/main.go</code>. Compiles to WebAssembly with <code>go build</code> to a WASI command module. Multi-module uses <strong>Go modules</strong>: a <code>go.mod</code> at the package root names the module, and a second package lives in a subdirectory (<code>source/geometry/geometry.go</code>) imported by its module path. Go's capitalized-identifier rule is the export boundary.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">go.mod (package root)</span><button class="copy-btn">Copy</button></div>
@@ -1699,7 +1796,7 @@ $ <span class="tok-mod">burn</span> repl --lang go
 $ <span class="tok-mod">burn</span> compile</pre>
       </div>
 
-      <h3 id="lang-c"><svg class="lang-ico"><use href="#lang-c"/></svg>C</h3>
+      <h3 id="lang-c"><i class="devicon-c-plain lang-i" aria-hidden="true"></i>C</h3>
       <p><code>language = "c"</code>, entry <code>source/main.c</code>. Compiles to WebAssembly with <code>clang</code> against the wasi-sdk sysroot (a <code>Makefile</code> or <code>CMakeLists.txt</code> in the package is honored when present). Multi-file C is just several translation units plus a shared header, all under <code>source/</code>: <code>burn</code> compiles every <code>.c</code> it finds and links them. <code>static</code> functions keep internal linkage as the encapsulation boundary.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">source/ layout</span><button class="copy-btn">Copy</button></div>
@@ -1728,7 +1825,7 @@ $ <span class="tok-mod">burn</span> repl --lang c
 $ <span class="tok-mod">burn</span> compile</pre>
       </div>
 
-      <h3 id="lang-cpp"><svg class="lang-ico"><use href="#lang-cpp"/></svg>C++</h3>
+      <h3 id="lang-cpp"><i class="devicon-cplusplus-plain lang-i" aria-hidden="true"></i>C++</h3>
       <p><code>language = "cpp"</code> (aliases <code>c++</code>, <code>cxx</code>, <code>cc</code>), entry <code>source/main.cpp</code>. Compiles to WebAssembly with <code>clang++</code>. Multi-file C++ mirrors C: translation units plus a header under <code>source/</code>, with a <code>namespace</code> and an anonymous-namespace boundary for the private helpers.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">source/main.cpp</span><button class="copy-btn">Copy</button></div>
@@ -1750,7 +1847,7 @@ $ <span class="tok-mod">burn</span> repl --lang cpp
 $ <span class="tok-mod">burn</span> compile</pre>
       </div>
 
-      <h3 id="lang-python"><svg class="lang-ico"><use href="#lang-python"/></svg>Python</h3>
+      <h3 id="lang-python"><i class="devicon-python-plain lang-i" aria-hidden="true"></i>Python</h3>
       <p><code>language = "python"</code> (alias <code>py</code>), entry <code>source/main.py</code>. Python runs on the Python runtime, which is auto-fetched into <code>~/.burn</code> on first use (or already embedded in the release binary). <strong>numpy and pandas import and execute</strong>, so <code>pandas.DataFrame({'a':[1,2,3]}).sum()</code> works. All three paths work with no environment variables:</p>
       <ul>
         <li><strong>Run: <code>burn run main.py</code></strong> - executes single-file Python, no setup.</li>
@@ -1769,7 +1866,7 @@ $ <span class="tok-mod">burn</span> compile main.py -o main.afb
 $ <span class="tok-mod">burn</span> run main.afb</pre>
       </div>
 
-      <h3 id="lang-ruby"><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby</h3>
+      <h3 id="lang-ruby"><i class="devicon-ruby-plain lang-i" aria-hidden="true"></i>Ruby</h3>
       <p><code>language = "ruby"</code> (alias <code>rb</code>), entry <code>source/main.rb</code>. Ruby compiles to a single <code>wasm32-wasip1</code> module: the Ruby interpreter + source + stdlib + gems packed into one portable artifact. The Ruby runtime auto-fetches into <code>~/.burn</code> on first use, or is embedded in the release binary. All three paths work with zero configuration:</p>
       <ul>
         <li><strong>Run: <code>burn run main.rb</code></strong> - executes single-file Ruby, no setup.</li>
@@ -1991,7 +2088,7 @@ $ <span class="tok-mod">burn</span> install --locked              <span class="t
       </div>
       <p><code>burn install</code> resolves the full transitive graph with a conflict-driven version solver (the class Cargo uses), topologically orders it, and writes <code>burn.lock</code> pinning every package to an exact content digest. Registry dependencies are pinned by SHA-256, so a coordinate can never silently resolve to different bytes; npm dependencies resolve to an exact version + integrity hash. Resolved packages land in a shared content-addressed cache, fetched at most once per machine. Importing is just <code>require()</code> (or a TS/JS <code>import</code>): a registry dependency by its <code>namespace/name</code>, an npm package by its bare name.</p>
 
-      <h3 id="packages-pip"><svg class="lang-ico"><use href="#lang-python"/></svg>Python packages (<code>[pip]</code>)</h3>
+      <h3 id="packages-pip"><i class="devicon-python-plain lang-i" aria-hidden="true"></i>Python packages (<code>[pip]</code>)</h3>
       <p>Python packages from <a href="https://pypi.org" style="color:var(--action)">PyPI</a> are declared in the <code>[pip]</code> table in <code>afb.toml</code>. Each entry is <code>package-name = "specifier"</code> where the specifier is a <a href="https://peps.python.org/pep-0440/" style="color:var(--action)">PEP 440</a> version specifier string. <code>burn install</code> resolves the dependency closure, verifies each wheel's SHA-256 digest, and vendors pre-built sandbox-compatible wheels into <code>vendor/pip/**</code> inside the <code>.afb</code> - so the resolved wheels ship with the package, not fetched at runtime.</p>
 
       <div class="callout callout--note">
@@ -2026,7 +2123,7 @@ $ <span class="tok-mod">burn</span> run          <span class="tok-com"># import 
 
       <p>The <code>[dependencies]</code> table is for other <code>.afb</code> packages (resolved at install time, not packed). The <code>[pip]</code> table is for PyPI packages (vendors wheels into the <code>.afb</code> itself). Both are declared in the same <code>afb.toml</code> and resolved by <code>burn install</code>.</p>
 
-      <h3 id="packages-gem"><svg class="lang-ico"><use href="#lang-ruby"/></svg>Ruby packages (<code>[gem]</code>)</h3>
+      <h3 id="packages-gem"><i class="devicon-ruby-plain lang-i" aria-hidden="true"></i>Ruby packages (<code>[gem]</code>)</h3>
       <p>Ruby gems from <a href="https://rubygems.org" style="color:var(--action)">RubyGems</a> are declared in the <code>[gem]</code> table in <code>afb.toml</code>. Each entry is <code>gem-name = "requirement"</code> where the requirement is a <a href="https://guides.rubygems.org/patterns/#pessimistic-version-constraint" style="color:var(--action)">RubyGems version requirement</a>. <code>burn install</code> resolves the closure, verifies each gem's SHA-256 digest, and vendors the gems into <code>vendor/gem/**</code> inside the <code>.afb</code> - the same vendoring model as <code>[pip]</code>.</p>
       <div class="codeblock">
         <div class="codeblock__head"><span class="lang">afb.toml</span><button class="copy-btn">Copy</button></div>
@@ -2418,52 +2515,20 @@ $ ./target/release/<span class="tok-mod">burn</span> version</pre>
     </article>
   </main>
 
-  <!-- =========== TOC =========== -->
-  <aside class="toc" id="docsToc">
-    <h4>On this page</h4>
-    <ul id="tocList"></ul>
-  </aside>
-
 </div>
 
 <script>
-  /* populate TOC from actual doc headings (h2 + h3 within .doc) */
-  (function buildToc() {
-    const list = document.getElementById('tocList');
-    if (!list) return;
-    const headings = [...document.querySelectorAll('.doc h2[id], .doc h3[id]')];
-    list.innerHTML = headings.map(h => {
-      const isSub = h.tagName === 'H3';
-      const label = h.textContent.replace(/^#\s*/, '').trim();
-      return '<li' + (isSub ? ' class="toc-sub"' : '') + '>' +
-        '<a href="#' + h.id + '">' + label + '</a></li>';
-    }).join('');
-  })();
-
   /* sidebar highlight on scroll (h2 only - section-level) */
   const h2sections = [...document.querySelectorAll('.doc h2[id]')];
   const sbLinks    = [...document.querySelectorAll('.sb-link[href^="#"]')];
 
-  /* toc highlight on scroll (h2 + h3 - fine-grained, matches populated list) */
-  const allHeadings = [...document.querySelectorAll('.doc h2[id], .doc h3[id]')];
-
   function highlight() {
     const top = window.scrollY + 110;
-
-    /* sidebar: track h2 */
     let curH2 = h2sections[0]?.id;
     for (const s of h2sections) {
       if (s.offsetTop <= top) curH2 = s.id;
     }
     sbLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + curH2));
-
-    /* toc: track h2 + h3 */
-    let curAny = allHeadings[0]?.id;
-    for (const s of allHeadings) {
-      if (s.offsetTop <= top) curAny = s.id;
-    }
-    const tocLinks = [...document.querySelectorAll('#tocList a[href^="#"]')];
-    tocLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + curAny));
   }
   document.addEventListener('scroll', highlight, { passive: true });
   highlight();
@@ -2676,6 +2741,18 @@ $ ./target/release/<span class="tok-mod">burn</span> version</pre>
         e.preventDefault();
         input.focus();
       }
+    });
+  })();
+
+  /* sidebar collapsible groups - L1 headers and L2 sub-headers toggle their body */
+  (function sidebarToggle() {
+    document.getElementById('docsSidebar').addEventListener('click', (e) => {
+      const btn = e.target.closest('.sb-group-header, .sb-sub-header');
+      if (!btn) return;
+      const group = btn.closest('.sb-group, .sb-sub-group');
+      const expanded = btn.getAttribute('aria-expanded') !== 'false';
+      btn.setAttribute('aria-expanded', String(!expanded));
+      group.classList.toggle('collapsed', expanded);
     });
   })();
 
