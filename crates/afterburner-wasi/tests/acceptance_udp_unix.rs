@@ -3,6 +3,8 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
+#![cfg(feature = "daemon")]
+
 //! Acceptance tests for UDP and Unix-domain socket support in the Python runtime.
 //!
 //! All tests are `#[ignore]` because they require the Pyodide runtime artifacts

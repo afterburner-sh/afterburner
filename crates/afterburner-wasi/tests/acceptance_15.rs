@@ -3,6 +3,8 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
+#![cfg(feature = "daemon")]
+
 //! Section 15 acceptance tests: webserver (N1 sockets) and database (N3
 //! durable host filesystem).
 //!

@@ -147,6 +147,13 @@ jobs:
           # any future runner switch.
           key: ${{ matrix.target }}-${{ matrix.os }}
 
+      - name: Install Binaryen v130 (wasm-opt for release-cli embed, Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          curl -sSL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz \
+            | tar xz -C /tmp
+          echo "/tmp/binaryen-version_130/bin" >> "$GITHUB_PATH"
+
       - name: Build burn (cli-release profile, full features)
         shell: bash
         env:

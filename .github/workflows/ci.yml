@@ -50,6 +50,11 @@ jobs:
       - name: Install libclang (rquickjs-sys bindgen)
         run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
       - uses: Swatinem/rust-cache@v2
+      - name: Install Binaryen v130 (wasm-opt for release-cli embed)
+        run: |
+          curl -sSL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz \
+            | tar xz -C /tmp
+          echo "/tmp/binaryen-version_130/bin" >> "$GITHUB_PATH"
       - name: clippy (workspace, default features)
         # Exclude afterburner-plugin: it targets wasm32-wasip1 only and
         # can't compile on the host triple (no_std, no panic_handler).

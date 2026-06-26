@@ -558,8 +558,10 @@ pub fn install(
         )?;
         let gem_res = install_gem_deps(&plan.gem, None)?;
         // Write npm and gem pins into the lockfile even when there are no afb deps.
-        if plan.write_lock_to.is_some()
-            && (!npm_res.packages.is_empty() || !gem_res.packages.is_empty())
+        if let Some(lock_dir) = plan
+            .write_lock_to
+            .as_ref()
+            .filter(|_| !npm_res.packages.is_empty() || !gem_res.packages.is_empty())
         {
             if !npm_res.packages.is_empty() {
                 plan.lockfile.npm = Lockfile::npm_pins_from_resolution(&npm_res);
@@ -567,7 +569,7 @@ pub fn install(
             if !gem_res.packages.is_empty() {
                 plan.lockfile.gem = Lockfile::gem_pins_from_resolution(&gem_res);
             }
-            let path = plan.write_lock_to.as_ref().unwrap().join(LOCKFILE_NAME);
+            let path = lock_dir.join(LOCKFILE_NAME);
             std::fs::write(&path, plan.lockfile.to_toml()?)
                 .with_context(|| format!("writing {}", path.display()))?;
         }
@@ -885,7 +887,7 @@ fn npm_deps_from_resolution(
 ) -> std::collections::BTreeMap<String, String> {
     use afterburner_cloud::cache;
     let mut npm: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    for (_, pkg) in &res.selected {
+    for pkg in res.selected.values() {
         let digest = pkg.digest.trim_start_matches("sha256:");
         if !cache::contains(digest) {
             continue;

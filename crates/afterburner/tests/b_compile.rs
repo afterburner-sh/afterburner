@@ -581,6 +581,8 @@ fn builder_precompiled_member_survives_pack_unpack() {
         },
         dependencies: Default::default(),
         npm: Default::default(),
+        pip: Default::default(),
+        gem: Default::default(),
         signature: None,
         metadata: Default::default(),
         extra: Default::default(),
