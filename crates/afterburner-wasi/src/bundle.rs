@@ -27,8 +27,8 @@ mod engine;
 
 pub use engine::{
     BundleProgress, NoProgress, burn_home, ensure_pyodide, ensure_ruby, ensure_wasi_sdk,
-    pyodide_dir, pyodide_manifest_ok, ruby_dir, ruby_manifest_ok, wasi_sdk_dir,
-    wasi_sdk_manifest_ok,
+    ensure_wasi_vfs, pyodide_dir, pyodide_manifest_ok, ruby_dir, ruby_manifest_ok, wasi_sdk_dir,
+    wasi_sdk_manifest_ok, wasi_vfs_dir, wasi_vfs_manifest_ok,
 };
 #[cfg(feature = "embed-core")]
 pub use engine::{PYODIDE_PYTHON_XY, PYODIDE_VERSION};
@@ -142,4 +142,18 @@ pub fn ensure_wasi_sdk_bundle() -> Result<PathBuf, String> {
     })?;
     ensure_wasi_sdk(&home, reporter())?;
     Ok(wasi_sdk_dir(&home))
+}
+
+/// Ensure the wasi-vfs CLI bundle under `~/.burn`, rendering progress.
+///
+/// Returns the path to the wasi-vfs bundle directory on success. The CLI binary
+/// is at `<dir>/wasi-vfs` (Unix) or `<dir>/wasi-vfs.exe` (Windows).
+pub fn ensure_wasi_vfs_bundle() -> Result<PathBuf, String> {
+    let home = home().ok_or_else(|| {
+        "cannot locate the Afterburner home dir: neither BURN_HOME nor a home directory \
+         (HOME / USERPROFILE) is set. Set WASI_VFS to a wasi-vfs binary path, or set HOME."
+            .to_string()
+    })?;
+    ensure_wasi_vfs(&home, reporter())?;
+    Ok(wasi_vfs_dir(&home))
 }

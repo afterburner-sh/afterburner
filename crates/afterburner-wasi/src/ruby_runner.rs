@@ -42,7 +42,11 @@ use crate::embedder_vm::{EmbedderVm, WasiCommandOpts};
 ///
 /// vertexia: global fuel budget; a per-phase split (boot vs user code) would
 /// let us bound user code tighter once we expose the boot cost separately.
-const RUBY_FUEL: u64 = 8_000_000_000_000;
+/// The fuel budget for a Ruby run (boot + user code). Ruby's WASM port has
+/// a substantial startup cost (VM init, require loading). 8 * 10^12 fuel
+/// is the shared constant used by all Ruby run paths including the vfs-packed
+/// wasm32-wasip1 path in `afterburner::cli::run`.
+pub const RUBY_FUEL: u64 = 8_000_000_000_000;
 
 /// Guest mount point for the cached `usr` tree. The standalone binary's
 /// compiled-in load path is absolute under `/usr/local/lib/ruby/<abi>`, and

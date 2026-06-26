@@ -230,7 +230,23 @@ fn run_afb(afb_path: &Path, user_args: &[String]) -> Result<()> {
 
     match SourceLang::from_str(&afb.manifest.package.language) {
         Ok(SourceLang::Python) => run_python_afb(afb_path, &afb, user_args),
-        Ok(SourceLang::Ruby) => run_ruby_afb(afb_path, &afb, user_args),
+        Ok(SourceLang::Ruby) => {
+            // A Ruby package compiled via `burn compile` has runtime.target = "wasm32-wasip1"
+            // and contains precompiled/wasm32-wasip1/main.wasm (the vfs-packed module).
+            // A Ruby source .afb (legacy / direct `burn package`) has no precompiled member
+            // and runs on the bundled interpreter.
+            let is_compiled = afb
+                .manifest
+                .runtime
+                .target
+                .as_deref()
+                .is_some_and(|t| t == "wasm32-wasip1");
+            if is_compiled {
+                run_ruby_wasm_afb(afb_path, &afb, user_args)
+            } else {
+                run_ruby_afb(afb_path, &afb, user_args)
+            }
+        }
         _ => run_wasm_afb(afb_path, &afb, user_args),
     }
 }
@@ -366,6 +382,78 @@ fn run_python_afb(
         std::process::exit(out.exit_code);
     }
     let _ = user_args;
+    Ok(())
+}
+
+/// Run a pre-compiled Ruby `.afb` (produced by `burn compile` with language = "ruby").
+///
+/// The `.afb` contains `precompiled/wasm32-wasip1/main.wasm`: the stock `ruby.wasm`
+/// with the package source and Ruby stdlib pre-embedded in a virtual filesystem by
+/// `wasi-vfs`. The module needs no host preopens; it is run as a WASI command
+/// module with argv = `[<pkg_name>, "/src/<entry>"]` so CRuby reads the embedded
+/// `/src/<entry>` as its script. `user_args` are appended after the entry path.
+#[cfg(feature = "wasm")]
+fn run_ruby_wasm_afb(
+    afb_path: &Path,
+    afb: &afterburner_cloud::afterburner_afb::Afb,
+    user_args: &[String],
+) -> Result<()> {
+    use crate::cli::compile::guest_entry_path;
+    use afterburner_wasi::embedder_vm::EmbedderVm;
+
+    let wasm_bytes = afb
+        .precompiled
+        .iter()
+        .find(|(k, _)| k.as_str() == "precompiled/wasm32-wasip1/main.wasm")
+        .map(|(_, v)| v.as_slice())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}: Ruby compiled package has no precompiled/wasm32-wasip1/main.wasm; \
+                 re-run `burn compile` to rebuild it",
+                afb_path.display()
+            )
+        })?;
+
+    let vm = EmbedderVm::new().context("creating EmbedderVm")?;
+    let module = vm
+        .compile(wasm_bytes, true, |_| Ok(()))
+        .context("compiling Ruby wasm module")?;
+
+    // argv[0] = conventional program name (the package path), argv[1] = guest script path.
+    // ruby.wasm treats argv[0] as its program name and argv[1] as the script to run.
+    let entry_rel = &afb.manifest.package.entry;
+    let guest_script = guest_entry_path(entry_rel);
+    let mut args = vec![afb_path.to_string_lossy().into_owned(), guest_script];
+    args.extend_from_slice(user_args);
+    let opts = WasiCommandOpts::new().args(args);
+
+    // Ruby's WASM port has a large startup cost (VM init, require loading).
+    // Use the same fuel budget as the source-package runner (RUBY_FUEL).
+    let output = vm
+        .run_command(
+            &module,
+            opts,
+            Some(afterburner_wasi::ruby_runner::RUBY_FUEL),
+        )
+        .context("running Ruby wasm command")?;
+
+    if !output.stdout.is_empty() {
+        use std::io::Write;
+        std::io::stdout()
+            .write_all(&output.stdout)
+            .context("writing Ruby wasm stdout")?;
+    }
+    if !output.stderr.is_empty() {
+        use std::io::Write;
+        std::io::stderr()
+            .write_all(&output.stderr)
+            .context("writing Ruby wasm stderr")?;
+    }
+
+    let exit_code = output.result as i32;
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
     Ok(())
 }
 

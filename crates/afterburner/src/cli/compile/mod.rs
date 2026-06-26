@@ -21,16 +21,24 @@
 //! `crypto.createHash` call is denied under a sealed Manifold and granted
 //! under one with `crypto: true`.
 //!
-//! For non-JS/TS packages (`language = "rust"`, `"go"`, `"c"`, `"cpp"`,
-//! `"python"`), the language-native toolchain is invoked to produce a
-//! `wasm32-wasip1` WASI command module. The language is read exclusively
-//! from `[package] language` in `afb.toml` - no file-extension auto-detection.
+//! For non-JS/TS packages (`language = "rust"`, `"go"`, `"c"`, `"cpp"`),
+//! the language-native toolchain is invoked to produce a `wasm32-wasip1`
+//! WASI command module. The language is read exclusively from
+//! `[package] language` in `afb.toml` - no file-extension auto-detection.
+//!
+//! For `language = "ruby"`, the package is compiled to a self-contained
+//! `wasm32-wasip1` module via `wasi-vfs pack`: the stock `ruby.wasm`
+//! interpreter with the package's `source/` tree and the Ruby stdlib
+//! pre-embedded. Python: packed as source; Ruby: compiled via wasi-vfs to
+//! a self-contained wasm32-wasip1 module.
 //!
 //! `javy` is required only for JS/TS - the runtime never shells to it.
 //! Required version: 8.1.1.
 
 mod cc; // C/C++ multi-file -> wasm32-wasip1 WASI command (wasi-sdk); used by `lang`.
 pub mod lang;
+mod ruby_wasm; // Ruby -> self-contained wasm32-wasip1 via wasi-vfs
+pub use ruby_wasm::{GUEST_SRC_MOUNT, gem_load_path_dirs, guest_entry_path};
 
 use afterburner_cloud::afterburner_afb::Afb;
 use afterburner_cloud::afterburner_afb::digest::{digest, hex};
@@ -287,8 +295,13 @@ pub fn dispatch_compile(
     if lang.is_js_family() {
         transpile_ts_sources(&mut local)?;
         compile_with_local_package(local, out_path, wasm_only)
+    } else if lang == SourceLang::Ruby {
+        // Ruby: compile to a self-contained wasm32-wasip1 via wasi-vfs.
+        // The stock ruby.wasm + the package's source/gems are embedded in the VFS.
+        let pkg_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        ruby_wasm::compile_ruby_to_wasm(local, &pkg_dir, out_path, wasm_only)
     } else if lang.is_interpretable() {
-        // Python / Ruby: shipped as source, interpreted on the bundled runtime.
+        // Python: shipped as source, interpreted on the bundled runtime.
         // There is no precompiled WASM artifact, so `--wasm-only` cannot apply.
         if wasm_only {
             anyhow::bail!(
@@ -378,8 +391,11 @@ fn compile_native_to_afb(
         SourceLang::C => "C",
         SourceLang::Cpp => "C++",
         SourceLang::Js | SourceLang::Ts => unreachable!("JS/TS not handled here"),
-        SourceLang::Python | SourceLang::Ruby => {
-            unreachable!("Python/Ruby are interpreted and packed as source, not compiled here")
+        SourceLang::Python => {
+            unreachable!("Python is interpreted and packed as source, not compiled here")
+        }
+        SourceLang::Ruby => {
+            unreachable!("Ruby is compiled via wasi-vfs, not the native toolchain path")
         }
     };
 

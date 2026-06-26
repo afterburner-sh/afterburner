@@ -1117,6 +1117,160 @@ fn extract_wasi_sdk(tar_gz: &[u8], staging: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// ── wasi-vfs (Ruby WASM packer) bundle ──────────────────────────────────────
+
+/// User-facing label for the wasi-vfs CLI download (no internal codename).
+#[allow(dead_code)] // used by the runtime side (bundle.rs); unused in the build script
+const WASI_VFS_LABEL: &str = "Fetching wasi-vfs packer";
+
+/// wasi-vfs release the bundled packer tracks.
+#[allow(dead_code)] // used by the runtime side (bundle.rs); unused in the build script
+const WASI_VFS_RELEASE: &str = "v0.6.3";
+
+/// Per-platform asset and its pinned sha256.
+#[allow(dead_code)] // used by the runtime side (bundle.rs); unused in the build script
+struct WasiVfsPlatformAsset {
+    arch: &'static str,
+    os: &'static str,
+    file: &'static str,
+    sha256: &'static str,
+}
+
+/// Platform table for wasi-vfs CLI (zip, contains one binary named `wasi-vfs`).
+#[allow(dead_code)] // used by the runtime side (bundle.rs); unused in the build script
+const WASI_VFS_PLATFORMS: &[WasiVfsPlatformAsset] = &[
+    WasiVfsPlatformAsset {
+        arch: "x86_64",
+        os: "linux",
+        file: "wasi-vfs-cli-x86_64-unknown-linux-gnu.zip",
+        sha256: "c9ee8179f6f0882abc37024fbe0cd678311aa8a29083fa364915ed4d29a69485",
+    },
+    WasiVfsPlatformAsset {
+        arch: "aarch64",
+        os: "linux",
+        file: "wasi-vfs-cli-aarch64-unknown-linux-gnu.zip",
+        sha256: "ef71666d26215121f7c49c1713ee029aa5ebe6ea41722013b41d488288cb0186",
+    },
+    WasiVfsPlatformAsset {
+        arch: "x86_64",
+        os: "macos",
+        file: "wasi-vfs-cli-x86_64-apple-darwin.zip",
+        sha256: "b3d86d63350ae48fda9b5877647cca4d9c1ff2f637db5e4eb40852aa5361c340",
+    },
+    WasiVfsPlatformAsset {
+        arch: "aarch64",
+        os: "macos",
+        file: "wasi-vfs-cli-aarch64-apple-darwin.zip",
+        sha256: "d9ebf1cb77927b39c543dccb3fc35842b0f14ca8f70223de1daf2585896de3c1",
+    },
+];
+
+#[allow(dead_code)] // used by the runtime side (bundle.rs); unused in the build script
+fn wasi_vfs_host_asset() -> Option<&'static WasiVfsPlatformAsset> {
+    let arch = std::env::consts::ARCH;
+    let os = match std::env::consts::OS {
+        "linux" => "linux",
+        "macos" => "macos",
+        _ => return None,
+    };
+    WASI_VFS_PLATFORMS
+        .iter()
+        .find(|a| a.arch == arch && a.os == os)
+}
+
+/// The wasi-vfs bundle dir: `<burn_home>/wasi-vfs-<release>`.
+#[allow(dead_code)] // used by the runtime side (bundle.rs); unused in the build script
+pub fn wasi_vfs_dir(home: &Path) -> PathBuf {
+    home.join(format!("wasi-vfs-{WASI_VFS_RELEASE}"))
+}
+
+/// The wasi-vfs CLI binary name on the current platform.
+#[allow(dead_code)] // used by the runtime side (bundle.rs); unused in the build script
+#[cfg(unix)]
+fn wasi_vfs_bin_name() -> &'static str {
+    "wasi-vfs"
+}
+#[allow(dead_code)] // used by the runtime side (bundle.rs); unused in the build script
+#[cfg(not(unix))]
+fn wasi_vfs_bin_name() -> &'static str {
+    "wasi-vfs.exe"
+}
+
+/// A wasi-vfs manifest is complete when the binary exists.
+#[allow(dead_code)] // used by the runtime side (bundle.rs); unused in the build script
+pub fn wasi_vfs_manifest_ok(dir: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("manifest.txt")) else {
+        return false;
+    };
+    for line in text.lines() {
+        let Some((key, rel)) = line.split_once('=') else {
+            continue;
+        };
+        if key == "bin" {
+            return dir.join(rel).exists();
+        }
+    }
+    false
+}
+
+/// Ensure the wasi-vfs CLI bundle exists under `home`. The CLI binary is
+/// extracted from the platform zip and cached at
+/// `~/.burn/wasi-vfs-<release>/wasi-vfs`. Returns `Err` on an unsupported
+/// host or any fetch/extract failure.
+#[allow(dead_code)] // used by the runtime side (bundle.rs); unused in the build script
+pub fn ensure_wasi_vfs(home: &Path, prog: &dyn BundleProgress) -> Result<(), String> {
+    let asset = wasi_vfs_host_asset().ok_or_else(|| {
+        format!(
+            "no bundled wasi-vfs for {}-{}; set WASI_VFS to a wasi-vfs binary path.",
+            std::env::consts::ARCH,
+            std::env::consts::OS
+        )
+    })?;
+    let dir = wasi_vfs_dir(home);
+    let bin_name = wasi_vfs_bin_name();
+    let manifest_ok = |d: &Path| wasi_vfs_manifest_ok(d);
+    let populate = |staging: &Path| -> Result<(), String> {
+        let url = format!(
+            "https://github.com/kateinoigakukun/wasi-vfs/releases/download/{WASI_VFS_RELEASE}/{}",
+            asset.file
+        );
+        let zip_bytes = fetch_verified(&url, asset.sha256, WASI_VFS_LABEL, prog)?;
+        prog.assembling(WASI_VFS_LABEL);
+        extract_wasi_vfs_bin(&zip_bytes, staging, bin_name)?;
+        write_file(
+            &staging.join("manifest.txt"),
+            format!("release={WASI_VFS_RELEASE}\nbin={bin_name}\n").as_bytes(),
+        )
+    };
+    let r = ensure_populated(&dir, &manifest_ok, &populate);
+    prog.finish();
+    r
+}
+
+/// Extract the single `wasi-vfs` binary from the zip into `staging/<bin_name>`,
+/// setting the executable bit on Unix. The zip contains exactly one file with
+/// `wasi-vfs` as its name (no directory prefix in these releases).
+#[allow(dead_code)] // used by the runtime side (bundle.rs); unused in the build script
+fn extract_wasi_vfs_bin(zip: &[u8], staging: &Path, bin_name: &str) -> Result<(), String> {
+    let entries = read_zip_entries(zip)?;
+    let entry = entries
+        .into_iter()
+        .find(|e| {
+            let base = e.name.rsplit('/').next().unwrap_or(&e.name);
+            base == "wasi-vfs" || base == "wasi-vfs.exe"
+        })
+        .ok_or_else(|| "wasi-vfs binary not found in downloaded zip".to_string())?;
+    let dest = staging.join(bin_name);
+    write_file(&dest, &entry.data)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("chmod +x {}: {e}", dest.display()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod home_dir_tests {
     use super::home_from;
