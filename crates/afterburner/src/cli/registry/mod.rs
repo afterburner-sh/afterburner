@@ -15,6 +15,7 @@ mod progress;
 use super::args::{Cli, ScaffoldArgs};
 use super::style;
 use afterburner_cloud::afterburner_afb::digest::hex;
+use afterburner_cloud::gem_client::{DEFAULT_GEM_REGISTRY, GemClient};
 use afterburner_cloud::lock::{LOCKFILE_NAME, Lockfile};
 use afterburner_cloud::resolve::{Req, resolve, runtime_version};
 use afterburner_cloud::scaffold::{ScaffoldOpts, Scaffolded};
@@ -322,7 +323,38 @@ pub fn package(
             // JS/TS/Python source-based path: transpile TS first.
             let mut local = local;
             transpile_ts_sources(&mut local)?;
-            let (bytes, digest) = style::spin("packing", || local.build())?;
+
+            // Ruby packages: vendor resolved [gem] dependencies into the .afb
+            // so `burn run <pkg.afb>` resolves them without a gem toolchain.
+            // Other interpreted languages have no [gem] section; this is a no-op.
+            let gem_res = if !local.manifest.gem.is_empty() {
+                Some(style::spin("resolving gems", || {
+                    GemClient::new(DEFAULT_GEM_REGISTRY).resolve_all(&local.manifest.gem)
+                })?)
+            } else {
+                None
+            };
+
+            // Build the .afb. When gems are present, build manually via Builder
+            // so we can add vendor/gem/<name>-<version>/<rel> members.
+            let (bytes, digest) = if let Some(ref res) = gem_res {
+                use afterburner_cloud::afterburner_afb::pack::Builder;
+                let mut b = Builder::new(local.manifest.clone(), local.manifold.clone());
+                for (path, data) in &local.sources {
+                    b = b.source(path.clone(), data.clone());
+                }
+                for pkg in &res.packages {
+                    for (rel, data) in &pkg.files {
+                        let vendor_path =
+                            format!("vendor/gem/{}-{}/{}", pkg.name, pkg.version, rel);
+                        b = b.vendor(vendor_path, data.clone());
+                    }
+                }
+                style::spin("packing", || b.build())?
+            } else {
+                style::spin("packing", || local.build())?
+            };
+
             std::fs::write(&out_path, &bytes)
                 .with_context(|| format!("writing {}", out_path.display()))?;
             println!("{} {}", style::ok("packaged"), style::accent(&coord));
@@ -514,19 +546,27 @@ pub fn install(
     let mut plan = build_install_plan(pkg, &client, locked)?;
     let items = plan.lockfile.install_items();
     if items.is_empty() {
-        if plan.npm.is_empty() {
+        if plan.npm.is_empty() && plan.gem.is_empty() {
             println!("{}", style::muted("nothing to install"));
             return Ok(());
         }
-        // No afb deps, but there may be npm deps to install.
+        // No afb deps, but there may be npm and/or gem deps to install.
         let npm_res = install_npm_deps(
             &plan.npm,
             plan.write_lock_to.as_deref(),
             npm_registry_cfg.as_deref(),
         )?;
-        // G1: write npm pins into the lockfile even when there are no afb deps.
-        if plan.write_lock_to.is_some() && !npm_res.packages.is_empty() {
-            plan.lockfile.npm = Lockfile::npm_pins_from_resolution(&npm_res);
+        let gem_res = install_gem_deps(&plan.gem, None)?;
+        // Write npm and gem pins into the lockfile even when there are no afb deps.
+        if plan.write_lock_to.is_some()
+            && (!npm_res.packages.is_empty() || !gem_res.packages.is_empty())
+        {
+            if !npm_res.packages.is_empty() {
+                plan.lockfile.npm = Lockfile::npm_pins_from_resolution(&npm_res);
+            }
+            if !gem_res.packages.is_empty() {
+                plan.lockfile.gem = Lockfile::gem_pins_from_resolution(&gem_res);
+            }
             let path = plan.write_lock_to.as_ref().unwrap().join(LOCKFILE_NAME);
             std::fs::write(&path, plan.lockfile.to_toml()?)
                 .with_context(|| format!("writing {}", path.display()))?;
@@ -577,10 +617,17 @@ pub fn install(
         npm_registry_cfg.as_deref(),
     )?;
 
-    // G1: record npm pins in the lockfile so the next install can be locked.
+    // gem dependencies (the `[gem]` section) - resolved + extracted +
+    // cached by the NATIVE gem installer (no `gem` binary, no process spawn).
+    let gem_res = install_gem_deps(&plan.gem, None)?;
+
+    // Record npm and gem pins in the lockfile so the next install can be locked.
     if let Some(dir) = &plan.write_lock_to {
         if !npm_res.packages.is_empty() {
             plan.lockfile.npm = Lockfile::npm_pins_from_resolution(&npm_res);
+        }
+        if !gem_res.packages.is_empty() {
+            plan.lockfile.gem = Lockfile::gem_pins_from_resolution(&gem_res);
         }
         let path = dir.join(LOCKFILE_NAME);
         std::fs::write(&path, plan.lockfile.to_toml()?)
@@ -649,6 +696,54 @@ fn install_npm_deps(
     Ok(res)
 }
 
+/// Resolve + cache the `[gem]` dependencies natively. Each gem is integrity-
+/// checked (SHA-256), native-extension-rejected, and stored in the
+/// content-addressed gem cache (`~/.cache/burn/gem`). Returns the resolved
+/// packages for lockfile recording.
+///
+/// Registry selection: `gem_registry` arg > `BURN_GEM_REGISTRY` env >
+/// compiled-in default (`DEFAULT_GEM_REGISTRY`).
+fn install_gem_deps(
+    gem: &std::collections::BTreeMap<String, String>,
+    gem_registry: Option<&str>,
+) -> Result<afterburner_cloud::ecosystem::EcosystemResolution> {
+    use afterburner_cloud::ecosystem::EcosystemResolution;
+    if gem.is_empty() {
+        return Ok(EcosystemResolution::default());
+    }
+    let base = gem_registry
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("BURN_GEM_REGISTRY")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_GEM_REGISTRY.to_string());
+    let client = GemClient::new(base);
+    let res = style::spin("resolving gems", || client.resolve_all(gem))?;
+    let n = res.packages.len();
+    for pkg in &res.packages {
+        afterburner_cloud::gem_client::store_gem(pkg)?;
+    }
+    println!(
+        "{} {}",
+        style::ok(&format!(
+            "installed {n} gem{}",
+            if n == 1 { "" } else { "s" }
+        )),
+        style::muted("(native)"),
+    );
+    for pkg in &res.packages {
+        println!(
+            "  {} {} {}",
+            style::bullet(),
+            style::value(&format!("{}@{}", pkg.name, pkg.version)),
+            style::gold("gem"),
+        );
+    }
+    Ok(res)
+}
+
 /// Link every locked registry dependency into `dir/node_modules/<ns>/<name>`
 /// as a symlink to its extracted `pkg-src/<digest>` tree, so the module
 /// loader resolves `require("ns/name")` exactly like any other package.
@@ -700,6 +795,8 @@ struct InstallPlan {
     write_lock_to: Option<PathBuf>,
     /// `[npm]` dependencies (name → semver range) to install natively.
     npm: std::collections::BTreeMap<String, String>,
+    /// `[gem]` dependencies (name → RubyGems requirement) to install natively.
+    gem: std::collections::BTreeMap<String, String>,
 }
 
 fn build_install_plan(
@@ -726,6 +823,7 @@ fn build_install_plan(
                 lockfile: Lockfile::from_resolution(&res),
                 write_lock_to: None,
                 npm,
+                gem: std::collections::BTreeMap::new(),
             })
         }
         None => {
@@ -737,19 +835,26 @@ fn build_install_plan(
                         "--locked needs an existing {LOCKFILE_NAME}; run `burn install` first"
                     )
                 })?;
-                // `--locked`: npm set from manifest via load_npm_deps (G7).
-                let npm = pkg::LocalPackage::load(&dir)
+                // `--locked`: npm + gem sets from the manifest.
+                let (npm, gem) = pkg::LocalPackage::load(&dir)
                     .ok()
-                    .and_then(|l| {
-                        afterburner_cloud::native_manifest::load_npm_deps(&dir, &l.manifest.npm)
-                            .ok()
-                            .map(|r| r.deps)
+                    .map(|l| {
+                        let npm = afterburner_cloud::native_manifest::load_npm_deps(
+                            &dir,
+                            &l.manifest.npm,
+                        )
+                        .ok()
+                        .map(|r| r.deps)
+                        .unwrap_or_default();
+                        let gem = l.manifest.gem.clone();
+                        (npm, gem)
                     })
                     .unwrap_or_default();
                 return Ok(InstallPlan {
                     lockfile: Lockfile::parse(&text)?,
                     write_lock_to: None,
                     npm,
+                    gem,
                 });
             }
             let local = pkg::LocalPackage::load(&dir)?;
@@ -758,11 +863,13 @@ fn build_install_plan(
             let npm_deps =
                 afterburner_cloud::native_manifest::load_npm_deps(&dir, &local.manifest.npm)
                     .with_context(|| "resolving [npm] dependencies")?;
+            let gem_deps = local.manifest.gem.clone();
             let res = style::spin("resolving", || resolve(&roots, &source, &runtime))?;
             Ok(InstallPlan {
                 lockfile: Lockfile::from_resolution(&res),
                 write_lock_to: Some(dir),
                 npm: npm_deps.deps,
+                gem: gem_deps,
             })
         }
     }

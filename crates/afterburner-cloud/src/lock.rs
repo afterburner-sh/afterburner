@@ -152,6 +152,26 @@ impl Lockfile {
         Ok(lf)
     }
 
+    /// Build `[[gem]]` lock entries from a resolved gem closure.
+    ///
+    /// Each entry records `name`, `version`, and the `sha256:<hex>` integrity
+    /// string verified during resolution.  Sorted by name for a stable diff.
+    pub fn gem_pins_from_resolution(
+        res: &crate::ecosystem::EcosystemResolution,
+    ) -> Vec<LockedGemPackage> {
+        let mut entries: Vec<LockedGemPackage> = res
+            .packages
+            .iter()
+            .map(|p| LockedGemPackage {
+                name: p.name.clone(),
+                version: p.version.clone(),
+                integrity: format!("sha256:{}", p.integrity.trim_start_matches("sha256:")),
+            })
+            .collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+        entries
+    }
+
     /// Build `[[npm]]` lock entries from a resolved npm closure (closes G1).
     ///
     /// Each entry records `name`, `version`, and the SRI integrity string that
