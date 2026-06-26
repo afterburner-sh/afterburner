@@ -3078,28 +3078,29 @@
     </div>
   </section>
 
-  <!-- ============= BENCH (throughput) ============= -->
+  <!-- ============= BENCH (warm-start latency + throughput vs containers + microVMs) ============= -->
   <section class="bench" id="bench">
     <div class="container">
       <div class="bench__head reveal">
-        <span class="kicker">// Compile once, run on repeat</span>
-        <h2>One compile. Then <em class="grad-text">thousands of runs a second.</em></h2>
-        <p>The compiled program loads once and runs again and again: every run is pure execution, nothing to rebuild or reload. Hand it more cores and it does more.</p>
+        <span class="kicker">// No boot tax</span>
+        <h2>A warm start in <em class="grad-text">about a millisecond.</em></h2>
+        <p>A container or a microVM boots a fresh sandbox for every run. A resident runtime skips that: the compiled program stays loaded, so a warm run starts in about a millisecond and the same isolated run lands hundreds of times a second.</p>
       </div>
 
       <div class="bench__card reveal" id="benchSandboxCard">
         <div class="bench__hot">
-          <span class="bench__hot-stat">~5,200 runs / sec</span>
-          <span class="bench__hot-sub">the same compiled program executed over and over, across 16 cores. a single core already clears about 900 a second.</span>
+          <span class="bench__hot-stat">~1 ms warm start</span>
+          <span class="bench__hot-sub">and about 920 runs a second per core once resident. a container or microVM boots from scratch every run, paying the cold start each time.</span>
         </div>
 
-        <p style="font-family: var(--font-mono); font-size: 13px; color: var(--fg); margin: 0 0 4px;">runs per second, by cores (more is better)</p>
-        <p style="font-size: 12.5px; color: var(--fg-subtle); margin: 0 0 24px; line-height: 1.45;">one compiled program, executed repeatedly. measured locally.</p>
+        <p style="font-family: var(--font-mono); font-size: 13px; color: var(--fg); margin: 0 0 4px;">warm-start latency, ms (lower is better)</p>
+        <div class="bench__chart" id="benchLatChart"></div>
 
-        <div class="bench__chart" id="benchSandboxChart"></div>
+        <p style="font-family: var(--font-mono); font-size: 13px; color: var(--fg); margin: 28px 0 4px;">fresh isolated runs per second (more is better)</p>
+        <div class="bench__chart" id="benchTputChart"></div>
 
         <div class="bench__legend">
-          <span>measured locally on a tight numeric loop. throughput climbs with every core added.</span>
+          <span>measured locally. References: <a href="https://arxiv.org/html/2602.15214v1" target="_blank" rel="noopener">container cold-start</a> (~1.9 s) &nbsp;&middot;&nbsp; <a href="https://firecracker-microvm.github.io/" target="_blank" rel="noopener">microVM boot</a> (~125 ms).</span>
         </div>
       </div>
     </div>
@@ -3952,31 +3953,35 @@ puts "ruby: sum(1..=100)=#{total} fib(20)=#{fib(20)}"`
       select(0);
     })();
 
-    /* ============= BENCH (throughput) - animated horizontal bars =============
-       Bars animate on viewport entry via IntersectionObserver. Width transitions
-       via CSS cubic-bezier; the runs/sec count-up tracks the same curve with rAF.
-       The top core-count renders in the brand gradient; the rest in muted. */
+    /* ============= BENCH (latency + throughput) - animated horizontal bars =============
+       Two metric groups (warm-start latency, fresh runs/sec) animate on viewport
+       entry. Width transitions via CSS cubic-bezier; the count-up tracks the same
+       curve with rAF. afterburner bars render in the brand gradient; the rest muted. */
     (() => {
       const card = document.getElementById('benchSandboxCard');
       if (!card) return;
-      const chart = document.getElementById('benchSandboxChart');
-      if (!chart) return;
-
-      // Throughput in runs/sec, by core count (measured locally).
-      const BARS = [
-        { name: '1 core',   value:  920, brand: false },
-        { name: '2 cores',  value: 1300, brand: false },
-        { name: '4 cores',  value: 2200, brand: false },
-        { name: '8 cores',  value: 3800, brand: false },
-        { name: '16 cores', value: 5200, brand: true  },
-      ];
-      const MAX = 5500;
 
       const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+      const fmt = (n) => (n < 10 ? String(Math.round(n * 10) / 10) : Math.round(n).toLocaleString('en-US'));
 
-      function build() {
+      const GROUPS = [
+        { el: 'benchLatChart', max: 2000, suffix: ' ms', bars: [
+          { name: 'warm start', value:    1, brand: true  },
+          { name: 'microVM',    value:  125, brand: false },
+          { name: 'container',  value: 1900, brand: false },
+        ] },
+        { el: 'benchTputChart', max: 1000, suffix: ' /s', bars: [
+          { name: 'cached run', value:  920, brand: true  },
+          { name: 'microVM',    value:    8, brand: false },
+          { name: 'container',  value:  0.5, brand: false },
+        ] },
+      ];
+
+      function buildGroup(g) {
+        const chart = document.getElementById(g.el);
+        if (!chart) return [];
         chart.innerHTML = '';
-        const rows = BARS.map((b) => {
+        return g.bars.map((b) => {
           const row = document.createElement('div');
           row.className = 'bench__row' + (b.brand ? ' lead' : '');
 
@@ -4000,9 +4005,11 @@ puts "ruby: sum(1..=100)=#{total} fib(20)=#{fib(20)}"`
           row.appendChild(value);
 
           chart.appendChild(row);
-          return { fill, num, ms: b.value, pct: (b.value / MAX) * 100 };
+          return { fill, num, val: b.value, suffix: g.suffix, pct: (b.value / g.max) * 100 };
         });
+      }
 
+      function animate(rows) {
         requestAnimationFrame(() => {
           rows.forEach((r, i) => {
             setTimeout(() => {
@@ -4012,9 +4019,9 @@ puts "ruby: sum(1..=100)=#{total} fib(20)=#{fib(20)}"`
               const dur = 1250;
               const tick = (now) => {
                 const t = Math.min(1, (now - start) / dur);
-                r.num.textContent = Math.round(r.ms * easeOutCubic(t)).toLocaleString('en-US') + ' /s';
+                r.num.textContent = fmt(r.val * easeOutCubic(t)) + r.suffix;
                 if (t < 1) requestAnimationFrame(tick);
-                else r.num.textContent = r.ms.toLocaleString('en-US') + ' /s';
+                else r.num.textContent = fmt(r.val) + r.suffix;
               };
               requestAnimationFrame(tick);
             }, i * 90);
@@ -4027,7 +4034,7 @@ puts "ruby: sum(1..=100)=#{total} fib(20)=#{fib(20)}"`
         entries.forEach(e => {
           if (e.isIntersecting && !armed) {
             armed = true;
-            build();
+            animate(GROUPS.flatMap(buildGroup));
             benchIo.unobserve(e.target);
           }
         });
