@@ -1074,6 +1074,228 @@
       box-shadow: 0 0 0 2px rgba(255, 97, 24, 0.2);
     }
 
+    /* ============= BENCH (cold-sandbox) ============= */
+    .bench {
+      padding: calc(96px * var(--density, 1)) 0;
+      background: var(--bg-soft);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .bench::before {
+      content: '';
+      position: absolute;
+      inset: -10% -10% auto auto;
+      width: 60%;
+      height: 65%;
+      background: radial-gradient(circle, rgba(255, 122, 0, 0.18), rgba(255, 46, 84, 0.10) 35%, transparent 65%);
+      filter: blur(60px);
+      pointer-events: none;
+    }
+
+    .bench__head {
+      margin-bottom: 40px;
+      max-width: 760px;
+      position: relative;
+    }
+
+    .bench__head h2 {
+      font-family: var(--font-display);
+      font-weight: 300;
+      font-size: 44px;
+      line-height: 1.1;
+      letter-spacing: -0.025em;
+      margin: 6px 0 16px;
+      color: var(--fg);
+    }
+
+    .bench__head p {
+      margin: 0;
+      color: var(--fg-muted);
+      font-size: 16px;
+      line-height: 1.5;
+      max-width: 640px;
+    }
+
+    .bench__card {
+      position: relative;
+      background: var(--bg);
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      padding: 28px 32px 24px;
+      box-shadow: 0 1px 2px rgba(6, 27, 49, 0.04), 0 12px 36px rgba(6, 27, 49, 0.06);
+    }
+
+    .bench__hot {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 28px;
+      padding-bottom: 22px;
+      border-bottom: 1px solid var(--stroke);
+    }
+
+    .bench__hot-stat {
+      font-family: var(--font-display);
+      font-size: 36px;
+      font-weight: 300;
+      letter-spacing: -0.03em;
+      color: var(--action);
+      line-height: 1;
+    }
+
+    .bench__hot-sub {
+      font-size: 13px;
+      color: var(--fg-muted);
+      line-height: 1.45;
+      max-width: 520px;
+    }
+
+    .bench__chart {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      position: relative;
+    }
+
+    .bench__chart::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image: linear-gradient(to right, var(--stroke) 1px, transparent 1px);
+      background-size: 25% 100%;
+      background-position: 0 0;
+      background-repeat: repeat-y;
+      opacity: 0.4;
+      pointer-events: none;
+      margin-left: 168px;
+      margin-right: 132px;
+    }
+
+    .bench__row {
+      display: grid;
+      grid-template-columns: 160px 1fr 132px;
+      gap: 16px;
+      align-items: center;
+      min-height: 36px;
+    }
+
+    .bench__name {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--fg);
+      text-align: right;
+      line-height: 1.25;
+      letter-spacing: -0.003em;
+    }
+
+    .bench__track {
+      position: relative;
+      height: 26px;
+      border-radius: 6px;
+      background: rgba(229, 237, 245, 0.55);
+      overflow: hidden;
+    }
+
+    .bench__fill {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 0;
+      border-radius: 6px;
+      background: var(--color-stone-gray, #8898aa);
+      transition: width 1.4s cubic-bezier(0.2, 0.7, 0.15, 1);
+      will-change: width;
+    }
+
+    .bench__fill.armed { min-width: 14px; }
+
+    .bench__fill.brand {
+      background: linear-gradient(90deg,
+          rgb(255, 207, 94) 0%,
+          rgb(255, 122, 0) 38%,
+          rgb(255, 46, 84) 72%,
+          rgb(247, 45, 243) 100%);
+      background-size: 220% 100%;
+      background-position: 100% 0;
+      box-shadow:
+        0 0 0 1px rgba(255, 122, 0, 0.18),
+        0 6px 18px rgba(255, 97, 24, 0.28),
+        inset 0 1px 0 rgba(255, 255, 255, 0.35);
+      animation: bench-shimmer 4.5s linear infinite;
+    }
+
+    @keyframes bench-shimmer {
+      0%   { background-position: 100% 0; }
+      100% { background-position: -120% 0; }
+    }
+
+    .bench__fill.ref-bar {
+      background: linear-gradient(90deg, rgba(80, 97, 122, 0.55), rgba(80, 97, 122, 0.78));
+    }
+
+    .bench__row.lead .bench__name {
+      color: var(--action);
+      font-weight: 600;
+    }
+
+    .bench__value {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      align-items: flex-start;
+      font-family: var(--font-mono);
+      font-size: 13.5px;
+      font-weight: 500;
+      color: var(--fg);
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.005em;
+    }
+
+    .bench__legend {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-top: 22px;
+      padding-top: 18px;
+      border-top: 1px dashed var(--stroke-strong);
+      font-size: 12px;
+      color: var(--fg-subtle);
+      flex-wrap: wrap;
+    }
+
+    .bench__legend a {
+      color: var(--fg-muted);
+      text-decoration: underline;
+      text-decoration-color: var(--stroke-strong);
+      text-underline-offset: 3px;
+    }
+
+    .bench__legend a:hover {
+      color: var(--action);
+      text-decoration-color: var(--action);
+    }
+
+    .bench__context {
+      margin-top: 24px;
+      padding: 16px 20px;
+      background: var(--bg-section);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      font-size: 12.5px;
+      color: var(--fg-muted);
+      line-height: 1.5;
+    }
+
+    .bench__context .ctx-aside {
+      color: var(--fg-subtle);
+      font-style: italic;
+    }
+
     /* ============= FEATURES ============= */
     .features {
       padding: calc(96px * var(--density, 1)) 0;
@@ -2043,6 +2265,32 @@
         font-size: 32px;
       }
 
+      .bench {
+        padding: 64px 0;
+      }
+
+      .bench__head {
+        margin-bottom: 28px;
+      }
+
+      .bench__head h2 {
+        font-size: 32px;
+      }
+
+      .bench__card {
+        padding: 22px 18px 18px;
+      }
+
+      .bench__chart::before {
+        margin-left: 132px;
+        margin-right: 116px;
+      }
+
+      .bench__row {
+        grid-template-columns: 124px 1fr 116px;
+        gap: 12px;
+      }
+
       .features {
         padding: 64px 0;
       }
@@ -2254,6 +2502,56 @@
 
       .langs__facts {
         padding: 18px;
+      }
+
+      .bench {
+        padding: 48px 0;
+      }
+
+      .bench__head h2 {
+        font-size: 26px;
+      }
+
+      .bench__hot-stat {
+        font-size: 28px;
+      }
+
+      .bench__card {
+        padding: 18px 14px 14px;
+      }
+
+      .bench__chart::before {
+        display: none;
+      }
+
+      .bench__row {
+        grid-template-columns: 1fr;
+        gap: 4px;
+        align-items: stretch;
+      }
+
+      .bench__name {
+        text-align: left;
+        font-size: 12px;
+      }
+
+      .bench__value {
+        text-align: right;
+        font-size: 12.5px;
+      }
+
+      .bench__track {
+        height: 22px;
+      }
+
+      .bench__legend {
+        font-size: 11.5px;
+        gap: 10px;
+      }
+
+      .bench__context {
+        font-size: 11.5px;
+        padding: 12px 14px;
       }
 
       .features {
@@ -2780,6 +3078,39 @@
     </div>
   </section>
 
+  <!-- ============= BENCH (cold-sandbox) ============= -->
+  <section class="bench" id="bench">
+    <div class="container">
+      <div class="bench__head reveal">
+        <span class="kicker">// No cold-boot tax</span>
+        <h2>A sealed sandbox for every language, <em class="grad-text">without the container tax.</em></h2>
+        <p>Compile once. Warm, the cached module answers in about a millisecond. Cold, a fresh sealed sandbox for any language still starts in tens to hundreds of milliseconds: no daemon, no image pull, no container cold-boot.</p>
+      </div>
+
+      <div class="bench__card reveal" id="benchSandboxCard">
+        <div class="bench__hot">
+          <span class="bench__hot-stat">~1.1 ms per call</span>
+          <span class="bench__hot-sub">Hot path: warm runtime, the cached compiled module invoked repeatedly. ~1.8 ms p99, scaling to 5,719 calls/sec across cores.</span>
+        </div>
+
+        <p style="font-family: var(--font-mono); font-size: 13px; color: var(--fg); margin: 0 0 4px;">time to a fresh sealed sandbox + run, ms</p>
+        <p style="font-size: 12.5px; color: var(--fg-subtle); margin: 0 0 24px; line-height: 1.45;">one test/validate iteration. afterburner languages sorted ascending; references in muted color.</p>
+
+        <div class="bench__chart" id="benchSandboxChart"></div>
+
+        <div class="bench__legend">
+          <span>afterburner measured locally (best of 5). Container and microVM figures are published references.</span>
+          <span>Sources: <a href="https://arxiv.org/html/2602.15214v1" target="_blank" rel="noopener">Docker cold-start</a> &nbsp;&middot;&nbsp; <a href="https://firecracker-microvm.github.io/" target="_blank" rel="noopener">Firecracker</a></span>
+        </div>
+      </div>
+
+      <div class="bench__context reveal">
+        <span>Bare native interpreters start faster (python3 ~20 ms, ruby ~60 ms) but run with no sandbox at all, a different tier.</span>
+        <span class="ctx-aside">The hot-path figure is the warm per-call path; a one-shot run pays the fresh-sandbox start above.</span>
+      </div>
+    </div>
+  </section>
+
   <!-- ============= LIVE TERMINAL ============= -->
   <section class="live" id="try">
     <div class="container">
@@ -2874,13 +3205,6 @@
         </div>
         <div class="feat reveal">
           <div class="feat__num">09</div>
-          <h3>Run a file, a package, or a REPL</h3>
-          <p><code>burn run app.go</code>, <code>burn run ./my-pkg</code>, <code>burn repl --lang c</code>. Feed JSON
-            through <code>burn thrust</code> for UDF mode, <code>burn check</code> to compile without running,
-            <code>burn bench</code> to measure.</p>
-        </div>
-        <div class="feat reveal">
-          <div class="feat__num">10</div>
           <h3>Compile to a portable wasm artifact</h3>
           <p><code>burn compile</code> turns your program into a single portable artifact <code>burn run</code> executes
             anywhere with no recompile and zero config. Drop it in a container and go. Runtimes auto-fetch on first
@@ -3632,6 +3956,94 @@ puts "ruby: sum(1..=100)=#{total} fib(20)=#{fib(20)}"`
 
       tiles.forEach(t => t.addEventListener('click', () => select(+t.dataset.idx)));
       select(0);
+    })();
+
+    /* ============= BENCH (cold-sandbox) - animated horizontal bars =============
+       Bars animate on viewport entry via IntersectionObserver. Width transitions
+       via CSS cubic-bezier; the ms count-up tracks the same curve with rAF.
+       afterburner entries render in the brand gradient; references in muted. */
+    (() => {
+      const card = document.getElementById('benchSandboxCard');
+      if (!card) return;
+      const chart = document.getElementById('benchSandboxChart');
+      if (!chart) return;
+
+      // All values in ms. Max scale ~2000 ms (Docker).
+      const BARS = [
+        { name: 'Rust',                value:   31, brand: true },
+        { name: 'C',                   value:   33, brand: true },
+        { name: 'C++',                 value:   64, brand: true },
+        { name: 'Go',                  value:   78, brand: true },
+        { name: 'JavaScript',          value:  122, brand: true },
+        { name: 'TypeScript',          value:  124, brand: true },
+        { name: 'Python',              value:  297, brand: true },
+        { name: 'Ruby',                value:  992, brand: true },
+        { name: 'Firecracker microVM', value:  125, brand: false },
+        { name: 'Docker container',    value: 1900, brand: false },
+      ];
+      const MAX = 2000;
+
+      const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+
+      function build() {
+        chart.innerHTML = '';
+        const rows = BARS.map((b) => {
+          const row = document.createElement('div');
+          row.className = 'bench__row' + (b.brand ? ' lead' : '');
+
+          const name = document.createElement('div');
+          name.className = 'bench__name';
+          name.textContent = b.name;
+          row.appendChild(name);
+
+          const track = document.createElement('div');
+          track.className = 'bench__track';
+          const fill = document.createElement('div');
+          fill.className = 'bench__fill' + (b.brand ? ' brand' : ' ref-bar');
+          track.appendChild(fill);
+          row.appendChild(track);
+
+          const value = document.createElement('div');
+          value.className = 'bench__value';
+          const num = document.createElement('span');
+          num.textContent = '0';
+          value.appendChild(num);
+          row.appendChild(value);
+
+          chart.appendChild(row);
+          return { fill, num, ms: b.value, pct: (b.value / MAX) * 100 };
+        });
+
+        requestAnimationFrame(() => {
+          rows.forEach((r, i) => {
+            setTimeout(() => {
+              r.fill.classList.add('armed');
+              r.fill.style.width = r.pct + '%';
+              const start = performance.now();
+              const dur = 1250;
+              const tick = (now) => {
+                const t = Math.min(1, (now - start) / dur);
+                r.num.textContent = Math.round(r.ms * easeOutCubic(t));
+                if (t < 1) requestAnimationFrame(tick);
+                else r.num.textContent = r.ms;
+              };
+              requestAnimationFrame(tick);
+            }, i * 90);
+          });
+        });
+      }
+
+      let armed = false;
+      const benchIo = new IntersectionObserver((entries) => {
+        entries.forEach(e => {
+          if (e.isIntersecting && !armed) {
+            armed = true;
+            build();
+            benchIo.unobserve(e.target);
+          }
+        });
+      }, { threshold: 0.2 });
+      benchIo.observe(card);
     })();
 
     /* ============= BURN BUTTONS - play video on hover ============= */
