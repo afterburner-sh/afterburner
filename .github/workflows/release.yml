@@ -147,12 +147,38 @@ jobs:
           # any future runner switch.
           key: ${{ matrix.target }}-${{ matrix.os }}
 
-      - name: Install Binaryen v130 (wasm-opt for release-cli embed, Linux only)
+      # release-cli pulls embed-core, which needs wasm-opt (Binaryen) at build
+      # time to translate the Pyodide core to exnref. EVERY release leg builds
+      # --features release-cli, so each platform needs its own wasm-opt. The
+      # wasm core is arch-agnostic, so the host wasm-opt serves any burn target
+      # (incl. the aarch64-linux cross build). build.rs (find_wasm_opt) checks
+      # $BURN_WASM_OPT first, then PATH.
+      - name: Install Binaryen v130 (wasm-opt for release-cli embed, Linux)
         if: runner.os == 'Linux'
         run: |
           curl -sSL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz \
             | tar xz -C /tmp
           echo "/tmp/binaryen-version_130/bin" >> "$GITHUB_PATH"
+
+      - name: Install Binaryen v130 (wasm-opt for release-cli embed, macOS)
+        if: runner.os == 'macOS'
+        run: |
+          curl -sSL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-arm64-macos.tar.gz \
+            | tar xz -C /tmp
+          echo "/tmp/binaryen-version_130/bin" >> "$GITHUB_PATH"
+
+      - name: Install Binaryen v130 (wasm-opt for release-cli embed, Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-windows.tar.gz"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\binaryen.tar.gz"
+          tar xzf "$env:RUNNER_TEMP\binaryen.tar.gz" -C "$env:RUNNER_TEMP"
+          $wasmOpt = "$env:RUNNER_TEMP\binaryen-version_130\bin\wasm-opt.exe"
+          if (-not (Test-Path $wasmOpt)) { throw "wasm-opt.exe not found at $wasmOpt" }
+          # build.rs find_wasm_opt() reads $BURN_WASM_OPT first; explicit path
+          # avoids any PATH / .exe resolution ambiguity on Windows.
+          "BURN_WASM_OPT=$wasmOpt" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build burn (cli-release profile, full features)
         shell: bash
