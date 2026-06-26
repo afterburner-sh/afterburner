@@ -228,6 +228,13 @@ fn run_afb(afb_path: &Path, user_args: &[String]) -> Result<()> {
     let afb =
         Afb::from_bytes(&bytes).with_context(|| format!("parsing .afb {}", afb_path.display()))?;
 
+    // Dispatch on runtime.target first (authoritative for compiled packages),
+    // then fall back to the language field for source .afb packages.
+    let runtime_target = afb.manifest.runtime.target.as_deref().unwrap_or("");
+    if runtime_target == crate::cli::compile::python_wasm::RUNTIME_TARGET {
+        return run_python_wasm_afb(afb_path, &afb, user_args);
+    }
+
     match SourceLang::from_str(&afb.manifest.package.language) {
         Ok(SourceLang::Python) => run_python_afb(afb_path, &afb, user_args),
         Ok(SourceLang::Ruby) => {
@@ -455,6 +462,92 @@ fn run_ruby_wasm_afb(
         std::process::exit(exit_code);
     }
     Ok(())
+}
+
+/// Run a compiled Python `.afb` (produced by `burn compile` with language = "python").
+///
+/// The `.afb` carries `runtime.target = "emscripten-pyodide"` and bundles:
+/// - `precompiled/emscripten-pyodide/pyodide.wasm` - the CPython Emscripten binary.
+/// - `precompiled/emscripten-pyodide/python_stdlib.zip` - the Python stdlib.
+/// - `vendor/pip/*.whl` - resolved pip wheels (if any).
+/// - `source/<rel>` - the package source (entry + siblings).
+///
+/// The runner materializes the wasm + stdlib to a temp dir (PyRuntime holds
+/// PathBuf), reconstitutes the runtime from those paths, mounts the vendored
+/// wheels and the package source into the in-memory FS, then calls
+/// `run_pyodide_package_with` - identical to the source-package path but with
+/// zero network access and zero env vars required.
+#[cfg(feature = "wasm")]
+fn run_python_wasm_afb(
+    afb_path: &Path,
+    afb: &afterburner_cloud::afterburner_afb::Afb,
+    user_args: &[String],
+) -> Result<()> {
+    use crate::cli::compile::python_wasm::reconstruct_runtime_from_afb;
+    use afterburner_wasi::pyodide_runner::{PyPackage, run_pyodide_package_with};
+    use std::collections::BTreeMap;
+    use std::io::Write;
+
+    let entry_source = afb_entry_source(afb)
+        .with_context(|| format!("reading Python entry of {}", afb_path.display()))?;
+
+    // Materialize the runtime artefacts to a temp dir.
+    let tmp_root = std::env::temp_dir().join(format!(
+        "burn-py-wasm-afb-{}-{}",
+        std::process::id(),
+        afb_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    let (rt, pip_wheel_bytes) = reconstruct_runtime_from_afb(afb, &tmp_root)
+        .with_context(|| format!("reconstructing Python runtime from {}", afb_path.display()))?;
+
+    // Mount the package's source tree under /pkg (same layout as run_python_afb).
+    const GUEST_PKG_ROOT: &str = "/pkg";
+    let sys_path_dir = format!("{GUEST_PKG_ROOT}/source");
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for (rel, data) in &afb.source {
+        files.insert(format!("{GUEST_PKG_ROOT}/{rel}"), data.clone());
+    }
+
+    let pkg = PyPackage {
+        files,
+        sys_path_dir,
+        vendor_pip_wheels: pip_wheel_bytes,
+    };
+
+    let run_result = run_pyodide_package_with(&rt, entry_source, &pkg)
+        .map_err(|e| anyhow::anyhow!("python runtime error: {e}"));
+
+    // Best-effort cleanup; never mask the real error.
+    let _ = fs::remove_dir_all(&tmp_root);
+    let out = run_result?;
+
+    if !out.stdout.is_empty() {
+        std::io::stdout()
+            .write_all(&out.stdout)
+            .context("writing python stdout")?;
+    }
+    if out.exit_code != 0 {
+        std::process::exit(out.exit_code);
+    }
+    let _ = user_args;
+    Ok(())
+}
+
+/// Python compiled .afb runner when the `wasm` feature is absent: honest error.
+#[cfg(not(feature = "wasm"))]
+fn run_python_wasm_afb(
+    afb_path: &Path,
+    _afb: &afterburner_cloud::afterburner_afb::Afb,
+    _user_args: &[String],
+) -> Result<()> {
+    anyhow::bail!(
+        "running compiled Python packages requires the `wasm` feature \
+         (rebuild with `--features wasm`). Package: {}",
+        afb_path.display()
+    )
 }
 
 /// Run a Ruby source `.afb` on the bundled CRuby runtime.
