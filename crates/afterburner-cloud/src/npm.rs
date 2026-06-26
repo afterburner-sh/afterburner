@@ -5,29 +5,33 @@
 //!
 //! `burn install` resolves and caches a package's `[npm]` dependencies
 //! WITHOUT a Node toolchain on the host - a self-contained registry client:
-//! fetch packument → pick the max version satisfying the range → download
-//! the tarball → verify integrity → extract into the content-addressed npm
-//! cache → recurse into that package's own `dependencies`. The runtime
+//! fetch packument -> pick the max version satisfying the range -> download
+//! the tarball -> verify integrity -> extract into the content-addressed npm
+//! cache -> recurse into that package's own `dependencies`. The runtime
 //! linker (`Afb::linked_source`) mounts the cached trees into the sandbox's
 //! virtual `node_modules`.
 //!
 //! Security:
-//! * **Integrity-verified.** Each tarball is checked against the registry's
-//!   `dist.shasum` (SHA-1) before it is trusted or cached.
+//! * **Integrity-verified.** Each tarball is checked against `dist.integrity`
+//!   (sha512 SRI, closes G2) when present, falling back to `dist.shasum`
+//!   (sha1) for older packages that lack it.
 //! * **No native code.** Every extracted file is run through the
 //!   native-artifact gate ([`afterburner_afb::native`]); a `.node`/`.so`/
 //!   `binding.gyp`/etc. aborts the install, naming the package + file.
 //! * **No install scripts.** Tarballs are extracted as data; npm lifecycle
-//!   scripts (`postinstall`, …) are never executed - the usual npm supply-
+//!   scripts (`postinstall`, ...) are never executed - the usual npm supply-
 //!   chain RCE vector simply does not exist here.
 //! * **Bounded.** Per-tarball size cap; path-escape / symlink entries are
 //!   refused by the extractor.
 
+use crate::ecosystem::{
+    self, EcosystemClient, EcosystemPackage, EcosystemRelease, EcosystemResolution,
+};
 use crate::error::{CloudError, Result};
 use semver::{Version, VersionReq};
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Default public npm registry base (no trailing slash).
 pub const DEFAULT_NPM_REGISTRY: &str = "https://registry.npmjs.org";
@@ -37,36 +41,13 @@ pub const DEFAULT_NPM_REGISTRY: &str = "https://registry.npmjs.org";
 const MAX_TARBALL_UNCOMPRESSED: u64 = 64 * 1024 * 1024;
 const MAX_TARBALL_COMPRESSED: u64 = 24 * 1024 * 1024;
 
-/// A resolved + extracted npm package: its files keyed package-root-relative
-/// (`index.js`, `lib/x.js`, `package.json`), ready to hand to the linker.
-#[derive(Debug, Clone)]
-pub struct NpmPackage {
-    pub name: String,
-    pub version: String,
-    pub files: BTreeMap<String, Vec<u8>>,
-}
+/// A resolved + extracted npm package. Type alias for the shared type so
+/// external callers keep the same API.
+pub type NpmPackage = EcosystemPackage;
 
-/// The full resolved npm closure for a package's `[npm]` section.
-#[derive(Debug, Clone, Default)]
-pub struct NpmResolution {
-    /// Every resolved package, in resolution (BFS) order. npm semantics:
-    /// several versions of one name may coexist in the closure.
-    pub packages: Vec<NpmPackage>,
-    /// The hoisted top-level choice per name - the first version resolved
-    /// (roots are processed first, so a root's pick always wins its name).
-    pub hoisted: BTreeMap<String, String>,
-    /// Resolved dependency edges: `"name@version"` → dep name → the dep
-    /// version that requester's range resolved to.
-    pub edges: BTreeMap<String, BTreeMap<String, String>>,
-}
-
-impl NpmResolution {
-    /// First resolved package with this name (the hoisted one).
-    #[must_use]
-    pub fn by_name(&self, name: &str) -> Option<&NpmPackage> {
-        self.packages.iter().find(|p| p.name == name)
-    }
-}
+/// The full resolved npm closure for a package's `[npm]` section. Type alias
+/// for the shared resolution type.
+pub type NpmResolution = EcosystemResolution;
 
 /// A registry client over `ureq`. `base` lets tests point at a mock.
 pub struct NpmClient {
@@ -89,74 +70,83 @@ impl NpmClient {
         Self::new(DEFAULT_NPM_REGISTRY)
     }
 
-    /// Resolve a `[npm]` section (name → semver range) and its full
+    /// Resolve a `[npm]` section (name -> semver range) and its full
     /// transitive `dependencies` closure into extracted, integrity-checked
-    /// packages. npm semantics: a range reuses an already-resolved version
-    /// of the name when one satisfies it; otherwise an ADDITIONAL version
-    /// of the same name joins the closure (materialized as a nested
-    /// override by the linker), exactly like npm's tree. BFS so roots win
-    /// the hoisted top-level slot for their names.
+    /// packages. Delegates to the shared [`ecosystem::resolve_all`] walk.
     pub fn resolve_all(&self, roots: &BTreeMap<String, String>) -> Result<NpmResolution> {
-        let mut out = NpmResolution::default();
-        // (name, range, requester "name@version" or None for roots)
-        let mut queue: std::collections::VecDeque<(String, String, Option<String>)> = roots
-            .iter()
-            .map(|(n, r)| (n.clone(), r.clone(), None))
-            .collect();
-        // name → every version resolved so far, in resolution order.
-        let mut versions: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        // packuments are fetched once per name even when a second version
-        // of it must be resolved.
-        let mut packuments: BTreeMap<String, Packument> = BTreeMap::new();
+        ecosystem::resolve_all(self, roots)
+    }
+}
 
-        while let Some((name, range, requester)) = queue.pop_front() {
-            let record_edge = |out: &mut NpmResolution, version: &str| {
-                if let Some(req) = &requester {
-                    out.edges
-                        .entry(req.clone())
-                        .or_default()
-                        .insert(name.clone(), version.to_string());
-                }
-            };
-            // Reuse any already-resolved version that satisfies this range.
-            if let Some(existing) = versions
-                .get(&name)
-                .and_then(|vs| vs.iter().find(|v| satisfies(v, &range)))
-            {
-                let existing = existing.clone();
-                record_edge(&mut out, &existing);
-                continue;
+// ---- EcosystemClient impl --------------------------------------------------
+
+impl EcosystemClient for NpmClient {
+    fn versions(&self, name: &str) -> Result<Vec<EcosystemRelease>> {
+        let pack = self.fetch_packument(name)?;
+        // Sort ascending so pick_release (which takes the last satisfying) picks the highest.
+        let mut releases: Vec<EcosystemRelease> = pack
+            .versions
+            .iter()
+            .map(|(vstr, entry)| EcosystemRelease {
+                version: vstr.clone(),
+                artifact_url: entry.dist.tarball.clone(),
+                // Prefer sha512 SRI (dist.integrity) over the sha1 shasum (G2).
+                integrity: entry.dist.sri().to_string(),
+                deps: entry.dependencies.clone(),
+            })
+            .collect();
+        releases.sort_by(|a, b| {
+            let va = Version::parse(&a.version);
+            let vb = Version::parse(&b.version);
+            match (va, vb) {
+                (Ok(a), Ok(b)) => a.cmp(&b),
+                (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+                (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+                (Err(_), Err(_)) => a.version.cmp(&b.version),
             }
-            if !packuments.contains_key(&name) {
-                packuments.insert(name.clone(), self.fetch_packument(&name)?);
-            }
-            let (version, dist, deps) = pick_version(&name, &range, &packuments[&name])?;
-            let tarball = self.download_tarball(&dist.tarball)?;
-            verify_shasum(&name, &version, &dist.shasum, &tarball)?;
-            let files = extract_tarball(&name, &tarball)?;
-            afterburner_afb::native::reject_native(files.keys().map(String::as_str))
-                .map_err(|e| CloudError::Package(format!("npm package {name}@{version}: {e}")))?;
-            record_edge(&mut out, &version);
-            out.hoisted
-                .entry(name.clone())
-                .or_insert_with(|| version.clone());
-            versions
-                .entry(name.clone())
-                .or_default()
-                .push(version.clone());
-            out.packages.push(NpmPackage {
-                name: name.clone(),
-                version: version.clone(),
-                files,
-            });
-            let key = format!("{name}@{version}");
-            for (dn, dr) in deps {
-                queue.push_back((dn, dr, Some(key.clone())));
-            }
-        }
-        Ok(out)
+        });
+        Ok(releases)
     }
 
+    fn fetch_artifact(&self, rel: &EcosystemRelease) -> Result<Vec<u8>> {
+        let bytes = ecosystem::download_capped(
+            &self.agent,
+            &rel.artifact_url,
+            MAX_TARBALL_COMPRESSED,
+            &rel.artifact_url,
+        )?;
+        // Use the stronger verifier when the integrity field is an SRI string
+        // (sha512- or sha256-prefix); fall back to sha1 for legacy entries.
+        verify_integrity(&rel.artifact_url, &rel.integrity, &bytes)?;
+        Ok(bytes)
+    }
+
+    fn satisfies(&self, version: &str, spec: &str) -> bool {
+        satisfies(version, spec)
+    }
+
+    fn extract(&self, name: &str, bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>> {
+        extract_tarball(name, bytes)
+    }
+
+    fn cache_key(&self, name: &str, version: &str) -> String {
+        // Flatten any `/` in scoped package names to `+`.
+        let safe = name.replace('/', "+");
+        format!("{safe}@{version}")
+    }
+
+    fn cache_root(&self) -> Result<PathBuf> {
+        npm_cache_root()
+    }
+
+    fn ecosystem_name(&self) -> &'static str {
+        "npm"
+    }
+}
+
+// ---- private npm fetch helpers ---------------------------------------------
+
+impl NpmClient {
     fn fetch_packument(&self, name: &str) -> Result<Packument> {
         let url = format!("{}/{}", self.base, encode_name(name));
         let resp = self
@@ -168,7 +158,7 @@ impl NpmClient {
                 "application/vnd.npm.install-v1+json, application/json",
             )
             .call()
-            .map_err(|e| map_ureq(name, e))?;
+            .map_err(|e| ecosystem::map_ureq(name, e))?;
         let mut body = String::new();
         resp.into_reader()
             .take(MAX_TARBALL_COMPRESSED)
@@ -176,21 +166,6 @@ impl NpmClient {
             .map_err(CloudError::Io)?;
         serde_json::from_str(&body)
             .map_err(|e| CloudError::Decode(format!("packument for {name}: {e}")))
-    }
-
-    fn download_tarball(&self, url: &str) -> Result<Vec<u8>> {
-        let resp = self.agent.get(url).call().map_err(|e| map_ureq(url, e))?;
-        let mut buf = Vec::new();
-        resp.into_reader()
-            .take(MAX_TARBALL_COMPRESSED + 1)
-            .read_to_end(&mut buf)
-            .map_err(CloudError::Io)?;
-        if buf.len() as u64 > MAX_TARBALL_COMPRESSED {
-            return Err(CloudError::Package(format!(
-                "npm tarball {url} exceeds the {MAX_TARBALL_COMPRESSED}-byte limit"
-            )));
-        }
-        Ok(buf)
     }
 }
 
@@ -212,35 +187,26 @@ struct VersionEntry {
 #[derive(serde::Deserialize, Clone)]
 struct Dist {
     tarball: String,
+    /// Modern SRI field (sha512 or sha256): `"sha512-<base64>"`.  Preferred
+    /// over `shasum` when present (closes G2).
+    #[serde(default)]
+    integrity: String,
+    /// Legacy SHA-1 hex field.  Used only when `integrity` is absent.
     #[serde(default)]
     shasum: String,
 }
 
-/// Pick the highest version satisfying `range` (npm semantics: prerelease
-/// versions are excluded unless the range names one - we conservatively skip
-/// prereleases entirely, which is correct for the overwhelming common case).
-fn pick_version(
-    name: &str,
-    range: &str,
-    pack: &Packument,
-) -> Result<(String, Dist, BTreeMap<String, String>)> {
-    let req = parse_range(range)
-        .ok_or_else(|| CloudError::Resolve(format!("npm {name}: bad range {range:?}")))?;
-    let mut best: Option<(Version, &VersionEntry, &String)> = None;
-    for (vstr, entry) in &pack.versions {
-        let Ok(v) = Version::parse(vstr) else {
-            continue;
-        };
-        if !v.pre.is_empty() {
-            continue;
-        }
-        if req.matches(&v) && best.as_ref().is_none_or(|(b, _, _)| v > *b) {
-            best = Some((v, entry, vstr));
+impl Dist {
+    /// Return the canonical SRI integrity string to store in the lockfile and
+    /// to use for verification.  Prefers `integrity` (sha512) over the sha1
+    /// `shasum` fallback.
+    fn sri(&self) -> &str {
+        if !self.integrity.is_empty() {
+            &self.integrity
+        } else {
+            &self.shasum
         }
     }
-    let (_, entry, vstr) = best
-        .ok_or_else(|| CloudError::Resolve(format!("npm {name}: no version satisfies {range}")))?;
-    Ok((vstr.clone(), entry.dist.clone(), entry.dependencies.clone()))
 }
 
 /// Whether `version` satisfies npm `range`.
@@ -309,29 +275,92 @@ fn parse_and_group(alt: &str) -> Option<VersionReq> {
     VersionReq::parse(&comps.join(", ")).ok()
 }
 
-/// `@scope/name` → `@scope%2fname` for the registry path.
+/// `@scope/name` -> `@scope%2fname` for the registry path.
 fn encode_name(name: &str) -> String {
     name.replacen('/', "%2f", 1)
 }
 
 // ---- integrity + extraction ------------------------------------------------
 
-fn verify_shasum(name: &str, version: &str, shasum: &str, bytes: &[u8]) -> Result<()> {
-    if shasum.is_empty() {
-        // No shasum in the packument - refuse rather than trust blindly.
+/// Verify `bytes` against `integrity`, which is either:
+/// - An SRI string (`"sha512-<base64>"` or `"sha256-<base64>"`): the modern
+///   npm lockfile v3 format (closes G2).
+/// - A bare hex sha1 string: the legacy `dist.shasum` field for older packages.
+///
+/// The SRI form is strongly preferred.  A sha1-only record is accepted as-is
+/// because the npm registry still publishes sha1 for packages that pre-date
+/// the integrity field, and refusing them would block installs.  New packages
+/// always have sha512; the lockfile records whichever form was used.
+pub fn verify_integrity(ctx: &str, integrity: &str, bytes: &[u8]) -> Result<()> {
+    if integrity.is_empty() {
         return Err(CloudError::Package(format!(
-            "npm {name}@{version}: registry returned no integrity shasum"
+            "npm {ctx}: registry returned no integrity field (dist.integrity or dist.shasum)"
         )));
     }
+    if let Some(b64) = integrity.strip_prefix("sha512-") {
+        use sha2::{Digest, Sha512};
+        let got = sha2_base64(&Sha512::digest(bytes));
+        if got != b64 {
+            return Err(CloudError::DigestMismatch {
+                expected: format!("sha512-{b64} ({ctx})"),
+                got: format!("sha512-{got}"),
+            });
+        }
+        return Ok(());
+    }
+    if let Some(b64) = integrity.strip_prefix("sha256-") {
+        use sha2::{Digest, Sha256};
+        let got = sha2_base64(&Sha256::digest(bytes));
+        if got != b64 {
+            return Err(CloudError::DigestMismatch {
+                expected: format!("sha256-{b64} ({ctx})"),
+                got: format!("sha256-{got}"),
+            });
+        }
+        return Ok(());
+    }
+    // Legacy sha1 hex fallback (dist.shasum).
     use sha1::{Digest, Sha1};
     let got = hex_lower(&Sha1::digest(bytes));
-    if !got.eq_ignore_ascii_case(shasum) {
+    if !got.eq_ignore_ascii_case(integrity) {
         return Err(CloudError::DigestMismatch {
-            expected: format!("sha1:{shasum} ({name}@{version})"),
+            expected: format!("sha1:{integrity} ({ctx})"),
             got: format!("sha1:{got}"),
         });
     }
     Ok(())
+}
+
+/// Verify a sha1 shasum for a named package version (used by legacy callers).
+pub fn verify_shasum(name: &str, version: &str, shasum: &str, bytes: &[u8]) -> Result<()> {
+    verify_integrity(&format!("{name}@{version}"), shasum, bytes)
+}
+
+/// Standard-library-free base64 encode (standard alphabet, padded).
+fn sha2_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let (a, b, c) = (
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        );
+        let n = (u32::from(a) << 16) | (u32::from(b) << 8) | u32::from(c);
+        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(ALPHABET[((n >> 6) & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(ALPHABET[(n & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 /// Decompress + untar an npm tarball, stripping the leading `package/`
@@ -392,20 +421,7 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-fn map_ureq(what: &str, e: ureq::Error) -> CloudError {
-    match e {
-        ureq::Error::Status(404, _) => {
-            CloudError::Package(format!("npm package not found: {what}"))
-        }
-        ureq::Error::Status(code, resp) => CloudError::Status {
-            code,
-            message: format!("{what}: {}", resp.status_text()),
-        },
-        ureq::Error::Transport(t) => CloudError::Transport(format!("{what}: {t}")),
-    }
-}
-
-// ---- on-disk npm cache -----------------------------------------------------
+// ---- on-disk npm cache (thin wrappers over ecosystem cache) ----------------
 
 /// `~/.cache/burn/npm`.
 pub fn npm_cache_root() -> Result<PathBuf> {
@@ -415,66 +431,25 @@ pub fn npm_cache_root() -> Result<PathBuf> {
 
 /// Directory for an extracted `name@version` (name slashes flattened).
 pub fn npm_cache_dir(name: &str, version: &str) -> Result<PathBuf> {
-    let safe = name.replace('/', "+");
-    Ok(npm_cache_root()?.join(format!("{safe}@{version}")))
+    Ok(npm_cache_root()?.join(format!("{safe}@{version}", safe = name.replace('/', "+"))))
 }
 
-/// Write a resolved package's files into the cache (atomic-ish: write to a
-/// temp dir then rename). Idempotent: an existing complete dir is reused.
+/// Write a resolved package's files into the cache. Thin wrapper over
+/// [`ecosystem::store_artifact`].
 pub fn store_npm(pkg: &NpmPackage) -> Result<PathBuf> {
-    let dir = npm_cache_dir(&pkg.name, &pkg.version)?;
-    if dir.join(".burn-complete").exists() {
-        return Ok(dir);
-    }
-    if let Some(parent) = dir.parent() {
-        std::fs::create_dir_all(parent).map_err(CloudError::Io)?;
-    }
-    let tmp = dir.with_extension("tmp");
-    let _ = std::fs::remove_dir_all(&tmp);
-    for (rel, bytes) in &pkg.files {
-        let p = tmp.join(rel);
-        if let Some(parent) = p.parent() {
-            std::fs::create_dir_all(parent).map_err(CloudError::Io)?;
-        }
-        std::fs::write(&p, bytes).map_err(CloudError::Io)?;
-    }
-    std::fs::write(tmp.join(".burn-complete"), b"1").map_err(CloudError::Io)?;
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::rename(&tmp, &dir).map_err(CloudError::Io)?;
-    Ok(dir)
+    // vertexia: uses a temporary NpmClient as the cache-root/key provider;
+    // if a dedicated cache type is added later, pass it directly.
+    let client = NpmClient::new(DEFAULT_NPM_REGISTRY);
+    ecosystem::store_artifact(&client, pkg)
 }
 
-/// Load a cached package's files (for the linker). `None` if not cached.
+/// Load a cached package's files. Thin wrapper over [`ecosystem::load_artifact`].
 pub fn load_npm(name: &str, version: &str) -> Result<Option<BTreeMap<String, Vec<u8>>>> {
-    let dir = npm_cache_dir(name, version)?;
-    if !dir.join(".burn-complete").exists() {
-        return Ok(None);
-    }
-    let mut files = BTreeMap::new();
-    collect(&dir, &dir, &mut files)?;
-    files.remove(".burn-complete");
-    Ok(Some(files))
+    let client = NpmClient::new(DEFAULT_NPM_REGISTRY);
+    ecosystem::load_artifact(&client, name, version)
 }
 
-fn collect(root: &Path, cur: &Path, out: &mut BTreeMap<String, Vec<u8>>) -> Result<()> {
-    for entry in std::fs::read_dir(cur).map_err(CloudError::Io)? {
-        let entry = entry.map_err(CloudError::Io)?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect(root, &path, out)?;
-        } else {
-            let rel = path
-                .strip_prefix(root)
-                .map_err(|_| CloudError::Cache("npm cache path escape".into()))?
-                .to_string_lossy()
-                .replace('\\', "/");
-            out.insert(rel, std::fs::read(&path).map_err(CloudError::Io)?);
-        }
-    }
-    Ok(())
-}
-
-// ---- node_modules linking (the dev-loop materializer) -----------------------
+// ---- node_modules linking (the dev-loop materializer) ----------------------
 
 /// Materialize `dir/node_modules` from the cache with npm's tree
 /// semantics. Hoisted names land flat, each a symlink into the
@@ -653,5 +628,73 @@ mod tests {
     fn empty_shasum_refused() {
         let err = verify_shasum("x", "1.0.0", "", b"hello").unwrap_err();
         assert!(matches!(err, CloudError::Package(_)));
+    }
+
+    // ---- G2: sha512 SRI integrity (verify_integrity) -----------------------
+
+    #[test]
+    fn sri_sha512_correct_passes() {
+        use sha2::{Digest, Sha512};
+        let bytes = b"test content";
+        let b64 = sha2_base64(&Sha512::digest(bytes));
+        let integrity = format!("sha512-{b64}");
+        verify_integrity("ctx", &integrity, bytes).expect("valid sha512 SRI must pass");
+    }
+
+    #[test]
+    fn sri_sha512_tampered_fails() {
+        use sha2::{Digest, Sha512};
+        let real = b"real content";
+        let b64 = sha2_base64(&Sha512::digest(real));
+        let integrity = format!("sha512-{b64}");
+        let err = verify_integrity("ctx", &integrity, b"TAMPERED").unwrap_err();
+        assert!(
+            matches!(err, CloudError::DigestMismatch { .. }),
+            "tampered payload must fail: {err}"
+        );
+    }
+
+    #[test]
+    fn sri_sha256_correct_passes() {
+        use sha2::{Digest, Sha256};
+        let bytes = b"another test";
+        let b64 = sha2_base64(&Sha256::digest(bytes));
+        let integrity = format!("sha256-{b64}");
+        verify_integrity("ctx", &integrity, bytes).expect("valid sha256 SRI must pass");
+    }
+
+    #[test]
+    fn sri_sha256_tampered_fails() {
+        use sha2::{Digest, Sha256};
+        let real = b"real content";
+        let b64 = sha2_base64(&Sha256::digest(real));
+        let integrity = format!("sha256-{b64}");
+        let err = verify_integrity("ctx", &integrity, b"TAMPERED").unwrap_err();
+        assert!(matches!(err, CloudError::DigestMismatch { .. }), "{err}");
+    }
+
+    #[test]
+    fn legacy_sha1_hex_still_accepted() {
+        // The verify_integrity path falls through to sha1 for legacy shasum values.
+        use sha1::{Digest, Sha1};
+        let bytes = b"legacy";
+        let shasum = hex_lower(&Sha1::digest(bytes));
+        verify_integrity("ctx", &shasum, bytes).expect("legacy sha1 hex must still verify");
+    }
+
+    #[test]
+    fn dist_sri_prefers_integrity_over_shasum() {
+        let dist = Dist {
+            tarball: "http://x".to_string(),
+            integrity: "sha512-abc".to_string(),
+            shasum: "sha1hex".to_string(),
+        };
+        assert_eq!(dist.sri(), "sha512-abc");
+        let dist_no_integrity = Dist {
+            tarball: "http://x".to_string(),
+            integrity: String::new(),
+            shasum: "sha1hex".to_string(),
+        };
+        assert_eq!(dist_no_integrity.sri(), "sha1hex");
     }
 }

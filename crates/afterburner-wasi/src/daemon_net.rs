@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! `net` - raw TCP host coordinator (B7).
 //!
@@ -47,7 +47,8 @@
 //! Inbound listening is daemon-mode-only; the library API never
 //! installs a `DaemonNet` so `net.createServer` cleanly errors.
 
-use afterburner_core::{Manifold, NetAccess};
+use crate::daemon_net_gate::net_outbound_allowed;
+use afterburner_core::Manifold;
 use kovan_channel::flavors::bounded::{
     Receiver as BoundedRx, Sender as BoundedTx, channel as bounded_channel,
 };
@@ -261,6 +262,12 @@ impl DaemonNet {
 
     pub fn try_recv_event(&self) -> Option<NetEvent> {
         self.events_rx.try_recv()
+    }
+
+    /// Expose the tokio runtime handle so synchronous callers (Python socket
+    /// syscalls) can bridge into async via `Handle::block_on`.
+    pub fn runtime(&self) -> &Handle {
+        &self.runtime
     }
 
     pub fn has_refs(&self) -> bool {
@@ -535,48 +542,7 @@ impl DaemonNet {
     }
 }
 
-/// Manifold gate. `OutboundHttp` is HTTP-only by design; raw TCP
-/// must use `OutboundFull` (with optional host allow-list).
-/// Allow-list entries are `host` or `host:port` patterns - see
-/// [`afterburner_node_compat::http_host::split_host_port_pattern`]
-/// for the shared grammar. `port` here is the literal connect port.
-fn net_outbound_allowed(m: &Manifold, host: &str, port: u16) -> bool {
-    match &m.net {
-        NetAccess::None => false,
-        NetAccess::OutboundHttp(_) => false,
-        NetAccess::OutboundFull(None) => true,
-        NetAccess::OutboundFull(Some(allow)) => host_allowed(host, port, allow),
-    }
-}
-
-fn host_allowed(host: &str, port: u16, allow: &[String]) -> bool {
-    if allow.is_empty() {
-        return true;
-    }
-    let host_lc = host.to_ascii_lowercase();
-    allow.iter().any(|pat| {
-        // `host:port` entries constrain the port; port-less entries
-        // match any port. The split grammar is shared with the HTTP
-        // gate so `--allow-net 127.0.0.1:9000` means the same thing
-        // for fetch and net.connect.
-        let (pat_host, pat_port) = afterburner_node_compat::http_host::split_host_port_pattern(pat);
-        if let Some(pp) = pat_port
-            && !pp.matches(port)
-        {
-            return false;
-        }
-        let p = pat_host.to_ascii_lowercase();
-        if p == "*" {
-            return true;
-        }
-        if let Some(suffix) = p.strip_prefix("*.") {
-            // *.example.com matches api.example.com (and deeper) but
-            // not example.com itself.
-            return host_lc.ends_with(&format!(".{suffix}"));
-        }
-        p == host_lc
-    })
-}
+// net_outbound_allowed and host_allowed live in daemon_net_gate (one canonical copy).
 
 // ---------------------------------------------------------------------
 // Per-connection / per-listener tokio tasks.
@@ -840,6 +806,7 @@ pub fn decode_payload(b64: &str, last_error: &mut String) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use afterburner_core::NetAccess;
 
     #[test]
     fn outbound_full_no_allowlist_permits_anything() {

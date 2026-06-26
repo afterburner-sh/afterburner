@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! `dgram` - UDP socket host coordinator.
 //!
@@ -127,6 +127,11 @@ impl std::fmt::Debug for DaemonDgram {
 impl DaemonDgram {
     pub fn new(runtime: Handle, manifold: Manifold) -> Arc<Self> {
         Self::new_inner(runtime, manifold, None)
+    }
+
+    /// Tokio runtime handle used by this coordinator.
+    pub fn runtime(&self) -> &Handle {
+        &self.runtime
     }
 
     /// Construct with a shared port-claim arbiter for multi-shard

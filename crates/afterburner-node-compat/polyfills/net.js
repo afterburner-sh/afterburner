@@ -1,17 +1,20 @@
-// net — raw TCP polyfill (B7).
+// net — raw TCP + AF_UNIX polyfill (B7).
 //
-// `Socket` is the JS-side façade for a host-owned `tokio::TcpStream`.
-// Operations cross into Rust via `__host_net_*` imports; inbound
-// bytes / lifecycle events arrive via the daemon-event dispatcher
-// as `{kind:"net-..."}` envelopes. The dispatcher routes them
-// through `__ab_net_handlers[conn_id]` and
-// `__ab_net_server_handlers[server_id]`.
+// `Socket` is the JS-side facade for a host-owned `tokio::TcpStream`
+// or `tokio::net::UnixStream`. Operations cross into Rust via
+// `__host_net_*` imports (TCP) or `__host_unix_*` imports (AF_UNIX);
+// inbound bytes / lifecycle events arrive via the daemon-event
+// dispatcher as `{kind:"net-..."}` or `{kind:"unix-..."}` envelopes.
+// The dispatcher routes them through `__ab_net_handlers[conn_id]`,
+// `__ab_net_server_handlers[server_id]`, `__ab_unix_handlers[conn_id]`,
+// or `__ab_unix_server_handlers[server_id]`.
 //
 // API coverage (minimum-viable for real DB drivers):
 //
 //   net.connect / net.createConnection
-//     ({port, host}[, listener])
-//     (port[, host][, listener])
+//     ({port, host}[, listener])       -- TCP
+//     (port[, host][, listener])       -- TCP
+//     ({path}[, listener])             -- Unix-domain
 //   socket.{write, end, destroy, setNoDelay, setKeepAlive, setTimeout,
 //           address, remoteAddress, remotePort, localAddress, localPort,
 //           bytesRead, bytesWritten, destroyed, connecting, readable,
@@ -22,8 +25,9 @@
 //            on('listening'|'connection'|'close'|'error')}
 //   net.{isIP, isIPv4, isIPv6}
 //
+// Unix-domain sockets: supported via AF_UNIX over __host_unix_* imports.
+//
 // Deferred (will throw a clear error if used):
-//   - Unix-domain sockets (path-based listen/connect)
 //   - net.BlockList
 //   - socket.setEncoding (callers should decode bytes themselves)
 //   - allowHalfOpen option on Server (always allowed by default)
@@ -31,6 +35,8 @@
 (function bootstrapNetGlobals() {
     if (!globalThis.__ab_net_handlers) globalThis.__ab_net_handlers = {};
     if (!globalThis.__ab_net_server_handlers) globalThis.__ab_net_server_handlers = {};
+    if (!globalThis.__ab_unix_handlers) globalThis.__ab_unix_handlers = {};
+    if (!globalThis.__ab_unix_server_handlers) globalThis.__ab_unix_server_handlers = {};
 })();
 
 __register_module('net', function(module, exports, require) {
@@ -70,7 +76,8 @@ __register_module('net', function(module, exports, require) {
         opts = opts || {};
 
         // Internal state
-        this._connId = 0;            // 0 until connect / accept binds it
+        this._connId = 0;            // 0 until TCP connect / accept binds it
+        this._unixConnId = 0;        // 0 unless this is a Unix-domain socket
         this._connecting = false;
         this._destroyed = false;
         // Separate from `_destroyed` so the host's terminal Close event
@@ -110,6 +117,12 @@ __register_module('net', function(module, exports, require) {
         }
         this._connId = connId | 0;
         globalThis.__ab_net_handlers[this._connId] = this;
+    };
+
+    // Internal: bind a host-allocated unix conn_id.
+    Socket.prototype._attachUnix = function(connId) {
+        this._unixConnId = connId | 0;
+        globalThis.__ab_unix_handlers[this._unixConnId] = this;
     };
 
     Socket.prototype._dispatchConnect = function(local, remote) {
@@ -175,10 +188,14 @@ __register_module('net', function(module, exports, require) {
         if (this._connId) {
             delete globalThis.__ab_net_handlers[this._connId];
         }
+        if (this._unixConnId) {
+            delete globalThis.__ab_unix_handlers[this._unixConnId];
+        }
     };
 
     Socket.prototype.connect = function() {
         // connect(port, host?, cb?) | connect({port, host}, cb?)
+        // connect({path}, cb?)  -- AF_UNIX
         var args = Array.prototype.slice.call(arguments);
         var opts;
         var cb;
@@ -190,6 +207,29 @@ __register_module('net', function(module, exports, require) {
         } else {
             opts = { port: args[0], host: args[1] };
         }
+
+        // Path-based = Unix-domain socket.
+        if (opts.path) {
+            this._connecting = true;
+            this.readyState = 'opening';
+            var rc = globalThis.__host_unix_connect(String(opts.path));
+            var self = this;
+            if (rc < 0) {
+                var err = makeError(rc, 'net.connect (unix)');
+                Promise.resolve().then(function() {
+                    self._connecting = false;
+                    self._destroyed = true;
+                    self.readyState = 'closed';
+                    try { self.emit('error', err); } catch (_) {}
+                    try { self.emit('close', true); } catch (_) {}
+                });
+                return this;
+            }
+            this._attachUnix(rc);
+            if (cb) this.once('connect', cb);
+            return this;
+        }
+
         var port = opts.port | 0;
         var host = opts.host || '127.0.0.1';
         if (!port || port < 1 || port > 65535) {
@@ -197,22 +237,22 @@ __register_module('net', function(module, exports, require) {
         }
         this._connecting = true;
         this.readyState = 'opening';
-        var rc = globalThis.__host_net_connect(String(host), port);
-        if (rc < 0) {
-            var err = makeError(rc, 'net.connect');
+        var rc2 = globalThis.__host_net_connect(String(host), port);
+        if (rc2 < 0) {
+            var err2 = makeError(rc2, 'net.connect');
             // Defer the error event to a microtask so handlers added
             // after connect() (the typical pattern) still fire.
-            var self = this;
+            var self2 = this;
             Promise.resolve().then(function() {
-                self._connecting = false;
-                self._destroyed = true;
-                self.readyState = 'closed';
-                try { self.emit('error', err); } catch (_) {}
-                try { self.emit('close', true); } catch (_) {}
+                self2._connecting = false;
+                self2._destroyed = true;
+                self2.readyState = 'closed';
+                try { self2.emit('error', err2); } catch (_) {}
+                try { self2.emit('close', true); } catch (_) {}
             });
             return this;
         }
-        this._attach(rc);
+        this._attach(rc2);
         if (cb) this.once('connect', cb);
         return this;
     };
@@ -236,22 +276,33 @@ __register_module('net', function(module, exports, require) {
             throw new TypeError('net.Socket.write: unsupported chunk type ' + t);
         }
 
-        var rc = globalThis.__host_net_write(this._connId, b64);
+        // bytesWritten counts the raw bytes, not the base64 string.
+        var n = Buffer.isBuffer(data) ? data.length :
+                (typeof data === 'string' ? Buffer.byteLength(data, encoding || 'utf8') :
+                 (data && data.length) || 0);
+
+        var rc;
+        if (this._unixConnId) {
+            rc = globalThis.__host_unix_write(this._unixConnId, b64);
+        } else {
+            rc = globalThis.__host_net_write(this._connId, b64);
+        }
         if (rc < 0) {
             var err = makeError(rc, 'net.write');
             if (cb) cb(err);
             try { this.emit('error', err); } catch (_) {}
             return false;
         }
-        // bytesWritten counts the raw bytes, not the base64 string.
-        var n = Buffer.isBuffer(data) ? data.length :
-                (typeof data === 'string' ? Buffer.byteLength(data, encoding || 'utf8') :
-                 (data && data.length) || 0);
         this.bytesWritten += n;
         this._resetTimeout();
         if (cb) Promise.resolve().then(cb);
 
-        var pending = globalThis.__host_net_pending(this._connId) | 0;
+        var pending;
+        if (this._unixConnId) {
+            pending = globalThis.__host_unix_pending(this._unixConnId) | 0;
+        } else {
+            pending = globalThis.__host_net_pending(this._connId) | 0;
+        }
         if (pending >= this._pendingHWM) {
             this._wantsDrain = true;
             return false;
@@ -266,8 +317,12 @@ __register_module('net', function(module, exports, require) {
             this.write(data, encoding);
         }
         this._writable = false;
-        if (this._connId && !this._destroyed) {
-            globalThis.__host_net_end(this._connId);
+        if (!this._destroyed) {
+            if (this._unixConnId) {
+                globalThis.__host_unix_end(this._unixConnId);
+            } else if (this._connId) {
+                globalThis.__host_net_end(this._connId);
+            }
         }
         if (cb) this.once('close', cb);
         return this;
@@ -278,7 +333,9 @@ __register_module('net', function(module, exports, require) {
         this._destroyed = true;
         this._readable = false;
         this._writable = false;
-        if (this._connId) {
+        if (this._unixConnId) {
+            globalThis.__host_unix_destroy(this._unixConnId);
+        } else if (this._connId) {
             globalThis.__host_net_destroy(this._connId);
         }
         if (err) {
@@ -376,6 +433,9 @@ __register_module('net', function(module, exports, require) {
     });
     Object.defineProperty(Socket.prototype, 'pending', {
         get: function() {
+            if (this._unixConnId) {
+                return globalThis.__host_unix_pending(this._unixConnId) | 0;
+            }
             if (!this._connId) return 0;
             return globalThis.__host_net_pending(this._connId) | 0;
         },
@@ -395,6 +455,7 @@ __register_module('net', function(module, exports, require) {
         this._closed = false;
         this._port = 0;
         this._host = '';
+        this._path = null;           // non-null for Unix-domain servers
         this._connections = new Set();
         if (connectionListener) this.on('connection', connectionListener);
     }
@@ -404,6 +465,7 @@ __register_module('net', function(module, exports, require) {
     Server.prototype.listen = function() {
         // listen(port[, host][, backlog][, cb])
         // listen({port, host, backlog}[, cb])
+        // listen({path}[, cb])  -- Unix-domain
         // listen(cb) — port 0
         var args = Array.prototype.slice.call(arguments);
         var cb;
@@ -418,6 +480,26 @@ __register_module('net', function(module, exports, require) {
         } else {
             opts = { port: args[0], host: args[1] };
         }
+
+        // Path-based = Unix-domain server.
+        if (opts.path) {
+            var upath = String(opts.path);
+            var urc = globalThis.__host_unix_listen(upath);
+            if (urc < 0) {
+                var uerr = makeError(urc, 'net.listen (unix)');
+                var uself = this;
+                Promise.resolve().then(function() {
+                    try { uself.emit('error', uerr); } catch (_) {}
+                });
+                return this;
+            }
+            this._serverId = urc | 0;
+            this._path = upath;
+            globalThis.__ab_unix_server_handlers[this._serverId] = this;
+            if (cb) this.once('listening', cb);
+            return this;
+        }
+
         var port = opts.port | 0;
         var host = opts.host || '0.0.0.0';
         if (port < 0 || port > 65535) {
@@ -442,6 +524,9 @@ __register_module('net', function(module, exports, require) {
 
     Server.prototype.address = function() {
         if (!this._listening) return null;
+        if (this._path) {
+            return { address: this._path, family: 'Unix', port: 0 };
+        }
         return {
             address: this._host,
             family: this._host.indexOf(':') >= 0 ? 'IPv6' : 'IPv4',
@@ -456,8 +541,13 @@ __register_module('net', function(module, exports, require) {
         }
         this._closed = true;
         if (this._serverId) {
-            globalThis.__host_net_close_server(this._serverId);
-            delete globalThis.__ab_net_server_handlers[this._serverId];
+            if (this._path) {
+                globalThis.__host_unix_close_server(this._serverId);
+                delete globalThis.__ab_unix_server_handlers[this._serverId];
+            } else {
+                globalThis.__host_net_close_server(this._serverId);
+                delete globalThis.__ab_net_server_handlers[this._serverId];
+            }
         }
         var self = this;
         Promise.resolve().then(function() {
@@ -493,6 +583,17 @@ __register_module('net', function(module, exports, require) {
         sock.remoteAddress = remote && remote.address;
         sock.remotePort = remote && remote.port;
         sock.remoteFamily = remote && remote.family;
+        var self = this;
+        this._connections.add(sock);
+        sock.once('close', function() { self._connections.delete(sock); });
+        try { this.emit('connection', sock); } catch (_) {}
+    };
+
+    Server.prototype._dispatchUnixConnection = function(connId) {
+        var sock = new Socket();
+        sock._attachUnix(connId | 0);
+        sock._connecting = false;
+        sock.readyState = 'open';
         var self = this;
         this._connections.add(sock);
         sock.once('close', function() { self._connections.delete(sock); });

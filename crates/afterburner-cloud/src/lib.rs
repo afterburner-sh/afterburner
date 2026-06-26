@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! `afterburner-cloud` - the registry client behind `burn`'s package-management
 //! subcommands (`login`, `publish`, `install`, `search`, `add`, `info`,
@@ -26,10 +26,14 @@ pub mod cache;
 pub mod client;
 pub mod config;
 pub mod coord;
+pub mod ecosystem;
 pub mod error;
+pub mod gem_client;
 pub mod install;
 pub mod lock;
+pub mod native_manifest;
 pub mod npm;
+pub mod pip_client;
 pub mod pkg;
 pub mod resolve;
 pub mod scaffold;

@@ -50,6 +50,11 @@ jobs:
       - name: Install libclang (rquickjs-sys bindgen)
         run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
       - uses: Swatinem/rust-cache@v2
+      - name: Install Binaryen v130 (wasm-opt for release-cli embed)
+        run: |
+          curl -sSL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz \
+            | tar xz -C /tmp
+          echo "/tmp/binaryen-version_130/bin" >> "$GITHUB_PATH"
       - name: clippy (workspace, default features)
         # Exclude afterburner-plugin: it targets wasm32-wasip1 only and
         # can't compile on the host triple (no_std, no panic_handler).
@@ -60,22 +65,29 @@ jobs:
         run: cargo clippy -p afterburner-afb -p afterburner-cloud --all-targets -- -D warnings
 
   # ---------------------------------------------------------------
-  # Workspace-wide library tests (no `bin` feature), split into three
-  # parallel jobs to keep each under ~26m wall-clock.
+  # afterburner-wasi: build-once, shard-many.
   #
-  # test-lib-wasi:   afterburner-wasi alone (wasmtime + 8 MB plugin).
-  # test-lib-compat: afterburner-node-compat, afterburner-ignite,
-  #                  afterburner-plugin (3 crates; heavy polyfill cost).
-  # test-lib-engine: the remaining 5 lib crates: afterburner,
-  #                  afterburner-core, afterburner-flow,
-  #                  afterburner-adaptive, afterburner-thrust.
-  # Together lib-compat + lib-engine = the original lib-rest 8 crates,
-  # none dropped, none doubled.
+  # build-wasi-tests  -- compile the test binary and archive it (nextest
+  #                      .tar.zst). May exceed 10 min (it is the build,
+  #                      not a test run).
+  # test-wasi         -- 6 parallel shards, each <=10 min wall-clock.
+  #                      RUST_TEST_THREADS=1 (global env) keeps tests
+  #                      serial within each shard; the 6 shards run as
+  #                      independent CI jobs -> parallelism without
+  #                      subprocess-flake risk.
+  # test-wasi-pyodide -- #[ignore]'d pyodide_integration tests behind a
+  #                      prepared /tmp/pyodide-exnref.wasm artifact.
+  #                      The tests skip-with-a-message when the wasm is
+  #                      absent, so a fetch failure is non-fatal.
+  #
+  # Branch-protection note: if the old required check "test / lib-wasi"
+  # is listed in repository Settings -> Branches, replace it with
+  # "test / wasi (shard 1/6)" ... "test / wasi (shard 6/6)".
   # ---------------------------------------------------------------
-  test-lib-wasi:
-    name: test / lib-wasi
+  build-wasi-tests:
+    name: build / wasi-tests
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -83,11 +95,111 @@ jobs:
           target: wasm32-wasip1
           rustflags: ''
       - run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       - uses: Swatinem/rust-cache@v2
         with:
-          key: lib-wasi
-      - name: cargo test (afterburner-wasi, default features)
-        run: cargo test -p afterburner-wasi --no-fail-fast -- --test-threads=1
+          key: wasi-archive
+      - name: nextest archive (afterburner-wasi)
+        run: cargo nextest archive -p afterburner-wasi --archive-file ${{ runner.temp }}/nextest-wasi.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nextest-wasi-archive
+          path: ${{ runner.temp }}/nextest-wasi.tar.zst
+          retention-days: 1
+
+  test-wasi:
+    name: test / wasi (shard ${{ matrix.shard }}/6)
+    needs: build-wasi-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      # Archive-run needs the source tree (for --workspace-remap) and a
+      # toolchain (cargo drives nextest); the binaries come from the archive,
+      # so nothing is recompiled here.
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip1
+          rustflags: ''
+      - uses: actions/download-artifact@v4
+        with:
+          name: nextest-wasi-archive
+          path: ${{ runner.temp }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: nextest run (shard ${{ matrix.shard }}/6)
+        run: >-
+          cargo nextest run
+          --archive-file ${{ runner.temp }}/nextest-wasi.tar.zst
+          --workspace-remap .
+          --partition count:${{ matrix.shard }}/6
+          --no-fail-fast
+
+  test-wasi-pyodide:
+    name: test / wasi-pyodide
+    needs: build-wasi-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-wasip1
+          rustflags: ''
+      - uses: actions/download-artifact@v4
+        with:
+          name: nextest-wasi-archive
+          path: ${{ runner.temp }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Install Binaryen v130 (wasm-opt --translate-to-exnref)
+        run: |
+          curl -sSL https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-x86_64-linux.tar.gz \
+            | tar xz -C /tmp
+          echo "/tmp/binaryen-version_130/bin" >> "$GITHUB_PATH"
+      - name: Get wasm-opt version for cache key
+        id: wasm_opt_ver
+        run: echo "ver=$(wasm-opt --version 2>&1 | head -1)" >> "$GITHUB_OUTPUT"
+      - name: Cache pyodide-exnref.wasm
+        id: pyodide_cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/pyodide-exnref.wasm
+          key: pyodide-exnref-0.28.3-${{ steps.wasm_opt_ver.outputs.ver }}
+      - name: Fetch and translate Pyodide artifacts
+        if: steps.pyodide_cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          # Download Pyodide 0.28.3 core artifacts from the CDN.
+          base="https://cdn.jsdelivr.net/pyodide/v0.28.3/full"
+          curl -fsSL "$base/pyodide.asm.wasm" -o /tmp/pyodide-new.asm.wasm
+          curl -fsSL "$base/python_stdlib.zip" -o /tmp/python_stdlib.zip
+          # Translate legacy EH (try/catch) to exnref (try_table) so Cranelift
+          # can compile the binary.  wasm-opt v130 supports --translate-to-exnref.
+          wasm-opt --translate-to-exnref \
+            --enable-exception-handling --enable-reference-types \
+            --enable-bulk-memory --enable-simd --enable-sign-ext \
+            --enable-nontrapping-float-to-int --enable-mutable-globals \
+            /tmp/pyodide-new.asm.wasm -o /tmp/pyodide-exnref.wasm
+      - name: nextest run (pyodide integration, ignored-only)
+        # Tests skip via eprintln+return when /tmp/pyodide-exnref.wasm is absent.
+        # A fetch failure is therefore non-fatal: the tests emit a SKIP message
+        # and the shard exits 0.  Prefer the test-level skip over continue-on-error.
+        run: >-
+          cargo nextest run
+          --archive-file ${{ runner.temp }}/nextest-wasi.tar.zst
+          --workspace-remap .
+          --run-ignored ignored-only
+          -E 'test(/pyodide|integration/)'
+          --no-fail-fast
 
   test-lib-compat:
     name: test / lib-compat

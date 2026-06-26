@@ -1,0 +1,12 @@
+[format]
+version = "1.0"
+
+[package]
+name = "go-sum"
+namespace = "fixtures"
+version = "0.1.0"
+language = "go"
+entry = "source/main.go"
+
+[runtime]
+min = "0.1.0"

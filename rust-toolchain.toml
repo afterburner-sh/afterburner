@@ -1,0 +1,9 @@
+# Pin the toolchain so local checks (fmt, clippy) match CI exactly.
+# Without a pin, CI's runner can resolve a different stable than a developer's
+# machine, and rustfmt formats some constructs (e.g. long closures inside
+# macros) differently across versions - which made `cargo fmt --all --check`
+# pass locally yet fail in CI. Pinning removes that skew.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-wasip1"]

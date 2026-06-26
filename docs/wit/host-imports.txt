@@ -154,6 +154,13 @@ host_tls_listen
 host_tls_pending
 host_tls_write
 host_ts_transpile
+host_unix_close_server
+host_unix_connect
+host_unix_destroy
+host_unix_end
+host_unix_listen
+host_unix_pending
+host_unix_write
 host_wasm_call_export
 host_wasm_compile
 host_wasm_drop_instance

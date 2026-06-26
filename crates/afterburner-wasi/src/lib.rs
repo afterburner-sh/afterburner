@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/vertexclique/afterburner/master/art/svg/afterburner-square.svg"
@@ -10,6 +10,7 @@
 //! QuickJS-in-WASM. Produces hard-sandboxed JS execution with fuel,
 //! memory, and wall-clock caps.
 
+pub mod bundle;
 pub mod capture;
 mod chamber;
 pub mod columnar;
@@ -28,6 +29,8 @@ pub mod daemon_inspector;
 #[cfg(feature = "daemon")]
 pub mod daemon_net;
 #[cfg(feature = "daemon")]
+pub mod daemon_net_gate;
+#[cfg(feature = "daemon")]
 pub mod daemon_port_claims;
 pub mod daemon_runtime;
 pub mod daemon_sab;
@@ -35,13 +38,48 @@ pub mod daemon_sab;
 pub mod daemon_shard_pool;
 #[cfg(feature = "daemon")]
 pub mod daemon_tls;
+#[cfg(all(feature = "daemon", unix))]
+pub mod daemon_unix;
 pub mod daemon_workers;
+pub mod embedder_vm;
+pub mod emscripten_abi;
+pub mod emscripten_dylink;
+pub mod emscripten_exnref;
+pub mod emscripten_ffi;
+pub mod emscripten_fs;
+pub mod emscripten_invoke;
+pub mod emscripten_jsffi;
+pub mod emscripten_mechanical;
+#[cfg(feature = "daemon")]
+pub mod emscripten_multiprocessing;
+#[cfg(feature = "daemon")]
+pub mod emscripten_pthread;
+pub mod emscripten_runtime;
+pub mod emscripten_sidemodule;
+pub mod emscripten_syscall;
+pub mod emscripten_wasi;
 pub mod host;
 pub mod host_imports;
 pub mod intake;
 pub mod manifold_codec;
 pub mod nozzle;
+pub mod pyodide_bundle;
+/// The embedded Python core (`include_bytes!`), present only under the
+/// `embed-core` feature; basic Python then runs offline with zero download.
+#[cfg(feature = "embed-core")]
+pub mod pyodide_embed;
+pub mod pyodide_runner;
+// `pyo_trace!` is `#[macro_export]`ed (available crate-wide as `crate::pyo_trace`
+// via an explicit `use`); no `#[macro_use]` needed.
+pub mod pyodide_trace;
+pub mod ruby_bundle;
+/// The embedded Ruby runtime (`include_bytes!`), present only under the
+/// `embed-ruby` feature; Ruby then runs offline with zero download.
+#[cfg(feature = "embed-ruby")]
+pub mod ruby_embed;
+pub mod ruby_runner;
 pub mod test_support;
+pub mod wasi_sdk_bundle;
 pub mod wasm_engine;
 pub mod wasm_loader;
 

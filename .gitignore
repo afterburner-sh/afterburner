@@ -26,3 +26,5 @@ docs/**
 
 # process.report.writeReport() artifacts dropped in cwd by tests.
 report.*.json
+/*.afb
+examples/**/target/

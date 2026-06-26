@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! `tls` - raw TLS host coordinator (B7).
 //!
@@ -58,7 +58,8 @@
 //!   `ServerConfig`. SNI / multi-cert routing isn't part of the
 //!   minimum viable subset.
 
-use afterburner_core::{Manifold, NetAccess};
+use crate::daemon_net_gate::net_outbound_allowed;
+use afterburner_core::Manifold;
 use kovan_channel::flavors::bounded::{
     Receiver as BoundedRx, Sender as BoundedTx, channel as bounded_channel,
 };
@@ -563,44 +564,7 @@ impl DaemonTls {
     }
 }
 
-/// Manifold gate. Same posture as `daemon_net`: TLS over raw TCP
-/// must use `OutboundFull`; `OutboundHttp` is HTTP-only by design.
-/// Allow-list entries are `host` or `host:port` patterns - see
-/// [`afterburner_node_compat::http_host::split_host_port_pattern`]
-/// for the shared grammar. `port` here is the literal connect port.
-fn net_outbound_allowed(m: &Manifold, host: &str, port: u16) -> bool {
-    match &m.net {
-        NetAccess::None => false,
-        NetAccess::OutboundHttp(_) => false,
-        NetAccess::OutboundFull(None) => true,
-        NetAccess::OutboundFull(Some(allow)) => host_allowed(host, port, allow),
-    }
-}
-
-fn host_allowed(host: &str, port: u16, allow: &[String]) -> bool {
-    if allow.is_empty() {
-        return true;
-    }
-    let host_lc = host.to_ascii_lowercase();
-    allow.iter().any(|pat| {
-        // Shared `host[:port]` grammar - port-less entries match any
-        // port, `host:port` entries pin the connect port.
-        let (pat_host, pat_port) = afterburner_node_compat::http_host::split_host_port_pattern(pat);
-        if let Some(pp) = pat_port
-            && !pp.matches(port)
-        {
-            return false;
-        }
-        let p = pat_host.to_ascii_lowercase();
-        if p == "*" {
-            return true;
-        }
-        if let Some(suffix) = p.strip_prefix("*.") {
-            return host_lc.ends_with(&format!(".{suffix}"));
-        }
-        p == host_lc
-    })
-}
+// net_outbound_allowed and host_allowed live in daemon_net_gate (one canonical copy).
 
 // ---------------------------------------------------------------------
 // rustls config builders
@@ -1324,6 +1288,7 @@ pub fn decode_payload(b64: &str, last_error: &mut String) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use afterburner_core::NetAccess;
 
     #[test]
     fn outbound_full_no_allowlist_permits_anything() {
@@ -1550,7 +1515,7 @@ mod tests {
             true,
             &mut err,
         )
-        .expect(&format!("server config: {err}"));
+        .unwrap_or_else(|| panic!("server config: {err}"));
 
         // Build the mTLS client config: verifies server against server_ca,
         // presents client_leaf signed by client_ca.
@@ -1568,7 +1533,7 @@ mod tests {
         };
         let mut client_err = String::new();
         let client_cfg = build_client_config(&client_opts, &mut client_err)
-            .expect(&format!("client config: {client_err}"));
+            .unwrap_or_else(|| panic!("client config: {client_err}"));
 
         let peer_chain = run_mtls_handshake(server_cfg, move |port| async move {
             use rustls::pki_types::ServerName;
@@ -1611,7 +1576,7 @@ mod tests {
             true,
             &mut err,
         )
-        .expect(&format!("server config: {err}"));
+        .unwrap_or_else(|| panic!("server config: {err}"));
 
         let server_ca_pem = server_ca.pem();
         // Client that presents NO client cert.
@@ -1625,7 +1590,7 @@ mod tests {
         };
         let mut client_err = String::new();
         let client_cfg = build_client_config(&client_opts, &mut client_err)
-            .expect(&format!("client config: {client_err}"));
+            .unwrap_or_else(|| panic!("client config: {client_err}"));
 
         // The server should reject the connection; run_mtls_handshake
         // returns Err when the acceptor.accept() call fails.
@@ -1671,7 +1636,7 @@ mod tests {
             true,
             &mut err,
         )
-        .expect(&format!("server config: {err}"));
+        .unwrap_or_else(|| panic!("server config: {err}"));
 
         let server_ca_pem = server_ca.pem();
         let client_cert_pem = client_leaf_bad.pem();
@@ -1687,7 +1652,7 @@ mod tests {
         };
         let mut client_err = String::new();
         let client_cfg = build_client_config(&client_opts, &mut client_err)
-            .expect(&format!("client config: {client_err}"));
+            .unwrap_or_else(|| panic!("client config: {client_err}"));
 
         let result = run_mtls_handshake(server_cfg, move |port| async move {
             use rustls::pki_types::ServerName;
@@ -1721,7 +1686,7 @@ mod tests {
         // request_client_cert: false -> one-way TLS, client CA PEM ignored.
         let server_cfg =
             build_server_config(&server_cert_pem, &server_key_pem, "", "", false, &mut err)
-                .expect(&format!("server config: {err}"));
+                .unwrap_or_else(|| panic!("server config: {err}"));
 
         // Client verifies the server cert via ca_pem (the self-signed cert
         // is also its own CA).
@@ -1735,7 +1700,7 @@ mod tests {
         };
         let mut client_err = String::new();
         let client_cfg = build_client_config(&client_opts, &mut client_err)
-            .expect(&format!("client config: {client_err}"));
+            .unwrap_or_else(|| panic!("client config: {client_err}"));
 
         let peer_chain = run_mtls_handshake(server_cfg, move |port| async move {
             use rustls::pki_types::ServerName;

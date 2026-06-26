@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Command-line dispatcher for the `burn` binary.
 //!
@@ -18,12 +18,13 @@ mod args;
 mod banner;
 mod bench;
 mod build;
+mod bundle_progress;
 mod check;
-mod compile;
+pub mod compile;
 mod daemon;
 mod manifold;
 mod passthrough;
-mod registry;
+pub mod registry;
 mod repl;
 mod run;
 mod script;
@@ -63,6 +64,10 @@ pub fn run() -> Result<()> {
     ) {
         style::banner(env!("CARGO_PKG_VERSION"));
     }
+    // Install the colorful sink for the runtime-bundle lazy fetch into `~/.burn`,
+    // so a `.py` / `.c` / `.rb` first-run on a cold cache shows the gradient
+    // download bar (a no-op on a non-TTY / NO_COLOR stderr, and on a warm cache).
+    bundle_progress::install();
     let cli = Cli::parse();
     dispatch(cli)
 }
@@ -177,8 +182,11 @@ fn dispatch(mut cli: Cli) -> Result<()> {
                     rest_args: std::mem::take(&mut cli.rest_args),
                 }
             } else {
-                // Bare `burn` (no subcommand, file, or eval) drops into the REPL.
-                Cmd::Repl
+                // Bare `burn` (no subcommand, file, or eval) drops into the
+                // JavaScript REPL.
+                Cmd::Repl {
+                    lang: "js".to_string(),
+                }
             }
         }
     };
@@ -188,7 +196,11 @@ fn dispatch(mut cli: Cli) -> Result<()> {
     // execute user code, so they don't warrant the warning.
     if matches!(
         cmd,
-        Cmd::Run { .. } | Cmd::Eval { .. } | Cmd::Thrust { .. } | Cmd::Bench { .. } | Cmd::Repl
+        Cmd::Run { .. }
+            | Cmd::Eval { .. }
+            | Cmd::Thrust { .. }
+            | Cmd::Bench { .. }
+            | Cmd::Repl { .. }
     ) {
         banner::maybe_show(&cli);
     }
@@ -203,7 +215,7 @@ fn dispatch(mut cli: Cli) -> Result<()> {
             iters,
             workers,
         } => bench::bench(&cli, &file, iters, workers),
-        Cmd::Repl => repl::repl(&cli),
+        Cmd::Repl { lang } => repl::repl(&cli, &lang),
         Cmd::Version => version::print_version(),
 
         // ── registry + package management ──────────────────────────────────

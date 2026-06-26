@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Daemon-event mode: re-enter the long-lived Store with one event.
 //!
@@ -396,6 +396,63 @@ globalThis.__ab_dispatch_event = (async function() {
                 try { p.emit(name, ev.code | 0); }
                 catch (e) { try { console.error(name + ' handler error:', (e && e.stack) || e); } catch (_) {} }
             }
+        }
+    } else if (kind === 'unix-connect') {
+        const table = globalThis.__ab_unix_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchConnect === 'function') {
+            try { sock._dispatchConnect(); }
+            catch (e) { try { console.error('unix connect dispatch:', (e && e.stack) || e); } catch (_) {} }
+        }
+    } else if (kind === 'unix-data') {
+        const table = globalThis.__ab_unix_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchData === 'function') {
+            try { sock._dispatchData(ev.payload_b64 || ''); }
+            catch (e) { try { console.error('unix data dispatch:', (e && e.stack) || e); } catch (_) {} }
+        }
+    } else if (kind === 'unix-end') {
+        const table = globalThis.__ab_unix_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchEnd === 'function') {
+            try { sock._dispatchEnd(); } catch (_) {}
+        }
+    } else if (kind === 'unix-drain') {
+        const table = globalThis.__ab_unix_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchDrain === 'function') {
+            try { sock._dispatchDrain(); } catch (_) {}
+        }
+    } else if (kind === 'unix-error') {
+        const table = globalThis.__ab_unix_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchError === 'function') {
+            try { sock._dispatchError(ev.message || '', 'EOTHER'); } catch (_) {}
+        }
+    } else if (kind === 'unix-close') {
+        const table = globalThis.__ab_unix_handlers || {};
+        const sock = table[ev.conn_id];
+        if (sock && typeof sock._dispatchClose === 'function') {
+            try { sock._dispatchClose(!!ev.had_error); } catch (_) {}
+        }
+    } else if (kind === 'unix-listening') {
+        const table = globalThis.__ab_unix_server_handlers || {};
+        const srv = table[ev.server_id];
+        if (srv && typeof srv._dispatchListening === 'function') {
+            try { srv._dispatchListening(); } catch (_) {}
+        }
+    } else if (kind === 'unix-connection') {
+        const table = globalThis.__ab_unix_server_handlers || {};
+        const srv = table[ev.server_id];
+        if (srv && typeof srv._dispatchUnixConnection === 'function') {
+            try { srv._dispatchUnixConnection(ev.conn_id | 0); }
+            catch (e) { try { console.error('unix connection dispatch:', (e && e.stack) || e); } catch (_) {} }
+        }
+    } else if (kind === 'unix-server-error') {
+        const table = globalThis.__ab_unix_server_handlers || {};
+        const srv = table[ev.server_id];
+        if (srv && typeof srv._dispatchServerError === 'function') {
+            try { srv._dispatchServerError(ev.message || ''); } catch (_) {}
         }
     } else {
         // Unknown event kind - surface on stderr for diagnosis.

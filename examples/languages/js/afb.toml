@@ -1,0 +1,12 @@
+[format]
+version = "1.0"
+
+[package]
+name = "lang-js"
+namespace = "examples"
+version = "0.1.0"
+language = "javascript"
+entry = "source/main.js"
+
+[runtime]
+min = "0.1.0"

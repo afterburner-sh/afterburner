@@ -1,0 +1,12 @@
+[format]
+version = "1.0"
+
+[package]
+name = "lang-go"
+namespace = "examples"
+version = "0.1.0"
+language = "go"
+entry = "source/main.go"
+
+[runtime]
+min = "0.1.0"

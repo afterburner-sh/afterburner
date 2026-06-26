@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! L3 shadow for `sqlite3` - end-to-end integration coverage.
 //!
@@ -28,18 +28,16 @@
 
 #![cfg(feature = "shadow-sqlite3")]
 
-use serial_test::serial;
-use std::process::Command;
+mod common;
 
-const BURN: &str = env!("CARGO_BIN_EXE_burn");
+use serial_test::serial;
 
 fn run_inline(source: &str) -> std::process::Output {
-    Command::new(BURN)
-        .env("BURN_QUIET", "1")
-        .env("BURN_SHARDS", "2")
-        .args(["-A", "-e", source])
-        .output()
-        .expect("spawn burn")
+    common::run_burn_capped(
+        &["-A", "-e", source],
+        &[("BURN_QUIET", "1"), ("BURN_SHARDS", "2")],
+        std::time::Duration::from_secs(60),
+    )
 }
 
 // ----- happy path: CRUD round-trips ------------------------------------
@@ -724,6 +722,18 @@ fn run_changes_count_for_update_and_delete() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "stdout: {stdout}");
     assert!(stdout.contains("CHANGES_OK"), "stdout: {stdout}");
+}
+
+#[test]
+#[should_panic(expected = "wedged")]
+fn wedged_burn_is_killed_and_fails_loud() {
+    // setInterval keeps the event loop alive forever; the fuel gauge does not
+    // fire on an idle timer, so only the host-side cap stops it.
+    common::run_burn_capped(
+        &["-A", "-e", "setInterval(() => {}, 100)"],
+        &[("BURN_QUIET", "1")],
+        std::time::Duration::from_secs(2),
+    );
 }
 
 #[test]

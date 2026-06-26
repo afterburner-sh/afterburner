@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! `DaemonRuntime` - long-lived `Store<HostState>` that persists JS
 //! state across many `daemon_step` invocations.
@@ -67,8 +67,8 @@ impl DaemonRuntime {
     /// installs HTTP handlers onto `globalThis.__ab_http_handlers`
     /// and binds listeners via `__host_http_listen`.
     ///
-    /// Returns a handle the caller drives via [`dispatch_event`]
-    /// and [`drain_stdout`] / [`drain_stderr`].
+    /// Returns a handle the caller drives via [`Self::dispatch_event`]
+    /// and [`Self::drain_stdout`] / [`Self::drain_stderr`].
     pub fn new(
         engine: &Engine,
         instance_pre: &InstancePre<HostState>,
@@ -121,7 +121,7 @@ impl DaemonRuntime {
 
     /// Build the long-lived Store + plugin instance WITHOUT running
     /// daemon-init. Callers that need to inspect partial output on
-    /// init failure use `instantiate()` + [`run_init`] separately
+    /// init failure use `instantiate()` + [`Self::run_init`] separately
     /// instead of the convenience constructors.
     #[allow(clippy::too_many_arguments)]
     pub fn instantiate(
@@ -169,7 +169,7 @@ impl DaemonRuntime {
     /// Evaluate the user source as daemon-init. On success, JS state
     /// (handler tables, plenum caches, globals) persists in the
     /// Store. On failure, `self` is still valid - callers can call
-    /// [`drain_stdout`] / [`drain_stderr`] to retrieve whatever the
+    /// [`Self::drain_stdout`] / [`Self::drain_stderr`] to retrieve whatever the
     /// script wrote before it threw.
     pub fn run_init(&mut self, source: &str, invocation: &ScriptInvocation) -> Result<()> {
         let envelope = serde_json::json!({
@@ -298,6 +298,12 @@ impl DaemonRuntime {
         {
             return true;
         }
+        #[cfg(all(feature = "daemon", unix))]
+        if let Some(u) = &self.store.data().daemon_unix
+            && u.has_refs()
+        {
+            return true;
+        }
         // Outbound HTTP keeps the daemon alive while a request is in
         // flight - without this the script-mode wrapper would exit
         // the moment the synchronous user fn returns, even though
@@ -398,6 +404,30 @@ impl DaemonRuntime {
     #[cfg(feature = "daemon")]
     pub fn try_recv_dgram_event(&self) -> Option<crate::daemon_dgram::DgramEvent> {
         self.store.data().daemon_dgram.as_ref()?.try_recv_event()
+    }
+
+    /// Install a Unix-domain socket coordinator on this daemon's Store.
+    /// Same lifecycle as `install_net` - CLI (parent + worker) calls this
+    /// before `run_init` so user code that calls `net.connect({path})` /
+    /// `net.createServer({path})` during top-level evaluation already
+    /// sees the host imports wired.
+    #[cfg(all(feature = "daemon", unix))]
+    pub fn install_unix(&mut self, unix: Arc<crate::daemon_unix::DaemonUnix>) {
+        self.store.data_mut().daemon_unix = Some(unix);
+    }
+
+    #[cfg(all(feature = "daemon", unix))]
+    pub fn try_recv_unix_event(&self) -> Option<crate::daemon_unix::UnixEvent> {
+        self.store.data().daemon_unix.as_ref()?.try_recv_event()
+    }
+
+    /// Drop the registry entry for `conn_id` after dispatching `Close`
+    /// to JS.
+    #[cfg(all(feature = "daemon", unix))]
+    pub fn mark_unix_closed(&self, conn_id: i32) {
+        if let Some(u) = &self.store.data().daemon_unix {
+            u.mark_closed(conn_id);
+        }
     }
 
     /// Install the inspector / Chrome DevTools Protocol coordinator

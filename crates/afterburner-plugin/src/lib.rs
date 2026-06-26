@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Afterburner custom Javy plugin.
 //!
@@ -33,7 +33,7 @@
 //! the host's `last_error` slot and readable via the `host_last_error`
 //! import.
 
-#![no_std]
+#![cfg_attr(target_arch = "wasm32", no_std)]
 #![cfg(target_arch = "wasm32")]
 
 extern crate alloc;

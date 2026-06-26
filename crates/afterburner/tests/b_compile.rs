@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Integration tests for `burn compile`.
 //!
@@ -581,6 +581,8 @@ fn builder_precompiled_member_survives_pack_unpack() {
         },
         dependencies: Default::default(),
         npm: Default::default(),
+        pip: Default::default(),
+        gem: Default::default(),
         signature: None,
         metadata: Default::default(),
         extra: Default::default(),

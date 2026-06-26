@@ -1,0 +1,27 @@
+[format]
+version = "1.0"
+
+[package]
+name = "accept-database"
+namespace = "examples"
+version = "0.1.0"
+language = "python"
+entry = "source/main.py"
+
+[runtime]
+min = "0.1.0"
+
+# Section 15 acceptance database. Uses Python's built-in sqlite3 (stdlib, no
+# pip wheel needed) and threading.Thread (N2) to write rows concurrently to a
+# database file under a host-backed read-write preopen (N3). A second run
+# (BURN_DB_MODE=read) reopens the same host file and reads the rows back,
+# proving persistence across runtime exits.
+#
+# The [pip] declaration below is the scaffolded form showing where a real driver
+# (e.g. SQLAlchemy or psycopg2) would go once the pip vendor phase ships. For
+# now sqlite3 (stdlib) is used so the test runs without any wheel vendor step.
+#
+# vertexia: pip vendor (section 13 PA-PD) is deferred; once it ships, switch to:
+#   [pip]
+#   sqlalchemy = ">=2,<3"
+# and replace sqlite3 with a SQLAlchemy engine in main.py.

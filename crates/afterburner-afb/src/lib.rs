@@ -18,6 +18,7 @@ pub mod manifest;
 pub mod native;
 pub mod pack;
 pub mod resolve;
+pub mod specifier;
 pub mod unpack;
 pub mod version;
 
@@ -27,6 +28,10 @@ pub use error::{AfbError, Result};
 pub use lock::{Lock, parse_lock, render_lock};
 pub use manifest::{DepReq, Manifest, parse_dep_req};
 pub use resolve::Resolved;
+pub use specifier::{
+    GemClause, GemOp, GemRequirement, Pep440Clause, Pep440Op, Pep440Specifier,
+    parse_gem_requirement, parse_pip_specifier,
+};
 
 use std::collections::BTreeMap;
 
@@ -63,7 +68,17 @@ pub const FORMAT_MAJOR: u32 = 1;
 /// `min_reader` is NOT bumped: a package that ships only a `precompiled/`
 /// member still requires source, and an old reader that ignores the module
 /// simply runs the source as before.
-pub const FORMAT_MINOR: u32 = 2;
+///
+/// Changed from 2 to 3: additive - an `.afb` may now carry `vendor/pip/*.whl`
+/// and `vendor/gem/**` members (vendored Python wheels and Ruby gems), and
+/// `[pip]`/`[gem]` manifest tables. Old readers (minor <= 2) skip the
+/// `vendor/*` members (their `wanted` predicate does not match them) while the
+/// entry bytes still flow through the capped decoder so zip-bomb protection
+/// holds. `min_reader` is NOT bumped: a package that imports vendored wheels
+/// will fail loudly at import on an old reader (mount produces nothing), never
+/// silently produce wrong output. That loud failure satisfies the additive
+/// contract.
+pub const FORMAT_MINOR: u32 = 3;
 
 /// This reader's `"MAJOR.MINOR"`.
 pub fn reader_format_version() -> String {
@@ -113,6 +128,14 @@ pub struct Afb {
     /// without any `precompiled/` member unpacks to an empty map so callers
     /// need not branch on the minor version.
     pub precompiled: BTreeMap<String, Vec<u8>>,
+    /// Vendored ecosystem artifacts (FORMAT_MINOR >= 3), keyed by their
+    /// archive-relative path (e.g. `"vendor/pip/requests-2.31.0-py3-none-any.whl"`
+    /// or `"vendor/gem/sinatra-3.1.0.gem"`). Empty for packages that carry no
+    /// vendored artifacts. Populated by [`pack::Builder::vendor`] and materialized
+    /// at run time by the Python and Ruby runners into their respective
+    /// site-packages / load paths. An `.afb` with no `vendor/` members unpacks
+    /// to an empty map so callers need not branch on the minor version.
+    pub vendor: BTreeMap<String, Vec<u8>>,
 }
 
 impl Afb {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! `Manifold` - capability gate controlling which Node.js-style built-in
 //! modules (and which parts of them) are available to a running script.
@@ -107,11 +107,19 @@ pub struct Manifold {
     /// Whether `process.exit()` terminates the script early. When `false`,
     /// `process.exit(code)` throws instead, so the host always receives
     /// a trap-or-value result.
+    ///
+    /// `#[serde(default)]` so manifolds serialized before this field existed
+    /// deserialize unchanged: absent = `false` (sealed, never widened).
+    #[serde(default)]
     pub allow_exit: bool,
     /// Per-call HTTP-request wall-clock cap, in milliseconds. `None`
     /// uses the host implementation's default (currently 30 s). Lets
     /// callers tighten the budget for SLA-strict scripts or loosen
     /// it for batch jobs.
+    ///
+    /// `#[serde(default)]` so manifolds serialized before this field existed
+    /// deserialize unchanged: absent = `None`.
+    #[serde(default)]
     pub http_timeout_ms: Option<u64>,
     /// Inbound listening grant for daemon-mode servers. `#[serde(default)]`
     /// so manifolds serialized before this axis existed deserialize

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 #![allow(non_snake_case)]
 //! L3 shadow for `sharp` - end-to-end integration coverage.
@@ -23,12 +23,11 @@
 
 #![cfg(feature = "shadow-sharp")]
 
+mod common;
+
 use base64::Engine as _;
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb, Rgba};
 use serial_test::serial;
-use std::process::Command;
-
-const BURN: &str = env!("CARGO_BIN_EXE_burn");
 
 /// 32×24 RGB gradient PNG. Encoded once per test invocation.
 fn fixture_png_rgb() -> Vec<u8> {
@@ -83,12 +82,11 @@ fn js_with_fixture(fixture_b64: &str, pipeline_body: &str) -> String {
 }
 
 fn run_inline(source: &str) -> std::process::Output {
-    Command::new(BURN)
-        .env("BURN_QUIET", "1")
-        .env("BURN_SHARDS", "2")
-        .args(["-A", "-e", source])
-        .output()
-        .expect("spawn burn")
+    common::run_burn_capped(
+        &["-A", "-e", source],
+        &[("BURN_QUIET", "1"), ("BURN_SHARDS", "2")],
+        std::time::Duration::from_secs(60),
+    )
 }
 
 fn assert_ok(out: &std::process::Output, marker: &str) {

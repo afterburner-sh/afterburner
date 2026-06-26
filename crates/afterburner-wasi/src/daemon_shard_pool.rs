@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! `DaemonShardPool` - N independent `DaemonRuntime` instances, each
 //! served from a dedicated OS thread. The shared `DaemonHttp`
@@ -43,6 +43,8 @@
 #![cfg(feature = "daemon")]
 
 use crate::daemon_dgram::DaemonDgram;
+#[cfg(unix)]
+use crate::daemon_envelopes::unix_event_to_envelope;
 use crate::daemon_envelopes::{
     dgram_event_to_envelope, http_event_to_envelope, net_event_to_envelope, tls_event_to_envelope,
     worker_event_to_envelope,
@@ -52,6 +54,8 @@ use crate::daemon_net::DaemonNet;
 use crate::daemon_port_claims::SharedPortClaims;
 use crate::daemon_runtime::DaemonRuntime;
 use crate::daemon_tls::DaemonTls;
+#[cfg(unix)]
+use crate::daemon_unix::DaemonUnix;
 use crate::daemon_workers::{DaemonWorkers, WorkerConfig};
 use crate::host::TranspileFn;
 use afterburner_core::{
@@ -119,8 +123,12 @@ pub struct ShardPoolConfig {
     pub tokio_handle: tokio::runtime::Handle,
     pub invocation: ScriptInvocation,
     pub shutdown: Arc<AtomicBool>,
-    /// Override for the per-shard mailbox depth. `None` → default.
+    /// Override for the per-shard mailbox depth. `None` -> default.
     pub queue_depth_per_shard: Option<usize>,
+    /// Optional AF_UNIX coordinator. `None` when not on unix or when
+    /// the script doesn't use Unix-domain sockets.
+    #[cfg(unix)]
+    pub unix_coord: Option<Arc<DaemonUnix>>,
 }
 
 /// Pool of N daemon runtime shards.
@@ -245,6 +253,8 @@ impl DaemonShardPool {
                 alive: Arc::clone(&alive),
                 has_refs: Arc::clone(&has_refs),
                 requests_handled: Arc::clone(&requests_handled),
+                #[cfg(unix)]
+                unix_coord: cfg.unix_coord.clone(),
             };
 
             let join = std::thread::Builder::new()
@@ -493,6 +503,9 @@ struct ShardThreadArgs {
     alive: Arc<AtomicBool>,
     has_refs: Arc<AtomicBool>,
     requests_handled: Arc<AtomicUsize>,
+    /// Optional AF_UNIX coordinator, shared across all shards.
+    #[cfg(unix)]
+    unix_coord: Option<Arc<DaemonUnix>>,
 }
 
 fn shard_main(args: ShardThreadArgs) {
@@ -529,6 +542,8 @@ fn shard_main_inner(args: ShardThreadArgs) {
         alive: _alive,
         has_refs,
         requests_handled,
+        #[cfg(unix)]
+        unix_coord,
     } = args;
 
     // Step 1: instantiate the daemon Store on this thread.
@@ -576,6 +591,10 @@ fn shard_main_inner(args: ShardThreadArgs) {
     daemon.install_tls(Arc::clone(&tls));
     let dgram = DaemonDgram::new_with_claims(tokio_handle.clone(), manifold, shared_claims);
     daemon.install_dgram(Arc::clone(&dgram));
+    #[cfg(unix)]
+    if let Some(ref u) = unix_coord {
+        daemon.install_unix(Arc::clone(u));
+    }
 
     // Outbound HTTP coordinator - async per-shard. JS calls to
     // `http.request` / `https.request` / `fetch` go through this
@@ -798,6 +817,23 @@ fn shard_event_loop(
                 shard_idx, daemon, envelope, "dgram", stdout_hw, stderr_hw,
             );
             let _ = flush_streams(daemon, stdout_hw, stderr_hw);
+        }
+
+        // ---- unix events ----
+        #[cfg(unix)]
+        for _ in 0..256 {
+            let Some(evt) = daemon.try_recv_unix_event() else {
+                break;
+            };
+            did_work = true;
+            let (envelope, reap_id) = unix_event_to_envelope(&evt);
+            dispatch_with_panic_isolation(
+                shard_idx, daemon, envelope, "unix", stdout_hw, stderr_hw,
+            );
+            let _ = flush_streams(daemon, stdout_hw, stderr_hw);
+            if let Some(id) = reap_id {
+                daemon.mark_unix_closed(id);
+            }
         }
 
         // ---- inspector / CDP events ----

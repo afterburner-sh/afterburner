@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Registry selection + cargo-style credential storage.
 //!
@@ -47,6 +47,9 @@ pub struct Resolved {
     pub username: Option<String>,
     /// The named registry this resolved to (`None` = the default registry).
     pub name: Option<String>,
+    /// Npm registry override from the config file (closes G9).  `None` means
+    /// use `BURN_NPM_REGISTRY` env or the default `https://registry.npmjs.org`.
+    pub npm_registry: Option<String>,
 }
 
 // ── credentials file model ──────────────────────────────────────────────────
@@ -65,6 +68,11 @@ struct RegistryEntry {
     token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     username: Option<String>,
+    /// Npm registry override for this registry context (closes G9).
+    /// Written by `burn config set npm-registry <url>` (future); currently
+    /// read from the credentials file under `[registry] npm_registry = "..."`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    npm_registry: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +148,7 @@ pub fn resolve(registry_flag: Option<&str>, token_flag: Option<&str>) -> Result<
             token: token.map(SecretString::from),
             username: entry.username.clone(),
             name: Some(name.to_string()),
+            npm_registry: None,
         });
     }
 
@@ -149,12 +158,14 @@ pub fn resolve(registry_flag: Option<&str>, token_flag: Option<&str>) -> Result<
         .or_else(|| env_nonempty(ENV_TOKEN))
         .or_else(|| file.registry.as_ref().and_then(|r| r.token.clone()));
     let username = file.registry.as_ref().and_then(|r| r.username.clone());
+    let npm_registry = file.registry.as_ref().and_then(|r| r.npm_registry.clone());
 
     Ok(Resolved {
         base_url: base_url.trim_end_matches('/').to_string(),
         token: token.map(SecretString::from),
         username,
         name: None,
+        npm_registry,
     })
 }
 
@@ -217,4 +228,44 @@ pub fn remove_token(registry_flag: Option<&str>) -> Result<bool> {
 
 fn env_nonempty(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- G9: npm_registry in credentials file --------------------------------
+
+    #[test]
+    fn credentials_file_parses_npm_registry() {
+        // Round-trip a credentials file that contains npm_registry.
+        let toml = "[registry]\ntoken = \"tok\"\nnpm_registry = \"https://npm.mycorp.example\"\n";
+        let file: CredentialsFile = toml::from_str(toml).expect("parse credentials");
+        assert_eq!(
+            file.registry
+                .as_ref()
+                .and_then(|r| r.npm_registry.as_deref()),
+            Some("https://npm.mycorp.example"),
+            "npm_registry must be parsed from credentials.toml"
+        );
+        // Serialise back: npm_registry must survive a round-trip.
+        let out = toml::to_string_pretty(&file).expect("serialize");
+        assert!(
+            out.contains("npm_registry"),
+            "npm_registry must be in serialized output: {out}"
+        );
+    }
+
+    #[test]
+    fn credentials_file_without_npm_registry_is_none() {
+        let toml = "[registry]\ntoken = \"tok\"\n";
+        let file: CredentialsFile = toml::from_str(toml).expect("parse credentials");
+        assert_eq!(
+            file.registry
+                .as_ref()
+                .and_then(|r| r.npm_registry.as_deref()),
+            None,
+            "absent npm_registry must parse as None"
+        );
+    }
 }

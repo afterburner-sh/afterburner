@@ -1,0 +1,12 @@
+[format]
+version = "1.0"
+
+[package]
+name = "ruby-multimodule"
+namespace = "examples"
+version = "0.1.0"
+language = "ruby"
+entry = "source/main.rb"
+
+[runtime]
+min = "0.1.0"

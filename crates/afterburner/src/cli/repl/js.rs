@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
-//! `burn repl` - interactive REPL.
+//! The JavaScript / TypeScript REPL backend.
+//!
+//! Each line becomes a fresh script run through the engine. Session state
+//! persists by replaying the accumulated `var`/`let`/`const`/`function`/`class`
+//! declarations before the current line (the engine runs each line isolated).
+//!
+//! With `transpile_ts = true` (`burn repl --lang ts`) each line is stripped of
+//! TypeScript types via oxc before it is run as JavaScript.
 //!
 //! Meta-commands:
 //!
@@ -11,128 +18,129 @@
 //! * `:mode native|wasm|adaptive` - rebuild the engine in a given mode.
 //! * `:allow net=*`, `:allow fs=/tmp`, `:allow env=HOME` - grant
 //!   capabilities on the live engine (rebuilds the manifold).
+//! * `:clear` / `:reset` - forget all session declarations.
 //! * `:help` - list commands. `:exit` / `:quit` - exit.
-//!
-//! Scripts run in UDF shape (`module.exports = () => ...` or plain
-//! expressions - the latter are wrapped). No state shared across
-//! lines; matches the fresh-per-call invariant.
 
 use crate::Afterburner;
+use crate::cli::build::build_afterburner;
+use crate::cli::style;
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::cell::RefCell;
 
-use super::args::Cli;
-use super::build::build_afterburner;
+use super::super::args::Cli;
+use super::{Flow, clean_repl_err, read_loop};
 
-// rustyline helper: colors the prompt via the Highlighter so rustyline still
-// measures width on the plain prompt (no `\x01`/`\x02` width markers).
-struct ReplHelper;
-impl rustyline::completion::Completer for ReplHelper {
-    type Candidate = String;
-}
-impl rustyline::hint::Hinter for ReplHelper {
-    type Hint = String;
-}
-impl rustyline::validate::Validator for ReplHelper {}
-impl rustyline::highlight::Highlighter for ReplHelper {
-    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
-        &'s self,
-        prompt: &'p str,
-        _default: bool,
-    ) -> std::borrow::Cow<'b, str> {
-        match super::style::highlight_prompt(prompt) {
-            Some(s) => std::borrow::Cow::Owned(s),
-            None => std::borrow::Cow::Borrowed(prompt),
-        }
-    }
-}
-impl rustyline::Helper for ReplHelper {}
-
-pub fn repl(cli: &Cli) -> Result<()> {
-    use rustyline::Editor;
-    use rustyline::error::ReadlineError;
-    use rustyline::history::FileHistory;
-
-    let mut rl: Editor<ReplHelper, FileHistory> = Editor::new().context("rustyline init")?;
-    rl.set_helper(Some(ReplHelper));
-    let mut live_cli = cli.clone();
-    let mut ab = build_afterburner(&live_cli)?;
+/// Run the JS (or TS) engine REPL. `transpile_ts` strips TypeScript types from
+/// each line before evaluation.
+pub fn run(cli: &Cli, transpile_ts: bool) -> Result<()> {
+    // The live engine and session state are owned here and mutated by the
+    // per-line closure. `RefCell` because `read_loop` takes an `FnMut` that
+    // borrows them across calls; this is single-threaded REPL state.
+    let live_cli = RefCell::new(cli.clone());
+    let ab = RefCell::new(build_afterburner(&live_cli.borrow())?);
     // Accumulated declarations (var/let/const/function/class) so REPL state
     // persists across lines - the engine runs each line isolated.
-    let mut decls: Vec<(String, String)> = Vec::new();
+    let decls: RefCell<Vec<(String, String)>> = RefCell::new(Vec::new());
 
-    super::style::repl_banner(env!("CARGO_PKG_VERSION"));
-    loop {
-        match rl.readline("burn> ") {
-            Ok(line) => {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let _ = rl.add_history_entry(trimmed);
+    let lang = if transpile_ts { "ts" } else { "js" };
+    style::repl_banner_lang(env!("CARGO_PKG_VERSION"), lang);
 
-                if let Some(rest) = trimmed.strip_prefix(':') {
-                    if matches!(rest.trim(), "clear" | "reset") {
-                        decls.clear();
-                        eprintln!("  {}", super::style::muted("session cleared"));
-                        continue;
-                    }
-                    match dispatch_meta(rest, &mut live_cli, &mut ab) {
-                        Ok(ReplAction::Continue) => continue,
-                        Ok(ReplAction::Exit) => break,
-                        Err(e) => {
-                            eprintln!("  {}", super::style::fail(&clean_repl_err(&e.to_string())));
-                            continue;
-                        }
-                    }
-                }
-
-                // Evaluate the line against the accumulated session so vars and
-                // functions defined earlier are in scope.
-                let wrapped = build_eval(&decls, trimmed);
-                match ab
-                    .register(&wrapped)
-                    .and_then(|id| ab.run(&id, &Value::Null))
-                {
-                    Ok(v) => {
-                        // A successful declaration joins the session (latest wins).
-                        if let Some(name) = declared_name(trimmed) {
-                            decls.retain(|(n, _)| n != &name);
-                            decls.push((name, trimmed.to_string()));
-                        }
-                        if !v.is_null() {
-                            println!(
-                                "{}",
-                                super::style::value(&serde_json::to_string(&v).unwrap_or_default())
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("  {}", super::style::fail(&clean_repl_err(&e.to_string())))
-                    }
-                }
+    read_loop("burn", |trimmed| {
+        if let Some(rest) = trimmed.strip_prefix(':') {
+            if matches!(rest.trim(), "clear" | "reset") {
+                decls.borrow_mut().clear();
+                eprintln!("  {}", style::muted("session cleared"));
+                return Flow::Continue;
             }
-            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
-            Err(e) => {
-                eprintln!("  {}", super::style::fail(&format!("readline error: {e}")));
-                break;
+            match dispatch_meta(rest, &mut live_cli.borrow_mut(), &mut ab.borrow_mut()) {
+                Ok(Flow::Exit) => return Flow::Exit,
+                Ok(Flow::Continue) => return Flow::Continue,
+                Err(e) => {
+                    eprintln!("  {}", style::fail(&clean_repl_err(&e.to_string())));
+                    return Flow::Continue;
+                }
             }
         }
-    }
-    Ok(())
+
+        // For TS, strip types from the raw line first so the engine sees plain
+        // JS. A transpile error is reported and the line is dropped.
+        let prepared = if transpile_ts {
+            match transpile_ts_line(trimmed) {
+                Ok(js) => {
+                    // A line that is purely TypeScript types (an `interface` /
+                    // `type` alias) strips to nothing: it is a no-op, not an
+                    // empty expression. Acknowledge and move on.
+                    if js.trim().is_empty() {
+                        eprintln!("  {}", style::muted("(type-only; nothing to run)"));
+                        return Flow::Continue;
+                    }
+                    js
+                }
+                Err(e) => {
+                    eprintln!("  {}", style::fail(&clean_repl_err(&e.to_string())));
+                    return Flow::Continue;
+                }
+            }
+        } else {
+            trimmed.to_string()
+        };
+
+        // Evaluate the line against the accumulated session so vars and
+        // functions defined earlier are in scope.
+        let wrapped = build_eval(&decls.borrow(), &prepared);
+        let result = {
+            let ab = ab.borrow();
+            ab.register(&wrapped)
+                .and_then(|id| ab.run(&id, &Value::Null))
+        };
+        match result {
+            Ok(v) => {
+                // A successful declaration joins the session (latest wins). We
+                // record the prepared (post-TS-strip) text so replay is plain JS.
+                if let Some(name) = declared_name(&prepared) {
+                    let mut d = decls.borrow_mut();
+                    d.retain(|(n, _)| n != &name);
+                    d.push((name, prepared.trim().to_string()));
+                }
+                if !v.is_null() {
+                    println!(
+                        "{}",
+                        style::value(&serde_json::to_string(&v).unwrap_or_default())
+                    );
+                }
+            }
+            Err(e) => eprintln!("  {}", style::fail(&clean_repl_err(&e.to_string()))),
+        }
+        Flow::Continue
+    })
 }
 
-enum ReplAction {
-    Continue,
-    Exit,
+/// Strip TypeScript types from a single REPL line, returning plain JS.
+///
+/// The oxc transpiler operates on whole modules, so a bare expression like
+/// `1 as number` is parsed as a statement (which is fine: we take the stripped
+/// output). ESM lowering is applied too (a no-op for plain expressions).
+#[cfg(feature = "ts")]
+fn transpile_ts_line(line: &str) -> Result<String> {
+    let path = std::path::Path::new("<repl>.ts");
+    // No inline source map: the line is wrapped in an expression position where
+    // a trailing `//# sourceMappingURL=` comment would break the wrap.
+    crate::ts::transpile_no_source_map(line, path)
+        .map(|js| js.trim_end().to_string())
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-fn clean_repl_err(raw: &str) -> String {
-    let s = super::style::humanize_error(raw);
-    s.strip_prefix("compile failed: ").unwrap_or(&s).to_string()
+/// Without the `ts` feature, `--lang ts` cannot strip types: honest error.
+#[cfg(not(feature = "ts"))]
+fn transpile_ts_line(_line: &str) -> Result<String> {
+    anyhow::bail!(
+        "burn: TypeScript REPL requires the `ts` cargo feature \
+         (rebuild with `cargo install afterburner --features ts`)"
+    )
 }
 
-fn dispatch_meta(rest: &str, cli: &mut Cli, ab: &mut Afterburner) -> Result<ReplAction> {
+fn dispatch_meta(rest: &str, cli: &mut Cli, ab: &mut Afterburner) -> Result<Flow> {
     let (cmd, arg) = match rest.split_once(char::is_whitespace) {
         Some((c, a)) => (c, a.trim()),
         None => (rest, ""),
@@ -150,8 +158,8 @@ fn dispatch_meta(rest: &str, cli: &mut Cli, ab: &mut Afterburner) -> Result<Repl
             ] {
                 eprintln!(
                     "  {} {}",
-                    super::style::accent(&format!("{cmd:<28}")),
-                    super::style::muted(desc)
+                    style::accent(&format!("{cmd:<28}")),
+                    style::muted(desc)
                 );
             }
         }
@@ -159,12 +167,12 @@ fn dispatch_meta(rest: &str, cli: &mut Cli, ab: &mut Afterburner) -> Result<Repl
             let n: u64 = arg.parse().context("parse fuel")?;
             cli.fuel = Some(n);
             *ab = build_afterburner(cli)?;
-            eprintln!("  {}", super::style::ok(&format!("fuel = {n}")));
+            eprintln!("  {}", style::ok(&format!("fuel = {n}")));
         }
         "mode" => {
             cli.mode = Some(arg.to_string());
             *ab = build_afterburner(cli)?;
-            eprintln!("  {}", super::style::ok(&format!("mode = {arg}")));
+            eprintln!("  {}", style::ok(&format!("mode = {arg}")));
         }
         "allow" => {
             let (k, v) = arg.split_once('=').context(":allow expects key=value")?;
@@ -176,12 +184,12 @@ fn dispatch_meta(rest: &str, cli: &mut Cli, ab: &mut Afterburner) -> Result<Repl
                 other => anyhow::bail!("unknown capability '{other}' (expected: net|fs|env|all)"),
             }
             *ab = build_afterburner(cli)?;
-            eprintln!("  {}", super::style::ok(&format!("{k} = {v}")));
+            eprintln!("  {}", style::ok(&format!("{k} = {v}")));
         }
-        "exit" | "quit" => return Ok(ReplAction::Exit),
+        "exit" | "quit" => return Ok(Flow::Exit),
         other => anyhow::bail!("unknown command :{other}, try :help"),
     }
-    Ok(ReplAction::Continue)
+    Ok(Flow::Continue)
 }
 
 /// Build the eval wrapper for a REPL line, replaying the session's accumulated
@@ -343,5 +351,23 @@ mod tests {
         assert_eq!(declared_name("class Widget {}").as_deref(), Some("Widget"));
         assert_eq!(declared_name("a + 1"), None);
         assert_eq!(declared_name("console.log(a)"), None);
+    }
+
+    #[cfg(feature = "ts")]
+    #[test]
+    fn ts_line_strips_type_annotations() {
+        // `const x: number = 1` -> the `: number` annotation is removed.
+        let js = transpile_ts_line("const x: number = 1").unwrap();
+        assert!(js.contains("const x = 1"), "stripped TS types: {js}");
+        assert!(!js.contains(": number"), "annotation gone: {js}");
+    }
+
+    #[cfg(feature = "ts")]
+    #[test]
+    fn ts_expression_with_cast_strips_to_plain_js() {
+        // `1 as number` -> `1`.
+        let js = transpile_ts_line("1 as number").unwrap();
+        assert!(js.contains('1'), "keeps the value: {js}");
+        assert!(!js.contains("as number"), "cast removed: {js}");
     }
 }

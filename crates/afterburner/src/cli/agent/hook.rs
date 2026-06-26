@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! The per-tool-call hook shim - what the assistant spawns before every
 //! shell command. Reads the host's hook JSON from stdin, classifies the
@@ -18,6 +18,8 @@
 //!   every tool call.
 //! * **Escape hatch.** `BURN_AGENT_HOOK=0|off|false` disables the redirect
 //!   without uninstalling.
+//!
+//! Covers all 8 burn languages: JS, TS, Python, Ruby, Rust, Go, C, C++.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -140,7 +142,7 @@ fn deny_json(host: Host, reason: &str) -> String {
         }
         Host::Cursor => serde_json::json!({
             "permission": "deny",
-            "user_message": "Rerouting JavaScript into the burn sandbox",
+            "user_message": "Rerouting code into the burn sandbox",
             "agent_message": reason,
         }),
         Host::Copilot => serde_json::json!({
@@ -289,5 +291,30 @@ mod tests {
         let out = respond(Host::Copilot, &payload).expect("deny");
         assert!(out.contains("\"permissionDecision\":\"deny\""));
         assert!(!out.contains("hookSpecificOutput"));
+    }
+
+    #[test]
+    fn python_command_is_denied_with_corrected_form() {
+        let out = respond(Host::ClaudeCode, &claude_payload("python script.py")).expect("deny");
+        assert!(out.contains("\"permissionDecision\":\"deny\""));
+        assert!(out.contains("burn --sandbox python script.py"));
+    }
+
+    #[test]
+    fn ruby_command_is_denied_with_corrected_form() {
+        let out = respond(Host::ClaudeCode, &claude_payload("ruby app.rb")).expect("deny");
+        assert!(out.contains("burn --sandbox ruby app.rb"));
+    }
+
+    #[test]
+    fn cargo_run_is_denied_with_suggestion() {
+        let out = respond(Host::ClaudeCode, &claude_payload("cargo run")).expect("deny");
+        assert!(out.contains("burn"));
+    }
+
+    #[test]
+    fn cargo_build_stays_silent() {
+        assert!(respond(Host::ClaudeCode, &claude_payload("cargo build")).is_none());
+        assert!(respond(Host::ClaudeCode, &claude_payload("cargo test")).is_none());
     }
 }

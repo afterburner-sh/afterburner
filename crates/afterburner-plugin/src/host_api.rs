@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! WASM import declarations for `afterburner:host`.
 //!
@@ -919,6 +919,18 @@ unsafe extern "C" {
     ) -> i32;
     pub fn host_dgram_close(socket_id: i32) -> i32;
     pub fn host_dgram_address(socket_id: i32, out_ptr: *mut u8, out_cap: u32) -> i32;
+
+    // ---- unix (AF_UNIX stream) ---------------------------------------
+    //
+    // Same wire convention as host_net_*: base64 payloads, i32 ids.
+    // Path arguments are UTF-8 strings (ptr + len).
+    pub fn host_unix_connect(path_ptr: *const u8, path_len: u32) -> i32;
+    pub fn host_unix_write(conn_id: i32, payload_ptr: *const u8, payload_len: u32) -> i32;
+    pub fn host_unix_end(conn_id: i32) -> i32;
+    pub fn host_unix_destroy(conn_id: i32) -> i32;
+    pub fn host_unix_pending(conn_id: i32) -> i32;
+    pub fn host_unix_listen(path_ptr: *const u8, path_len: u32) -> i32;
+    pub fn host_unix_close_server(server_id: i32) -> i32;
 
     // ---- child_process (sync) ---------------------------------------
     pub fn host_child_process_exec_sync(

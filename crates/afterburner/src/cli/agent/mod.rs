@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
-//! `burn agent` - wire AI coding assistants to run the JavaScript they
+//! `burn agent` - wire AI coding assistants to run the code they
 //! generate inside the burn sandbox.
 //!
 //! * `install` - pick assistants (arrow-key multi-select; detected ones
@@ -15,8 +15,9 @@
 //! * `hook` - the non-interactive per-tool-call shim (see [`hook`]).
 //!
 //! The redirect itself rides on the pass-through dispatcher: the hook tells
-//! the assistant to prefix the JS-executing command with `burn`, and
-//! `burn node`/`burn npm`/`burn npx` already run those sandboxed.
+//! the assistant to prefix the code-executing command with `burn`, and
+//! `burn node`/`burn npm`/`burn npx`/`burn python`/`burn ruby` already
+//! run those sandboxed.
 
 mod classify;
 mod context;
@@ -194,7 +195,7 @@ fn install(explicit: &[String], user: bool, yes: bool) -> Result<()> {
     println!(
         "{}",
         style::muted(
-            "Route every JavaScript run through the sealed sandbox. Space toggles, Enter confirms."
+            "Route every code run through the sealed sandbox. Space toggles, Enter confirms."
         )
     );
     let picked = resolve_hosts(explicit, yes, "Wire which assistants?", |h| {
@@ -216,10 +217,7 @@ fn install(explicit: &[String], user: bool, yes: bool) -> Result<()> {
     }
     if !wired.is_empty() {
         println!();
-        println!(
-            "{} now run JavaScript inside burn.",
-            style::ok(&wired.join(", "))
-        );
+        println!("{} now run code inside burn.", style::ok(&wired.join(", ")));
         println!(
             "{}",
             style::muted("Undo anytime: burn agent uninstall · one-off bypass: BURN_AGENT_HOOK=0")

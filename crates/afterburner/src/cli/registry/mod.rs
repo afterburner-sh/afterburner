@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! `burn` registry + package-management subcommands. Thin handlers over
 //! [`afterburner_cloud`]; all output is styled via [`super::style`].
+//!
+// vertexia: file pre-existing at ~1200 SLOC before lang-prompt additions;
+// ceiling is ~1000 SLOC. Upgrade path: split into registry/scaffold.rs +
+// registry/install.rs + registry/publish.rs along the existing logical sections.
 
 mod progress;
 
 use super::args::{Cli, ScaffoldArgs};
 use super::style;
 use afterburner_cloud::afterburner_afb::digest::hex;
+use afterburner_cloud::gem_client::{DEFAULT_GEM_REGISTRY, GemClient};
 use afterburner_cloud::lock::{LOCKFILE_NAME, Lockfile};
 use afterburner_cloud::resolve::{Req, resolve, runtime_version};
 use afterburner_cloud::scaffold::{ScaffoldOpts, Scaffolded};
@@ -21,6 +26,7 @@ use afterburner_cloud::{
 };
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 pub fn login(token: Option<&str>, registry: Option<&str>) -> Result<()> {
     let base = match config::resolve(registry, None) {
@@ -97,17 +103,88 @@ pub fn whoami(registry: Option<&str>) -> Result<()> {
 }
 
 pub fn new_package(cli: &Cli, spec: &str, args: &ScaffoldArgs) -> Result<()> {
-    let opts = scaffold_opts(cli, args);
+    let lang = resolve_lang(args)?;
+    let mut opts = scaffold_opts(cli, args);
+    opts.lang = Some(lang);
+    opts.ts = false; // lang takes precedence; ts shorthand subsumed
     let made = scaffold::run_new(spec, &opts, login_username().as_deref())?;
     report_scaffold(&made);
     Ok(())
 }
 
 pub fn init_package(cli: &Cli, path: Option<&Path>, args: &ScaffoldArgs) -> Result<()> {
-    let opts = scaffold_opts(cli, args);
+    let lang = resolve_lang(args)?;
+    let mut opts = scaffold_opts(cli, args);
+    opts.lang = Some(lang);
+    opts.ts = false; // lang takes precedence; ts shorthand subsumed
     let made = scaffold::run_init(path, &opts, login_username().as_deref())?;
     report_scaffold(&made);
     Ok(())
+}
+
+/// Resolve the source language for a scaffold operation.
+///
+/// Priority:
+/// 1. `--lang <value>` - validate via `SourceLang::from_str`, return the
+///    normalized lowercase string on success or an error on an unknown value.
+/// 2. `--ts` shorthand - returns `"typescript"`.
+/// 3. stdin is a TTY - prompt the user with a numbered menu (default: js).
+/// 4. Non-TTY (CI / piped) - default to `"js"` for back-compat.
+fn resolve_lang(args: &ScaffoldArgs) -> Result<String> {
+    use super::compile::lang::SourceLang;
+    use std::io::IsTerminal;
+
+    if let Some(ref l) = args.lang {
+        // Validate: SourceLang::from_str gives a clear error on unknown values.
+        let norm = l.trim().to_ascii_lowercase();
+        SourceLang::from_str(&norm).with_context(|| format!("invalid --lang {l:?}"))?;
+        return Ok(norm);
+    }
+    if args.ts {
+        return Ok("typescript".into());
+    }
+    if std::io::stdin().is_terminal() {
+        return prompt_lang();
+    }
+    Ok("js".into())
+}
+
+/// Numbered language menu for TTY scaffold (default: js).
+fn prompt_lang() -> Result<String> {
+    use std::io::{BufRead, Write};
+
+    const CHOICES: &[(&str, &str)] = &[
+        ("js", "JavaScript"),
+        ("ts", "TypeScript"),
+        ("rust", "Rust (compiles to wasm32-wasip1)"),
+        ("go", "Go (compiles to wasm32-wasip1)"),
+        ("python", "Python"),
+        ("c", "C (compiles to wasm32-wasi)"),
+        ("ruby", "Ruby"),
+    ];
+
+    eprintln!();
+    eprintln!("{}", style::muted("Source language:"));
+    for (i, (_, label)) in CHOICES.iter().enumerate() {
+        eprintln!("  {}  {}", style::accent(&format!("[{}]", i + 1)), label);
+    }
+    eprint!("{}", style::muted("choice [1]: "));
+    std::io::stderr().flush()?;
+
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let trimmed = line.trim();
+
+    if trimmed.is_empty() || trimmed == "1" {
+        return Ok("js".into());
+    }
+    match trimmed.parse::<usize>() {
+        Ok(n) if n >= 1 && n <= CHOICES.len() => Ok(CHOICES[n - 1].0.into()),
+        _ => anyhow::bail!(
+            "invalid language choice {trimmed:?}; enter a number between 1 and {}",
+            CHOICES.len()
+        ),
+    }
 }
 
 fn scaffold_opts(cli: &Cli, a: &ScaffoldArgs) -> ScaffoldOpts {
@@ -140,6 +217,7 @@ fn scaffold_opts(cli: &Cli, a: &ScaffoldArgs) -> ScaffoldOpts {
         vcs_git: a.vcs.as_deref() == Some("git"),
         force: a.force,
         ts: a.ts,
+        lang: a.lang.clone(),
     }
 }
 
@@ -152,7 +230,7 @@ fn report_scaffold(s: &Scaffolded) {
     );
     println!(
         "  {}",
-        style::value("afb.toml  manifold.json  source/main.js  tests/  README.md")
+        style::value(&format!("afb.toml  manifold.json  {}  README.md", s.entry))
     );
     println!(
         "  {} {}",
@@ -189,13 +267,15 @@ pub fn package(
     do_compile: bool,
     wasm_only: bool,
 ) -> Result<()> {
+    use super::compile::lang::SourceLang;
+
     let dir = dir.unwrap_or_else(|| Path::new("."));
-    let mut local = pkg::LocalPackage::load(dir)?;
-    // TypeScript is build-time only: transpile every `.ts/.mts/.cts`
-    // source to `.js` here so the published `.afb` is always plain JS and
-    // the runtime sandbox never needs a transpiler. The package entry is
-    // rewritten to the `.js` path. (Pure-JS packages are untouched.)
-    transpile_ts_sources(&mut local)?;
+    let local = pkg::LocalPackage::load(dir)?;
+
+    // Read language early so we can gate source-only mode for native languages.
+    let lang = SourceLang::from_str(&local.manifest.package.language)
+        .with_context(|| format!("invalid [package] language in {}/afb.toml", dir.display()))?;
+
     let coord = coord_str(&local);
     let out_path = out
         .map(Path::to_path_buf)
@@ -210,7 +290,18 @@ pub fn package(
         PackageMode::FullWasm
     } else if do_compile {
         PackageMode::SourceBased
+    } else if !lang.is_interpretable() {
+        // Native (Rust/Go/C/C++): compiled to wasm, no source interpreter.
+        // Full-WASM is the only valid mode; do not prompt.
+        PackageMode::FullWasm
+    } else if !lang.is_js_family() {
+        // Python/Ruby: purely interpreted, no standalone wasm artifact. Source
+        // is the only valid mode; do not prompt (offering full-WASM here errors).
+        PackageMode::SourceBased
     } else {
+        // JS/TS: can ship as source (QuickJS) or compiled to wasm (Javy) - the
+        // only language where both modes are real, so this is the only case
+        // that prompts.
         use std::io::IsTerminal;
         if std::io::stdin().is_terminal() {
             prompt_package_mode()?
@@ -220,13 +311,61 @@ pub fn package(
     };
 
     match mode {
-        PackageMode::FullWasm => super::compile::compile_with_local_package(local, &out_path, true),
-        PackageMode::SourceBased if do_compile || wasm_only => {
-            // wasm_only is handled above; do_compile -> compile+source.
-            super::compile::compile_with_local_package(local, &out_path, false)
+        PackageMode::FullWasm => {
+            // Route through dispatch_compile with wasm_only=true so native
+            // languages (Rust/Go/C) use their toolchain, not the JS engine path.
+            super::compile::dispatch_compile(dir, local, &out_path, true)
+        }
+        PackageMode::SourceBased if do_compile => {
+            // --compile: compile+source for all languages via dispatch_compile.
+            super::compile::dispatch_compile(dir, local, &out_path, false)
         }
         PackageMode::SourceBased => {
-            let (bytes, digest) = style::spin("packing", || local.build())?;
+            // Plain source-based packaging. Native languages (Rust/Go/C) have
+            // no source interpreter, so shipping source-only produces an
+            // unrunnable .afb. Reject early with a clear message.
+            if !lang.is_interpretable() {
+                anyhow::bail!(
+                    "a {lang_name} package compiles to wasm and cannot ship as source; \
+                     run `burn package --compile`",
+                    lang_name = format!("{lang:?}").to_lowercase(),
+                );
+            }
+            // JS/TS/Python source-based path: transpile TS first.
+            let mut local = local;
+            transpile_ts_sources(&mut local)?;
+
+            // Ruby packages: vendor resolved [gem] dependencies into the .afb
+            // so `burn run <pkg.afb>` resolves them without a gem toolchain.
+            // Other interpreted languages have no [gem] section; this is a no-op.
+            let gem_res = if !local.manifest.gem.is_empty() {
+                Some(style::spin("resolving gems", || {
+                    GemClient::new(DEFAULT_GEM_REGISTRY).resolve_all(&local.manifest.gem)
+                })?)
+            } else {
+                None
+            };
+
+            // Build the .afb. When gems are present, build manually via Builder
+            // so we can add vendor/gem/<name>-<version>/<rel> members.
+            let (bytes, digest) = if let Some(ref res) = gem_res {
+                use afterburner_cloud::afterburner_afb::pack::Builder;
+                let mut b = Builder::new(local.manifest.clone(), local.manifold.clone());
+                for (path, data) in &local.sources {
+                    b = b.source(path.clone(), data.clone());
+                }
+                for pkg in &res.packages {
+                    for (rel, data) in &pkg.files {
+                        let vendor_path =
+                            format!("vendor/gem/{}-{}/{}", pkg.name, pkg.version, rel);
+                        b = b.vendor(vendor_path, data.clone());
+                    }
+                }
+                style::spin("packing", || b.build())?
+            } else {
+                style::spin("packing", || local.build())?
+            };
+
             std::fs::write(&out_path, &bytes)
                 .with_context(|| format!("writing {}", out_path.display()))?;
             println!("{} {}", style::ok("packaged"), style::accent(&coord));
@@ -411,17 +550,40 @@ pub fn install(
     locked: bool,
 ) -> Result<()> {
     let resolved = config::resolve(registry, None)?;
+    // G9: capture npm_registry from config before moving `resolved` into the client.
+    let npm_registry_cfg = resolved.npm_registry.clone();
     let client = RegistryClient::from_resolved(resolved);
 
-    let plan = build_install_plan(pkg, &client, locked)?;
+    let mut plan = build_install_plan(pkg, &client, locked)?;
     let items = plan.lockfile.install_items();
     if items.is_empty() {
-        if plan.npm.is_empty() {
+        if plan.npm.is_empty() && plan.gem.is_empty() {
             println!("{}", style::muted("nothing to install"));
             return Ok(());
         }
-        // No afb deps, but there may be npm deps to install.
-        install_npm_deps(&plan.npm, plan.write_lock_to.as_deref())?;
+        // No afb deps, but there may be npm and/or gem deps to install.
+        let npm_res = install_npm_deps(
+            &plan.npm,
+            plan.write_lock_to.as_deref(),
+            npm_registry_cfg.as_deref(),
+        )?;
+        let gem_res = install_gem_deps(&plan.gem, None)?;
+        // Write npm and gem pins into the lockfile even when there are no afb deps.
+        if let Some(lock_dir) = plan
+            .write_lock_to
+            .as_ref()
+            .filter(|_| !npm_res.packages.is_empty() || !gem_res.packages.is_empty())
+        {
+            if !npm_res.packages.is_empty() {
+                plan.lockfile.npm = Lockfile::npm_pins_from_resolution(&npm_res);
+            }
+            if !gem_res.packages.is_empty() {
+                plan.lockfile.gem = Lockfile::gem_pins_from_resolution(&gem_res);
+            }
+            let path = lock_dir.join(LOCKFILE_NAME);
+            std::fs::write(&path, plan.lockfile.to_toml()?)
+                .with_context(|| format!("writing {}", path.display()))?;
+        }
         return Ok(());
     }
 
@@ -438,12 +600,6 @@ pub fn install(
         out
     })?;
 
-    if let Some(dir) = &plan.write_lock_to {
-        let path = dir.join(LOCKFILE_NAME);
-        std::fs::write(&path, plan.lockfile.to_toml()?)
-            .with_context(|| format!("writing {}", path.display()))?;
-    }
-
     // Make every installed package require()-able from here: link each one
     // into ./node_modules/<ns>/<name> (extracted from the content-addressed
     // cache). Package installs link next to their manifest; a bare
@@ -457,11 +613,39 @@ pub fn install(
 
     report_install(&plan.lockfile, &summary);
 
+    // G8: for the registry-arg arm (`burn install ns/pkg`), plan.npm is empty
+    // at plan-build time (packages not yet cached); re-read from the now-cached
+    // afb manifests so the transitive npm deps are not silently dropped.
+    if plan.npm.is_empty() && plan.write_lock_to.is_none() {
+        plan.npm = npm_deps_from_cached_items(&items);
+    }
+
     // npm dependencies (the `[npm]` section) - resolved + extracted +
     // cached by the NATIVE installer (no `npm` binary, no process spawn),
     // then linked into ./node_modules so `burn run` / `burn test` resolve
     // them exactly like Node would.
-    install_npm_deps(&plan.npm, plan.write_lock_to.as_deref())?;
+    let npm_res = install_npm_deps(
+        &plan.npm,
+        plan.write_lock_to.as_deref(),
+        npm_registry_cfg.as_deref(),
+    )?;
+
+    // gem dependencies (the `[gem]` section) - resolved + extracted +
+    // cached by the NATIVE gem installer (no `gem` binary, no process spawn).
+    let gem_res = install_gem_deps(&plan.gem, None)?;
+
+    // Record npm and gem pins in the lockfile so the next install can be locked.
+    if let Some(dir) = &plan.write_lock_to {
+        if !npm_res.packages.is_empty() {
+            plan.lockfile.npm = Lockfile::npm_pins_from_resolution(&npm_res);
+        }
+        if !gem_res.packages.is_empty() {
+            plan.lockfile.gem = Lockfile::gem_pins_from_resolution(&gem_res);
+        }
+        let path = dir.join(LOCKFILE_NAME);
+        std::fs::write(&path, plan.lockfile.to_toml()?)
+            .with_context(|| format!("writing {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -471,15 +655,28 @@ pub fn install(
 /// resolved set is additionally materialized as `dir/node_modules` symlinks
 /// into the cache - the build artifact the runtime resolves bare specifiers
 /// from. No Node toolchain involved.
+///
+/// `npm_registry` is the config-file override (G9); falls back to
+/// `BURN_NPM_REGISTRY` env and then the compiled-in default.
+/// Returns the resolved packages for lockfile recording (G1).
 fn install_npm_deps(
     npm: &std::collections::BTreeMap<String, String>,
     link_into: Option<&std::path::Path>,
-) -> Result<()> {
+    npm_registry: Option<&str>,
+) -> Result<afterburner_cloud::ecosystem::EcosystemResolution> {
+    use afterburner_cloud::ecosystem::EcosystemResolution;
     if npm.is_empty() {
-        return Ok(());
+        return Ok(EcosystemResolution::default());
     }
-    let base = std::env::var("BURN_NPM_REGISTRY")
-        .unwrap_or_else(|_| afterburner_cloud::npm::DEFAULT_NPM_REGISTRY.to_string());
+    // G9: config override > env var > compiled-in default.
+    let base = npm_registry
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("BURN_NPM_REGISTRY")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| afterburner_cloud::npm::DEFAULT_NPM_REGISTRY.to_string());
     let client = afterburner_cloud::npm::NpmClient::new(base);
     let res = style::spin("resolving npm", || client.resolve_all(npm))?;
     let n = res.packages.len();
@@ -509,7 +706,55 @@ fn install_npm_deps(
             style::gold("npm"),
         );
     }
-    Ok(())
+    Ok(res)
+}
+
+/// Resolve + cache the `[gem]` dependencies natively. Each gem is integrity-
+/// checked (SHA-256), native-extension-rejected, and stored in the
+/// content-addressed gem cache (`~/.cache/burn/gem`). Returns the resolved
+/// packages for lockfile recording.
+///
+/// Registry selection: `gem_registry` arg > `BURN_GEM_REGISTRY` env >
+/// compiled-in default (`DEFAULT_GEM_REGISTRY`).
+fn install_gem_deps(
+    gem: &std::collections::BTreeMap<String, String>,
+    gem_registry: Option<&str>,
+) -> Result<afterburner_cloud::ecosystem::EcosystemResolution> {
+    use afterburner_cloud::ecosystem::EcosystemResolution;
+    if gem.is_empty() {
+        return Ok(EcosystemResolution::default());
+    }
+    let base = gem_registry
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("BURN_GEM_REGISTRY")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_GEM_REGISTRY.to_string());
+    let client = GemClient::new(base);
+    let res = style::spin("resolving gems", || client.resolve_all(gem))?;
+    let n = res.packages.len();
+    for pkg in &res.packages {
+        afterburner_cloud::gem_client::store_gem(pkg)?;
+    }
+    println!(
+        "{} {}",
+        style::ok(&format!(
+            "installed {n} gem{}",
+            if n == 1 { "" } else { "s" }
+        )),
+        style::muted("(native)"),
+    );
+    for pkg in &res.packages {
+        println!(
+            "  {} {} {}",
+            style::bullet(),
+            style::value(&format!("{}@{}", pkg.name, pkg.version)),
+            style::gold("gem"),
+        );
+    }
+    Ok(res)
 }
 
 /// Link every locked registry dependency into `dir/node_modules/<ns>/<name>`
@@ -550,7 +795,9 @@ pub fn ensure_npm_linked(dir: &std::path::Path) -> Result<()> {
         }
     }
     if !local.manifest.npm.is_empty() {
-        install_npm_deps(&local.manifest.npm, Some(dir))?;
+        // npm_registry: no config resolution here (self-heal path); env var
+        // and default handle registry selection.
+        install_npm_deps(&local.manifest.npm, Some(dir), None)?;
     }
     Ok(())
 }
@@ -561,6 +808,8 @@ struct InstallPlan {
     write_lock_to: Option<PathBuf>,
     /// `[npm]` dependencies (name → semver range) to install natively.
     npm: std::collections::BTreeMap<String, String>,
+    /// `[gem]` dependencies (name → RubyGems requirement) to install natively.
+    gem: std::collections::BTreeMap<String, String>,
 }
 
 fn build_install_plan(
@@ -573,15 +822,21 @@ fn build_install_plan(
 
     match pkg {
         Some(spec) => {
+            // G8: `burn install ns/pkg` must carry the package's [npm] deps,
+            // not silently drop them. After resolution we read the npm deps
+            // from every installed package's cached .afb manifest and union
+            // them so the caller can install them.
             let coord = Coord::parse(spec)?;
             let req = Req::from_cli_version(coord.version.as_deref())?;
             let res = style::spin("resolving", || {
                 resolve(&[(coord.qualified(), req)], &source, &runtime)
             })?;
+            let npm = npm_deps_from_resolution(&res);
             Ok(InstallPlan {
                 lockfile: Lockfile::from_resolution(&res),
                 write_lock_to: None,
-                npm: Default::default(),
+                npm,
+                gem: std::collections::BTreeMap::new(),
             })
         }
         None => {
@@ -593,27 +848,110 @@ fn build_install_plan(
                         "--locked needs an existing {LOCKFILE_NAME}; run `burn install` first"
                     )
                 })?;
-                // `--locked`: npm set comes from the on-disk manifest too.
-                let npm = pkg::LocalPackage::load(&dir)
-                    .map(|l| l.manifest.npm.clone())
+                // `--locked`: npm + gem sets from the manifest.
+                let (npm, gem) = pkg::LocalPackage::load(&dir)
+                    .ok()
+                    .map(|l| {
+                        let npm = afterburner_cloud::native_manifest::load_npm_deps(
+                            &dir,
+                            &l.manifest.npm,
+                        )
+                        .ok()
+                        .map(|r| r.deps)
+                        .unwrap_or_default();
+                        let gem = l.manifest.gem.clone();
+                        (npm, gem)
+                    })
                     .unwrap_or_default();
                 return Ok(InstallPlan {
                     lockfile: Lockfile::parse(&text)?,
                     write_lock_to: None,
                     npm,
+                    gem,
                 });
             }
             let local = pkg::LocalPackage::load(&dir)?;
             let roots = manifest_roots(&local.manifest)?;
-            let npm = local.manifest.npm.clone();
+            // G7: read npm deps via load_npm_deps so package.json is honoured.
+            let npm_deps =
+                afterburner_cloud::native_manifest::load_npm_deps(&dir, &local.manifest.npm)
+                    .with_context(|| "resolving [npm] dependencies")?;
+            let gem_deps = local.manifest.gem.clone();
             let res = style::spin("resolving", || resolve(&roots, &source, &runtime))?;
             Ok(InstallPlan {
                 lockfile: Lockfile::from_resolution(&res),
                 write_lock_to: Some(dir),
-                npm,
+                npm: npm_deps.deps,
+                gem: gem_deps,
             })
         }
     }
+}
+
+/// Collect the union of `[npm]` deps declared in every resolved package's
+/// cached `.afb` manifest from a PubGrub [`Resolution`].  The packages may
+/// not be in cache yet at plan-build time; those are silently skipped
+/// (returns an empty or partial map).  The caller retries after
+/// `install_concurrent` with [`npm_deps_from_cached_items`] instead.
+fn npm_deps_from_resolution(
+    res: &afterburner_cloud::resolve::Resolution,
+) -> std::collections::BTreeMap<String, String> {
+    use afterburner_cloud::cache;
+    let mut npm: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for pkg in res.selected.values() {
+        let digest = pkg.digest.trim_start_matches("sha256:");
+        if !cache::contains(digest) {
+            continue;
+        }
+        let path = match cache::path_for(digest) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let afb = match afterburner_cloud::afterburner_afb::Afb::from_bytes(&bytes) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        for (name, spec) in afb.manifest.npm {
+            npm.entry(name).or_insert(spec);
+        }
+    }
+    npm
+}
+
+/// Collect npm deps from already-downloaded [`InstallItem`] digests (G8).
+///
+/// Called AFTER `install_concurrent` so all digests are guaranteed to be in
+/// the cache.  Returns the union of `[npm]` from each installed package's
+/// `.afb` manifest, so a `burn install ns/pkg` that installs a package with
+/// `[npm]` deps now correctly installs them too.
+fn npm_deps_from_cached_items(
+    items: &[afterburner_cloud::InstallItem],
+) -> std::collections::BTreeMap<String, String> {
+    use afterburner_cloud::cache;
+    let mut npm: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for item in items {
+        let digest = item.digest.trim_start_matches("sha256:");
+        let path = match cache::path_for(digest) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let afb = match afterburner_cloud::afterburner_afb::Afb::from_bytes(&bytes) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        for (name, spec) in afb.manifest.npm {
+            npm.entry(name).or_insert(spec);
+        }
+    }
+    npm
 }
 
 fn manifest_roots(m: &Manifest) -> Result<Vec<(String, Req)>> {

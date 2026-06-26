@@ -15,6 +15,24 @@ description = "Afterburner WASM engine — Wasmtime + QuickJS sandbox"
 
 [features]
 default = []
+# Embed the Python core (the exnref main wasm + the stdlib zip, ~10.6 MiB) into
+# the binary via `include_bytes!`, so basic Python runs OFFLINE with zero
+# download even on a cold `~/.burn`. The build script fetches + exnref-translates
+# JUST the core into `OUT_DIR` at compile time (it needs `wasm-opt` + network at
+# build time only). The wheels (numpy/pandas) and the C/C++ toolchain are NOT
+# embedded - they still fetch lazily into `~/.burn` on demand. Off by default:
+# most builds prefer the smaller binary and the lazy download. The embedded
+# bytes are byte-identical to the fetched+translated artifact, so a later online
+# run is a cache hit on the same `~/.burn/pyodide-<ver>` dir.
+embed-core = []
+# Embed the Ruby interpreter (ruby.wasm, ~33 MiB) and stdlib tree (~20 MiB)
+# into the binary via `include_bytes!`, so Ruby runs OFFLINE with zero
+# download even on a cold `~/.burn`. The build script fetches the stock
+# ruby-3.4-wasm32-wasip1-full tarball into `OUT_DIR` at compile time (it
+# needs network at build time only; no `wasm-opt` required). Off by default:
+# most builds prefer the smaller binary and the lazy download. The embedded
+# bytes are byte-identical to what the lazy runtime fetch produces.
+embed-ruby = []
 # Expose HostFunction::HttpRequest to JS scripts. Off by default so flow
 # scripts don't get ambient network access. Forwards to afterburner-core's
 # feature of the same name.
@@ -104,6 +122,18 @@ atomic-wait = { workspace = true }
 quinn = { workspace = true, optional = true }
 h3 = { workspace = true, optional = true }
 h3-quinn = { workspace = true, optional = true }
+wasmparser = "0.252.0"
+flate2.workspace = true
+# Runtime, not build-only: the lazy runtime-bundle fetch into `~/.burn`
+# (`bundle_fetch.rs`, `#[path]`-included into `src/lib.rs`) downloads the stock
+# Python / Ruby / C-C++ runtime artifacts on first use, verifies their pinned
+# sha256, and untars the toolchain tarballs. `flate2` (above) inflates the
+# wheels + gzip; `ureq` fetches; `tar` extracts; `sha2` verifies. The SAME
+# engine, called with `BURN_PREFETCH=1`, also runs at build time, so there is
+# one copy of the logic and the bundle is byte-identical either way.
+ureq.workspace = true
+tar.workspace = true
+sha2.workspace = true
 
 # Genuinely unix-only — no Windows equivalent for the parts we use.
 [target.'cfg(unix)'.dependencies]
@@ -111,15 +141,27 @@ libc.workspace = true
 
 [dev-dependencies]
 afterburner-ignite.workspace = true
+afterburner-afb.workspace = true
+toml.workspace = true
 rsa.workspace = true
 p256.workspace = true
 rand.workspace = true
 # Compile WAT (WebAssembly text format) to bytes inside tests so we
 # don't have to hand-encode binary fixtures.
 wat.workspace = true
-# B7 tls — generate self-signed certs in unit tests for the
+# B7 tls -- generate self-signed certs in unit tests for the
 # server-config builder.
 rcgen = { workspace = true }
+# Binary instrumentation for wasm rewrite probes (e.g. instrument_sp).
+wasm-encoder = { version = "0.252", features = ["wasmparser"] }
 
 [build-dependencies]
+# The build script `#[path]`-includes the SAME `bundle_fetch.rs` engine the
+# runtime uses. By default it does no network work (the plugin-drift gate only);
+# with `BURN_PREFETCH=1` it calls the shared engine to populate `~/.burn` at
+# build time, so the prefetch and the lazy runtime fetch are one code path and
+# the bundle is byte-identical. These mirror the runtime `[dependencies]` block.
 sha2.workspace = true
+ureq.workspace = true
+flate2.workspace = true
+tar.workspace = true

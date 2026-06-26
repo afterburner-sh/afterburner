@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! Daemon-event-to-JSON-envelope converters, shared between the
 //! single-runtime CLI loop and the multi-shard pool. Every kind of
@@ -399,6 +399,60 @@ pub fn dgram_event_to_envelope(evt: &DgramEvent) -> serde_json::Value {
             "kind": "dgram-close",
             "socketId": socket_id,
         }),
+    }
+}
+
+/// AF_UNIX event -> envelope. Same shape as `net_event_to_envelope` but
+/// uses `unix-*` kind prefixes. The `Some(conn_id)` second tuple means
+/// mark_unix_closed after dispatch.
+#[cfg(all(feature = "daemon", unix))]
+pub fn unix_event_to_envelope(
+    evt: &crate::daemon_unix::UnixEvent,
+) -> (serde_json::Value, Option<i32>) {
+    use crate::daemon_unix::UnixEvent;
+    match evt {
+        UnixEvent::Connect { conn_id } => (
+            serde_json::json!({"kind": "unix-connect", "conn_id": conn_id}),
+            None,
+        ),
+        UnixEvent::Connection { server_id, conn_id } => (
+            serde_json::json!({"kind": "unix-connection", "server_id": server_id, "conn_id": conn_id}),
+            None,
+        ),
+        UnixEvent::Data {
+            conn_id,
+            payload_b64,
+        } => (
+            serde_json::json!({"kind": "unix-data", "conn_id": conn_id, "payload_b64": payload_b64}),
+            None,
+        ),
+        UnixEvent::End { conn_id } => (
+            serde_json::json!({"kind": "unix-end", "conn_id": conn_id}),
+            None,
+        ),
+        UnixEvent::Drain { conn_id } => (
+            serde_json::json!({"kind": "unix-drain", "conn_id": conn_id}),
+            None,
+        ),
+        UnixEvent::Close { conn_id, had_error } => (
+            serde_json::json!({"kind": "unix-close", "conn_id": conn_id, "had_error": had_error}),
+            Some(*conn_id),
+        ),
+        UnixEvent::Error { conn_id, message } => (
+            serde_json::json!({"kind": "unix-error", "conn_id": conn_id, "message": message}),
+            None,
+        ),
+        UnixEvent::Listening { server_id } => (
+            serde_json::json!({"kind": "unix-listening", "server_id": server_id}),
+            None,
+        ),
+        UnixEvent::ServerError { server_id, message } => (
+            serde_json::json!({"kind": "unix-server-error", "server_id": server_id, "message": message}),
+            None,
+        ),
+        // DgramMessage / DgramBound are handled by the Python syscall path only;
+        // the JS path doesn't use unix SOCK_DGRAM.
+        _ => (serde_json::json!({"kind": "unix-unknown"}), None),
     }
 }
 

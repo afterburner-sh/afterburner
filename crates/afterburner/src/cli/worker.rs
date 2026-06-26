@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! `burn run --internal-worker FOO.js` - worker-child bootstrap.
 //!
@@ -107,6 +107,13 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     // UDP coordinator inherits the same manifold as net.
     let dgram = afterburner_wasi::DaemonDgram::new(rt.handle().clone(), manifold);
     daemon.install_dgram(Arc::clone(&dgram));
+
+    // AF_UNIX coordinator: workers can use unix sockets too.
+    #[cfg(unix)]
+    {
+        let unix_coord = afterburner_wasi::daemon_unix::DaemonUnix::new(rt.handle().clone());
+        daemon.install_unix(unix_coord);
+    }
 
     if let Err(e) = daemon.run_init(source, &invocation) {
         flush_streams(&mut daemon)?;
@@ -271,6 +278,29 @@ fn run_child_event_loop(
                 }
                 let _ = std::io::stderr()
                     .write_all(format!("burn worker: dgram error: {e}\n").as_bytes());
+            }
+        }
+
+        // Unix events.
+        #[cfg(unix)]
+        for _ in 0..256 {
+            let Some(evt) = daemon.try_recv_unix_event() else {
+                break;
+            };
+            did_work = true;
+            let (envelope, reap_id) =
+                afterburner_wasi::daemon_envelopes::unix_event_to_envelope(&evt);
+            let res = daemon.dispatch_event(envelope);
+            flush_streams(daemon)?;
+            if let Err(e) = res {
+                if let AfterburnerError::ProcessExit(code) = &e {
+                    std::process::exit(*code);
+                }
+                let _ = std::io::stderr()
+                    .write_all(format!("burn worker: unix error: {e}\n").as_bytes());
+            }
+            if let Some(id) = reap_id {
+                daemon.mark_unix_closed(id);
             }
         }
 

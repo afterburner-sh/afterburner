@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 // Copyright (c) 2026 vertexclique
 // Licensed under the Business Source License 1.1.
-// Change Date: 4 years after this version's release. Change License: Apache-2.0.
+// Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! `burn <file>` / `burn -e <code>` daemon driver.
 //!
@@ -211,6 +211,10 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
         invocation,
         shutdown: Arc::clone(&shutdown),
         queue_depth_per_shard: None,
+        #[cfg(unix)]
+        unix_coord: Some(afterburner_wasi::daemon_unix::DaemonUnix::new(
+            rt.handle().clone(),
+        )),
     }) {
         Ok(p) => p,
         Err(e) => {

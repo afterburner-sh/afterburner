@@ -7,6 +7,7 @@
 //! tarball download → integrity check → extract → transitive deps →
 //! native rejection.
 
+use afterburner_cloud::lock::Lockfile;
 use afterburner_cloud::npm::NpmClient;
 use flate2::write::GzEncoder;
 use httpmock::prelude::*;
@@ -327,4 +328,122 @@ fn conflicting_dep_ranges_resolve_as_two_versions_with_nested_override() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- G1: resolution carries integrity into lock pins -------------------------
+
+/// Verify that the resolved packages carry their SRI integrity string so the
+/// caller can record them in `burn.lock` `[[npm]]` for reproducible installs.
+#[test]
+fn resolved_packages_carry_integrity_for_lock() {
+    let server = MockServer::start();
+    let (tar, sha) = make_tarball(&[("index.js", b"module.exports = 1;")]);
+    let url = server.url("/widget/-/widget-1.0.0.tgz");
+    server.mock(|when, then| {
+        when.method(GET).path("/widget");
+        then.status(200).json_body(serde_json::json!({
+            "name": "widget",
+            "versions": {
+                "1.0.0": {
+                    "name": "widget", "version": "1.0.0",
+                    "dist": { "tarball": url, "shasum": &sha }
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/widget/-/widget-1.0.0.tgz");
+        then.status(200).body(tar);
+    });
+
+    let client = NpmClient::new(server.base_url());
+    let mut roots = BTreeMap::new();
+    roots.insert("widget".to_string(), "^1.0.0".to_string());
+    let res = client.resolve_all(&roots).expect("resolve");
+
+    let pkg = res.by_name("widget").expect("widget resolved");
+    assert!(
+        !pkg.integrity.is_empty(),
+        "resolved package must carry a non-empty integrity string"
+    );
+    // sha1 hex for a legacy shasum (no dist.integrity in the mock above).
+    assert_eq!(
+        &pkg.integrity, &sha,
+        "integrity must match the registry shasum"
+    );
+
+    // Verify npm_pins_from_resolution records it.
+    let pins = Lockfile::npm_pins_from_resolution(&res);
+    assert_eq!(pins.len(), 1);
+    assert_eq!(pins[0].name, "widget");
+    assert_eq!(pins[0].version, "1.0.0");
+    assert_eq!(pins[0].integrity, sha);
+}
+
+/// When a package carries `dist.integrity` (sha512 SRI), that is stored in the
+/// lock - not the sha1 shasum - so the lock uses the stronger hash (closes G1 + G2).
+#[test]
+fn sri_integrity_is_preferred_over_shasum_in_lock() {
+    use sha2::{Digest as _, Sha512};
+    let server = MockServer::start();
+    let (tar, sha1) = make_tarball(&[("index.js", b"module.exports = 42;")]);
+    // Compute a real sha512 SRI for the tarball.
+    let sha512_b64 = {
+        let hash = Sha512::digest(&tar);
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in hash.chunks(3) {
+            let (a, b, c) = (
+                chunk[0],
+                chunk.get(1).copied().unwrap_or(0),
+                chunk.get(2).copied().unwrap_or(0),
+            );
+            let n = (u32::from(a) << 16) | (u32::from(b) << 8) | u32::from(c);
+            out.push(alphabet[((n >> 18) & 0x3F) as usize] as char);
+            out.push(alphabet[((n >> 12) & 0x3F) as usize] as char);
+            if chunk.len() > 1 {
+                out.push(alphabet[((n >> 6) & 0x3F) as usize] as char);
+            } else {
+                out.push('=');
+            }
+            if chunk.len() > 2 {
+                out.push(alphabet[(n & 0x3F) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+        out
+    };
+    let sri = format!("sha512-{sha512_b64}");
+    let url = server.url("/sri-pkg/-/sri-pkg-2.0.0.tgz");
+    server.mock(|when, then| {
+        when.method(GET).path("/sri-pkg");
+        then.status(200).json_body(serde_json::json!({
+            "name": "sri-pkg",
+            "versions": {
+                "2.0.0": {
+                    "name": "sri-pkg", "version": "2.0.0",
+                    "dist": { "tarball": url, "shasum": &sha1, "integrity": &sri }
+                }
+            }
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/sri-pkg/-/sri-pkg-2.0.0.tgz");
+        then.status(200).body(tar);
+    });
+
+    let client = NpmClient::new(server.base_url());
+    let mut roots = BTreeMap::new();
+    roots.insert("sri-pkg".to_string(), "^2.0.0".to_string());
+    let res = client.resolve_all(&roots).expect("resolve");
+    let pkg = res.by_name("sri-pkg").expect("resolved");
+
+    // The SRI (sha512) field must win over the sha1 shasum.
+    assert_eq!(
+        pkg.integrity, sri,
+        "sha512 SRI must be preferred over sha1 shasum"
+    );
+    let pins = Lockfile::npm_pins_from_resolution(&res);
+    assert_eq!(pins[0].integrity, sri, "lock must record sha512 SRI");
 }

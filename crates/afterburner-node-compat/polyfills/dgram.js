@@ -5,11 +5,10 @@
 // backed); calling `bind` / `send` from library mode surfaces a clear
 // `ERR_NO_DAEMON` rather than silently dropping packets.
 //
-// What works today: bind / address / send / close + `'listening'`
-// and `'close'` events. Inbound `'message'` event delivery requires
-// the CLI's daemon-event translator to route `dgram-message`
-// envelopes through `__ab_dgram_handlers`; until that lands, sockets
-// can be bound and used to *send* but won't observe inbound packets.
+// What works today: bind / address / send / close + `'listening'`,
+// `'close'`, and `'message'` events. Inbound `'message'` delivery is
+// fully wired: the host recv loop emits `dgram-message` envelopes
+// that the daemon-event dispatcher routes to `__ab_dgram_handlers[id]`.
 
 (function bootstrapDgramGlobals() {
     if (!globalThis.__ab_dgram_handlers) globalThis.__ab_dgram_handlers = {};
