@@ -136,7 +136,7 @@ fn pread_at(file: &mut std::fs::File, buf: &mut [u8], offset: u64) -> std::io::R
 #[cfg(unix)]
 fn inode_of(meta: &std::fs::Metadata) -> u64 {
     use std::os::unix::fs::MetadataExt;
-    inode_of(&meta)
+    meta.ino()
 }
 #[cfg(windows)]
 fn inode_of(_meta: &std::fs::Metadata) -> u64 {
