@@ -5,7 +5,7 @@ name: Release
 #
 # IMPORTANT: this workflow does NOT run `cargo release` or
 # `cargo publish`. crates.io publishing is intentionally a manual,
-# local-only step (see `release.toml` and the project README) — running
+# local-only step (see `release.toml` and the project README), running
 # it from CI is dangerous (lost CI runs can leave the workspace
 # half-published; cargo publish is one-way and versions can't be
 # unpublished). The publish flow is:
@@ -35,7 +35,7 @@ permissions:
 # Releases are tag-specific. Two parallel runs for the same tag would
 # race when uploading artifacts to the GitHub Release, so group by
 # tag/ref. `cancel-in-progress: false` so an accidental retry never
-# kills an in-flight build that's about to finish — the second run
+# kills an in-flight build that's about to finish; the second run
 # just queues behind it.
 concurrency:
   group: release-${{ github.ref }}
@@ -56,7 +56,7 @@ jobs:
           # Pinned to ubuntu-22.04 (glibc 2.35) instead of
           # ubuntu-latest. `ubuntu-latest` is currently 24.04
           # (glibc 2.39); a binary linked against glibc 2.39 fails
-          # to load on Ubuntu 22.04 / Debian 11–12 / RHEL 9 / WSL
+          # to load on Ubuntu 22.04 / Debian 11-12 / RHEL 9 / WSL
           # default images / most "long-term-support" enterprise
           # Linux. glibc is forward-compatible (2.35 binaries run
           # on 2.39 hosts) but not backward-compatible. Pinning to
@@ -72,7 +72,7 @@ jobs:
             cross: true
           # x86_64-apple-darwin is intentionally NOT in the release
           # matrix. GitHub's `macos-13` runner (the last x86_64 macOS
-          # tier) is end-of-life and resource-starved — jobs queue
+          # tier) is end-of-life and resource-starved; jobs queue
           # 15+ minutes waiting for runner pickup, blocking the
           # whole `attach-binaries` step. Apple's been ARM-only for
           # new Macs since 2020; x86_64 macOS users on the
@@ -287,7 +287,7 @@ jobs:
           {
             echo "# burn ${tag}"
             echo
-            echo "BURN: Sandboxed JavaScript runtime. Drop-in for Node-style scripts, runs untrusted JS in a sandbox."
+            echo "BURN: Polyglot, deterministic, sandboxed WebAssembly runtime."
             echo
             echo "## Install"
             echo
@@ -334,9 +334,9 @@ jobs:
             echo "\$env:Path = \"\$dst;\$env:Path\""
             echo '```'
             echo
-            echo "Windows ARM64: install the x86_64 build above — Windows 11 ARM64 ships with transparent x64 emulation, so the x86_64 binary runs unmodified."
+            echo "Windows ARM64: install the x86_64 build above. Windows 11 ARM64 ships with transparent x64 emulation, so the x86_64 binary runs unmodified."
             echo
-            echo "Intel macOS: not in the release matrix (GitHub's macos-13 runner is end-of-life). Build from source — see the repo README."
+            echo "Intel macOS: not in the release matrix (GitHub's macos-13 runner is end-of-life). Build from source, see the repo README."
             echo
             echo "## Verify"
             echo
