@@ -58,7 +58,9 @@ dialoguer = { workspace = true, optional = true }
 kovan-channel = { workspace = true, optional = true }
 
 [dev-dependencies]
-afterburner-afb.workspace = true
+# Path-only (no version): test-only deps, stripped from the published crate so they
+# impose no crates.io publish-order constraint (see afterburner-wasi for the full why).
+afterburner-afb = { path = "../afterburner-afb" }
 # Serialize tests that spawn long-lived `burn` subprocesses. Each
 # subprocess cold-starts the wasmtime engine + plugin (~seconds in
 # debug builds), and running them in parallel oversubscribes CPU
@@ -69,8 +71,8 @@ httpmock = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 tempfile.workspace = true
-afterburner-core.workspace = true
-afterburner-wasi.workspace = true
+afterburner-core = { path = "../afterburner-core" }
+afterburner-wasi = { path = "../afterburner-wasi" }
 # B7 tls test fixtures — generate self-signed certs and spin up a
 # tokio-rustls server in a background thread so the burn-as-client
 # tests don't need any external infrastructure.

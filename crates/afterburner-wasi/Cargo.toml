@@ -140,8 +140,13 @@ sha2.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
-afterburner-ignite.workspace = true
-afterburner-afb.workspace = true
+# Path-only (no version) on purpose: cargo strips a version-less path dev-dep from
+# the published crate, so these test-only deps impose NO crates.io publish-order
+# constraint. With a version (`.workspace = true`) they would require afb/ignite on
+# crates.io before wasi can verify, but cargo-release's publish-order sort ignores
+# dev-deps and lists wasi before afb -> the release breaks. Keep these path-only.
+afterburner-ignite = { path = "../afterburner-ignite" }
+afterburner-afb = { path = "../afterburner-afb" }
 toml.workspace = true
 rsa.workspace = true
 p256.workspace = true
