@@ -3,6 +3,13 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.2.2] - 2026-06-27
+
+Windows build fix. The emscripten filesystem shim now uses cross-platform
+positional file I/O (`pread`/`pwrite` that preserve the file offset on Windows
+too) and a portable inode, so the runtime compiles and runs on Windows alongside
+Linux and macOS.
+
 ## [0.2.1] - 2026-06-27
 
 The polyglot release. afterburner goes from a JavaScript/TypeScript sandbox to a
@@ -63,5 +70,6 @@ self-contained WebAssembly artifact, with zero configuration.
 - Rewritten as a polyglot site covering the eight languages, REPLs, multi-module
   packages, the registry, determinism, and the sandbox model.
 
+[0.2.2]: https://github.com/afterburner-sh/afterburner/releases/tag/v0.2.2
 [0.2.1]: https://github.com/afterburner-sh/afterburner/releases/tag/v0.2.1
 [0.1.3]: https://github.com/afterburner-sh/afterburner/releases/tag/v0.1.3

@@ -93,11 +93,60 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use crate::emscripten_syscall::EM_STAT_STRUCT_BYTES;
 use crate::pyo_trace;
+
+// ---- cross-platform positional file I/O + inode ------------------------------
+// Unix `FileExt::{read_at, write_at}` never move the fd offset and
+// `MetadataExt::ino()` returns an inode; Windows has `FileExt::{seek_read,
+// seek_write}` (which DO move the offset) and `file_index()` in place of an
+// inode. These shims preserve the offset and a stable file identity on both, so
+// emscripten_fs builds and behaves the same on Linux, macOS, and Windows.
+
+#[cfg(unix)]
+fn pwrite_at(file: &mut std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+    file.write_at(buf, offset)
+}
+#[cfg(windows)]
+fn pwrite_at(file: &mut std::fs::File, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+    let saved = file.stream_position()?;
+    let n = file.seek_write(buf, offset)?;
+    file.seek(SeekFrom::Start(saved))?;
+    Ok(n)
+}
+
+#[cfg(unix)]
+fn pread_at(file: &mut std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+    file.read_at(buf, offset)
+}
+#[cfg(windows)]
+fn pread_at(file: &mut std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+    let saved = file.stream_position()?;
+    let n = file.seek_read(buf, offset)?;
+    file.seek(SeekFrom::Start(saved))?;
+    Ok(n)
+}
+
+#[cfg(unix)]
+fn inode_of(meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.ino()
+}
+#[cfg(windows)]
+fn inode_of(_meta: &std::fs::Metadata) -> u64 {
+    // Windows exposes no stable inode through std (`file_index` is unstable, see
+    // rust-lang/rust#63010). Return a constant so file identity stays consistent
+    // across stat/fstat for the same file, which is what the callers rely on
+    // (SQLite's DBMOVED check must not false-fire). Distinct per-file ids on
+    // Windows would need GetFileInformationByHandle via the `windows` crate.
+    0
+}
 
 // ---- errno constants ---------------------------------------------------------
 
@@ -881,7 +930,7 @@ impl InMemFs {
     /// Returns `None` if `fd` is not a host-backed fd.
     pub fn pwrite_host(&mut self, fd: i32, src: &[u8], offset: u64) -> Option<i32> {
         let file = self.host_fds.get_mut(&fd)?;
-        let n = match file.write_at(src, offset) {
+        let n = match pwrite_at(file, src, offset) {
             Ok(n) => n as i32,
             Err(e) => io_err_to_errno(&e),
         };
@@ -893,7 +942,7 @@ impl InMemFs {
     /// Returns `None` if `fd` is not a host-backed fd.
     pub fn pread_host(&mut self, fd: i32, dst: &mut [u8], offset: u64) -> Option<i32> {
         let file = self.host_fds.get_mut(&fd)?;
-        let n = match file.read_at(dst, offset) {
+        let n = match pread_at(file, dst, offset) {
             Ok(n) => n as i32,
             Err(e) => io_err_to_errno(&e),
         };
@@ -969,7 +1018,7 @@ impl InMemFs {
                 // Use the real host inode so SQLite's DBMOVED check (which
                 // compares the inode recorded at open time against the inode
                 // seen at pagerOpenJournal time) does not fire a false positive.
-                let ino = meta.ino();
+                let ino = inode_of(&meta);
                 let (mode, size) = if meta.is_dir() {
                     (S_IFDIR | S_IRWXU, 0u64)
                 } else {
@@ -998,7 +1047,7 @@ impl InMemFs {
         match std::fs::metadata(host_path) {
             Ok(meta) => {
                 // Use the real host inode for stable identity across stat calls.
-                let ino = meta.ino();
+                let ino = inode_of(&meta);
                 let (mode, size) = if meta.is_dir() {
                     (S_IFDIR | S_IRWXU, 0u64)
                 } else {
@@ -1036,7 +1085,7 @@ impl InMemFs {
             };
             // Use the real host inode so SQLite's DBMOVED check agrees with
             // the inode seen via stat64 on the same path.
-            let ino = meta.ino();
+            let ino = inode_of(&meta);
             let (mode, size) = if meta.is_dir() {
                 (S_IFDIR | S_IRWXU, 0u64)
             } else {
