@@ -348,3 +348,156 @@ fn columnar_precompiled_output_equals_source_output() {
         "columnar sum values must be correct"
     );
 }
+
+// ---- SEALED WASM HTTP EGRESS -------------------------------------------
+//
+// Proofs for the `host-http` feature: sealed WASI guests (compiled
+// wasm32-wasip1 programs registered via `register_precompiled`) can now
+// call `afterburner:host`/`host_http_request`. The feature is gated so the
+// tests only compile when `host-http` is enabled.
+//
+// WAT probe design:
+//   Memory layout (one 64 KiB page):
+//     0..2    = "GET" (method, 3 bytes)
+//     4..N    = URL (templated by `build_http_probe_wat`)
+//     512     = HTTP response output buffer (30 000 bytes)
+//     30520   = iov[0].ptr (4 bytes, little-endian)
+//     30524   = iov[0].len (4 bytes)
+//     30528   = nwritten scratch (4 bytes)
+//     30532   = i32 result from host_http_request (4 bytes written to stdout)
+//
+//   `_start` calls host_http_request, stores the i32 result at 30532,
+//   sets up a single iov pointing at it (4 bytes), writes it to stdout
+//   via fd_write(1,...), then exits cleanly with proc_exit(0).
+//
+//   The host reads the 4-byte stdout and interprets it as an i32 LE:
+//     >= 0  success (bytes written to the out buffer)
+//      -1   PermissionDenied (E_PERMISSION in host_imports.rs)
+//     <-1   other host error
+
+#[cfg(feature = "host-http")]
+mod http_egress {
+    use super::make_combustor;
+    use afterburner_core::{Combustor, FuelGauge, Manifold, NetAccess};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// Build a WAT probe module that calls `host_http_request` with `url`
+    /// and writes the i32 result to stdout as 4 raw little-endian bytes.
+    fn build_http_probe_wat(url: &str) -> String {
+        format!(
+            r#"(module
+  (import "wasi_snapshot_preview1" "fd_write"
+    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "proc_exit"
+    (func $proc_exit (param i32)))
+  (import "afterburner:host" "host_http_request"
+    (func $http_req (param i32 i32 i32 i32 i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "GET")
+  (data (i32.const 4) "{url}")
+  (func (export "_start")
+    (local $r i32)
+    (local.set $r (call $http_req
+      (i32.const 0)
+      (i32.const 3)
+      (i32.const 4)
+      (i32.const {url_len})
+      (i32.const 0)
+      (i32.const 0)
+      (i32.const 512)
+      (i32.const 30000)
+    ))
+    (i32.store (i32.const 30532) (local.get $r))
+    (i32.store (i32.const 30520) (i32.const 30532))
+    (i32.store (i32.const 30524) (i32.const 4))
+    (drop (call $fd_write (i32.const 1) (i32.const 30520) (i32.const 1) (i32.const 30528)))
+    (call $proc_exit (i32.const 0))
+  )
+)"#,
+            url = url,
+            url_len = url.len(),
+        )
+    }
+
+    /// Read an i32 LE result from the 4-byte raw stdout of the probe module.
+    fn read_result(raw: &[u8]) -> i32 {
+        assert_eq!(
+            raw.len(),
+            4,
+            "probe stdout must be exactly 4 bytes; got {raw:?}"
+        );
+        i32::from_le_bytes(raw[..4].try_into().unwrap())
+    }
+
+    /// Spin up a minimal HTTP/1.1 server that accepts one connection and
+    /// replies with a 200 OK. Same pattern as `node_compat_host.rs`.
+    fn spawn_one_shot_http_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+            let _ = stream.read(&mut buf);
+            let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+            let _ = stream.write_all(reply);
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        });
+        port
+    }
+
+    /// Proof 1: `register_precompiled` resolves the `host_http_request` import
+    /// (the import is in the linker), and with a sealed Manifold the call is
+    /// rejected before any network I/O with PermissionDenied (code -1).
+    #[test]
+    fn sealed_wasm_http_sealed_manifold_is_denied() {
+        // Any URL works for the denied case; the gate fires before connect.
+        let wat = build_http_probe_wat("http://127.0.0.1:1/probe");
+        let c = make_combustor();
+        // This must succeed: the sealed linker now resolves `host_http_request`.
+        let id = c
+            .register_precompiled(wat.as_bytes(), "wasm32-wasip1")
+            .expect("register_precompiled must succeed (import now in sealed linker)");
+        let limits = FuelGauge {
+            manifold: Manifold::sealed(),
+            ..FuelGauge::unlimited()
+        };
+        let raw = c
+            .thrust_sealed_raw_bytes(&id, vec![], &limits)
+            .expect("thrust must complete (module exits cleanly)");
+        let code = read_result(&raw);
+        assert_eq!(
+            code, -1,
+            "sealed Manifold must yield PermissionDenied (-1); got {code}"
+        );
+    }
+
+    /// Proof 2: with a Manifold that grants `OutboundHttp` for the target host,
+    /// the sealed WASI guest reaches the localhost mock and gets a successful
+    /// result (non-negative bytes written to the response buffer).
+    #[test]
+    fn sealed_wasm_http_open_manifold_reaches_server() {
+        let port = spawn_one_shot_http_server();
+        let url = format!("http://127.0.0.1:{port}/probe");
+        let wat = build_http_probe_wat(&url);
+        let c = make_combustor();
+        let id = c
+            .register_precompiled(wat.as_bytes(), "wasm32-wasip1")
+            .expect("register_precompiled");
+        let mut m = Manifold::sealed();
+        m.net = NetAccess::OutboundHttp(Some(vec![format!("127.0.0.1:{port}")]));
+        let limits = FuelGauge {
+            manifold: m,
+            ..FuelGauge::unlimited()
+        };
+        let raw = c
+            .thrust_sealed_raw_bytes(&id, vec![], &limits)
+            .expect("thrust must complete");
+        let code = read_result(&raw);
+        assert!(
+            code >= 0,
+            "open Manifold must reach server and return >= 0 bytes written; got {code}"
+        );
+    }
+}

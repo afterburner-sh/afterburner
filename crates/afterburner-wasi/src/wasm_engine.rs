@@ -420,15 +420,21 @@ impl WasmCombustor {
         }
 
         // Compile the module native code once (cached by wasmtime's on-disk
-        // cache when `compile_cache_dir` is set). A WASI-only linker is used
-        // at `InstancePre` build time so the sealed module cannot resolve
-        // `afterburner:host` imports - hard structural separation.
+        // cache when `compile_cache_dir` is set).
         let module = Module::new(&self.engine, wasm)
             .map_err(|e| AfterburnerError::CompileFailed(format!("sealed module compile: {e}")))?;
 
         let mut wasi_linker: Linker<HostState> = Linker::new(&self.engine);
         add_to_linker_sync(&mut wasi_linker, |s: &mut HostState| &mut s.wasi)
             .map_err(|e| AfterburnerError::Engine(format!("sealed wasi linker: {e}")))?;
+        // Wire outbound HTTP so sealed WASI guests can call
+        // `afterburner:host`/`host_http_request`. The caller's Manifold
+        // (carried through `FuelGauge` on each thrust) gates every request
+        // via `NetAccess::OutboundHttp`; a sealed Manifold yields
+        // PermissionDenied before any connection is attempted, preserving
+        // the default zero-capability posture when no Manifold is supplied.
+        #[cfg(feature = "host-http")]
+        host_imports::wrap_http(&mut wasi_linker)?;
 
         let instance_pre = wasi_linker
             .instantiate_pre(&module)
@@ -490,13 +496,13 @@ impl WasmCombustor {
     }
 
     /// Execute a sealed (pre-compiled self-contained) module. Instantiates
-    /// the module in a fresh `Store` with WASI only, feeds `input` as JSON on
-    /// stdin, runs `_start`, and drains stdout through [`parse_output`]. Fuel,
-    /// epoch deadline, and the memory limiter are applied identically to the
-    /// plugin path.
+    /// the module in a fresh `Store`, feeds `input` as JSON on stdin, runs
+    /// `_start`, and drains stdout through [`parse_output`]. Fuel, epoch
+    /// deadline, and the memory limiter are applied identically to the plugin
+    /// path. The caller's `Manifold` (from `limits`) gates any
+    /// `afterburner:host` imports the module may call. No plugin envelope.
     ///
-    /// No `afterburner:host` wiring, no plugin envelope. The module must have
-    /// been registered via [`register_precompiled`].
+    /// The module must have been registered via [`register_precompiled`].
     fn thrust_sealed(&self, id: &ScriptId, input: &Value, limits: &FuelGauge) -> Result<Value> {
         let input_bytes = serde_json::to_vec(input)?;
         let stdout_bytes = self.thrust_sealed_raw_bytes_inner(id, input_bytes, limits)?;
@@ -521,15 +527,18 @@ impl WasmCombustor {
             .get(&id.hash)
             .ok_or(AfterburnerError::ScriptNotFound)?;
 
-        // The sealed module reads its input from stdin directly; no plugin envelope.
+        // The sealed module reads its input from stdin directly; no plugin
+        // envelope. The caller's Manifold gates any `afterburner:host` imports
+        // the module may call (e.g. `host_http_request` when the `host-http`
+        // feature is on). Callers that pass `FuelGauge::default()` or
+        // `FuelGauge::unlimited()` carry `Manifold::sealed()` (the field
+        // default), preserving the zero-capability posture for any existing
+        // call site that does not explicitly opt in to net access.
         let state = HostState::new(
             &input_bytes,
             limits.memory_bytes,
             limits.output_ceiling(),
-            // Sealed modules have no capability gates - they cannot call
-            // afterburner:host, so the Manifold is unused. Pass sealed() for
-            // hygiene; it has no effect on execution.
-            Manifold::sealed(),
+            limits.manifold.clone(),
             self.state_store.clone(),
             None,
         );
