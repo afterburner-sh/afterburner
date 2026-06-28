@@ -170,7 +170,7 @@ jobs:
         run: echo "ver=$(wasm-opt --version 2>&1 | head -1)" >> "$GITHUB_OUTPUT"
       - name: Cache pyodide-exnref.wasm
         id: pyodide_cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/pyodide-exnref.wasm
           key: pyodide-exnref-0.28.3-${{ steps.wasm_opt_ver.outputs.ver }}
