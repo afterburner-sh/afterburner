@@ -1704,7 +1704,11 @@ fn wrap_os(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
 
 // ---- http ----------------------------------------------------------------
 
-fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
+/// Register the `afterburner:host` / `host_http_request` (v1 + v2) imports
+/// into `linker`. Called for both the plugin (JS/dynamic) linker and, when
+/// the `host-http` feature is enabled, the sealed-module linker built by
+/// [`crate::wasm_engine::WasmCombustor::register_precompiled`].
+pub(crate) fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
     linker
         .func_wrap(
             NS,
