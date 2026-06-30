@@ -405,6 +405,36 @@ pub fn wire_fs_env_funcs(
                             return n;
                         }
                     }
+                    // Socket fds (fd >= SOCK_FD_BASE) read from DaemonNet, not FS.
+                    #[cfg(feature = "daemon")]
+                    {
+                        if fd >= socket::SOCK_FD_BASE {
+                            let Some(net) = caller.data().daemon_net.clone() else {
+                                return EBADF;
+                            };
+                            let conn_id = caller
+                                .data()
+                                .socket_state
+                                .as_deref()
+                                .and_then(|s| s.conn_fds.get(&fd).copied())
+                                .unwrap_or(socket::EBADF);
+                            if conn_id == socket::EBADF {
+                                return EBADF;
+                            }
+                            let state = caller.data_mut().socket_state.as_deref_mut().unwrap();
+                            let bytes = match socket::blocking::wait_data(&net, conn_id, state, len)
+                            {
+                                Err(e) => return e,
+                                Ok(b) => b,
+                            };
+                            let n = bytes.len().min(len);
+                            if n > 0 {
+                                let mem = memory.data_mut(&mut caller);
+                                mem[start..start + n].copy_from_slice(&bytes[..n]);
+                            }
+                            return n as i32;
+                        }
+                    }
                     // Read from FS into a temp buffer, then write to guest memory.
                     // Host-backed fds are checked first.
                     let mut tmp = vec![0u8; len];
@@ -500,6 +530,26 @@ pub fn wire_fs_env_funcs(
                                     continue;
                                 }
                             }
+                            // Socket fds (fd >= SOCK_FD_BASE) write to DaemonNet.
+                            #[cfg(feature = "daemon")]
+                            if fd >= socket::SOCK_FD_BASE {
+                                let Some(net) = caller.data().daemon_net.clone() else {
+                                    return EBADF;
+                                };
+                                let conn_id = caller
+                                    .data()
+                                    .socket_state
+                                    .as_deref()
+                                    .and_then(|s| s.conn_fds.get(&fd).copied())
+                                    .unwrap_or(socket::EBADF);
+                                if conn_id == socket::EBADF {
+                                    return EBADF;
+                                }
+                                let mut err_s = String::new();
+                                net.write(conn_id, chunk, &mut err_s);
+                                total += buf_len as i32;
+                                continue;
+                            }
                             if caller.data().fs.is_host_fd(fd) {
                                 let n = match caller.data_mut().fs.write_host(fd, &chunk) {
                                     Some(n) => n,
@@ -579,6 +629,25 @@ pub fn wire_fs_env_funcs(
                                 }
                                 return n;
                             }
+                        }
+                        // Socket fds (fd >= SOCK_FD_BASE) write to DaemonNet.
+                        #[cfg(feature = "daemon")]
+                        if fd >= socket::SOCK_FD_BASE {
+                            let Some(net) = caller.data().daemon_net.clone() else {
+                                return EBADF;
+                            };
+                            let conn_id = caller
+                                .data()
+                                .socket_state
+                                .as_deref()
+                                .and_then(|s| s.conn_fds.get(&fd).copied())
+                                .unwrap_or(socket::EBADF);
+                            if conn_id == socket::EBADF {
+                                return EBADF;
+                            }
+                            let mut err_s = String::new();
+                            net.write(conn_id, chunk, &mut err_s);
+                            return len as i32;
                         }
                         if caller.data().fs.is_host_fd(fd) {
                             let n = match caller.data_mut().fs.write_host(fd, &chunk) {
@@ -1587,7 +1656,123 @@ pub fn wire_fs_env_funcs(
         def_syscall!("__syscall_recvmsg", 6);
     }
 
+    // __syscall_getsockopt(sockfd, level, optname, optval, optlen, 0) -> 0 | err
+    // CPython / OpenSSL query SO_ERROR after connect and SO_TYPE for sanity.
+    // Non-daemon: all socket syscalls are no-ops (no socket fds exist).
+    // Daemon: return 0 (success) with sensible values for known options.
+    #[cfg(not(feature = "daemon"))]
     def_syscall!("__syscall_getsockopt", 6);
+    #[cfg(feature = "daemon")]
+    {
+        let _log = mech_log.clone();
+        linker
+            .func_wrap(
+                "env",
+                "__syscall_getsockopt",
+                move |mut caller: Caller<'_, EmbedderState>,
+                      _sockfd: i32,
+                      level: i32,
+                      optname: i32,
+                      optval_ptr: i32,
+                      optlen_ptr: i32,
+                      _e: i32|
+                      -> i32 {
+                    _log.push("__syscall_getsockopt", level, optname);
+                    // SOL_SOCKET=1, SO_TYPE=3 (SOCK_STREAM=1), SO_ERROR=4 (0=no error).
+                    const SOL_SOCKET: i32 = 1;
+                    const SO_TYPE: i32 = 3;
+                    const SO_ERROR: i32 = 4;
+                    let Some(memory) = caller.data().pyodide_memory else {
+                        return 0;
+                    };
+                    let val: u32 = match (level, optname) {
+                        (SOL_SOCKET, SO_ERROR) => 0,
+                        (SOL_SOCKET, SO_TYPE) => 1, // SOCK_STREAM
+                        _ => return 0,
+                    };
+                    let mem = memory.data_mut(&mut caller);
+                    let op = optval_ptr as u32 as usize;
+                    if op + 4 <= mem.len() {
+                        mem[op..op + 4].copy_from_slice(&val.to_le_bytes());
+                    }
+                    let ol = optlen_ptr as u32 as usize;
+                    if ol + 4 <= mem.len() {
+                        mem[ol..ol + 4].copy_from_slice(&4u32.to_le_bytes());
+                    }
+                    0
+                },
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("__syscall_getsockopt: {e}")))?;
+    }
+    // __syscall_setsockopt(sockfd, level, optname, optval, optlen, 0) -> 0 | err
+    // Non-daemon: noop stub (no socket fds in sealed mode).
+    // Daemon: recognize the custom AFB TLS-SNI level so the Python ssl shim
+    //   (wrap_socket) can signal the host to upgrade a TCP connection to TLS.
+    //   level=0xB055 ("BOSS") / optname=1 (SO_AFB_TLS_SNI) carries the SNI
+    //   hostname in optval. All other options succeed silently (return 0).
+    #[cfg(not(feature = "daemon"))]
+    def_syscall!("__syscall_setsockopt", 6);
+    #[cfg(feature = "daemon")]
+    {
+        let _log = mech_log.clone();
+        linker
+            .func_wrap(
+                "env",
+                "__syscall_setsockopt",
+                move |caller: Caller<'_, EmbedderState>,
+                      sockfd: i32,
+                      level: i32,
+                      optname: i32,
+                      optval_ptr: i32,
+                      optlen: i32,
+                      _p5: i32|
+                      -> i32 {
+                    _log.push("__syscall_setsockopt", sockfd, level);
+                    // Custom level 0xB055 / optname 1: TLS SNI hostname.
+                    // The Python ssl shim calls setsockopt(0xB055, 1, sni_bytes)
+                    // in wrap_socket to signal the host to TLS-upgrade the conn.
+                    const AFB_TLS_LEVEL: i32 = 0xB055;
+                    const SO_AFB_TLS_SNI: i32 = 1;
+                    if level == AFB_TLS_LEVEL && optname == SO_AFB_TLS_SNI {
+                        // Read the SNI hostname bytes from guest memory.
+                        let sni: Option<String> = {
+                            let mem_handle = caller.data().pyodide_memory;
+                            mem_handle.and_then(|m| {
+                                let data = m.data(&caller);
+                                let start = optval_ptr as u32 as usize;
+                                // Cap at 256 bytes - a hostname longer than that is malformed.
+                                let len = (optlen as u32 as usize).min(256);
+                                if start
+                                    .checked_add(len)
+                                    .map(|e| e <= data.len())
+                                    .unwrap_or(false)
+                                {
+                                    std::str::from_utf8(&data[start..start + len])
+                                        .ok()
+                                        .map(|s| s.trim_end_matches('\0').to_owned())
+                                } else {
+                                    None
+                                }
+                            })
+                        };
+                        let conn_id = caller
+                            .data()
+                            .socket_state
+                            .as_deref()
+                            .and_then(|s| s.conn_fds.get(&sockfd).copied());
+                        let net = caller.data().daemon_net.clone();
+                        if let (Some(sni), Some(cid), Some(net)) = (sni, conn_id, net)
+                            && !sni.is_empty()
+                        {
+                            net.set_tls(cid, sni);
+                        }
+                    }
+                    // All setsockopt calls return 0 (success).
+                    0
+                },
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("__syscall_setsockopt: {e}")))?;
+    }
     // __syscall_getsockname: daemon build resolves port from socket_state;
     // non-daemon stub returns EBADF (-9) because no socket fds exist.
     #[cfg(not(feature = "daemon"))]

@@ -1069,17 +1069,90 @@ fn run_pyodide_with_daemon(
     // (the default), which produces byte-identical output on re-execution.
     store.data_mut().entropy = crate::embedder_vm::EntropySource::RealOs;
 
-    // Prepend a preamble that points ssl.create_default_context() at certifi's
-    // CA bundle. The try/except makes it a no-op when certifi is absent (so sealed
-    // tests remain unaffected). `certifi.where()` returns the path inside the
-    // Pyodide MEMFS where cacert.pem lives for the active Python version.
-    const SSL_PREAMBLE: &str = concat!(
+    // Prepend the ssl shim + certifi setup as a preamble so both are in place
+    // before any user code runs `import ssl` or `import urllib.request`.
+    //
+    // The ssl shim installs a pure-Python `ssl` module into sys.modules. The
+    // Pyodide stdlib zip has no ssl.py (no conflict). It provides the minimal
+    // surface urllib.request uses:
+    //   - SSLContext.wrap_socket: returns the socket as a plaintext passthrough
+    //     (an SSLSocket delegating recv/send/makefile to the raw socket). The
+    //     host terminates TLS: the SNI hostname is captured at getaddrinfo
+    //     (hostname -> resolved ip/port), and the TCP connect signals DaemonNet
+    //     to upgrade that connection, which encrypts/decrypts via rustls.
+    //   - create_default_context, SSLError, HAS_SNI, CERT_REQUIRED, etc.
+    //
+    // The certifi block is a no-op when certifi is absent; it stays for
+    // environments where certifi is mounted (harmless since host validates certs).
+    const SSL_SHIM: &str = concat!(
+        "import sys as _sys,types as _t\n",
+        "def _mk_ssl():\n",
+        " m=_t.ModuleType('ssl')\n",
+        " m.CERT_NONE=0;m.CERT_OPTIONAL=1;m.CERT_REQUIRED=2\n",
+        " m.PROTOCOL_TLS=2;m.PROTOCOL_TLS_CLIENT=16;m.HAS_SNI=True\n",
+        " class VerifyMode(int):pass\n",
+        " m.VerifyMode=VerifyMode\n",
+        " class Purpose:\n",
+        "  SERVER_AUTH=object();CLIENT_AUTH=object()\n",
+        " m.Purpose=Purpose\n",
+        " class SSLError(OSError):pass\n",
+        " m.SSLError=SSLError\n",
+        " class SSLWantReadError(SSLError):pass\n",
+        " m.SSLWantReadError=SSLWantReadError\n",
+        " class SSLWantWriteError(SSLError):pass\n",
+        " m.SSLWantWriteError=SSLWantWriteError\n",
+        " class SSLSocket:\n",
+        "  __slots__=('_s',)\n",
+        "  def __init__(self,s):self._s=s\n",
+        "  def recv(self,*a,**k):return self._s.recv(*a,**k)\n",
+        "  def read(self,n=-1):return self._s.recv(n)\n",
+        "  def send(self,*a,**k):return self._s.send(*a,**k)\n",
+        "  def sendall(self,d,f=0):return self._s.sendall(d,f)\n",
+        "  def makefile(self,*a,**k):return self._s.makefile(*a,**k)\n",
+        "  def close(self):return self._s.close()\n",
+        "  def fileno(self):return self._s.fileno()\n",
+        "  def settimeout(self,t):return self._s.settimeout(t)\n",
+        "  def gettimeout(self):return self._s.gettimeout()\n",
+        "  def setsockopt(self,*a,**k):return self._s.setsockopt(*a,**k)\n",
+        "  def getpeername(self):return self._s.getpeername()\n",
+        "  def getpeercert(self,b=False):return {}\n",
+        "  def version(self):return 'TLSv1.3'\n",
+        "  def cipher(self):return None\n",
+        "  def do_handshake(self):pass\n",
+        "  def unwrap(self):return self._s\n",
+        "  def shutdown(self,h):return self._s.shutdown(h)\n",
+        "  def __enter__(self):return self\n",
+        "  def __exit__(self,*a):self.close()\n",
+        " m.SSLSocket=SSLSocket\n",
+        " class SSLContext:\n",
+        "  def __init__(self,p=None):\n",
+        "   self.check_hostname=False;self.verify_mode=m.CERT_REQUIRED\n",
+        "   self.post_handshake_auth=False;self.options=0\n",
+        "   self.minimum_version=None;self.maximum_version=None\n",
+        "  def load_default_certs(self,*a,**k):pass\n",
+        "  def load_verify_locations(self,*a,**k):pass\n",
+        "  def set_alpn_protocols(self,*a,**k):pass\n",
+        "  def set_ciphers(self,*a,**k):pass\n",
+        "  def set_servername_callback(self,*a,**k):pass\n",
+        "  def wrap_socket(self,s,server_hostname=None,server_side=False,\n",
+        "                  do_handshake_on_connect=True,suppress_ragged_eofs=True,**k):\n",
+        "   return SSLSocket(s)\n",
+        " m.SSLContext=SSLContext\n",
+        " def cdc(purpose=None,**k):\n",
+        "  c=SSLContext();c.check_hostname=True;c.verify_mode=m.CERT_REQUIRED;return c\n",
+        " m.create_default_context=cdc\n",
+        " m._create_unverified_context=cdc\n",
+        " m._create_default_https_context=cdc\n",
+        " m.match_hostname=lambda *a,**k:None\n",
+        " return m\n",
+        "_sys.modules['ssl']=_mk_ssl()\n",
+        "del _mk_ssl,_sys,_t\n",
         "try:\n",
         " import certifi as _c,os as _o;_o.environ['SSL_CERT_FILE']=_c.where()\n",
         "except Exception:\n",
         " pass\n",
     );
-    let combined_source = format!("{SSL_PREAMBLE}{python_source}");
+    let combined_source = format!("{SSL_SHIM}{python_source}");
     run_booted_pyodide(&combined_source, None, &mut store, &instance)
 }
 

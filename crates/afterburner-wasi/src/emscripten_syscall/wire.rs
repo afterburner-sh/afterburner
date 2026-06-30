@@ -127,12 +127,19 @@ pub(super) fn wire_socket_syscalls(linker: &mut Linker<EmbedderState>) -> Result
                         if conn_id < 0 {
                             return socket::ECONNREFUSED;
                         }
+                        // If getaddrinfo stored a TLS SNI for this (ip, port), signal
+                        // a host-side TLS upgrade before any data flows. This covers
+                        // HTTPS connections (port 443) where the original hostname was
+                        // resolved via getaddrinfo and is needed as the rustls SNI.
                         {
                             let state = caller
                                 .data_mut()
                                 .socket_state
                                 .get_or_insert_with(socket::SocketState::new);
                             state.conn_fds.insert(sockfd, conn_id);
+                            if let Some(sni) = state.pending_tls_sni.remove(&(host.clone(), port)) {
+                                net.set_tls(conn_id, sni);
+                            }
                         }
                         let state = caller.data_mut().socket_state.as_deref_mut().unwrap();
                         socket::blocking::wait_connect(&net, conn_id, state)

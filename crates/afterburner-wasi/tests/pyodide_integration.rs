@@ -28,18 +28,21 @@ fn pyodide_available() -> bool {
 /// bundle. This differs from [`pyodide_available`] (the `/tmp` `boot_pyodide`
 /// convention) because `run_python_with_net` discovers the runtime through the
 /// bundle resolver, not a hardcoded `/tmp` path.
+#[cfg(feature = "daemon")]
 fn python_net_runtime_available() -> bool {
-    if let Ok(dir) = std::env::var("BURN_PYTHON_RUNTIME") {
-        if std::path::Path::new(&dir).join("pyodide-exnref.wasm").exists() {
-            return true;
-        }
+    if let Ok(dir) = std::env::var("BURN_PYTHON_RUNTIME")
+        && std::path::Path::new(&dir)
+            .join("pyodide-exnref.wasm")
+            .exists()
+    {
+        return true;
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        if let Ok(entries) = std::fs::read_dir(std::path::Path::new(&home).join(".burn")) {
-            return entries
-                .flatten()
-                .any(|e| e.path().join("pyodide-exnref.wasm").exists());
-        }
+    if let Some(home) = std::env::var_os("HOME")
+        && let Ok(entries) = std::fs::read_dir(std::path::Path::new(&home).join(".burn"))
+    {
+        return entries
+            .flatten()
+            .any(|e| e.path().join("pyodide-exnref.wasm").exists());
     }
     false
 }
@@ -175,9 +178,14 @@ fn live_https_get_returns_200() {
     // urllib.request is stdlib; it uses Python's ssl module which calls getentropy
     // and random_get during the TLS handshake. A non-zero exit code means Python
     // raised an exception (e.g. ssl.SSLError or urllib.error.URLError).
+    // Use a blocking socket (no timeout) so CPython's PySSL_select short-circuits
+    // the SOCKET_IS_BLOCKING path and never calls select/poll. Our socket bridge
+    // handles read/write on blocking fds but does not implement select/newselect,
+    // so a non-None timeout would cause the TLS handshake to stall on a spurious
+    // "nothing ready" return from __syscall__newselect.
     let source = concat!(
         "import urllib.request as _u\n",
-        "resp = _u.urlopen('https://example.com', timeout=15)\n",
+        "resp = _u.urlopen('https://example.com')\n",
         "print(resp.status)\n",
     );
 

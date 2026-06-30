@@ -647,6 +647,22 @@ fn build_client_config(
     Some(Arc::new(cfg))
 }
 
+/// Build a default TLS client config for host-side HTTPS termination.
+///
+/// Uses the Mozilla root CA bundle from `webpki-roots`. No client certificate,
+/// no ALPN, always rejects unauthorized (cert-validating). This is the config
+/// used when `DaemonNet::set_tls` upgrades a raw TCP connection to TLS on
+/// behalf of the Python ssl shim (`DaemonNet` piece 1 of the HTTPS path).
+pub(crate) fn build_default_client_config() -> Arc<ClientConfig> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    Arc::new(
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )
+}
+
 fn build_server_config(
     cert_pem: &str,
     key_pem: &str,

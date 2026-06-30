@@ -251,6 +251,26 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                 None => return EBADF,
             };
             pyo_trace!("[fd_write] fd={fd} iov[{i}] buf_ptr={buf_ptr:#x} buf_len={buf_len}");
+            // Socket fds (fd >= SOCK_FD_BASE) write to DaemonNet, not FS.
+            #[cfg(feature = "daemon")]
+            if fd >= crate::emscripten_syscall::socket::SOCK_FD_BASE {
+                let Some(net) = caller.data().daemon_net.clone() else {
+                    return EBADF;
+                };
+                let conn_id = caller
+                    .data()
+                    .socket_state
+                    .as_deref()
+                    .and_then(|s| s.conn_fds.get(&fd).copied())
+                    .unwrap_or(crate::emscripten_syscall::socket::EBADF);
+                if conn_id == crate::emscripten_syscall::socket::EBADF {
+                    return EBADF;
+                }
+                let mut err_s = String::new();
+                net.write(conn_id, chunk, &mut err_s);
+                total += buf_len as u32;
+                continue;
+            }
             if fd == 1 || fd == 2 {
                 // Opt-in: mirror guest stdout/stderr to the host so a fatal error
                 // that traps before the runner reads back wasi_stdout is still
@@ -302,6 +322,76 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
         // stdin/stdout/stderr: return EOF (0 bytes).
         if fd < 3 {
             if !write_u32(&mut caller, nread_ptr, 0) {
+                return EBADF;
+            }
+            return 0;
+        }
+        // Socket fds (fd >= SOCK_FD_BASE) read from DaemonNet, not FS.
+        #[cfg(feature = "daemon")]
+        if fd >= crate::emscripten_syscall::socket::SOCK_FD_BASE {
+            let Some(net) = caller.data().daemon_net.clone() else {
+                return EBADF;
+            };
+            let conn_id = caller
+                .data()
+                .socket_state
+                .as_deref()
+                .and_then(|s| s.conn_fds.get(&fd).copied())
+                .unwrap_or(crate::emscripten_syscall::socket::EBADF);
+            if conn_id == crate::emscripten_syscall::socket::EBADF {
+                return EBADF;
+            }
+            let iovs_count = iovs_len as u32 as usize;
+            let iov_bytes = match read_bytes(&caller, iovs_ptr, iovs_count * 8) {
+                Some(b) => b,
+                None => return EBADF,
+            };
+            let cap: usize = (0..iovs_count)
+                .map(|i| {
+                    let b = i * 8;
+                    u32::from_le_bytes(iov_bytes[b + 4..b + 8].try_into().unwrap_or_default())
+                        as usize
+                })
+                .sum();
+            let state = caller.data_mut().socket_state.as_deref_mut().unwrap();
+            let bytes = match crate::emscripten_syscall::socket::blocking::wait_data(
+                &net,
+                conn_id,
+                state,
+                cap.max(1),
+            ) {
+                Err(_) => return EBADF,
+                Ok(b) => b,
+            };
+            if bytes.is_empty() {
+                if !write_u32(&mut caller, nread_ptr, 0) {
+                    return EBADF;
+                }
+                return 0;
+            }
+            let mut remaining = bytes.as_slice();
+            let mut total: u32 = 0;
+            for i in 0..iovs_count {
+                if remaining.is_empty() {
+                    break;
+                }
+                let b = i * 8;
+                let buf_ptr =
+                    u32::from_le_bytes(iov_bytes[b..b + 4].try_into().unwrap_or_default()) as i32;
+                let buf_len =
+                    u32::from_le_bytes(iov_bytes[b + 4..b + 8].try_into().unwrap_or_default())
+                        as usize;
+                if buf_len == 0 {
+                    continue;
+                }
+                let take = remaining.len().min(buf_len);
+                if !write_bytes(&mut caller, buf_ptr, &remaining[..take]) {
+                    return EBADF;
+                }
+                remaining = &remaining[take..];
+                total += take as u32;
+            }
+            if !write_u32(&mut caller, nread_ptr, total) {
                 return EBADF;
             }
             return 0;
