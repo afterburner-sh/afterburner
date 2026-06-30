@@ -108,3 +108,99 @@ fn getentropy_fill_is_deterministic_0xab() {
     assert_eq!(buf1, buf2, "same fill params must produce identical bytes");
     assert!(buf1.iter().all(|&b| b == 0xAB), "fill value must be 0xAB");
 }
+
+// ---- getentropy full shim: Deterministic and RealOs paths ------------------
+
+/// Build a Store that has a memory wired as pyodide_memory, sets the requested
+/// entropy mode, and wires all mechanical env funcs. Returned together with
+/// a ready-to-use linker that can instantiate test WAT modules.
+fn make_mech_store_with_entropy(
+    entropy: crate::embedder_vm::EntropySource,
+) -> (wasmtime::Store<EmbedderState>, Linker<EmbedderState>) {
+    let engine = &*SHARED_ENGINE;
+    let mut store = wasmtime::Store::new(engine, EmbedderState::for_emscripten());
+    store.set_fuel(10_000_000).expect("set_fuel");
+    store.data_mut().entropy = entropy;
+
+    // 4 pages = 256 KiB; the test buffer lives at guest offset 0x1000.
+    let mem_ty = wasmtime::MemoryType::new(4, None);
+    let mem = wasmtime::Memory::new(&mut store, mem_ty).expect("memory");
+    store.data_mut().pyodide_memory = Some(mem);
+
+    let mut linker: Linker<EmbedderState> = Linker::new(engine);
+    linker.allow_shadowing(true);
+    let mech_log = crate::emscripten_runtime::MechCallLog::new();
+    wire_mechanical_env_funcs(engine, &mut linker, mech_log).expect("wire_mechanical_env_funcs");
+    (store, linker)
+}
+
+/// Call env.getentropy(buf=0x1000, len=8) through the shim via a tiny WAT
+/// module. Returns the i32 return code and the 8 bytes written at 0x1000.
+fn call_getentropy_via_shim(
+    store: &mut wasmtime::Store<EmbedderState>,
+    linker: &Linker<EmbedderState>,
+) -> (i32, Vec<u8>) {
+    let wat = r#"(module
+      (import "env" "getentropy" (func $ge (param i32 i32) (result i32)))
+      (func (export "run") (result i32)
+        i32.const 0x1000
+        i32.const 8
+        call $ge))"#;
+    let wasm = wat::parse_str(wat).expect("WAT");
+    let module = wasmtime::Module::new(&SHARED_ENGINE, &wasm).expect("module");
+    let instance = linker
+        .instantiate(&mut *store, &module)
+        .expect("instantiate");
+    let rc = instance
+        .get_typed_func::<(), i32>(&mut *store, "run")
+        .expect("run")
+        .call(&mut *store, ())
+        .expect("call");
+    let mem = store.data().pyodide_memory.expect("mem");
+    let bytes = mem.data(store)[0x1000..0x1008].to_vec();
+    (rc, bytes)
+}
+
+/// Deterministic mode: the shim fills the buffer with 0xAB exactly (existing
+/// behavior preserved byte-for-byte).
+#[test]
+fn getentropy_deterministic_mode_fills_0xab() {
+    let (mut store, linker) =
+        make_mech_store_with_entropy(crate::embedder_vm::EntropySource::Deterministic);
+    let (rc, bytes) = call_getentropy_via_shim(&mut store, &linker);
+    assert_eq!(rc, 0, "getentropy must return 0 on success");
+    assert!(
+        bytes.iter().all(|&b| b == 0xAB),
+        "Deterministic mode must fill every byte with 0xAB; got {bytes:?}"
+    );
+}
+
+/// RealOs mode: two independent calls to getentropy must produce distinct
+/// output with overwhelming probability (prob 2^-64 of collision by chance).
+/// This proves the shim switches to the OS CSPRNG.
+#[test]
+fn getentropy_real_os_produces_non_constant_output() {
+    let (mut store, linker) =
+        make_mech_store_with_entropy(crate::embedder_vm::EntropySource::RealOs);
+    let (rc1, bytes1) = call_getentropy_via_shim(&mut store, &linker);
+    // Zero the buffer so a second call starts from a known blank slate.
+    {
+        let mem = store.data().pyodide_memory.expect("mem");
+        mem.data_mut(&mut store)[0x1000..0x1008].fill(0x00);
+    }
+    let (rc2, bytes2) = call_getentropy_via_shim(&mut store, &linker);
+    assert_eq!(rc1, 0, "first getentropy (RealOs) must succeed");
+    assert_eq!(rc2, 0, "second getentropy (RealOs) must succeed");
+    assert_ne!(bytes1, vec![0u8; 8], "first fill must not be all zeros");
+    assert_ne!(bytes2, vec![0u8; 8], "second fill must not be all zeros");
+    // 0xAB-fill would also be wrong in RealOs mode.
+    assert_ne!(
+        bytes1,
+        vec![0xABu8; 8],
+        "RealOs mode must not produce the deterministic 0xAB fill"
+    );
+    assert_ne!(
+        bytes1, bytes2,
+        "RealOs mode must produce distinct fills on independent calls"
+    );
+}

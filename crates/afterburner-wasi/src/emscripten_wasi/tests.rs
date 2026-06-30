@@ -480,6 +480,99 @@ fn random_get_zero_len_is_noop() {
     assert_eq!(rc, 0, "random_get with len=0 must return 0");
 }
 
+/// RealOs mode: two independent random_get calls must produce distinct output
+/// with overwhelming probability (prob 2^-256 of collision by chance).
+/// This proves the shim switched from the fixed-seed SplitMix64 to the OS CSPRNG.
+#[test]
+fn random_get_real_os_produces_non_deterministic_output() {
+    let (mut store, linker) = make_store_and_linker();
+    store.data_mut().entropy = crate::embedder_vm::EntropySource::RealOs;
+
+    let call_random_get = |store: &mut Store<EmbedderState>, ptr: i32, len: i32| {
+        let wat_src = format!(
+            r#"(module
+              (import "wasi_snapshot_preview1" "random_get"
+                (func $f (param i32 i32) (result i32)))
+              (func (export "run") (result i32)
+                i32.const {ptr}
+                i32.const {len}
+                call $f))"#
+        );
+        let wasm = wat::parse_str(&wat_src).expect("WAT");
+        let module = Module::new(&ENGINE, &wasm).expect("module");
+        let instance = linker
+            .instantiate(&mut *store, &module)
+            .expect("instantiate");
+        instance
+            .get_typed_func::<(), i32>(&mut *store, "run")
+            .expect("run")
+            .call(&mut *store, ())
+            .expect("call")
+    };
+
+    let rc1 = call_random_get(&mut store, 0xc000, 32);
+    let bytes1 = read_mem(&store, 0xc000, 32);
+    // Zero the buffer before the second call so any overlap is not a coincidence.
+    write_mem(&mut store, 0xc000, &[0u8; 32]);
+    let rc2 = call_random_get(&mut store, 0xc000, 32);
+    let bytes2 = read_mem(&store, 0xc000, 32);
+
+    assert_eq!(rc1, 0, "first random_get (RealOs) must succeed");
+    assert_eq!(rc2, 0, "second random_get (RealOs) must succeed");
+    assert_ne!(bytes1, vec![0u8; 32], "first fill must not be all zeros");
+    assert_ne!(bytes2, vec![0u8; 32], "second fill must not be all zeros");
+    assert_ne!(
+        bytes1, bytes2,
+        "RealOs mode must produce distinct fills on independent calls"
+    );
+}
+
+/// Deterministic mode preserves the SplitMix64 fixed-seed behavior even when
+/// the entropy field is explicitly set (the default). Two calls produce the
+/// same bytes, proving the sealed path is byte-identical to before.
+#[test]
+fn random_get_deterministic_mode_matches_fixed_seed() {
+    let (mut store, linker) = make_store_and_linker();
+    // Explicit set to Deterministic (same as the default) to document the intent.
+    store.data_mut().entropy = crate::embedder_vm::EntropySource::Deterministic;
+
+    let call_random_get = |store: &mut Store<EmbedderState>, ptr: i32, len: i32| {
+        let wat_src = format!(
+            r#"(module
+              (import "wasi_snapshot_preview1" "random_get"
+                (func $f (param i32 i32) (result i32)))
+              (func (export "run") (result i32)
+                i32.const {ptr}
+                i32.const {len}
+                call $f))"#
+        );
+        let wasm = wat::parse_str(&wat_src).expect("WAT");
+        let module = Module::new(&ENGINE, &wasm).expect("module");
+        let instance = linker
+            .instantiate(&mut *store, &module)
+            .expect("instantiate");
+        instance
+            .get_typed_func::<(), i32>(&mut *store, "run")
+            .expect("run")
+            .call(&mut *store, ())
+            .expect("call")
+    };
+
+    let rc1 = call_random_get(&mut store, 0xd000, 16);
+    let bytes1 = read_mem(&store, 0xd000, 16);
+    write_mem(&mut store, 0xd000, &[0u8; 16]);
+    let rc2 = call_random_get(&mut store, 0xd000, 16);
+    let bytes2 = read_mem(&store, 0xd000, 16);
+
+    assert_eq!(rc1, 0, "random_get Deterministic must return 0");
+    assert_eq!(rc2, 0, "random_get Deterministic second call must return 0");
+    assert_eq!(
+        bytes1, bytes2,
+        "Deterministic mode must produce identical bytes across re-calls"
+    );
+    assert_ne!(bytes1, vec![0u8; 16], "bytes must not be all zero");
+}
+
 // ---- args_sizes_get / args_get ----------------------------------------------
 
 /// args_sizes_get reports 0 args and 0 buf bytes.

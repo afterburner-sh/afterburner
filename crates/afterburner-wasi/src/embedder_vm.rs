@@ -258,6 +258,37 @@ fn install_compile_cache(cfg: &mut Config) {
     }
 }
 
+// ---- entropy source ---------------------------------------------------------
+
+/// Controls whether randomness shims (`getentropy`, `random_get`) produce
+/// deterministic output (sealed / frozen runs) or real OS entropy (live-net runs).
+///
+/// ## Why two modes
+///
+/// Sealed execution is deterministic by design: re-running the same source
+/// over the same inputs must produce byte-identical results. Deterministic
+/// entropy is required for that property.
+///
+/// Live-net runs involve real sockets and real TLS. TLS handshakes need real
+/// cryptographic randomness for session keys; a constant fill breaks or insecures
+/// the handshake. Setting `RealOs` provides that without touching the sealed path.
+///
+/// ## Default
+///
+/// Defaults to `Deterministic` so every new `EmbedderState` is sealed unless the
+/// caller explicitly opts in to live entropy.
+#[derive(Copy, Clone, PartialEq, Eq, Default, Debug)]
+pub enum EntropySource {
+    /// Fixed fill / fixed-seed PRNG - deterministic across re-runs. This is
+    /// the ONLY mode for sealed runs; changing it would break the honesty fence.
+    #[default]
+    Deterministic,
+    /// Real OS entropy via `getrandom`. Used by the live-net (daemon) Python path
+    /// where TLS requires cryptographically random nonces. Live runs are already
+    /// non-deterministic (real sockets, real clock), so real entropy is consistent.
+    RealOs,
+}
+
 // ---- internal store-data type ------------------------------------------------
 
 /// Per-call store state that parameterises the embedder linker and stores.
@@ -387,6 +418,10 @@ pub struct EmbedderState {
     /// A guest path under one of these preopens is routed to the real host FS
     /// instead of `InMemFs`. Empty by default (deny-by-default / sealed).
     pub rw_preopens: Vec<(PathBuf, String)>,
+    /// Controls whether the `getentropy` and `random_get` shims produce
+    /// deterministic (sealed) or real OS (live-net) entropy. Defaults to
+    /// `Deterministic`; set to `RealOs` for daemon runs that perform live TLS.
+    pub entropy: EntropySource,
 }
 
 impl EmbedderState {
@@ -428,6 +463,7 @@ impl EmbedderState {
             #[cfg(all(feature = "daemon", unix))]
             daemon_unix: None,
             rw_preopens: Vec::new(),
+            entropy: EntropySource::Deterministic,
         }
     }
 
@@ -481,6 +517,7 @@ impl EmbedderState {
             #[cfg(all(feature = "daemon", unix))]
             daemon_unix: None,
             rw_preopens: Vec::new(),
+            entropy: EntropySource::Deterministic,
         }
     }
 
@@ -528,6 +565,7 @@ impl EmbedderState {
             #[cfg(all(feature = "daemon", unix))]
             daemon_unix: None,
             rw_preopens: Vec::new(),
+            entropy: EntropySource::Deterministic,
         }
     }
 
@@ -796,6 +834,7 @@ impl EmbedderVm {
                 daemon_dgram_py: None,
                 #[cfg(all(feature = "daemon", unix))]
                 daemon_unix: None,
+                entropy: EntropySource::Deterministic,
             }
         } else {
             EmbedderState {
@@ -833,6 +872,7 @@ impl EmbedderVm {
                 daemon_dgram_py: None,
                 #[cfg(all(feature = "daemon", unix))]
                 daemon_unix: None,
+                entropy: EntropySource::Deterministic,
             }
         };
 
@@ -1001,6 +1041,7 @@ impl EmbedderVm {
             daemon_dgram_py: None,
             #[cfg(all(feature = "daemon", unix))]
             daemon_unix: None,
+            entropy: EntropySource::Deterministic,
         };
 
         let mut store = Store::new(&module.engine, state);

@@ -573,11 +573,13 @@ pub(crate) fn wire_mechanical_env_funcs(
             // so caller.get_export("memory") returns None. Use the pyodide_memory
             // handle set in EmbedderState by wire_env_memory_and_table_in_store.
             //
-            // Deterministic fill (0xAB) in sealed mode - determinism is desired
-            // so re-execution produces byte-identical results.
+            // Deterministic fill (0xAB): sealed runs; the fixed fill makes two
+            // re-executions of the same source byte-identical (honesty fence).
             //
-            // vertexia: fixed fill; upgrade path is a seeded PRNG in EmbedderState
-            // if callers need distinct entropy per instantiation.
+            // RealOs: live-net runs where TLS needs real cryptographic randomness.
+            // The sealed path is BYTE-IDENTICAL to before; only the RealOs branch
+            // is new. Both Copy fields are read before the mutable memory borrow.
+            let entropy = caller.data().entropy;
             let Some(memory) = caller.data().pyodide_memory else {
                 return -1;
             };
@@ -585,7 +587,21 @@ pub(crate) fn wire_mechanical_env_funcs(
             let len = length as u32 as usize;
             let mem = memory.data_mut(&mut caller);
             if start.checked_add(len).is_some_and(|e| e <= mem.len()) {
-                mem[start..start + len].fill(0xAB);
+                match entropy {
+                    crate::embedder_vm::EntropySource::Deterministic => {
+                        mem[start..start + len].fill(0xAB);
+                    }
+                    crate::embedder_vm::EntropySource::RealOs => {
+                        // getrandom fills the slice from the OS CSPRNG.
+                        // On error return -1 so TLS fails visibly rather than
+                        // silently proceeding with uninitialized bytes.
+                        let mut tmp = vec![0u8; len];
+                        if getrandom::getrandom(&mut tmp).is_err() {
+                            return -1;
+                        }
+                        mem[start..start + len].copy_from_slice(&tmp);
+                    }
+                }
                 0
             } else {
                 -1

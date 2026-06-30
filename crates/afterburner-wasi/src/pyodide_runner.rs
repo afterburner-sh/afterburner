@@ -1064,7 +1064,23 @@ fn run_pyodide_with_daemon(
     if !rw_preopens.is_empty() {
         store.data_mut().rw_preopens = rw_preopens.to_vec();
     }
-    run_booted_pyodide(python_source, None, &mut store, &instance)
+    // Live-net runs need real OS entropy so TLS handshakes can generate
+    // cryptographically random session keys. Sealed runs keep Deterministic
+    // (the default), which produces byte-identical output on re-execution.
+    store.data_mut().entropy = crate::embedder_vm::EntropySource::RealOs;
+
+    // Prepend a preamble that points ssl.create_default_context() at certifi's
+    // CA bundle. The try/except makes it a no-op when certifi is absent (so sealed
+    // tests remain unaffected). `certifi.where()` returns the path inside the
+    // Pyodide MEMFS where cacert.pem lives for the active Python version.
+    const SSL_PREAMBLE: &str = concat!(
+        "try:\n",
+        " import certifi as _c,os as _o;_o.environ['SSL_CERT_FILE']=_c.where()\n",
+        "except Exception:\n",
+        " pass\n",
+    );
+    let combined_source = format!("{SSL_PREAMBLE}{python_source}");
+    run_booted_pyodide(&combined_source, None, &mut store, &instance)
 }
 
 /// The program's captured output. Prefers the guest `/tmp/pyout.txt` (where the

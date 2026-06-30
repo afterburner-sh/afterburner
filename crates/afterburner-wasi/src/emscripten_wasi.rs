@@ -858,14 +858,13 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
     // "Fatal Python error: _Py_HashRandomization_Init: failed to get random
     // numbers to initialize Python".
     //
-    // Determinism is DESIRED here: a sealed engine with a fixed seed produces
-    // byte-identical output across runs, making re-execution exact.
+    // Determinism is DESIRED for sealed runs: a fixed-seed SplitMix64 produces
+    // byte-identical output across re-runs (honesty fence).
     //
-    // Implementation: SplitMix64 with a fixed seed. Each call re-seeds from
-    // the same constant so buf_ptr/buf_len combinations are stable across runs.
-    //
-    // vertexia: fixed seed; upgrade path is a per-store seed in EmbedderState
-    // if callers need distinct entropy per instantiation.
+    // RealOs mode: live-net runs need real cryptographic randomness for TLS.
+    // The Deterministic path is BYTE-IDENTICAL to before; only the RealOs
+    // branch is new. The entropy mode is read (copied) before any mutable
+    // borrow of caller so the borrow checker is satisfied.
     def!("random_get", |mut caller: Caller<'_, EmbedderState>,
                         buf_ptr: i32,
                         buf_len: i32|
@@ -874,23 +873,41 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
         if len == 0 {
             return 0;
         }
-        // SplitMix64 generator with a fixed deterministic seed.
-        // Each call starts from the same seed so output is stable across runs.
-        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
-        let mut buf = Vec::with_capacity(len);
-        while buf.len() < len {
-            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-            let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-            z ^= z >> 31;
-            buf.extend_from_slice(&z.to_le_bytes());
-        }
-        buf.truncate(len);
-        if write_bytes(&mut caller, buf_ptr, &buf) {
-            0
-        } else {
-            1
+        let entropy = caller.data().entropy;
+        match entropy {
+            crate::embedder_vm::EntropySource::Deterministic => {
+                // SplitMix64 generator with a fixed deterministic seed.
+                // Each call starts from the same seed so output is stable across runs.
+                let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+                let mut buf = Vec::with_capacity(len);
+                while buf.len() < len {
+                    state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                    let mut z = state;
+                    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                    z ^= z >> 31;
+                    buf.extend_from_slice(&z.to_le_bytes());
+                }
+                buf.truncate(len);
+                if write_bytes(&mut caller, buf_ptr, &buf) {
+                    0
+                } else {
+                    1
+                }
+            }
+            crate::embedder_vm::EntropySource::RealOs => {
+                // Real OS entropy for live-net TLS. Fail visibly (return 1 = WASI
+                // ERRNO_IO) rather than silently using uninitialized bytes.
+                let mut buf = vec![0u8; len];
+                if getrandom::getrandom(&mut buf).is_err() {
+                    return 1;
+                }
+                if write_bytes(&mut caller, buf_ptr, &buf) {
+                    0
+                } else {
+                    1
+                }
+            }
         }
     });
 

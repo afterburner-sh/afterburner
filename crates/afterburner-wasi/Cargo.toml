@@ -86,6 +86,7 @@ fastrace.workspace = true
 afterburner-node-compat.workspace = true
 hex.workspace = true
 base64.workspace = true
+getrandom.workspace = true
 
 # Daemon deps. All cross-platform — `axum`, `tokio`, `hyper`,
 # `bytes`, `rustls`, `tokio-rustls`, `rustls-pemfile`, `webpki-roots`,

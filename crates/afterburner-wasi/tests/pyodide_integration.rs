@@ -23,6 +23,27 @@ fn pyodide_available() -> bool {
     std::path::Path::new(PYODIDE_WASM_PATH).exists()
 }
 
+/// Whether `run_python_with_net` can resolve its runtime: the
+/// `BURN_PYTHON_RUNTIME` override dir, or the self-contained `~/.burn/pyodide-*/`
+/// bundle. This differs from [`pyodide_available`] (the `/tmp` `boot_pyodide`
+/// convention) because `run_python_with_net` discovers the runtime through the
+/// bundle resolver, not a hardcoded `/tmp` path.
+fn python_net_runtime_available() -> bool {
+    if let Ok(dir) = std::env::var("BURN_PYTHON_RUNTIME") {
+        if std::path::Path::new(&dir).join("pyodide-exnref.wasm").exists() {
+            return true;
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        if let Ok(entries) = std::fs::read_dir(std::path::Path::new(&home).join(".burn")) {
+            return entries
+                .flatten()
+                .any(|e| e.path().join("pyodide-exnref.wasm").exists());
+        }
+    }
+    false
+}
+
 // ---- boot ------------------------------------------------------------------
 
 /// Pyodide 0.28 Wasm binary compiles and boots CPython through
@@ -83,4 +104,91 @@ fn pyodide_binary_compiles() {
         afterburner_wasi::embedder_vm::deterministic_engine().expect("deterministic engine");
     wasmtime::Module::new(&engine, &wasm_bytes)
         .expect("Pyodide binary must compile with the deterministic engine");
+}
+
+// ---- live HTTPS (RealOs entropy) -------------------------------------------
+
+/// Probe whether the host machine has outbound HTTPS reachability to example.com.
+/// Returns false when offline or when the connect times out (a short 2 s budget).
+#[cfg(feature = "daemon")]
+fn https_reachable() -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+    // Resolve example.com by name rather than a hardcoded IP: the classic
+    // 93.184.216.34 (EdgeCast) was retired when example.com moved to Cloudflare,
+    // so a fixed IP gives a false "offline". Resolve, then connect to the first
+    // address with a timeout.
+    "example.com:443"
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .and_then(|addr| TcpStream::connect_timeout(&addr, Duration::from_secs(3)).ok())
+        .is_some()
+}
+
+/// Live HTTPS GET via `run_python_with_net`: proves that real OS entropy (the
+/// RealOs shim mode) enables a working TLS handshake inside Pyodide.
+///
+/// Skipped when:
+///   - the Pyodide runtime is not available at /tmp/pyodide-exnref.wasm, or
+///   - the host is offline (no HTTPS reachability to example.com:443).
+///
+/// The test fetches https://example.com via Python's stdlib `urllib.request`
+/// (which calls into CPython's ssl module and triggers the `getentropy`/
+/// `random_get` shims), reads the HTTP status from the response, and asserts it
+/// is 200. A TLS handshake failure (the pre-fix symptom) would surface as a
+/// Python exception, which would propagate as a non-zero exit code.
+///
+/// To run on demand:
+///   cargo test -p afterburner-wasi --test pyodide_integration --features daemon -- --ignored live_https_get_returns_200
+#[test]
+#[ignore]
+#[cfg(feature = "daemon")]
+fn live_https_get_returns_200() {
+    if !python_net_runtime_available() {
+        eprintln!(
+            "[pyodide_integration] SKIP live_https: no run_python_with_net runtime \
+             (set BURN_PYTHON_RUNTIME or populate ~/.burn/pyodide-*/)"
+        );
+        return;
+    }
+    if !https_reachable() {
+        eprintln!("[pyodide_integration] SKIP live_https: host appears to be offline");
+        return;
+    }
+
+    use afterburner_core::Manifold;
+    use afterburner_wasi::pyodide_runner::{PythonNetOpts, run_python_with_net};
+
+    // Build a tokio runtime; the socket bridge needs async I/O.
+    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime for live_https test");
+
+    let opts = PythonNetOpts {
+        tokio_handle: tokio_rt.handle().clone(),
+        manifold: Manifold::open(),
+        rw_preopens: Vec::new(),
+    };
+
+    // urllib.request is stdlib; it uses Python's ssl module which calls getentropy
+    // and random_get during the TLS handshake. A non-zero exit code means Python
+    // raised an exception (e.g. ssl.SSLError or urllib.error.URLError).
+    let source = concat!(
+        "import urllib.request as _u\n",
+        "resp = _u.urlopen('https://example.com', timeout=15)\n",
+        "print(resp.status)\n",
+    );
+
+    let out = run_python_with_net(source, opts).expect("run_python_with_net failed");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(
+        out.exit_code, 0,
+        "Python must exit cleanly (TLS handshake + HTTP GET succeeded); stdout={text:?}"
+    );
+    assert!(
+        text.trim() == "200",
+        "expected HTTP status 200 from example.com, got: {text:?}"
+    );
 }
