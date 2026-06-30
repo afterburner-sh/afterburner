@@ -36,7 +36,7 @@ default-members = [
 exclude = ["examples"]
 
 [workspace.package]
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 rust-version = "1.90"
 authors = ["Theo Bulut <info@afterburner.sh>"]
