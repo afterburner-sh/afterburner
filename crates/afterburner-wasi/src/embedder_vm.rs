@@ -258,7 +258,60 @@ fn install_compile_cache(cfg: &mut Config) {
     }
 }
 
+// ---- entropy source ---------------------------------------------------------
+
+/// Controls whether randomness shims (`getentropy`, `random_get`) produce
+/// deterministic output (sealed / frozen runs) or real OS entropy (live-net runs).
+///
+/// ## Why two modes
+///
+/// Sealed execution is deterministic by design: re-running the same source
+/// over the same inputs must produce byte-identical results. Deterministic
+/// entropy is required for that property.
+///
+/// Live-net runs involve real sockets and real TLS. TLS handshakes need real
+/// cryptographic randomness for session keys; a constant fill breaks or insecures
+/// the handshake. Setting `RealOs` provides that without touching the sealed path.
+///
+/// ## Default
+///
+/// Defaults to `Deterministic` so every new `EmbedderState` is sealed unless the
+/// caller explicitly opts in to live entropy.
+#[derive(Copy, Clone, PartialEq, Eq, Default, Debug)]
+pub enum EntropySource {
+    /// Fixed fill / fixed-seed PRNG - deterministic across re-runs. This is
+    /// the ONLY mode for sealed runs; changing it would break the honesty fence.
+    #[default]
+    Deterministic,
+    /// Real OS entropy via `getrandom`. Used by the live-net (daemon) Python path
+    /// where TLS requires cryptographically random nonces. Live runs are already
+    /// non-deterministic (real sockets, real clock), so real entropy is consistent.
+    RealOs,
+}
+
 // ---- internal store-data type ------------------------------------------------
+
+/// One preopened directory the WASI-command capture variant advertises to the
+/// guest through the shadowed `fd_prestat_get` / `fd_prestat_dir_name`.
+///
+/// `host_path` is the switch between the two capture modes: `Some(root)` is a
+/// **host-backed** preopen (a real `std::fs` directory the guest reads and
+/// writes through the `*_host` passthrough ops); `None` is a **sealed**
+/// in-memory preopen (increment 1: the fd-3 root of the [`InMemFs`], used by
+/// the WAT conformance path). There is no global mode flag: the per-fd switch
+/// is whether the guest path resolves to a host-backed preopen.
+#[derive(Debug, Clone)]
+pub struct Preopen {
+    /// The fd number this preopen occupies (3, 4, 5, ... contiguously).
+    pub fd: i32,
+    /// The guest-visible absolute path (e.g. `/usr`, `/pkg`, `/`).
+    pub guest_path: String,
+    /// The host directory backing it, or `None` for a sealed in-memory preopen.
+    pub host_path: Option<PathBuf>,
+    /// Whether writes are permitted under this preopen (a read-only stdlib
+    /// mount is `false`; a `/work` or `/pkg` mount is `true`).
+    pub writable: bool,
+}
 
 /// Per-call store state that parameterises the embedder linker and stores.
 /// Exposed as `pub` so it can appear in the `IntoFunc` bound on
@@ -387,6 +440,30 @@ pub struct EmbedderState {
     /// A guest path under one of these preopens is routed to the real host FS
     /// instead of `InMemFs`. Empty by default (deny-by-default / sealed).
     pub rw_preopens: Vec<(PathBuf, String)>,
+    /// Preopened directories the WASI-command capture variant advertises to the
+    /// guest via `fd_prestat_get` / `fd_prestat_dir_name` (see [`Preopen`]).
+    /// Empty on sealed / default runs (the stock wasmtime-wasi preopen path is
+    /// used instead). Populated by [`EmbedderVm::run_command`] in capture mode:
+    /// one in-memory root (`{fd:3, "/", host_path:None}`, increment 1) or the
+    /// enumerated host-backed set (increment 2). The single source of truth the
+    /// fs shadows resolve a guest path against (see [`Self::resolve_host_backed`]).
+    pub fs_preopens: Vec<Preopen>,
+    /// Controls whether the `getentropy` and `random_get` shims produce
+    /// deterministic (sealed) or real OS (live-net) entropy. Defaults to
+    /// `Deterministic`; set to `RealOs` for daemon runs that perform live TLS.
+    pub entropy: EntropySource,
+    /// Optional record/replay effect seam for a recording host (causarum).
+    /// `None` on sealed / default runs, so the `__syscall_*` filesystem shims
+    /// behave byte-identically (no per-call allocation, no path lookup). When
+    /// `Some`, each instrumented filesystem handler offers a
+    /// [`HostEffect`](afterburner_core::HostEffect) via
+    /// [`on_host_call`](afterburner_core::HostContext::on_host_call) (a `Some`
+    /// return replays recorded bytes without touching the FS) and reports the
+    /// real op's byte-level result via
+    /// [`record_host_effect`](afterburner_core::HostContext::record_host_effect).
+    /// Set by the [`crate::pyodide_runner`] session/record path, never by the
+    /// sealed run core.
+    pub host_context: Option<Arc<dyn afterburner_core::HostContext>>,
 }
 
 impl EmbedderState {
@@ -428,6 +505,9 @@ impl EmbedderState {
             #[cfg(all(feature = "daemon", unix))]
             daemon_unix: None,
             rw_preopens: Vec::new(),
+            fs_preopens: Vec::new(),
+            entropy: EntropySource::Deterministic,
+            host_context: None,
         }
     }
 
@@ -481,6 +561,9 @@ impl EmbedderState {
             #[cfg(all(feature = "daemon", unix))]
             daemon_unix: None,
             rw_preopens: Vec::new(),
+            fs_preopens: Vec::new(),
+            entropy: EntropySource::Deterministic,
+            host_context: None,
         }
     }
 
@@ -528,6 +611,9 @@ impl EmbedderState {
             #[cfg(all(feature = "daemon", unix))]
             daemon_unix: None,
             rw_preopens: Vec::new(),
+            fs_preopens: Vec::new(),
+            entropy: EntropySource::Deterministic,
+            host_context: None,
         }
     }
 
@@ -540,6 +626,33 @@ impl EmbedderState {
             .as_mut()
             .map(|w| &mut w.ctx)
             .unwrap_or_else(|| unreachable!("WASI accessor reached non-WASI store"))
+    }
+
+    /// Resolve a guest-absolute path to `(host_path, writable)` when it falls
+    /// under a **host-backed** preopen ([`Preopen::host_path`] is `Some`), else
+    /// `None`.
+    ///
+    /// This is the single per-fd switch that distinguishes the two capture
+    /// modes for the fs shadows: a `Some` return routes the op to the real host
+    /// filesystem (increment 2); a `None` return keeps it on the in-memory
+    /// [`InMemFs`] (the sealed WAT path, increment 1). Preopens are matched in
+    /// their advertised order (read-only stdlib mounts first, so a nested mount
+    /// like `/pkg/vendor/gem` shadows the broader `/pkg`), reusing the tested
+    /// [`InMemFs::resolve_to_host_path`] prefix/join logic so the host-path
+    /// mapping is single-sourced.
+    pub fn resolve_host_backed(&self, abs_guest: &str) -> Option<(PathBuf, bool)> {
+        for p in &self.fs_preopens {
+            let Some(root) = p.host_path.as_ref() else {
+                continue;
+            };
+            let pair = (root.clone(), p.guest_path.clone());
+            if let Some(host) =
+                InMemFs::resolve_to_host_path(abs_guest, std::slice::from_ref(&pair))
+            {
+                return Some((host, p.writable));
+            }
+        }
+        None
     }
 }
 
@@ -772,6 +885,7 @@ impl EmbedderVm {
                 wasi_stdout: Vec::new(),
                 fs: InMemFs::new(),
                 rw_preopens: Vec::new(),
+                fs_preopens: Vec::new(),
                 last_invoke_idx: u64::MAX,
                 cxa_thrown_ptr: 0,
                 cxa_throw_count: 0,
@@ -796,6 +910,8 @@ impl EmbedderVm {
                 daemon_dgram_py: None,
                 #[cfg(all(feature = "daemon", unix))]
                 daemon_unix: None,
+                entropy: EntropySource::Deterministic,
+                host_context: None,
             }
         } else {
             EmbedderState {
@@ -809,6 +925,7 @@ impl EmbedderVm {
                 wasi_stdout: Vec::new(),
                 fs: InMemFs::new(),
                 rw_preopens: Vec::new(),
+                fs_preopens: Vec::new(),
                 last_invoke_idx: u64::MAX,
                 cxa_thrown_ptr: 0,
                 cxa_throw_count: 0,
@@ -833,6 +950,8 @@ impl EmbedderVm {
                 daemon_dgram_py: None,
                 #[cfg(all(feature = "daemon", unix))]
                 daemon_unix: None,
+                entropy: EntropySource::Deterministic,
+                host_context: None,
             }
         };
 
@@ -918,6 +1037,43 @@ impl EmbedderVm {
         opts: WasiCommandOpts,
         fuel: Option<u64>,
     ) -> Result<EmbedderRunOutput> {
+        self.run_command_impl(module, opts, fuel, None)
+    }
+
+    /// Like [`run_command`][Self::run_command] but threads a recording /
+    /// replaying host ([`HostContext`](afterburner_core::HostContext)) into the
+    /// run. The effect-wrapped preview1 imports (see [`crate::effect_wasi`])
+    /// read it from [`EmbedderState::host_context`] at call time:
+    /// `on_host_call` returning `Some` replays a recorded value, `None` records
+    /// the produced one. Pass `None` for a sealed run (identical to
+    /// [`run_command`][Self::run_command]).
+    ///
+    /// This is the R4 seam: a session reuses one host and one preopen root
+    /// across successive calls, so a later run observes what an earlier one
+    /// recorded.
+    pub fn run_command_with_host(
+        &self,
+        module: &EmbedderModule,
+        opts: WasiCommandOpts,
+        fuel: Option<u64>,
+        host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+    ) -> Result<EmbedderRunOutput> {
+        self.run_command_impl(module, opts, fuel, host_context)
+    }
+
+    /// Shared body of [`run_command`][Self::run_command] and
+    /// [`run_command_with_host`][Self::run_command_with_host]: the one canonical
+    /// WASI-command run path (DRY - the two public entry points differ only in
+    /// whether a recording host is supplied). The host, when present, is placed
+    /// in [`EmbedderState::host_context`] so the effect-wrapped preview1 shims
+    /// can consult it.
+    fn run_command_impl(
+        &self,
+        module: &EmbedderModule,
+        opts: WasiCommandOpts,
+        fuel: Option<u64>,
+        host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+    ) -> Result<EmbedderRunOutput> {
         if !module.wasi {
             return Err(AfterburnerError::Engine(
                 "run_command requires a module compiled with wasi: true".into(),
@@ -943,27 +1099,93 @@ impl EmbedderVm {
             builder.env(key, val);
         }
 
-        for (host_path, guest_path) in &opts.preopens_ro {
-            builder
-                .preopened_dir(host_path, guest_path, DirPerms::READ, FilePerms::READ)
-                .map_err(|e| {
-                    AfterburnerError::Engine(format!(
-                        "embedder preopen-ro {}: {e}",
-                        host_path.display()
-                    ))
-                })?;
+        // Capture-mode selection. A recording host with at least one preopen is
+        // the **host-backed** capture (increment 2): the shadowed `fd_prestat_*`
+        // owns the preopen fd table over the real host directories, so the stock
+        // wasmtime-wasi preopens are NOT added to the ctx (they would collide on
+        // fds 3, 4, 5 with the owned table). Every other run (sealed, or the WAT
+        // conformance path which passes a host but no preopens) keeps the stock
+        // preopen path verbatim, so it stays byte-identical to before.
+        let host_backed =
+            host_context.is_some() && !(opts.preopens_ro.is_empty() && opts.preopens_rw.is_empty());
+
+        if !host_backed {
+            for (host_path, guest_path) in &opts.preopens_ro {
+                builder
+                    .preopened_dir(host_path, guest_path, DirPerms::READ, FilePerms::READ)
+                    .map_err(|e| {
+                        AfterburnerError::Engine(format!(
+                            "embedder preopen-ro {}: {e}",
+                            host_path.display()
+                        ))
+                    })?;
+            }
+
+            for (host_path, guest_path) in &opts.preopens_rw {
+                builder
+                    .preopened_dir(host_path, guest_path, DirPerms::all(), FilePerms::all())
+                    .map_err(|e| {
+                        AfterburnerError::Engine(format!(
+                            "embedder preopen-rw {}: {e}",
+                            host_path.display()
+                        ))
+                    })?;
+            }
         }
 
-        for (host_path, guest_path) in &opts.preopens_rw {
-            builder
-                .preopened_dir(host_path, guest_path, DirPerms::all(), FilePerms::all())
-                .map_err(|e| {
-                    AfterburnerError::Engine(format!(
-                        "embedder preopen-rw {}: {e}",
-                        host_path.display()
-                    ))
-                })?;
-        }
+        // Seed the owned fd table + preopen advertisement for the fs capture
+        // variant. Three cases (see [`EmbedderState::fs_preopens`]):
+        //   * no host              -> empty (stock wasmtime-wasi fs path; sealed).
+        //   * host, no preopens    -> in-memory root `/` at fd 3 (increment 1).
+        //   * host, with preopens  -> host-backed set, fds 3.. in advertised
+        //                             order (read-only first, read-write last).
+        let (fs, fs_preopens, rw_preopens) = if !host_backed {
+            if host_context.is_some() {
+                (
+                    InMemFs::new_with_root_preopen(),
+                    vec![Preopen {
+                        fd: 3,
+                        guest_path: "/".to_owned(),
+                        host_path: None,
+                        writable: true,
+                    }],
+                    Vec::new(),
+                )
+            } else {
+                (InMemFs::new(), Vec::new(), Vec::new())
+            }
+        } else {
+            let mut fs_preopens = Vec::new();
+            let mut rw_preopens: Vec<(PathBuf, String)> = Vec::new();
+            let mut guest_paths: Vec<String> = Vec::new();
+            let mut fd = 3i32;
+            for (host_path, guest_path) in &opts.preopens_ro {
+                fs_preopens.push(Preopen {
+                    fd,
+                    guest_path: guest_path.clone(),
+                    host_path: Some(host_path.clone()),
+                    writable: false,
+                });
+                guest_paths.push(guest_path.clone());
+                fd += 1;
+            }
+            for (host_path, guest_path) in &opts.preopens_rw {
+                fs_preopens.push(Preopen {
+                    fd,
+                    guest_path: guest_path.clone(),
+                    host_path: Some(host_path.clone()),
+                    writable: true,
+                });
+                rw_preopens.push((host_path.clone(), guest_path.clone()));
+                guest_paths.push(guest_path.clone());
+                fd += 1;
+            }
+            (
+                InMemFs::new_host_backed(&guest_paths),
+                fs_preopens,
+                rw_preopens,
+            )
+        };
 
         let ctx = builder.build_p1();
         let state = EmbedderState {
@@ -975,8 +1197,14 @@ impl EmbedderVm {
             pyodide_cpp_exception_tag: None,
             pyodide_c_longjmp_tag: None,
             wasi_stdout: Vec::new(),
-            fs: InMemFs::new(),
-            rw_preopens: Vec::new(),
+            // The fs-wired capture variant ([`crate::effect_wasi_fs`]) owns its
+            // own fd table over this `InMemFs`; seeded above per capture mode. A
+            // sealed run (no host) leaves it the empty default the stock
+            // wasmtime-wasi fs path never touches, so the sealed path stays
+            // byte-identical.
+            fs,
+            rw_preopens,
+            fs_preopens,
             last_invoke_idx: u64::MAX,
             cxa_thrown_ptr: 0,
             cxa_throw_count: 0,
@@ -1001,6 +1229,10 @@ impl EmbedderVm {
             daemon_dgram_py: None,
             #[cfg(all(feature = "daemon", unix))]
             daemon_unix: None,
+            entropy: EntropySource::Deterministic,
+            // R4: the per-run recording/replaying host consulted by the
+            // effect-wrapped preview1 shims (see `crate::effect_wasi`).
+            host_context,
         };
 
         let mut store = Store::new(&module.engine, state);
@@ -1025,9 +1257,19 @@ impl EmbedderVm {
         // paths so captures are never lost.
         let call_result = start_fn.call(&mut store, &[], &mut []);
 
-        let stdout = match store.into_data().wasi {
-            Some(w) => w.stdout.contents().to_vec(),
-            None => Vec::new(),
+        // Stdout capture is a single namespace. The fs-wired capture variant
+        // routes fd 1/2 writes into `wasi_stdout`; the stock variant routes them
+        // into the wasmtime-wasi pipe. Prefer `wasi_stdout` when it holds bytes
+        // (the recording path), else read the pipe - one path, no second branch.
+        let data = store.into_data();
+        let pipe_stdout = data
+            .wasi
+            .map(|w| w.stdout.contents().to_vec())
+            .unwrap_or_default();
+        let stdout = if data.wasi_stdout.is_empty() {
+            pipe_stdout
+        } else {
+            data.wasi_stdout
         };
 
         let exit_code = match call_result {

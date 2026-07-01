@@ -238,6 +238,9 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
             }
         };
         let mut total: u32 = 0;
+        // Effect seam: gather file-fd bytes for one Write record only when a
+        // recording host is attached (None -> no copy, byte-identical).
+        let mut fx_recorded: Option<Vec<u8>> = caller.data().host_context.is_some().then(Vec::new);
         for i in 0..iovs_len {
             let base = i * 8;
             let buf_ptr = u32::from_le_bytes(iov_bytes[base..base + 4].try_into().unwrap()) as i32;
@@ -251,6 +254,26 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                 None => return EBADF,
             };
             pyo_trace!("[fd_write] fd={fd} iov[{i}] buf_ptr={buf_ptr:#x} buf_len={buf_len}");
+            // Socket fds (fd >= SOCK_FD_BASE) write to DaemonNet, not FS.
+            #[cfg(feature = "daemon")]
+            if fd >= crate::emscripten_syscall::socket::SOCK_FD_BASE {
+                let Some(net) = caller.data().daemon_net.clone() else {
+                    return EBADF;
+                };
+                let conn_id = caller
+                    .data()
+                    .socket_state
+                    .as_deref()
+                    .and_then(|s| s.conn_fds.get(&fd).copied())
+                    .unwrap_or(crate::emscripten_syscall::socket::EBADF);
+                if conn_id == crate::emscripten_syscall::socket::EBADF {
+                    return EBADF;
+                }
+                let mut err_s = String::new();
+                net.write(conn_id, chunk, &mut err_s);
+                total += buf_len as u32;
+                continue;
+            }
             if fd == 1 || fd == 2 {
                 // Opt-in: mirror guest stdout/stderr to the host so a fatal error
                 // that traps before the runner reads back wasi_stdout is still
@@ -276,7 +299,28 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                     return -n; // WASI error codes are positive
                 }
             }
+            // File-fd write: gather for the effect record (host only, not stdout).
+            if fd != 1
+                && fd != 2
+                && let Some(buf) = fx_recorded.as_mut()
+            {
+                buf.extend_from_slice(&chunk);
+            }
             total += buf_len as u32;
+        }
+        // Effect seam: journal the gathered file bytes as one Write record.
+        if let Some(buf) = fx_recorded
+            && !buf.is_empty()
+        {
+            let abs = caller.data().fs.fd_path(fd).unwrap_or_default().to_owned();
+            crate::emscripten_syscall::FsSeam::record_now(
+                &caller,
+                afterburner_core::FileOp::Write,
+                &abs,
+                buf,
+                Vec::new(),
+                total as i64,
+            );
         }
         pyo_trace!("[fd_write] fd={fd} total_bytes={total}");
         if !write_u32(&mut caller, nwritten_ptr, total) {
@@ -302,6 +346,76 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
         // stdin/stdout/stderr: return EOF (0 bytes).
         if fd < 3 {
             if !write_u32(&mut caller, nread_ptr, 0) {
+                return EBADF;
+            }
+            return 0;
+        }
+        // Socket fds (fd >= SOCK_FD_BASE) read from DaemonNet, not FS.
+        #[cfg(feature = "daemon")]
+        if fd >= crate::emscripten_syscall::socket::SOCK_FD_BASE {
+            let Some(net) = caller.data().daemon_net.clone() else {
+                return EBADF;
+            };
+            let conn_id = caller
+                .data()
+                .socket_state
+                .as_deref()
+                .and_then(|s| s.conn_fds.get(&fd).copied())
+                .unwrap_or(crate::emscripten_syscall::socket::EBADF);
+            if conn_id == crate::emscripten_syscall::socket::EBADF {
+                return EBADF;
+            }
+            let iovs_count = iovs_len as u32 as usize;
+            let iov_bytes = match read_bytes(&caller, iovs_ptr, iovs_count * 8) {
+                Some(b) => b,
+                None => return EBADF,
+            };
+            let cap: usize = (0..iovs_count)
+                .map(|i| {
+                    let b = i * 8;
+                    u32::from_le_bytes(iov_bytes[b + 4..b + 8].try_into().unwrap_or_default())
+                        as usize
+                })
+                .sum();
+            let state = caller.data_mut().socket_state.as_deref_mut().unwrap();
+            let bytes = match crate::emscripten_syscall::socket::blocking::wait_data(
+                &net,
+                conn_id,
+                state,
+                cap.max(1),
+            ) {
+                Err(_) => return EBADF,
+                Ok(b) => b,
+            };
+            if bytes.is_empty() {
+                if !write_u32(&mut caller, nread_ptr, 0) {
+                    return EBADF;
+                }
+                return 0;
+            }
+            let mut remaining = bytes.as_slice();
+            let mut total: u32 = 0;
+            for i in 0..iovs_count {
+                if remaining.is_empty() {
+                    break;
+                }
+                let b = i * 8;
+                let buf_ptr =
+                    u32::from_le_bytes(iov_bytes[b..b + 4].try_into().unwrap_or_default()) as i32;
+                let buf_len =
+                    u32::from_le_bytes(iov_bytes[b + 4..b + 8].try_into().unwrap_or_default())
+                        as usize;
+                if buf_len == 0 {
+                    continue;
+                }
+                let take = remaining.len().min(buf_len);
+                if !write_bytes(&mut caller, buf_ptr, &remaining[..take]) {
+                    return EBADF;
+                }
+                remaining = &remaining[take..];
+                total += take as u32;
+            }
+            if !write_u32(&mut caller, nread_ptr, total) {
                 return EBADF;
             }
             return 0;
@@ -858,14 +972,13 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
     // "Fatal Python error: _Py_HashRandomization_Init: failed to get random
     // numbers to initialize Python".
     //
-    // Determinism is DESIRED here: a sealed engine with a fixed seed produces
-    // byte-identical output across runs, making re-execution exact.
+    // Determinism is DESIRED for sealed runs: a fixed-seed SplitMix64 produces
+    // byte-identical output across re-runs (honesty fence).
     //
-    // Implementation: SplitMix64 with a fixed seed. Each call re-seeds from
-    // the same constant so buf_ptr/buf_len combinations are stable across runs.
-    //
-    // vertexia: fixed seed; upgrade path is a per-store seed in EmbedderState
-    // if callers need distinct entropy per instantiation.
+    // RealOs mode: live-net runs need real cryptographic randomness for TLS.
+    // The Deterministic path is BYTE-IDENTICAL to before; only the RealOs
+    // branch is new. The entropy mode is read (copied) before any mutable
+    // borrow of caller so the borrow checker is satisfied.
     def!("random_get", |mut caller: Caller<'_, EmbedderState>,
                         buf_ptr: i32,
                         buf_len: i32|
@@ -874,23 +987,41 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
         if len == 0 {
             return 0;
         }
-        // SplitMix64 generator with a fixed deterministic seed.
-        // Each call starts from the same seed so output is stable across runs.
-        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
-        let mut buf = Vec::with_capacity(len);
-        while buf.len() < len {
-            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-            let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-            z ^= z >> 31;
-            buf.extend_from_slice(&z.to_le_bytes());
-        }
-        buf.truncate(len);
-        if write_bytes(&mut caller, buf_ptr, &buf) {
-            0
-        } else {
-            1
+        let entropy = caller.data().entropy;
+        match entropy {
+            crate::embedder_vm::EntropySource::Deterministic => {
+                // SplitMix64 generator with a fixed deterministic seed.
+                // Each call starts from the same seed so output is stable across runs.
+                let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+                let mut buf = Vec::with_capacity(len);
+                while buf.len() < len {
+                    state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                    let mut z = state;
+                    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                    z ^= z >> 31;
+                    buf.extend_from_slice(&z.to_le_bytes());
+                }
+                buf.truncate(len);
+                if write_bytes(&mut caller, buf_ptr, &buf) {
+                    0
+                } else {
+                    1
+                }
+            }
+            crate::embedder_vm::EntropySource::RealOs => {
+                // Real OS entropy for live-net TLS. Fail visibly (return 1 = WASI
+                // ERRNO_IO) rather than silently using uninitialized bytes.
+                let mut buf = vec![0u8; len];
+                if getrandom::getrandom(&mut buf).is_err() {
+                    return 1;
+                }
+                if write_bytes(&mut caller, buf_ptr, &buf) {
+                    0
+                } else {
+                    1
+                }
+            }
         }
     });
 

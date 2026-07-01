@@ -62,6 +62,13 @@ pub enum AfterburnerError {
     #[error("host error: {0}")]
     Host(String),
 
+    /// A file-frame ([`crate::frame`]) failed to decode: a bad magic, an
+    /// unsupported version, an unknown kind, a truncated or over-long buffer,
+    /// or a payload hash mismatch. Loud by contract - a malformed frame is
+    /// never read as a silent partial success.
+    #[error("frame decode failed: {0}")]
+    FrameDecode(String),
+
     /// The script requested a capability the active `Manifold` does not
     /// grant (e.g. `fs.readFileSync` with `FsAccess::None`, or an FS
     /// path outside the allowed roots). The inner string names the

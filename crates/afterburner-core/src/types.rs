@@ -208,11 +208,43 @@ impl OutputValue {
 }
 
 /// SHA-256 the given bytes. Shared helper so every engine hashes sources
-/// identically and `ScriptId`s round-trip between backends.
+/// identically and `ScriptId`s round-trip between backends. This is the
+/// **source**-address (a `ScriptId`); the content-address for effect and
+/// output *payloads* is [`content_hash`] (BLAKE3).
 pub fn sha256(bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hasher.finalize().into()
+}
+
+/// BLAKE3 the given bytes: the canonical **content**-address for effect and
+/// output payloads. The frame carrier ([`crate::frame`]) and the effect seam
+/// ([`crate::effect`]) both use this one function, so a value carried as an
+/// `output` and the same bytes seen as a filesystem effect content-address
+/// identically (the record/replay parity crux). Distinct from [`sha256`],
+/// which stays the source-address for a `ScriptId`.
+pub fn content_hash(bytes: &[u8]) -> [u8; 32] {
+    blake3::hash(bytes).into()
+}
+
+/// Result of [`crate::engine::Combustor::run_with_result`] - a full run that
+/// also surfaces the typed return value.
+///
+/// The delta over [`ScriptOutcome`] is the typed `output`: captured
+/// stdout/stderr and the exit code as before, plus the module's return value
+/// as an [`OutputValue`]. `OutputValue::Json(Value::Null)` means "no return
+/// value was surfaced". Verdict / probe outcomes stay causarum-side and are
+/// deliberately not carried here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunResult {
+    /// Everything the run wrote to fd 1, byte-exact.
+    pub stdout: Vec<u8>,
+    /// Everything the run wrote to fd 2, byte-exact.
+    pub stderr: Vec<u8>,
+    /// Node-style exit code (`0` = clean completion).
+    pub exit_code: i32,
+    /// The module's typed return value, or `Json(Null)` when none surfaced.
+    pub output: OutputValue,
 }
 
 #[cfg(test)]

@@ -11,7 +11,8 @@
 //! (`afterburner-adaptive`) composes both.
 
 use crate::error::{AfterburnerError, Result};
-use crate::types::{FuelGauge, OutputValue, ScriptId, ScriptInvocation, ScriptOutcome};
+use crate::host::HostContext;
+use crate::types::{FuelGauge, OutputValue, RunResult, ScriptId, ScriptInvocation, ScriptOutcome};
 use serde_json::Value;
 
 /// The engine contract. Implementations must be `Send + Sync` so a single
@@ -165,6 +166,32 @@ pub trait Combustor: Send + Sync {
         let _ = (source, invocation, limits);
         Err(AfterburnerError::Engine(
             "script mode not supported by this backend".into(),
+        ))
+    }
+
+    /// Script mode with a typed result and a host seam. Same run semantics as
+    /// [`run_script`](Self::run_script), but the result is a
+    /// [`RunResult`] that also carries the module's typed `output`
+    /// ([`OutputValue`]), and `host` receives the effect seam
+    /// ([`HostContext::on_host_call`])
+    /// during the run.
+    ///
+    /// `OutputValue::Json(Value::Null)` in the result means "no return value
+    /// was surfaced" - a plain script-mode run that only wrote stdout.
+    ///
+    /// Default impl errors - substrates wire the real capture path later; a
+    /// backend that has not yet implemented it inherits a clean diagnostic
+    /// rather than a silent empty result (honesty fence).
+    fn run_with_result(
+        &self,
+        source: &[u8],
+        invocation: &ScriptInvocation,
+        limits: &FuelGauge,
+        host: &dyn HostContext,
+    ) -> Result<RunResult> {
+        let _ = (source, invocation, limits, host);
+        Err(AfterburnerError::Engine(
+            "run_with_result not supported by this backend".into(),
         ))
     }
 

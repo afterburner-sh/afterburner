@@ -10,7 +10,7 @@
 //! with no BURN_PYTHON_RUNTIME / BURN_RUBY_RUNTIME), the test LOUD-SKIPs with an
 //! honest explanation rather than failing or silently passing. JS runs always.
 
-use afterburner::{Afterburner, Language, Outcome};
+use afterburner::{Afterburner, Language, Outcome, OutputValue};
 
 // ---- Language::from_extension -----------------------------------------------
 
@@ -46,10 +46,10 @@ fn outcome_from_script_outcome_ok() {
         exit_code: 0,
     };
     let out = Outcome::from(so);
-    assert_eq!(out.stdout, "hello\n");
-    assert_eq!(out.stderr, "");
+    assert_eq!(out.stdout_str(), "hello\n");
+    assert_eq!(out.stderr_str(), "");
     assert!(out.ok);
-    assert!(out.value.is_none());
+    assert_eq!(out.output, OutputValue::Json(serde_json::Value::Null));
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn outcome_from_script_outcome_nonzero_exit() {
     };
     let out = Outcome::from(so);
     assert!(!out.ok);
-    assert_eq!(out.stderr, "boom\n");
+    assert_eq!(out.stderr_str(), "boom\n");
 }
 
 // ---- run_source: JavaScript -------------------------------------------------
@@ -72,11 +72,11 @@ fn run_source_js_hello() {
     let out = ab
         .run_source(Language::Js, "console.log('hello from js')")
         .expect("run_source js");
-    assert!(out.ok, "exit 0; stderr={:?}", out.stderr);
+    assert!(out.ok, "exit 0; stderr={:?}", out.stderr_str());
     assert!(
-        out.stdout.contains("hello from js"),
+        out.stdout_str().contains("hello from js"),
         "stdout must contain greeting: {:?}",
-        out.stdout
+        out.stdout_str()
     );
 }
 
@@ -87,9 +87,9 @@ fn run_source_js_returns_outcome_not_json() {
         .run_source(Language::Js, "console.log(42)")
         .expect("run_source js");
     assert!(out.ok);
-    assert!(out.stdout.contains("42"));
-    // value is None for script-mode runs (no UDF return value)
-    assert!(out.value.is_none());
+    assert!(out.stdout_str().contains("42"));
+    // no return value surfaced for a script-mode run -> Json(Null) sentinel
+    assert_eq!(out.output, OutputValue::Json(serde_json::Value::Null));
 }
 
 #[test]
@@ -111,11 +111,11 @@ fn run_source_ts_strips_types_and_runs() {
     let ab = Afterburner::new().expect("build ab");
     let source = "const msg: string = 'hello ts'; console.log(msg);";
     let out = ab.run_source(Language::Ts, source).expect("run_source ts");
-    assert!(out.ok, "stderr={:?}", out.stderr);
+    assert!(out.ok, "stderr={:?}", out.stderr_str());
     assert!(
-        out.stdout.contains("hello ts"),
+        out.stdout_str().contains("hello ts"),
         "stdout must contain greeting: {:?}",
-        out.stdout
+        out.stdout_str()
     );
 }
 
@@ -184,11 +184,11 @@ fn run_file_detects_js_extension() {
     std::fs::write(&path, "console.log('hi from file')").expect("write");
     let ab = Afterburner::new().expect("build ab");
     let out = ab.run_file(&path).expect("run_file js");
-    assert!(out.ok, "stderr={:?}", out.stderr);
+    assert!(out.ok, "stderr={:?}", out.stderr_str());
     assert!(
-        out.stdout.contains("hi from file"),
+        out.stdout_str().contains("hi from file"),
         "stdout={:?}",
-        out.stdout
+        out.stdout_str()
     );
 }
 
@@ -227,11 +227,11 @@ fn run_source_python_hello_or_skip() {
     let ab = Afterburner::new().expect("build ab");
     match ab.run_source(Language::Python, "print('hello from python')") {
         Ok(out) => {
-            assert!(out.ok, "python must exit 0; stderr={:?}", out.stderr);
+            assert!(out.ok, "python must exit 0; stderr={:?}", out.stderr_str());
             assert!(
-                out.stdout.contains("hello from python"),
+                out.stdout_str().contains("hello from python"),
                 "stdout must contain greeting: {:?}",
-                out.stdout
+                out.stdout_str()
             );
         }
         Err(e) => {
@@ -255,11 +255,11 @@ fn run_source_ruby_hello_or_skip() {
     let ab = Afterburner::new().expect("build ab");
     match ab.run_source(Language::Ruby, "puts 'hello from ruby'") {
         Ok(out) => {
-            assert!(out.ok, "ruby must exit 0; stderr={:?}", out.stderr);
+            assert!(out.ok, "ruby must exit 0; stderr={:?}", out.stderr_str());
             assert!(
-                out.stdout.contains("hello from ruby"),
+                out.stdout_str().contains("hello from ruby"),
                 "stdout must contain greeting: {:?}",
-                out.stdout
+                out.stdout_str()
             );
         }
         Err(e) => {

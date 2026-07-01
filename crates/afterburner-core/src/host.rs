@@ -36,6 +36,21 @@ pub enum HttpMethod {
     Patch,
 }
 
+impl HttpMethod {
+    /// The canonical uppercase method token (`"GET"`, `"POST"`, ...). Used to
+    /// build the canonical HTTP effect target so every substrate spells the
+    /// method identically (see [`crate::effect::http_target`]).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            HttpMethod::Get => "GET",
+            HttpMethod::Post => "POST",
+            HttpMethod::Put => "PUT",
+            HttpMethod::Delete => "DELETE",
+            HttpMethod::Patch => "PATCH",
+        }
+    }
+}
+
 /// Response returned from `HostFunction::HttpRequest`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpResponse {
@@ -99,6 +114,40 @@ pub trait HostContext: Send + Sync {
         Err(crate::error::AfterburnerError::Host(
             "http_request not implemented".into(),
         ))
+    }
+
+    /// The record/serve seam for a side effect the guest is about to perform.
+    ///
+    /// Called by a substrate *before* it executes an effect. The return value
+    /// selects the mode:
+    ///
+    /// - `None` -> **original run**: the substrate executes the real effect,
+    ///   then reports the result back via [`record_host_effect`].
+    /// - `Some(record)` -> **replay**: the substrate substitutes
+    ///   `record.output` and performs **no** real effect.
+    ///
+    /// The default is `None` (always run the real effect), so a minimal host
+    /// or a test needs no override.
+    ///
+    /// [`record_host_effect`]: Self::record_host_effect
+    fn on_host_call(
+        &self,
+        _effect: &crate::effect::HostEffect,
+    ) -> Option<crate::effect::HostEffectRecord> {
+        None
+    }
+
+    /// Append a completed effect to the host's journal, after the substrate
+    /// executed the real effect on an original run. The default drops it -
+    /// afterburner owns the seam, not the journal schema or its persistence
+    /// (causarum owns those); a recording host overrides this.
+    fn record_host_effect(&self, _record: crate::effect::HostEffectRecord) {}
+
+    /// The full effect journal in call order. The handoff point: causarum
+    /// reads the recorded effects here. The default is empty (a
+    /// non-recording host).
+    fn get_effect_log(&self) -> Vec<crate::effect::HostEffectRecord> {
+        Vec::new()
     }
 }
 

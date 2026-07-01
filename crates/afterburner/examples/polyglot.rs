@@ -23,12 +23,12 @@ fn main() -> Result<(), afterburner::AfterburnerError> {
     println!(
         "[js]     ok={} stdout={:?}",
         js_out.ok,
-        js_out.stdout.trim()
+        js_out.stdout_str().trim()
     );
     assert!(
-        js_out.stdout.contains("hello from js"),
+        js_out.stdout_str().contains("hello from js"),
         "js stdout: {:?}",
-        js_out.stdout
+        js_out.stdout_str()
     );
 
     // ---- Python (requires wasm feature + bundled Pyodide runtime) -------------
@@ -40,7 +40,7 @@ fn main() -> Result<(), afterburner::AfterburnerError> {
                 println!(
                     "[python] ok={} stdout={:?}",
                     py_out.ok,
-                    py_out.stdout.trim()
+                    py_out.stdout_str().trim()
                 );
             }
             Err(e) => {
@@ -62,7 +62,7 @@ fn main() -> Result<(), afterburner::AfterburnerError> {
                 println!(
                     "[ruby]   ok={} stdout={:?}",
                     rb_out.ok,
-                    rb_out.stdout.trim()
+                    rb_out.stdout_str().trim()
                 );
             }
             Err(e) => {

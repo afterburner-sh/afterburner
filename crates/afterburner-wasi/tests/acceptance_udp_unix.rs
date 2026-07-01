@@ -88,6 +88,7 @@ print('udp-echo-ok')
         tokio_handle: handle,
         manifold: Manifold::open(),
         rw_preopens: Vec::new(),
+        host_context: None,
     };
     let result = run_python_with_net(&python_source, opts)
         .expect("[acceptance_udp_unix] udp_echo: run_python_with_net failed");
@@ -190,6 +191,7 @@ print('unix-stream-ok')
         tokio_handle: handle.clone(),
         manifold: Manifold::open(),
         rw_preopens: Vec::new(),
+        host_context: None,
     };
     let probe_out = run_python_with_net(probe_source, probe_opts)
         .expect("[acceptance_udp_unix] unix_stream: probe failed");
@@ -205,6 +207,7 @@ print('unix-stream-ok')
         tokio_handle: handle,
         manifold: Manifold::open(),
         rw_preopens: Vec::new(),
+        host_context: None,
     };
     let result = run_python_with_net(&python_source, opts)
         .expect("[acceptance_udp_unix] unix_stream: run_python_with_net failed");

@@ -112,6 +112,12 @@ pub struct SocketState {
     pub unix_stream_bind_paths: HashMap<i32, String>,
     /// Per-fd Unix dgram default remote path (set by connect() on AF_UNIX SOCK_DGRAM).
     pub unix_dgram_connected: HashMap<i32, String>,
+    /// Pending TLS SNI: maps (resolved_ip, port) -> original hostname.
+    ///
+    /// Populated by `getaddrinfo` when it resolves a hostname. Consumed by
+    /// `__syscall_connect` to initiate a host-side TLS handshake when the
+    /// connection is to port 443, forwarding the original hostname as the SNI.
+    pub pending_tls_sni: HashMap<(String, u16), String>,
 }
 
 impl SocketState {
@@ -128,6 +134,7 @@ impl SocketState {
             udp_connected: HashMap::new(),
             unix_stream_bind_paths: HashMap::new(),
             unix_dgram_connected: HashMap::new(),
+            pending_tls_sni: HashMap::new(),
         })
     }
 

@@ -41,6 +41,11 @@ pub mod daemon_tls;
 #[cfg(all(feature = "daemon", unix))]
 pub mod daemon_unix;
 pub mod daemon_workers;
+pub mod effect_seam;
+pub mod effect_wasi;
+pub mod effect_wasi_abi;
+pub mod effect_wasi_fs;
+pub mod effect_wasi_fs_ext;
 pub mod embedder_vm;
 pub mod emscripten_abi;
 pub mod emscripten_dylink;
@@ -78,8 +83,10 @@ pub mod ruby_bundle;
 #[cfg(feature = "embed-ruby")]
 pub mod ruby_embed;
 pub mod ruby_runner;
+pub mod session;
 pub mod test_support;
 pub mod wasi_sdk_bundle;
+pub mod wasi_session;
 pub mod wasm_engine;
 pub mod wasm_loader;
 

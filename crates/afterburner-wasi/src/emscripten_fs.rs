@@ -277,6 +277,37 @@ impl InMemFs {
         }
     }
 
+    /// Create a host-backed filesystem whose preopened directories occupy fds
+    /// 3, 4, 5, ... in the order of `preopen_guest_paths`.
+    ///
+    /// Used by the WASI-command host-backed capture mode: each preopen's guest
+    /// path is seeded as a live entry in the fd table (starting at fd 3) so
+    /// `fd_path` resolves a `dirfd` base and `fd_prestat_dir_name` finds the
+    /// name, while the actual bytes come from the real host filesystem via the
+    /// `*_host` passthrough ops (the host path lives in the caller's preopen
+    /// table, not here). No in-memory nodes are created for the preopen roots;
+    /// only the always-present root `/` node exists so `open`/`mkdir_p` on an
+    /// in-memory placeholder (the replay path) still works.
+    pub fn new_host_backed(preopen_guest_paths: &[String]) -> Self {
+        let mut nodes = HashMap::new();
+        nodes.insert("/".to_owned(), FsNode::Dir);
+        // fds 0/1/2 reserved; preopens fill 3.. contiguously in the given order.
+        let mut fds = vec![None, None, None];
+        for gp in preopen_guest_paths {
+            fds.push(Some(FdEntry {
+                path: gp.clone(),
+                offset: 0,
+                dir_cursor: 0,
+            }));
+        }
+        Self {
+            nodes,
+            fds,
+            host_fds: HashMap::new(),
+            next_ino: 1,
+        }
+    }
+
     /// Return the path and name of the preopened directory at `fd`, or `None`
     /// if the fd is not a preopened directory (for `fd_prestat_get`).
     ///
@@ -1133,6 +1164,22 @@ impl InMemFs {
             Err(e) => io_err_to_errno(&e),
         }
     }
+}
+
+/// Read host metadata for a path into the fields a wasip1 `filestat` needs:
+/// `(ino, filetype, size)` where `filetype` is the wasip1 encoding
+/// (3 = directory, 4 = regular file). Returns `None` (the caller maps to the
+/// host errno) when the path cannot be stat'd. The real host inode is used so
+/// the identity is stable across `fd_filestat_get` / `path_filestat_get` on the
+/// same file within a record run.
+pub(crate) fn host_node_info(host_path: &Path) -> Option<(u64, u8, u64)> {
+    let meta = std::fs::metadata(host_path).ok()?;
+    let (filetype, size) = if meta.is_dir() {
+        (3u8, 0u64)
+    } else {
+        (4u8, meta.len())
+    };
+    Some((inode_of(&meta), filetype, size))
 }
 
 // ---- host I/O error mapping ------------------------------------------------

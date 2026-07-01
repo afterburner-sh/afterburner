@@ -156,6 +156,7 @@ server.serve_forever()
             tokio_handle: handle,
             manifold: Manifold::open(),
             rw_preopens: Vec::new(),
+            host_context: None,
         };
         let _ = run_python_with_net(&source_clone, opts);
     });

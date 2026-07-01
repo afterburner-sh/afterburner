@@ -539,6 +539,7 @@ pub(crate) fn wire_mechanical_env_funcs(
                          _r: i32|
      -> i32 { 8 }); // EAI_FAIL (no network in sealed mode)
 
+    #[cfg(not(feature = "daemon"))]
     def!("getnameinfo", |_: Caller<'_, EmbedderState>,
                          _sa: i32,
                          _sl: i32,
@@ -547,7 +548,10 @@ pub(crate) fn wire_mechanical_env_funcs(
                          _sv: i32,
                          _svl: i32,
                          _f: i32|
-     -> i32 { 1 }); // EAI_NONAME - not needed for outbound client use
+     -> i32 { 1 }); // EAI_NONAME - not needed for outbound sealed use
+
+    #[cfg(feature = "daemon")]
+    wire_getnameinfo(linker)?;
 
     def!("getprotobyname", |_: Caller<'_, EmbedderState>,
                             _name: i32|
@@ -573,11 +577,13 @@ pub(crate) fn wire_mechanical_env_funcs(
             // so caller.get_export("memory") returns None. Use the pyodide_memory
             // handle set in EmbedderState by wire_env_memory_and_table_in_store.
             //
-            // Deterministic fill (0xAB) in sealed mode - determinism is desired
-            // so re-execution produces byte-identical results.
+            // Deterministic fill (0xAB): sealed runs; the fixed fill makes two
+            // re-executions of the same source byte-identical (honesty fence).
             //
-            // vertexia: fixed fill; upgrade path is a seeded PRNG in EmbedderState
-            // if callers need distinct entropy per instantiation.
+            // RealOs: live-net runs where TLS needs real cryptographic randomness.
+            // The sealed path is BYTE-IDENTICAL to before; only the RealOs branch
+            // is new. Both Copy fields are read before the mutable memory borrow.
+            let entropy = caller.data().entropy;
             let Some(memory) = caller.data().pyodide_memory else {
                 return -1;
             };
@@ -585,7 +591,21 @@ pub(crate) fn wire_mechanical_env_funcs(
             let len = length as u32 as usize;
             let mem = memory.data_mut(&mut caller);
             if start.checked_add(len).is_some_and(|e| e <= mem.len()) {
-                mem[start..start + len].fill(0xAB);
+                match entropy {
+                    crate::embedder_vm::EntropySource::Deterministic => {
+                        mem[start..start + len].fill(0xAB);
+                    }
+                    crate::embedder_vm::EntropySource::RealOs => {
+                        // getrandom fills the slice from the OS CSPRNG.
+                        // On error return -1 so TLS fails visibly rather than
+                        // silently proceeding with uninitialized bytes.
+                        let mut tmp = vec![0u8; len];
+                        if getrandom::getrandom(&mut tmp).is_err() {
+                            return -1;
+                        }
+                        mem[start..start + len].copy_from_slice(&tmp);
+                    }
+                }
                 0
             } else {
                 -1
@@ -1058,6 +1078,137 @@ pub fn wire_pyodide028_env_stubs(
             .map_err(|e| AfterburnerError::Engine(format!("__hiwire_deduplicate_new: {e}")))?;
     }
 
+    // ---- getaddrinfo / getnameinfo / freeaddrinfo ----------------------------
+    //
+    // These are wasm imports in Pyodide 0.28.3 (confirmed from the import
+    // section). The mechanical-env-funcs path handles them for other builds;
+    // for the 028 exnref path they are wired here instead.
+    //
+    // In daemon mode, `wire_getaddrinfo` resolves hostnames via the host DNS
+    // stack and `wire_getnameinfo` converts a sockaddr_in to a dotted-quad
+    // string (NI_NUMERICHOST), which CPython's `makeipaddr` needs to build
+    // the Python address tuple returned by `socket.getaddrinfo`.
+    //
+    // In sealed (non-daemon) mode, getaddrinfo returns EAI_FAIL so Python
+    // raises `socket.gaierror` and network code fails fast with a clear error.
+    #[cfg(feature = "daemon")]
+    wire_getaddrinfo(linker)?;
+    #[cfg(feature = "daemon")]
+    wire_getnameinfo(linker)?;
+    #[cfg(not(feature = "daemon"))]
+    def!("getaddrinfo", |_: Caller<'_, EmbedderState>,
+                         _n: i32,
+                         _s: i32,
+                         _h: i32,
+                         _r: i32|
+     -> i32 { 8 }); // EAI_FAIL - no network in sealed mode
+    #[cfg(not(feature = "daemon"))]
+    def!("getnameinfo", |_: Caller<'_, EmbedderState>,
+                         _sa: i32,
+                         _sl: i32,
+                         _h: i32,
+                         _hl: i32,
+                         _sv: i32,
+                         _svl: i32,
+                         _f: i32|
+     -> i32 { 1 }); // EAI_NONAME
+    def!("freeaddrinfo", |_: Caller<'_, EmbedderState>,
+                          _ai: i32|
+     -> i32 {
+        // No-op: addrinfo lives in the wasm scratch page, no wasm-heap alloc.
+        0
+    });
+
+    Ok(())
+}
+
+/// Wire `getnameinfo` for the daemon build.
+///
+/// CPython's `socketmodule.c` `makeipaddr` calls `getnameinfo` with
+/// `NI_NUMERICHOST` to convert a resolved `sockaddr_in` back to a dotted-quad
+/// string. Without a working implementation, every `getaddrinfo` result entry
+/// is silently dropped and Python sees an empty address list.
+///
+/// Only the IPv4 + numeric-host path is needed for outbound HTTPS client use.
+#[cfg(feature = "daemon")]
+fn wire_getnameinfo(linker: &mut Linker<EmbedderState>) -> Result<()> {
+    linker
+        .func_wrap(
+            "env",
+            "getnameinfo",
+            |mut caller: Caller<'_, EmbedderState>,
+             sa: i32,
+             _sl: i32,
+             host: i32,
+             hostlen: i32,
+             serv: i32,
+             servlen: i32,
+             _flags: i32|
+             -> i32 {
+                const EAI_FAMILY: i32 = 7;
+                const EAI_OVERFLOW: i32 = 14;
+                let mem_handle = match caller.data().pyodide_memory {
+                    Some(m) => m,
+                    None => return EAI_FAMILY,
+                };
+                // Read sa_family (uint16 LE) and sin_addr (4 bytes at offset 4).
+                let (family, ip_bytes) = {
+                    let mem = mem_handle.data(&caller);
+                    let sa_ptr = sa as u32 as usize;
+                    if sa_ptr + 8 > mem.len() {
+                        return EAI_FAMILY;
+                    }
+                    let fam = u16::from_le_bytes([mem[sa_ptr], mem[sa_ptr + 1]]);
+                    let ip = [
+                        mem[sa_ptr + 4],
+                        mem[sa_ptr + 5],
+                        mem[sa_ptr + 6],
+                        mem[sa_ptr + 7],
+                    ];
+                    (fam, ip)
+                };
+                // Only AF_INET (2) is supported for now.
+                if family != 2 {
+                    return EAI_FAMILY;
+                }
+                let ip_str = format!(
+                    "{}.{}.{}.{}",
+                    ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]
+                );
+                // Write ip_str + NUL into the host buffer if provided.
+                if host != 0 && hostlen > 0 {
+                    let needed = ip_str.len() + 1;
+                    if needed > hostlen as usize {
+                        return EAI_OVERFLOW;
+                    }
+                    let mem = mem_handle.data_mut(&mut caller);
+                    let h_ptr = host as u32 as usize;
+                    if h_ptr + needed > mem.len() {
+                        return EAI_OVERFLOW;
+                    }
+                    mem[h_ptr..h_ptr + ip_str.len()].copy_from_slice(ip_str.as_bytes());
+                    mem[h_ptr + ip_str.len()] = 0;
+                }
+                // Write port-as-string into serv buffer if provided.
+                if serv != 0 && servlen > 0 {
+                    let mem_r = mem_handle.data(&caller);
+                    let sa_ptr = sa as u32 as usize;
+                    let port = u16::from_be_bytes([mem_r[sa_ptr + 2], mem_r[sa_ptr + 3]]);
+                    let port_str = format!("{port}");
+                    let needed = port_str.len() + 1;
+                    if needed <= servlen as usize {
+                        let mem = mem_handle.data_mut(&mut caller);
+                        let s_ptr = serv as u32 as usize;
+                        if s_ptr + needed <= mem.len() {
+                            mem[s_ptr..s_ptr + port_str.len()].copy_from_slice(port_str.as_bytes());
+                            mem[s_ptr + port_str.len()] = 0;
+                        }
+                    }
+                }
+                0
+            },
+        )
+        .map_err(|e| AfterburnerError::Engine(format!("getnameinfo: {e}")))?;
     Ok(())
 }
 
@@ -1088,7 +1239,7 @@ fn wire_getaddrinfo(linker: &mut Linker<EmbedderState>) -> Result<()> {
             "getaddrinfo",
             |mut caller: Caller<'_, EmbedderState>,
              node: i32,
-             _service: i32,
+             service: i32,
              _hints: i32,
              res: i32|
              -> i32 {
@@ -1101,6 +1252,7 @@ fn wire_getaddrinfo(linker: &mut Linker<EmbedderState>) -> Result<()> {
                     Some(m) => m,
                     None => return EAI_FAIL,
                 };
+                // Read hostname from guest memory.
                 let hostname: String = {
                     let mem = mem_handle.data(&caller);
                     let ptr = node as u32 as usize;
@@ -1116,6 +1268,35 @@ fn wire_getaddrinfo(linker: &mut Linker<EmbedderState>) -> Result<()> {
                 if hostname.is_empty() {
                     return EAI_FAIL;
                 }
+                // Read service port from guest memory. `service` is a pointer to a
+                // C string: a port number like "443" or a service name like "https".
+                // NULL (0) means no port constraint; treat as 0.
+                let port: u16 = if service == 0 {
+                    0
+                } else {
+                    let mem = mem_handle.data(&caller);
+                    let svc_ptr = service as u32 as usize;
+                    let svc_end = mem
+                        .get(svc_ptr..)
+                        .and_then(|s| s.iter().position(|&b| b == 0))
+                        .unwrap_or(0);
+                    let svc_str =
+                        std::str::from_utf8(&mem[svc_ptr..svc_ptr + svc_end]).unwrap_or("");
+                    // Parse as integer first; fall back to well-known service names.
+                    svc_str.parse::<u16>().unwrap_or(match svc_str {
+                        "https" => 443,
+                        "http" => 80,
+                        "ftp" => 21,
+                        "ssh" => 22,
+                        "smtp" => 25,
+                        "pop3" => 110,
+                        "imap" => 143,
+                        "imaps" => 993,
+                        "smtps" => 465,
+                        "ftps" => 990,
+                        _ => 0,
+                    })
+                };
                 let ip = match afterburner_node_compat::dns_host::lookup(&hostname, &manifold) {
                     Ok(ip) => ip,
                     Err(_) => return EAI_FAIL,
@@ -1124,14 +1305,27 @@ fn wire_getaddrinfo(linker: &mut Linker<EmbedderState>) -> Result<()> {
                 if parts.len() != 4 {
                     return EAI_FAIL;
                 }
-                let mem = mem_handle.data_mut(&mut caller);
-                let mem_len = mem.len();
+                // Store (ip, port) -> hostname so __syscall_connect can use the
+                // original hostname as the TLS SNI when connecting to port 443.
+                {
+                    use crate::emscripten_syscall::socket::SocketState;
+                    let state = caller
+                        .data_mut()
+                        .socket_state
+                        .get_or_insert_with(SocketState::new);
+                    state
+                        .pending_tls_sni
+                        .insert((ip.clone(), port), hostname.clone());
+                }
+                // Write addrinfo + sockaddr_in into the last 512 bytes of wasm memory.
+                let mem_len = mem_handle.data(&caller).len();
                 if mem_len < 512 {
                     return EAI_FAIL;
                 }
                 let ai_off = mem_len - 512;
                 let sa_off = ai_off + 32;
                 let sa_ptr = sa_off as i32;
+                let mem = mem_handle.data_mut(&mut caller);
                 // addrinfo:
                 mem[ai_off..ai_off + 4].copy_from_slice(&0i32.to_le_bytes()); // ai_flags
                 mem[ai_off + 4..ai_off + 8].copy_from_slice(&2i32.to_le_bytes()); // ai_family
@@ -1144,7 +1338,8 @@ fn wire_getaddrinfo(linker: &mut Linker<EmbedderState>) -> Result<()> {
                 // sockaddr_in:
                 let family: u16 = 2;
                 mem[sa_off..sa_off + 2].copy_from_slice(&family.to_le_bytes());
-                mem[sa_off + 2..sa_off + 4].copy_from_slice(&0u16.to_be_bytes());
+                // Port in network byte order (big-endian).
+                mem[sa_off + 2..sa_off + 4].copy_from_slice(&port.to_be_bytes());
                 mem[sa_off + 4] = parts[0];
                 mem[sa_off + 5] = parts[1];
                 mem[sa_off + 6] = parts[2];

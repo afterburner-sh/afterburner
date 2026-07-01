@@ -56,6 +56,7 @@ use kovan_channel::flavors::unbounded::{
     Receiver as UnboundedRx, Sender as UnboundedTx, channel as unbounded_channel,
 };
 use kovan_map::HopscotchMap;
+use rustls::pki_types::ServerName;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
@@ -64,6 +65,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 use tokio::task::AbortHandle;
+use tokio_rustls::TlsConnector;
 
 pub type ConnId = i32;
 pub type ServerId = i32;
@@ -177,6 +179,15 @@ enum WriteCmd {
         enable: bool,
         delay_ms: i32,
     },
+    /// Upgrade this TCP connection to TLS with the given SNI hostname.
+    ///
+    /// Sent by `DaemonNet::set_tls` in response to the Python ssl shim
+    /// calling `setsockopt(0xB055, 1, sni_bytes)`. The per-connection
+    /// task in `client_task` intercepts this in `drive_socket` and
+    /// performs the rustls client handshake before the next write.
+    /// After the handshake all data flows as plaintext from the guest's
+    /// perspective; the host encrypts/decrypts transparently.
+    TlsUpgrade(String),
 }
 
 pub struct DaemonNet {
@@ -381,6 +392,23 @@ impl DaemonNet {
         0
     }
 
+    /// Signal the per-connection task to perform a TLS client handshake with
+    /// `sni` as the server name (used for cert verification and SNI extension).
+    ///
+    /// The handshake runs in the tokio task before the next guest write reaches
+    /// the wire. After the handshake the task drives the `TlsStream` instead of
+    /// the raw `TcpStream`; the guest reads and writes plaintext as before.
+    ///
+    /// Returns `0` on success or `errors::E_BAD_ID` when `conn_id` is unknown.
+    pub fn set_tls(&self, conn_id: ConnId, sni: String) -> i32 {
+        let Some(handle) = self.conns.get(&conn_id) else {
+            return errors::E_BAD_ID;
+        };
+        handle.write_tx.send(WriteCmd::TlsUpgrade(sni));
+        handle.wake.notify_one();
+        0
+    }
+
     pub fn listen(self: &Arc<Self>, host: &str, port: u16, last_error: &mut String) -> i32 {
         if host.is_empty() {
             *last_error = "net.listen: empty host".into();
@@ -548,6 +576,21 @@ impl DaemonNet {
 // Per-connection / per-listener tokio tasks.
 // ---------------------------------------------------------------------
 
+/// Outcome of `drive_socket`. The connection either closed normally or the
+/// guest sent a TLS-upgrade signal before any plaintext write reached the wire.
+enum DriveExit {
+    /// Connection closed (EOF, error, or half-close). `Close` event was already sent.
+    Closed,
+    /// Guest issued `setsockopt(0xB055, 1, sni)` to request host-side TLS.
+    /// `drive_socket` returns WITHOUT dispatching a `Close` event; the caller
+    /// must do the TLS handshake and re-drive with the resulting `TlsStream`.
+    TlsUpgrade {
+        stream: TcpStream,
+        sni: String,
+        write_rx: UnboundedRx<WriteCmd>,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn client_task(
     _coord: Arc<DaemonNet>,
@@ -581,7 +624,58 @@ async fn client_task(
         local,
         remote,
     });
-    drive_socket(conn_id, stream, write_rx, wake, pending, evt_tx).await;
+    match drive_socket(
+        conn_id,
+        stream,
+        write_rx,
+        wake.clone(),
+        Arc::clone(&pending),
+        evt_tx.clone(),
+    )
+    .await
+    {
+        DriveExit::Closed => {}
+        DriveExit::TlsUpgrade {
+            stream: tcp,
+            sni,
+            write_rx: rx,
+        } => {
+            // Build a cert-validating TLS client config (webpki roots, no client auth).
+            let cfg = crate::daemon_tls::build_default_client_config();
+            let connector = TlsConnector::from(cfg);
+            let server_name = match ServerName::try_from(sni.as_str()).map(|n| n.to_owned()) {
+                Ok(n) => n,
+                Err(e) => {
+                    evt_tx.send(NetEvent::Error {
+                        conn_id,
+                        message: format!("tls sni invalid: {e}"),
+                        code: "EINVAL".into(),
+                    });
+                    evt_tx.send(NetEvent::Close {
+                        conn_id,
+                        had_error: true,
+                    });
+                    return;
+                }
+            };
+            let tls_stream = match connector.connect(server_name, tcp).await {
+                Ok(s) => s,
+                Err(e) => {
+                    evt_tx.send(NetEvent::Error {
+                        conn_id,
+                        message: format!("tls handshake: {e}"),
+                        code: "ECONNRESET".into(),
+                    });
+                    evt_tx.send(NetEvent::Close {
+                        conn_id,
+                        had_error: true,
+                    });
+                    return;
+                }
+            };
+            drive_tls_socket(conn_id, tls_stream, rx, wake, pending, evt_tx).await;
+        }
+    }
 }
 
 async fn server_task(
@@ -641,6 +735,12 @@ async fn server_task(
 /// Drive both halves of an established TCP socket. Reader posts
 /// `Data`/`End`/`Error`; writer drains the queue and posts `Drain`.
 /// Single task with `tokio::select!` - no polling, no Mutex.
+///
+/// Returns `DriveExit::Closed` on normal termination (the `Close` event is
+/// sent before returning). Returns `DriveExit::TlsUpgrade` when the guest
+/// requests host-side TLS via `WriteCmd::TlsUpgrade`; in that case the
+/// `Close` event is NOT sent - the caller must finish the TLS handshake and
+/// re-drive the connection with `drive_tls_socket`.
 async fn drive_socket(
     conn_id: ConnId,
     stream: TcpStream,
@@ -648,7 +748,7 @@ async fn drive_socket(
     wake: Arc<Notify>,
     pending: Arc<AtomicUsize>,
     evt_tx: BoundedTx<NetEvent>,
-) {
+) -> DriveExit {
     let (mut read_half, mut write_half) = stream.into_split();
     let mut read_buf = vec![0u8; READ_CHUNK];
     let mut had_error = false;
@@ -660,6 +760,18 @@ async fn drive_socket(
         // before we block on the next select.
         while let Some(cmd) = write_rx.try_recv() {
             match cmd {
+                WriteCmd::TlsUpgrade(sni) => {
+                    // Reunite the halves; SAFETY: split from the same TcpStream.
+                    let tcp = read_half
+                        .reunite(write_half)
+                        .expect("reunite: same TcpStream");
+                    // Return WITHOUT sending Close; the caller drives TLS.
+                    return DriveExit::TlsUpgrade {
+                        stream: tcp,
+                        sni,
+                        write_rx,
+                    };
+                }
                 WriteCmd::Bytes(buf) => {
                     let n = buf.len();
                     if let Err(e) = write_half.write_all(&buf).await {
@@ -761,6 +873,95 @@ async fn drive_socket(
             _ = wake.notified() => {
                 // Loop back to drain the write queue.
             }
+        }
+    }
+
+    evt_tx.send(NetEvent::Close { conn_id, had_error });
+    DriveExit::Closed
+}
+
+/// Drive a TLS-upgraded connection. Mirrors `drive_socket` but operates on a
+/// `TlsStream<TcpStream>` returned by the rustls client handshake. Reader
+/// posts `Data`/`End`/`Error`; writer drains `WriteCmd::Bytes`/`End`.
+///
+/// TCP socket options (`SetNoDelay`, `SetKeepAlive`) are not applicable once
+/// TLS is active and are silently ignored. A nested `TlsUpgrade` is also
+/// ignored (can only upgrade once).
+async fn drive_tls_socket(
+    conn_id: ConnId,
+    stream: tokio_rustls::client::TlsStream<TcpStream>,
+    write_rx: UnboundedRx<WriteCmd>,
+    wake: Arc<Notify>,
+    pending: Arc<AtomicUsize>,
+    evt_tx: BoundedTx<NetEvent>,
+) {
+    let (mut read_half, mut write_half) = tokio::io::split(stream);
+    let mut read_buf = vec![0u8; READ_CHUNK];
+    let mut had_error = false;
+    let mut writer_open = true;
+    let mut was_over_hwm = false;
+
+    'outer: loop {
+        while let Some(cmd) = write_rx.try_recv() {
+            match cmd {
+                WriteCmd::Bytes(buf) => {
+                    let n = buf.len();
+                    if let Err(e) = write_half.write_all(&buf).await {
+                        evt_tx.send(NetEvent::Error {
+                            conn_id,
+                            message: e.to_string(),
+                            code: io_error_code(&e),
+                        });
+                        had_error = true;
+                        break 'outer;
+                    }
+                    let prev = pending.fetch_sub(n, Ordering::AcqRel);
+                    let now = prev.saturating_sub(n);
+                    if was_over_hwm && now < WRITE_HWM {
+                        evt_tx.send(NetEvent::Drain { conn_id });
+                        was_over_hwm = false;
+                    } else if !was_over_hwm && now >= WRITE_HWM {
+                        was_over_hwm = true;
+                    }
+                }
+                WriteCmd::End => {
+                    let _ = write_half.shutdown().await;
+                    writer_open = false;
+                }
+                // Socket options are not applicable on a TLS stream; skip.
+                WriteCmd::SetNoDelay(_) | WriteCmd::SetKeepAlive { .. } => {}
+                // Already TLS; ignore nested upgrade request.
+                WriteCmd::TlsUpgrade(_) => {}
+            }
+        }
+
+        if !writer_open && pending.load(Ordering::Acquire) == 0 {
+            // Half-closed and queue drained.
+        }
+
+        tokio::select! {
+            res = read_half.read(&mut read_buf) => {
+                match res {
+                    Ok(0) => {
+                        evt_tx.send(NetEvent::End { conn_id });
+                        break 'outer;
+                    }
+                    Ok(n) => {
+                        let payload_b64 = base64_encode(&read_buf[..n]);
+                        evt_tx.send(NetEvent::Data { conn_id, payload_b64 });
+                    }
+                    Err(e) => {
+                        evt_tx.send(NetEvent::Error {
+                            conn_id,
+                            message: e.to_string(),
+                            code: io_error_code(&e),
+                        });
+                        had_error = true;
+                        break 'outer;
+                    }
+                }
+            }
+            _ = wake.notified() => {}
         }
     }
 
