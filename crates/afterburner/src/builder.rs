@@ -524,7 +524,7 @@ impl Afterburner {
     /// let ab = Afterburner::new()?;
     ///
     /// let js_out = ab.run_source(Language::Js, "console.log('hello js')")?;
-    /// assert!(js_out.stdout.contains("hello js"));
+    /// assert!(js_out.stdout_str().contains("hello js"));
     /// # Ok::<_, afterburner::AfterburnerError>(())
     /// ```
     pub fn run_source(&self, lang: crate::Language, source: &str) -> Result<crate::Outcome> {
