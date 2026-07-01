@@ -37,11 +37,13 @@ install dependencies, build) persists from one run to the next.
 
 ### Filesystem capture for the compiled languages
 
-The WebAssembly runtime for Ruby, Rust, Go, C, and C++ gains an afterburner-owned
-filesystem layer that records each file operation as an effect through its own
-wasip1 file-descriptor table. This first increment ships the capture mechanism,
-proven end to end over binary data; broader coverage of the full filesystem
-surface and each language runtime continues in later releases.
+The WebAssembly runtime for the compiled languages (Ruby, Rust, Go, C, C++) gains
+an afterburner-owned filesystem layer that records each file operation as an
+effect through its own wasip1 file-descriptor table. A real Ruby program's file
+reads and writes are captured end to end over binary data, with a record-and-replay
+seam that reproduces a recorded read without touching the disk. Per-language
+coverage for Rust, Go, and C, and the remaining filesystem surface, continue in
+later releases.
 
 ### Multimodal, binary-safe throughout
 
