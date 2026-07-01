@@ -3,6 +3,59 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.2.4] - 2026-07-01
+
+The recording release. afterburner gains three runtime capabilities for capturing
+and reproducing what a program does, adds real HTTPS for Python, and stays
+binary-safe from end to end.
+
+### Python over HTTPS
+
+Python programs make real HTTPS requests out of the box. `urllib` and `requests`
+reach live endpoints with zero configuration and no custom runtime. TLS is
+terminated on the host (the host validates the server certificate and encrypts
+the connection), so the guest sees plaintext and needs no certificate store or
+OpenSSL build.
+
+### Effect recording and replay
+
+afterburner records every host-mediated effect a program performs: filesystem
+reads and writes, network calls, environment reads, and child processes, each
+captured at the runtime boundary with its input, its output, and a content hash.
+The same recording replays. On a replay run afterburner serves the recorded
+result instead of performing the real effect, so the run reproduces
+deterministically without touching the network or the disk. The seam works
+across all eight languages.
+
+### Structured results and session filesystems
+
+A run can return a structured result carrying stdout, stderr, the exit code, and
+the program's typed return value together, all binary-safe so images, audio, and
+other non-text output survive byte for byte. A session keeps one filesystem
+across multiple runs, so a multi-step workflow (create a directory, write files,
+install dependencies, build) persists from one run to the next.
+
+### Filesystem capture for the compiled languages
+
+The WebAssembly runtime for Ruby, Rust, Go, C, and C++ gains an afterburner-owned
+filesystem layer that records each file operation as an effect through its own
+wasip1 file-descriptor table. This first increment ships the capture mechanism,
+proven end to end over binary data; broader coverage of the full filesystem
+surface and each language runtime continues in later releases.
+
+### Multimodal, binary-safe throughout
+
+Every recorded payload, structured result, and captured file carries raw bytes
+and never assumes text, so binary and multimodal data (images, audio, video)
+round-trips exactly.
+
+## [0.2.3] - 2026-06-29
+
+Outbound HTTP for the compiled languages. Programs written in Rust, Go, C, C++,
+and Ruby and compiled to WebAssembly now make HTTP and HTTPS requests through the
+host, the same host-mediated networking that JavaScript and Python already had.
+No raw sockets are exposed to the guest.
+
 ## [0.2.2] - 2026-06-27
 
 Windows build fix. The emscripten filesystem shim now uses cross-platform
