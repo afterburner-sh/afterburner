@@ -43,6 +43,8 @@ pub mod daemon_unix;
 pub mod daemon_workers;
 pub mod effect_seam;
 pub mod effect_wasi;
+pub mod effect_wasi_abi;
+pub mod effect_wasi_fs;
 pub mod embedder_vm;
 pub mod emscripten_abi;
 pub mod emscripten_dylink;

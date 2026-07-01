@@ -59,48 +59,12 @@
 //! source yields byte-identical clock/random reads, so record and replay agree.
 
 use afterburner_core::{EffectDetail, EffectKind, HostEffect, Result};
-use wasmtime::{Caller, Extern};
+use wasmtime::Caller;
 
 use crate::effect_seam::{self, Seamed};
+use crate::effect_wasi_abi::{ERRNO_FAULT, ERRNO_INVAL, ERRNO_SUCCESS, write_bytes};
 use crate::embedder_vm::{EmbedderLinker, EmbedderState};
 use crate::emscripten_abi::VIRTUAL_EPOCH_NS;
-
-// ---- WASI errno constants (wasi_snapshot_preview1 values, positive) ---------
-
-/// WASI errno: success.
-const ERRNO_SUCCESS: i32 = 0;
-/// WASI errno: bad address (a guest pointer that does not map into memory).
-const ERRNO_FAULT: i32 = 21;
-/// WASI errno: invalid argument (e.g. a recorded payload too short to satisfy
-/// the request).
-const ERRNO_INVAL: i32 = 28;
-
-// ---- guest-memory write helper ----------------------------------------------
-
-/// Write `bytes` into the guest's exported linear memory at `ptr`
-/// (u32 address space). Returns `false` when the module exports no `memory`
-/// or the range is out of bounds.
-///
-/// WASI command modules **export** their memory as `"memory"` (unlike the
-/// Emscripten modules that import it as `env.memory`), so this resolves it via
-/// [`Caller::get_export`] rather than [`EmbedderState`]'s stored handle.
-fn write_bytes(caller: &mut Caller<'_, EmbedderState>, ptr: i32, bytes: &[u8]) -> bool {
-    let mem = match caller.get_export("memory") {
-        Some(Extern::Memory(m)) => m,
-        _ => return false,
-    };
-    let data = mem.data_mut(&mut *caller);
-    let start = ptr as u32 as usize;
-    let end = match start.checked_add(bytes.len()) {
-        Some(e) => e,
-        None => return false,
-    };
-    if end > data.len() {
-        return false;
-    }
-    data[start..end].copy_from_slice(bytes);
-    true
-}
 
 // ---- deterministic value sources --------------------------------------------
 

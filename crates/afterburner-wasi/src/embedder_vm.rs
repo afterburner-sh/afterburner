@@ -1069,7 +1069,16 @@ impl EmbedderVm {
             pyodide_cpp_exception_tag: None,
             pyodide_c_longjmp_tag: None,
             wasi_stdout: Vec::new(),
-            fs: InMemFs::new(),
+            // The fs-wired capture variant ([`crate::effect_wasi_fs`]) owns its
+            // own fd table over this `InMemFs`; a recording run seeds it with the
+            // preopen root `/` at fd 3. A sealed run (no host) leaves it the empty
+            // default the stock wasmtime-wasi fs path never touches, so the sealed
+            // path stays byte-identical.
+            fs: if host_context.is_some() {
+                InMemFs::new_with_root_preopen()
+            } else {
+                InMemFs::new()
+            },
             rw_preopens: Vec::new(),
             last_invoke_idx: u64::MAX,
             cxa_thrown_ptr: 0,
@@ -1123,9 +1132,19 @@ impl EmbedderVm {
         // paths so captures are never lost.
         let call_result = start_fn.call(&mut store, &[], &mut []);
 
-        let stdout = match store.into_data().wasi {
-            Some(w) => w.stdout.contents().to_vec(),
-            None => Vec::new(),
+        // Stdout capture is a single namespace. The fs-wired capture variant
+        // routes fd 1/2 writes into `wasi_stdout`; the stock variant routes them
+        // into the wasmtime-wasi pipe. Prefer `wasi_stdout` when it holds bytes
+        // (the recording path), else read the pipe - one path, no second branch.
+        let data = store.into_data();
+        let pipe_stdout = data
+            .wasi
+            .map(|w| w.stdout.contents().to_vec())
+            .unwrap_or_default();
+        let stdout = if data.wasi_stdout.is_empty() {
+            pipe_stdout
+        } else {
+            data.wasi_stdout
         };
 
         let exit_code = match call_result {
