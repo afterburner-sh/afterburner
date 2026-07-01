@@ -173,6 +173,7 @@ fn live_https_get_returns_200() {
         tokio_handle: tokio_rt.handle().clone(),
         manifold: Manifold::open(),
         rw_preopens: Vec::new(),
+        host_context: None,
     };
 
     // urllib.request is stdlib; it uses Python's ssl module which calls getentropy

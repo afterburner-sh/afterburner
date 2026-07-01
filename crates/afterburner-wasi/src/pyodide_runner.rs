@@ -21,7 +21,10 @@
 
 use std::path::{Path, PathBuf};
 
-use afterburner_core::{AfterburnerError, Result};
+use afterburner_core::{
+    AfterburnerError, Language, OutputTag, OutputValue, Result, RunResult, Session,
+    decode_output_value, encode_frame,
+};
 use wasmtime::{
     FuncType, Global, GlobalType, Instance, Linker, Module, Mutability, Store, Tag, TagType, Val,
     ValType,
@@ -318,11 +321,26 @@ pub struct PyodideBootOutput {
 }
 
 /// Output from a [`run_pyodide_source`] call.
+///
+/// `stdout` / `stderr` are byte-exact: the Python process writes them to
+/// separate binary sinks (`/.afb/stdout.bin`, `/.afb/stderr.bin`) in the guest
+/// [`InMemFs`], read back verbatim (a PNG or audio bytes on stdout survive
+/// bit-for-bit; no UTF-8-lossy text redirect). `output` is the program's typed
+/// return value, carried across the guest/host boundary as an `"AFBF"` frame
+/// written to `/.afb/output.frame` (decoded by the crate-private
+/// `captured_output`); it is [`OutputValue::Json`]`(Value::Null)` when the
+/// program surfaced no value.
 pub struct PyodideRunOutput {
-    /// Bytes written to wasi_stdout (stdout of the Python process).
+    /// Bytes the Python process wrote to stdout, byte-exact.
     pub stdout: Vec<u8>,
+    /// Bytes the Python process wrote to stderr, byte-exact. Empty on a run
+    /// that wrote nothing to stderr.
+    pub stderr: Vec<u8>,
     /// Exit code returned by `run_main()` / `pymain_run_python()`.
     pub exit_code: i32,
+    /// The program's typed return value (via `__afb_emit__`), or
+    /// `Json(Null)` when none was surfaced.
+    pub output: OutputValue,
 }
 
 // ---- private boot helper ---------------------------------------------------
@@ -665,6 +683,23 @@ pub fn run_python(python_source: &str) -> Result<PyodideRunOutput> {
     run_pyodide_with(&rt, python_source)
 }
 
+/// Run a `.py` program on the self-contained runtime with a record/replay host
+/// attached (R1 effect capture): the emscripten effect seams record every
+/// host-mediated effect (fs/env/...) into `host_context`, retrievable via its
+/// `get_effect_log`. The sealed [`run_python`] leaves the seams off (the hot
+/// path pays nothing when no host is attached).
+///
+/// # Errors
+///
+/// Returns `Err` when no runtime is available, or when boot / run traps.
+pub fn run_python_with_host(
+    python_source: &str,
+    host_context: std::sync::Arc<dyn afterburner_core::HostContext>,
+) -> Result<PyodideRunOutput> {
+    let rt = resolve_runtime()?;
+    run_pyodide_with_host(&rt, python_source, host_context)
+}
+
 /// Run a `.py` program on the self-contained runtime with host-filesystem
 /// read-write preopens, returning stdout + exit code.
 ///
@@ -758,6 +793,11 @@ pub struct PythonNetOpts {
     /// A Python path under a declared guest prefix is routed to the real
     /// host FS instead of the in-memory FS. Empty = no durable FS access.
     pub rw_preopens: Vec<(std::path::PathBuf, String)>,
+    /// Optional record/replay host. When set, the emscripten effect seams
+    /// journal every host-mediated effect (R1) into it (retrievable via
+    /// `get_effect_log`); on replay it serves recorded results. `None` (the
+    /// default) = no capture, seams stay off.
+    pub host_context: Option<std::sync::Arc<dyn afterburner_core::HostContext>>,
 }
 
 /// Run Python with real OS capabilities: server sockets (N1), real threads via
@@ -791,6 +831,7 @@ pub fn run_python_with_net(python_source: &str, opts: PythonNetOpts) -> Result<P
         &rt,
         python_source,
         &opts.rw_preopens,
+        opts.host_context,
         opts.manifold,
         daemon_net,
         daemon_workers,
@@ -827,7 +868,18 @@ pub struct PyPackage {
 /// Boot a resolved [`PyRuntime`], run `python -c <source>`, return stdout + exit
 /// code. The one canonical run path; the public entry points are thin shims.
 pub fn run_pyodide_with(rt: &PyRuntime, python_source: &str) -> Result<PyodideRunOutput> {
-    run_pyodide_core(rt, python_source, None, &[])
+    run_pyodide_core(rt, python_source, None, &[], None)
+}
+
+/// Boot a resolved [`PyRuntime`] and run `python -c <source>` with a record/replay
+/// host attached so the emscripten effect seams capture host-mediated effects
+/// (R1) into `host_context`. The sealed [`run_pyodide_with`] leaves the seams off.
+pub fn run_pyodide_with_host(
+    rt: &PyRuntime,
+    python_source: &str,
+    host_context: std::sync::Arc<dyn afterburner_core::HostContext>,
+) -> Result<PyodideRunOutput> {
+    run_pyodide_core(rt, python_source, None, &[], Some(host_context))
 }
 
 /// Boot a resolved [`PyRuntime`], run `python -c <source>` with host-filesystem
@@ -846,7 +898,7 @@ pub fn run_pyodide_with_preopens(
     python_source: &str,
     rw_preopens: &[(std::path::PathBuf, String)],
 ) -> Result<PyodideRunOutput> {
-    run_pyodide_core(rt, python_source, None, rw_preopens)
+    run_pyodide_core(rt, python_source, None, rw_preopens, None)
 }
 
 /// Run a Python *package* on a resolved [`PyRuntime`]: mount the package's
@@ -863,7 +915,7 @@ pub fn run_pyodide_package_with(
     entry_source: &str,
     pkg: &PyPackage,
 ) -> Result<PyodideRunOutput> {
-    run_pyodide_core(rt, entry_source, Some(pkg), &[])
+    run_pyodide_core(rt, entry_source, Some(pkg), &[], None)
 }
 
 /// Shared boot + run core for [`run_pyodide_with`], [`run_pyodide_with_preopens`],
@@ -876,6 +928,7 @@ fn run_pyodide_core(
     python_source: &str,
     pkg: Option<&PyPackage>,
     rw_preopens: &[(std::path::PathBuf, String)],
+    host_context: Option<std::sync::Arc<dyn afterburner_core::HostContext>>,
 ) -> Result<PyodideRunOutput> {
     // Collect vendored wheels from the package (if any) so they are mounted into
     // site-packages during boot, before CPython's import machinery is active.
@@ -891,6 +944,10 @@ fn run_pyodide_core(
         crate::pyo_trace!("[run_pyodide_core] setting rw_preopens={rw_preopens:?}");
         store.data_mut().rw_preopens = rw_preopens.to_vec();
     }
+    // Thread the record/replay host into the store so the emscripten effect
+    // seams (FsSeam) capture/serve host-mediated effects (R1). `None` = a sealed
+    // run: the seams stay off and the hot path pays nothing.
+    store.data_mut().host_context = host_context;
 
     // Mount the package's sibling modules into the guest in-memory FS so
     // CPython's import machinery (which reads from this same FS the stdlib and
@@ -921,12 +978,62 @@ fn run_booted_pyodide(
 ) -> Result<PyodideRunOutput> {
     // In Pyodide's native (non-JS) build, `sys.stdout`/`sys.stderr` go through a
     // JS-backed IO layer that emits NOTHING to WASI - so `print()` output never
-    // reaches `wasi_stdout`. Redirect both to a known guest file (line-buffered
-    // so each print flushes) and read it back after the run. This is the only
-    // capture that works for this build; it serves the basic path and numpy/
-    // pandas alike.
-    const STDOUT_REDIRECT: &[u8] =
-        b"import sys as _sys; _f=open('/tmp/pyout.txt','w',buffering=1); _sys.stdout=_f; _sys.stderr=_f\n";
+    // reaches `wasi_stdout`. Redirect each to its OWN BINARY sink in the guest
+    // InMemFs (`/.afb/stdout.bin`, `/.afb/stderr.bin`) opened `wb` with
+    // `buffering=0` (raw, unbuffered): every write lands byte-exact and
+    // immediately in the FS node, so a PNG or audio bytes written to
+    // `sys.stdout.buffer` survive bit-for-bit (the old text `/tmp/pyout.txt`
+    // redirect mangled binary and merged the two streams). `print()` still works
+    // via a `write_through` `TextIOWrapper` that encodes UTF-8 straight into the
+    // raw sink. `__afb_emit__(value)` records the program's typed return; the
+    // appended `OUTPUT_POSTAMBLE` serializes it to `/.afb/output.frame`.
+    const STDOUT_REDIRECT: &[u8] = concat!(
+        "import sys as _sys, io as _io, os as _os, builtins as _b\n",
+        "_os.makedirs('/.afb', exist_ok=True)\n",
+        "_afb_o = open('/.afb/stdout.bin', 'wb', buffering=0)\n",
+        "_afb_e = open('/.afb/stderr.bin', 'wb', buffering=0)\n",
+        "_sys.stdout = _io.TextIOWrapper(_afb_o, encoding='utf-8', write_through=True)\n",
+        "_sys.stderr = _io.TextIOWrapper(_afb_e, encoding='utf-8', errors='backslashreplace', write_through=True)\n",
+        "_afb_out = [False, None]\n",
+        "def __afb_emit__(v):\n",
+        " _afb_out[0]=True; _afb_out[1]=v\n",
+        "_b.__afb_emit__ = __afb_emit__\n",
+    )
+    .as_bytes();
+
+    // Appended AFTER the user program (top level): flush the sinks, and if the
+    // program called `__afb_emit__`, serialize its value to
+    // `/.afb/output.frame` as `[kind_byte] + payload` (kind 1 = raw bytes,
+    // kind 0 = UTF-8 JSON). The host reads this in `captured_output` and lifts
+    // it through afterburner-core's `"AFBF"` frame codec into an `OutputValue`.
+    // Leading `\n` guards against a user source with no trailing newline. If the
+    // program raised, this does not run: the frame is absent (`output = Null`)
+    // but stdout/stderr were already captured (the sinks are unbuffered).
+    const OUTPUT_POSTAMBLE: &[u8] = concat!(
+        "\n",
+        "def __afb_finalize__():\n",
+        " import sys as _s, os as _o, json as _j\n",
+        " try:\n",
+        "  _s.stdout.flush()\n",
+        " except Exception:\n",
+        "  pass\n",
+        " try:\n",
+        "  _s.stderr.flush()\n",
+        " except Exception:\n",
+        "  pass\n",
+        " if not _afb_out[0]:\n",
+        "  return\n",
+        " v = _afb_out[1]\n",
+        " if isinstance(v, (bytes, bytearray, memoryview)):\n",
+        "  payload = bytes(v); kind = 1\n",
+        " else:\n",
+        "  payload = _j.dumps(v).encode('utf-8'); kind = 0\n",
+        " fd = _o.open('/.afb/output.frame', _o.O_WRONLY | _o.O_CREAT | _o.O_TRUNC, 0o644)\n",
+        " _o.write(fd, bytes([kind]) + payload)\n",
+        " _o.close(fd)\n",
+        "__afb_finalize__()\n",
+    )
+    .as_bytes();
 
     // Build argv in wasm memory: ["python\0", "-c\0", <source>\0] + pointer table.
     // Layout (wasm32 = 4-byte pointers, little-endian):
@@ -950,6 +1057,7 @@ fn run_booted_pyodide(
         source_bytes.extend_from_slice(sys_path_line.as_bytes());
     }
     source_bytes.extend_from_slice(python_source.as_bytes());
+    source_bytes.extend_from_slice(OUTPUT_POSTAMBLE);
     source_bytes.push(0);
     let arg2_ptr = alloc_cstr(&mut *store, &source_bytes)?;
 
@@ -981,7 +1089,9 @@ fn run_booted_pyodide(
     if main_exitcode != 0 {
         return Ok(PyodideRunOutput {
             stdout: captured_stdout(store),
+            stderr: captured_stderr(store),
             exit_code: main_exitcode,
+            output: captured_output(store)?,
         });
     }
 
@@ -1022,7 +1132,9 @@ fn run_booted_pyodide(
 
     Ok(PyodideRunOutput {
         stdout: captured_stdout(store),
+        stderr: captured_stderr(store),
         exit_code,
+        output: captured_output(store)?,
     })
 }
 
@@ -1042,6 +1154,7 @@ fn run_pyodide_with_daemon(
     rt: &PyRuntime,
     python_source: &str,
     rw_preopens: &[(std::path::PathBuf, String)],
+    host_context: Option<std::sync::Arc<dyn afterburner_core::HostContext>>,
     manifold: afterburner_core::Manifold,
     daemon_net: std::sync::Arc<crate::daemon_net::DaemonNet>,
     daemon_workers: std::sync::Arc<crate::daemon_workers::DaemonWorkers>,
@@ -1064,6 +1177,9 @@ fn run_pyodide_with_daemon(
     if !rw_preopens.is_empty() {
         store.data_mut().rw_preopens = rw_preopens.to_vec();
     }
+    // R1 effect capture on the live-net path: attach the record/replay host so
+    // the emscripten seams journal host-mediated effects. `None` = no capture.
+    store.data_mut().host_context = host_context;
     // Live-net runs need real OS entropy so TLS handshakes can generate
     // cryptographically random session keys. Sealed runs keep Deterministic
     // (the default), which produces byte-identical output on re-execution.
@@ -1156,21 +1272,186 @@ fn run_pyodide_with_daemon(
     run_booted_pyodide(&combined_source, None, &mut store, &instance)
 }
 
-/// The program's captured output. Prefers the guest `/tmp/pyout.txt` (where the
-/// injected redirect sends `sys.stdout`/`sys.stderr`); falls back to
-/// `wasi_stdout` if the redirect file is empty (e.g. a future build that writes
-/// straight to WASI).
+/// The program's captured stdout: the BINARY sink `/.afb/stdout.bin` the
+/// injected preamble redirects `sys.stdout` to, read back byte-exact (a PNG or
+/// audio bytes survive bit-for-bit). Falls back to `wasi_stdout` (fd 1/2
+/// C-level writes) when the sink is empty - e.g. a run that trapped before the
+/// preamble installed, or output written straight to WASI.
 fn captured_stdout(store: &Store<EmbedderState>) -> Vec<u8> {
     let from_file = store
         .data()
         .fs
-        .read_file("/tmp/pyout.txt")
+        .read_file("/.afb/stdout.bin")
         .map(<[u8]>::to_vec)
         .unwrap_or_default();
     if from_file.is_empty() {
         store.data().wasi_stdout.clone()
     } else {
         from_file
+    }
+}
+
+/// The program's captured stderr: the BINARY sink `/.afb/stderr.bin` the
+/// injected preamble redirects `sys.stderr` to, byte-exact. Empty when the
+/// program wrote nothing to stderr.
+fn captured_stderr(store: &Store<EmbedderState>) -> Vec<u8> {
+    store
+        .data()
+        .fs
+        .read_file("/.afb/stderr.bin")
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default()
+}
+
+/// The program's typed return value, lifted from `/.afb/output.frame`.
+///
+/// The guest postamble writes `[kind_byte] + payload` there when the program
+/// called `__afb_emit__` (kind `1` = raw bytes, kind `0` = UTF-8 JSON). The
+/// Pyodide stdlib has no BLAKE3, so the guest cannot build a self-verifying
+/// `"AFBF"` frame; instead the host reframes the raw payload through
+/// afterburner-core's one canonical carrier ([`encode_frame`] +
+/// [`decode_output_value`]) - the BLAKE3 stays native, the decode path is the
+/// same one every substrate uses (DRY), and the payload round-trips byte-exact
+/// into an [`OutputValue`]. An absent or empty frame means no value was
+/// surfaced -> `Json(Null)`; a present-but-malformed frame is a loud error
+/// (honesty fence), never a silent empty value.
+fn captured_output(store: &Store<EmbedderState>) -> Result<OutputValue> {
+    match store.data().fs.read_file("/.afb/output.frame") {
+        Some(raw) if !raw.is_empty() => {
+            let kind = OutputTag::from_u8(raw[0]).ok_or_else(|| {
+                AfterburnerError::Engine(format!(
+                    "python output frame at /.afb/output.frame: unknown kind byte {}",
+                    raw[0]
+                ))
+            })?;
+            let frame = encode_frame(kind, &raw[1..]);
+            decode_output_value(&frame)
+        }
+        _ => Ok(OutputValue::Json(serde_json::Value::Null)),
+    }
+}
+
+// ---- persistent session (R4) -----------------------------------------------
+
+/// A persistent Python session over a fixed host-filesystem root.
+///
+/// Implements the substrate-agnostic [`Session`] contract (R4): a stable
+/// rw-preopen root (a real host directory) survives byte-exact across
+/// successive [`run`](Session::run) calls, so a file one run writes under the
+/// session's guest root is visible to the next run and to the `fs_*`
+/// accessors. [`fs_read`](Session::fs_read) / [`fs_write`](Session::fs_write) /
+/// [`fs_exists`](Session::fs_exists) operate directly on that host directory
+/// without entering guest code.
+///
+/// Each [`run`](Session::run) mounts the session root as the guest rw-preopen
+/// via [`run_pyodide_with_preopens`] (the existing durable-FS seam), so a
+/// multimodal artifact (a PNG, an audio buffer) a run writes there reads back
+/// bit-identical on the next run or through `fs_read`.
+///
+// vertexia: each run boots a fresh interpreter mounted on the session root
+// (correctness: state persists via the host dir). Reusing ONE booted CPython
+// across runs for speed is blocked by the interpreter model - `__main_argc_argv`
+// runs `Py_Initialize` then `Py_Main` finalizes CPython, so a second run needs a
+// re-entrant `PyRun_String` export the Pyodide build does not surface; wire that
+// export to reuse the post-ctors `run_booted_pyodide` store across runs.
+pub struct PySession {
+    /// Host directory backing the session; persists across runs.
+    root: PathBuf,
+    /// Guest mount path the root is preopened at (e.g. `/session`).
+    guest_root: String,
+}
+
+impl PySession {
+    /// Open a session backed by host directory `root`, mounted in the guest at
+    /// `/session`. The directory is created if absent.
+    pub fn open(root: impl Into<PathBuf>) -> Result<Self> {
+        Self::open_at(root, "/session")
+    }
+
+    /// Open a session backed by host directory `root`, mounted in the guest at
+    /// `guest_root`. The host directory is created if absent.
+    pub fn open_at(root: impl Into<PathBuf>, guest_root: impl Into<String>) -> Result<Self> {
+        let root = root.into();
+        std::fs::create_dir_all(&root).map_err(|e| {
+            AfterburnerError::Engine(format!("session root {}: {e}", root.display()))
+        })?;
+        Ok(Self {
+            root,
+            guest_root: guest_root.into(),
+        })
+    }
+
+    /// The guest mount path of the session root (e.g. `/session`). Guest code
+    /// reads and writes durable session state under this directory.
+    pub fn guest_root(&self) -> &str {
+        &self.guest_root
+    }
+
+    /// Resolve a session-relative or guest-absolute `path` to its host path,
+    /// rejecting any `..` component so an accessor call cannot escape the root.
+    fn host_path(&self, path: &str) -> Result<PathBuf> {
+        let rel = path
+            .strip_prefix(&self.guest_root)
+            .unwrap_or(path)
+            .trim_start_matches('/');
+        if Path::new(rel)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(AfterburnerError::Engine(format!(
+                "session path {path:?} escapes the root (`..` is not allowed)"
+            )));
+        }
+        Ok(self.root.join(rel))
+    }
+}
+
+impl Session for PySession {
+    fn run(&mut self, code: &[u8], lang: Language) -> Result<RunResult> {
+        if lang != Language::Python {
+            return Err(AfterburnerError::Engine(format!(
+                "PySession runs Python; got {lang:?}"
+            )));
+        }
+        let source = std::str::from_utf8(code)
+            .map_err(|e| AfterburnerError::Engine(format!("python source is not UTF-8: {e}")))?;
+        let rt = resolve_runtime()?;
+        let out = run_pyodide_with_preopens(
+            &rt,
+            source,
+            &[(self.root.clone(), self.guest_root.clone())],
+        )?;
+        Ok(RunResult {
+            stdout: out.stdout,
+            stderr: out.stderr,
+            exit_code: out.exit_code,
+            output: out.output,
+        })
+    }
+
+    fn fs_read(&self, path: &str) -> Result<Vec<u8>> {
+        let hp = self.host_path(path)?;
+        std::fs::read(&hp)
+            .map_err(|e| AfterburnerError::Engine(format!("session fs_read {}: {e}", hp.display())))
+    }
+
+    fn fs_write(&mut self, path: &str, data: &[u8]) -> Result<()> {
+        let hp = self.host_path(path)?;
+        if let Some(parent) = hp.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AfterburnerError::Engine(format!(
+                    "session fs_write mkdir {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+        std::fs::write(&hp, data).map_err(|e| {
+            AfterburnerError::Engine(format!("session fs_write {}: {e}", hp.display()))
+        })
+    }
+
+    fn fs_exists(&self, path: &str) -> bool {
+        self.host_path(path).map(|p| p.exists()).unwrap_or(false)
     }
 }
 
@@ -1514,5 +1795,195 @@ with open('/data/hello.txt', 'r') as f:
             "file not found on host at {:?}",
             host_dir.join("hello.txt")
         );
+    }
+
+    /// R2/R3: a program writing raw non-UTF-8 bytes (NULs, 0xFF, a lone
+    /// continuation byte) to `sys.stdout.buffer` reads back BIT-IDENTICAL - the
+    /// binary sink does not mangle stdout the way the old text redirect did.
+    #[test]
+    #[ignore = "requires the real ~/.burn Python runtime; run explicitly"]
+    fn binary_stdout_roundtrip_bit_identical() {
+        let rt = match resolve_runtime() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip: {e}");
+                return;
+            }
+        };
+        // Every byte 0..=255 plus an explicit invalid-UTF-8 pair (0xC3 0x28).
+        let src = "import sys\n\
+                   sys.stdout.buffer.write(bytes(range(256)))\n\
+                   sys.stdout.buffer.write(b'\\xc3\\x28')\n";
+        let out = run_pyodide_with(&rt, src).expect("run");
+        let mut expected: Vec<u8> = (0..=255u8).collect();
+        expected.extend_from_slice(&[0xc3, 0x28]);
+        assert_eq!(out.exit_code, 0, "stderr={:?}", out.stderr);
+        assert_eq!(
+            out.stdout, expected,
+            "binary stdout must round-trip bit-identical"
+        );
+    }
+
+    /// R1: with a record host attached via [`run_python_with_host`], the
+    /// emscripten effect seam actually FIRES - a guest fs write produces a
+    /// captured `Fs(Write)` `HostEffectRecord` in the host's effect log,
+    /// content-addressed by BLAKE3. Before the `host_context` wiring this seam
+    /// was instrumented but unreachable (dead code): no runner set the store's
+    /// host, so Python surfaced zero effects. This is the parity proof that
+    /// Python captures effects like the JS substrate.
+    #[test]
+    #[ignore = "requires the real ~/.burn Python runtime; run explicitly"]
+    fn host_effect_seam_captures_fs_write() {
+        use afterburner_core::HostContext;
+        if resolve_runtime().is_err() {
+            eprintln!("skip: no python runtime available");
+            return;
+        }
+
+        #[derive(Default)]
+        struct RecordingHost {
+            log: std::sync::Mutex<Vec<afterburner_core::HostEffectRecord>>,
+        }
+        impl afterburner_core::HostContext for RecordingHost {
+            fn record_host_effect(&self, record: afterburner_core::HostEffectRecord) {
+                self.log.lock().unwrap().push(record);
+            }
+            fn get_effect_log(&self) -> Vec<afterburner_core::HostEffectRecord> {
+                self.log.lock().unwrap().clone()
+            }
+        }
+
+        let host = std::sync::Arc::new(RecordingHost::default());
+        let payload = b"multimodal\x00\xff bytes";
+        let out = run_python_with_host(
+            "open('/cap_probe.bin', 'wb').write(b'multimodal\\x00\\xff bytes')",
+            host.clone() as std::sync::Arc<dyn afterburner_core::HostContext>,
+        )
+        .expect("run_python_with_host");
+        assert_eq!(out.exit_code, 0, "stderr={:?}", out.stderr);
+
+        let log = host.get_effect_log();
+        // afterburner's own /.afb capture plumbing must NOT leak in as guest effects.
+        assert!(
+            !log.iter()
+                .any(|r| r.effect.target.starts_with("file::/.afb")),
+            "internal /.afb plumbing leaked into the effect log: {:?}",
+            log.iter()
+                .map(|r| r.effect.target.clone())
+                .collect::<Vec<_>>()
+        );
+        // The seam must have fired for the guest's own write, byte-exact.
+        let write = log
+            .iter()
+            .find(|r| {
+                r.effect.target == "file::/cap_probe.bin"
+                    && matches!(
+                        r.effect.kind,
+                        afterburner_core::EffectKind::Fs(afterburner_core::FileOp::Write)
+                    )
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "effect seam must capture the guest fs write; captured targets = {:?}",
+                    log.iter()
+                        .map(|r| r.effect.target.clone())
+                        .collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            write.effect.input_hash,
+            afterburner_core::content_hash(payload),
+            "captured write content must content-address identically (BLAKE3 parity)"
+        );
+    }
+
+    /// R3: the typed return value carried via `__afb_emit__` -> the AFBF frame
+    /// at `/.afb/output.frame` -> [`PyodideRunOutput::output`]. Raw bytes come
+    /// back as [`OutputValue::Bytes`] byte-exact (audio/image payloads survive);
+    /// a JSON value comes back as [`OutputValue::Json`]; no emit -> `Json(Null)`.
+    #[test]
+    #[ignore = "requires the real ~/.burn Python runtime; run explicitly"]
+    fn typed_output_frame_bytes_and_json() {
+        let rt = match resolve_runtime() {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skip: {e}");
+                return;
+            }
+        };
+
+        let audio: Vec<u8> = (0..=255u8).rev().collect();
+        let bytes_out = run_pyodide_with(&rt, "__afb_emit__(bytes(range(255, -1, -1)))")
+            .expect("run bytes emit");
+        assert_eq!(bytes_out.exit_code, 0, "stderr={:?}", bytes_out.stderr);
+        assert_eq!(
+            bytes_out.output,
+            OutputValue::Bytes(audio),
+            "emitted bytes must survive byte-exact"
+        );
+
+        let json_out =
+            run_pyodide_with(&rt, "__afb_emit__({'k': [1, 2, 3], 's': 'hi'})").expect("run json");
+        assert_eq!(
+            json_out.output,
+            OutputValue::Json(serde_json::json!({"k": [1, 2, 3], "s": "hi"})),
+            "emitted JSON must decode structurally"
+        );
+
+        let none_out = run_pyodide_with(&rt, "print('no emit')").expect("run no emit");
+        assert_eq!(
+            none_out.output,
+            OutputValue::Json(serde_json::Value::Null),
+            "no emit -> Json(Null)"
+        );
+        assert_eq!(none_out.stdout, b"no emit\n");
+    }
+
+    /// R4: a [`PySession`] keeps a durable root across runs. Run 1 writes a
+    /// binary file (all 256 byte values) under the guest root; run 2 reads it
+    /// back and emits it; the host-side `fs_read` sees the same bytes - all
+    /// bit-identical.
+    #[test]
+    #[ignore = "requires the real ~/.burn Python runtime; run explicitly"]
+    fn session_persists_binary_across_runs() {
+        if resolve_runtime().is_err() {
+            eprintln!("skip: no python runtime available");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut sess = PySession::open(tmp.path().to_path_buf()).expect("open session");
+
+        let w = sess
+            .run(
+                b"open('/session/img.bin', 'wb').write(bytes(range(256)))",
+                Language::Python,
+            )
+            .expect("run 1 write");
+        assert_eq!(w.exit_code, 0, "stderr={:?}", w.stderr);
+
+        let r = sess
+            .run(
+                b"__afb_emit__(open('/session/img.bin', 'rb').read())",
+                Language::Python,
+            )
+            .expect("run 2 read");
+        assert_eq!(r.exit_code, 0, "stderr={:?}", r.stderr);
+        let all: Vec<u8> = (0..=255u8).collect();
+        assert_eq!(
+            r.output,
+            OutputValue::Bytes(all.clone()),
+            "run 2 must read back what run 1 wrote"
+        );
+
+        // Host-side accessor sees the same bytes without entering guest code.
+        assert!(sess.fs_exists("/session/img.bin"));
+        assert_eq!(
+            sess.fs_read("/session/img.bin").expect("fs_read"),
+            all,
+            "fs_read must be bit-identical to the guest write"
+        );
+
+        // `..` traversal is rejected at the accessor boundary.
+        assert!(sess.fs_read("/session/../escape").is_err());
     }
 }

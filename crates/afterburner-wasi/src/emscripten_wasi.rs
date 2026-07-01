@@ -238,6 +238,9 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
             }
         };
         let mut total: u32 = 0;
+        // Effect seam: gather file-fd bytes for one Write record only when a
+        // recording host is attached (None -> no copy, byte-identical).
+        let mut fx_recorded: Option<Vec<u8>> = caller.data().host_context.is_some().then(Vec::new);
         for i in 0..iovs_len {
             let base = i * 8;
             let buf_ptr = u32::from_le_bytes(iov_bytes[base..base + 4].try_into().unwrap()) as i32;
@@ -296,7 +299,28 @@ pub(crate) fn wire_wasi_snapshot_preview1(linker: &mut Linker<EmbedderState>) ->
                     return -n; // WASI error codes are positive
                 }
             }
+            // File-fd write: gather for the effect record (host only, not stdout).
+            if fd != 1
+                && fd != 2
+                && let Some(buf) = fx_recorded.as_mut()
+            {
+                buf.extend_from_slice(&chunk);
+            }
             total += buf_len as u32;
+        }
+        // Effect seam: journal the gathered file bytes as one Write record.
+        if let Some(buf) = fx_recorded
+            && !buf.is_empty()
+        {
+            let abs = caller.data().fs.fd_path(fd).unwrap_or_default().to_owned();
+            crate::emscripten_syscall::FsSeam::record_now(
+                &caller,
+                afterburner_core::FileOp::Write,
+                &abs,
+                buf,
+                Vec::new(),
+                total as i64,
+            );
         }
         pyo_trace!("[fd_write] fd={fd} total_bytes={total}");
         if !write_u32(&mut caller, nwritten_ptr, total) {

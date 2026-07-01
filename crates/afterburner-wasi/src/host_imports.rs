@@ -19,8 +19,14 @@
 //! stashed in `HostState::last_error` and read by the plugin via the
 //! `host_last_error` import.
 
+use crate::effect_seam::{self, Seamed};
 use crate::host::{HostState, TimerSlot};
 use afterburner_core::AfterburnerError;
+use afterburner_core::effect::{
+    EffectDetail, EffectKind, EffectStatus, FileOp, HostEffect, env_target, fs_target, http_target,
+    process_target,
+};
+use afterburner_core::host::HttpMethod;
 use afterburner_node_compat::{
     child_process_host, crypto_host, dns_host, fs_host, http_host, os_host, prime_host,
     subtle_host, v8_host, zlib_host,
@@ -865,10 +871,27 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     None => return E_OTHER,
                 };
                 let m = caller.data().manifold.clone();
-                if fs_host::exists_sync(&path, &m) {
-                    1
-                } else {
-                    0
+                let hc = caller.data().host_context.clone();
+                // existsSync is a metadata read (Node implements it via stat);
+                // recorded as Fs(Stat) with the boolean carried as the single
+                // output byte so replay reproduces the exact answer.
+                let effect = HostEffect::new(
+                    EffectKind::Fs(FileOp::Stat),
+                    fs_target(&path),
+                    Vec::new(),
+                    EffectDetail::None,
+                    None,
+                );
+                match effect_seam::seam(hc, effect, move |_| {
+                    let present = fs_host::exists_sync(&path, &m);
+                    Ok((
+                        vec![u8::from(present)],
+                        effect_seam::ok_code(i64::from(present)),
+                    ))
+                }) {
+                    Seamed::Output { bytes, .. } => i32::from(bytes.first().copied().unwrap_or(0)),
+                    // exists never errors; a replayed error reads as "absent".
+                    Seamed::LiveError(_) | Seamed::ReplayedError(_) => 0,
                 }
             },
         )
@@ -904,13 +927,26 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     }
                 };
                 let m = caller.data().manifold.clone();
-                match fs_host::read_file_sync(&path, &m) {
-                    Ok(bytes) => {
-                        use base64::Engine as _;
-                        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let hc = caller.data().host_context.clone();
+                let effect = HostEffect::new(
+                    EffectKind::Fs(FileOp::Read),
+                    fs_target(&path),
+                    Vec::new(),
+                    EffectDetail::None,
+                    None,
+                );
+                match effect_seam::seam(hc, effect, move |_| {
+                    fs_host::read_file_sync(&path, &m).map(|b| (b, effect_seam::ok()))
+                }) {
+                    // The recorded output is the raw file content (parity); the
+                    // guest wire form is base64, applied identically whether the
+                    // bytes came from disk or from a replayed record.
+                    Seamed::Output { bytes, .. } => {
+                        let encoded = B64.encode(&bytes);
                         write_out(&mut caller, &memory, out_ptr, out_cap, encoded.as_bytes())
                     }
-                    Err(e) => map_err(&mut caller, e),
+                    Seamed::LiveError(e) => map_err(&mut caller, e),
+                    Seamed::ReplayedError(msg) => seam_replayed_error(&mut caller, &msg),
                 }
             },
         )
@@ -953,9 +989,23 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     }
                 };
                 let m = caller.data().manifold.clone();
-                match fs_host::write_file_sync(&path, &data, &m) {
-                    Ok(()) => 0,
-                    Err(e) => map_err(&mut caller, e),
+                let hc = caller.data().host_context.clone();
+                // The written payload is the effect input (content-addressed);
+                // the closure borrows it back from the effect, no extra copy.
+                let effect = HostEffect::new(
+                    EffectKind::Fs(FileOp::Write),
+                    fs_target(&path),
+                    data,
+                    EffectDetail::None,
+                    None,
+                );
+                match effect_seam::seam(hc, effect, move |eff| {
+                    fs_host::write_file_sync(&path, &eff.input, &m)
+                        .map(|()| (Vec::new(), effect_seam::ok()))
+                }) {
+                    Seamed::Output { .. } => 0,
+                    Seamed::LiveError(e) => map_err(&mut caller, e),
+                    Seamed::ReplayedError(msg) => seam_replayed_error(&mut caller, &msg),
                 }
             },
         )
@@ -979,15 +1029,30 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     None => return E_OTHER,
                 };
                 let m = caller.data().manifold.clone();
-                match fs_host::stat_sync(&path, &m) {
-                    Ok(s) => {
+                let hc = caller.data().host_context.clone();
+                let effect = HostEffect::new(
+                    EffectKind::Fs(FileOp::Stat),
+                    fs_target(&path),
+                    Vec::new(),
+                    EffectDetail::None,
+                    None,
+                );
+                match effect_seam::seam(hc, effect, move |_| {
+                    fs_host::stat_sync(&path, &m).map(|s| {
                         let json = format!(
                             r#"{{"size":{},"isFile":{},"isDirectory":{},"mtimeMs":{}}}"#,
                             s.size, s.is_file, s.is_dir, s.mtime_ms
                         );
-                        write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
+                        (json.into_bytes(), effect_seam::ok())
+                    })
+                }) {
+                    // The stat JSON is the recorded output; written verbatim on
+                    // the fresh and replayed paths alike.
+                    Seamed::Output { bytes, .. } => {
+                        write_out(&mut caller, &memory, out_ptr, out_cap, &bytes)
                     }
-                    Err(e) => map_err(&mut caller, e),
+                    Seamed::LiveError(e) => map_err(&mut caller, e),
+                    Seamed::ReplayedError(msg) => seam_replayed_error(&mut caller, &msg),
                 }
             },
         )
@@ -1009,9 +1074,20 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     None => return E_OTHER,
                 };
                 let m = caller.data().manifold.clone();
-                match fs_host::unlink_sync(&path, &m) {
-                    Ok(()) => 0,
-                    Err(e) => map_err(&mut caller, e),
+                let hc = caller.data().host_context.clone();
+                let effect = HostEffect::new(
+                    EffectKind::Fs(FileOp::Delete),
+                    fs_target(&path),
+                    Vec::new(),
+                    EffectDetail::None,
+                    None,
+                );
+                match effect_seam::seam(hc, effect, move |_| {
+                    fs_host::unlink_sync(&path, &m).map(|()| (Vec::new(), effect_seam::ok()))
+                }) {
+                    Seamed::Output { .. } => 0,
+                    Seamed::LiveError(e) => map_err(&mut caller, e),
+                    Seamed::ReplayedError(msg) => seam_replayed_error(&mut caller, &msg),
                 }
             },
         )
@@ -1086,8 +1162,16 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     None => return E_OTHER,
                 };
                 let m = caller.data().manifold.clone();
-                match fs_host::readdir_sync(&path, &m) {
-                    Ok(names) => {
+                let hc = caller.data().host_context.clone();
+                let effect = HostEffect::new(
+                    EffectKind::Fs(FileOp::List),
+                    fs_target(&path),
+                    Vec::new(),
+                    EffectDetail::None,
+                    None,
+                );
+                match effect_seam::seam(hc, effect, move |_| {
+                    fs_host::readdir_sync(&path, &m).map(|names| {
                         let mut json = String::from("[");
                         for (i, name) in names.iter().enumerate() {
                             if i > 0 {
@@ -1096,9 +1180,15 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                             json.push_str(&js_string_literal(name));
                         }
                         json.push(']');
-                        write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
+                        (json.into_bytes(), effect_seam::ok())
+                    })
+                }) {
+                    // The directory-listing JSON is the recorded output.
+                    Seamed::Output { bytes, .. } => {
+                        write_out(&mut caller, &memory, out_ptr, out_cap, &bytes)
                     }
-                    Err(e) => map_err(&mut caller, e),
+                    Seamed::LiveError(e) => map_err(&mut caller, e),
+                    Seamed::ReplayedError(msg) => seam_replayed_error(&mut caller, &msg),
                 }
             },
         )
@@ -1743,26 +1833,24 @@ pub(crate) fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), Afterburne
                     None
                 };
                 let m = caller.data().manifold.clone();
-                match http_host::request(&method, &url, &[], body.as_deref(), &m) {
-                    Ok(resp) => {
-                        // Binary bodies must not be lossy-stringified into the envelope:
-                        // U+FFFD replacement trebles random bytes and double-encodes
-                        // alongside body_b64, blowing the guest read cap on large
-                        // responses. body_b64 is authoritative for non-UTF-8 bodies.
-                        let body_text = match std::str::from_utf8(&resp.body) {
-                            Ok(s) => s.to_owned(),
-                            Err(_) => String::new(),
-                        };
-                        let body_b64 = B64.encode(&resp.body);
-                        let json = format!(
-                            r#"{{"status":{},"body":{},"body_b64":{}}}"#,
-                            resp.status,
-                            js_string_literal(&body_text),
-                            js_string_literal(&body_b64),
-                        );
+                let hc = caller.data().host_context.clone();
+                // Recorded output is the raw response body (parity); the
+                // request body is the content-addressed effect input.
+                let effect = http_effect(&method, &url, body.clone().unwrap_or_default());
+                match effect_seam::seam(hc, effect, move |_| {
+                    http_host::request(&method, &url, &[], body.as_deref(), &m)
+                        .map(|resp| (resp.body, effect_seam::ok_code(i64::from(resp.status))))
+                }) {
+                    // The {status, body, body_b64} envelope is rebuilt from the
+                    // body + recorded status - binary bodies stay in body_b64,
+                    // never lossy-stringified - on the fresh and replayed paths.
+                    Seamed::Output { bytes, status } => {
+                        let code = ok_code_of(&status) as u16;
+                        let json = http_response_envelope(code, &bytes);
                         write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
                     }
-                    Err(e) => map_err(&mut caller, e),
+                    Seamed::LiveError(e) => map_err(&mut caller, e),
+                    Seamed::ReplayedError(msg) => seam_replayed_error(&mut caller, &msg),
                 }
             },
         )
@@ -1829,26 +1917,26 @@ pub(crate) fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), Afterburne
                     None
                 };
                 let m = caller.data().manifold.clone();
-                match http_host::request(&method, &url, &headers, body.as_deref(), &m) {
-                    Ok(resp) => {
-                        // Binary bodies must not be lossy-stringified into the envelope:
-                        // U+FFFD replacement trebles random bytes and double-encodes
-                        // alongside body_b64, blowing the guest read cap on large
-                        // responses. body_b64 is authoritative for non-UTF-8 bodies.
-                        let body_text = match std::str::from_utf8(&resp.body) {
-                            Ok(s) => s.to_owned(),
-                            Err(_) => String::new(),
-                        };
-                        let body_b64 = B64.encode(&resp.body);
-                        let json = format!(
-                            r#"{{"status":{},"body":{},"body_b64":{}}}"#,
-                            resp.status,
-                            js_string_literal(&body_text),
-                            js_string_literal(&body_b64),
-                        );
+                let hc = caller.data().host_context.clone();
+                // Recorded output is the raw response body (parity); the
+                // request body is the content-addressed effect input. Request
+                // headers stay off the identity here (the reference impl keys
+                // an HTTP effect on method + host + path + body).
+                let effect = http_effect(&method, &url, body.clone().unwrap_or_default());
+                match effect_seam::seam(hc, effect, move |_| {
+                    http_host::request(&method, &url, &headers, body.as_deref(), &m)
+                        .map(|resp| (resp.body, effect_seam::ok_code(i64::from(resp.status))))
+                }) {
+                    // The {status, body, body_b64} envelope is rebuilt from the
+                    // body + recorded status - binary bodies stay in body_b64,
+                    // never lossy-stringified - on the fresh and replayed paths.
+                    Seamed::Output { bytes, status } => {
+                        let code = ok_code_of(&status) as u16;
+                        let json = http_response_envelope(code, &bytes);
                         write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
                     }
-                    Err(e) => map_err(&mut caller, e),
+                    Seamed::LiveError(e) => map_err(&mut caller, e),
+                    Seamed::ReplayedError(msg) => seam_replayed_error(&mut caller, &msg),
                 }
             },
         )
@@ -3308,14 +3396,30 @@ fn wrap_host_context(linker: &mut Linker<HostState>) -> Result<(), AfterburnerEr
                     Some(s) => s,
                     None => return E_OTHER,
                 };
-                let val = caller
-                    .data()
-                    .host_context
-                    .as_ref()
-                    .and_then(|ctx| ctx.get_env(&key));
-                match val {
-                    Some(v) => write_out(&mut caller, &memory, out_ptr, out_cap, v.as_bytes()),
-                    None => E_NOT_FOUND,
+                let hc = caller.data().host_context.clone();
+                let hc_env = hc.clone();
+                let key_owned = key.clone();
+                let effect = HostEffect::new(
+                    EffectKind::Env,
+                    env_target(&key),
+                    Vec::new(),
+                    EffectDetail::Env { name: key },
+                    None,
+                );
+                match effect_seam::seam(hc, effect, move |_| {
+                    // The env value source IS the host context's get_env; the
+                    // seam records the read so replay reproduces it. code 0 =
+                    // present (an empty value is still present), 1 = unset.
+                    match hc_env.as_ref().and_then(|c| c.get_env(&key_owned)) {
+                        Some(v) => Ok((v.into_bytes(), effect_seam::ok())),
+                        None => Ok((Vec::new(), effect_seam::ok_code(1))),
+                    }
+                }) {
+                    Seamed::Output { bytes, status } if ok_code_of(&status) == 0 => {
+                        write_out(&mut caller, &memory, out_ptr, out_cap, &bytes)
+                    }
+                    Seamed::Output { .. } => E_NOT_FOUND,
+                    Seamed::LiveError(_) | Seamed::ReplayedError(_) => E_NOT_FOUND,
                 }
             },
         )
@@ -5258,19 +5362,42 @@ fn wrap_child_process(linker: &mut Linker<HostState>) -> Result<(), AfterburnerE
                         }
                     }
                 };
-                let argv_refs: Vec<&str> = argv_owned.iter().map(String::as_str).collect();
                 let m = caller.data().manifold.clone();
-                match child_process_host::exec_sync(&cmd, &argv_refs, &m) {
-                    Ok(result) => {
+                let hc = caller.data().host_context.clone();
+                let mut argv_full = Vec::with_capacity(argv_owned.len() + 1);
+                argv_full.push(cmd.clone());
+                argv_full.extend(argv_owned.iter().cloned());
+                let effect = HostEffect::new(
+                    EffectKind::Process,
+                    process_target(&cmd),
+                    argv_json.into_bytes(),
+                    EffectDetail::Process { argv: argv_full },
+                    None,
+                );
+                match effect_seam::seam(hc, effect, move |_| {
+                    let argv_refs: Vec<&str> = argv_owned.iter().map(String::as_str).collect();
+                    child_process_host::exec_sync(&cmd, &argv_refs, &m).map(|result| {
+                        // A child process is inherently multi-field (status +
+                        // stdout + stderr); record the exact guest wire envelope
+                        // so replay is lossless (no file-parity cross-reference
+                        // applies to process output).
                         let json = format!(
                             r#"{{"status":{},"stdout":{},"stderr":{}}}"#,
                             result.status,
                             js_string_literal(&result.stdout),
                             js_string_literal(&result.stderr)
                         );
-                        write_out(&mut caller, &memory, out_ptr, out_cap, json.as_bytes())
+                        (
+                            json.into_bytes(),
+                            effect_seam::ok_code(i64::from(result.status)),
+                        )
+                    })
+                }) {
+                    Seamed::Output { bytes, .. } => {
+                        write_out(&mut caller, &memory, out_ptr, out_cap, &bytes)
                     }
-                    Err(e) => map_err(&mut caller, e),
+                    Seamed::LiveError(e) => map_err(&mut caller, e),
+                    Seamed::ReplayedError(msg) => seam_replayed_error(&mut caller, &msg),
                 }
             },
         )
@@ -6737,4 +6864,97 @@ fn js_string_literal(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+// ---- effect seam helpers -------------------------------------------------
+//
+// Shared plumbing for the record/replay seam (`crate::effect_seam`) wired into
+// the fs / http / env / child_process imports. Each import builds a canonical
+// `HostEffect`, routes the real call through `effect_seam::seam`, then maps the
+// resulting `Seamed` back to the guest wire form.
+
+/// Surface a replayed [`Seamed::ReplayedError`] to the guest: stash the
+/// recorded error text as `last_error` and return the generic error code. A
+/// recorded [`EffectStatus::Err`] carries only the message bytes (not the
+/// original permission / not-found / other classification), so replay reports
+/// `E_OTHER` with the faithful message.
+fn seam_replayed_error(caller: &mut Caller<'_, HostState>, msg: &[u8]) -> i32 {
+    record(caller, &String::from_utf8_lossy(msg));
+    E_OTHER
+}
+
+/// The effect-native code from a success status (always the shape of a
+/// [`Seamed::Output`]), or `0` for the unreachable error shape.
+fn ok_code_of(status: &EffectStatus) -> i64 {
+    match status {
+        EffectStatus::Ok { code, .. } => *code,
+        EffectStatus::Err(_) => 0,
+    }
+}
+
+/// Split an outbound HTTP URL into `(host, path)` for the canonical effect
+/// target. Everything after `"://"` up to the first `/` is the authority; the
+/// remainder (query included) is the path. A URL with no path yields `"/"`.
+fn split_http_url(url: &str) -> (String, String) {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    match after_scheme.find('/') {
+        Some(i) => (after_scheme[..i].to_string(), after_scheme[i..].to_string()),
+        None => (after_scheme.to_string(), "/".to_string()),
+    }
+}
+
+/// Parse an HTTP method token into the canonical [`HttpMethod`]. `None` for a
+/// method outside the enum (HEAD, OPTIONS, ...); the caller then keeps it
+/// distinct in the target via the same `#METHOD` convention `http_target` uses.
+fn parse_http_method(s: &str) -> Option<HttpMethod> {
+    match s.to_ascii_uppercase().as_str() {
+        "GET" => Some(HttpMethod::Get),
+        "POST" => Some(HttpMethod::Post),
+        "PUT" => Some(HttpMethod::Put),
+        "DELETE" => Some(HttpMethod::Delete),
+        "PATCH" => Some(HttpMethod::Patch),
+        _ => None,
+    }
+}
+
+/// Build the canonical [`HostEffect`] for an outbound HTTP request. `input` is
+/// the request body bytes (empty for a bodyless request), content-addressed so
+/// a body sourced from a recorded file matches.
+fn http_effect(method: &str, url: &str, input: Vec<u8>) -> HostEffect {
+    let (host, path) = split_http_url(url);
+    match parse_http_method(method) {
+        Some(m) => HostEffect::new(
+            EffectKind::Net,
+            http_target(&host, &path, m),
+            input,
+            EffectDetail::Http {
+                method: m,
+                host,
+                path,
+            },
+            None,
+        ),
+        None => {
+            // Non-enum method: keep it distinct in the target with the same
+            // `#METHOD` spelling `http_target` uses, so HEAD != GET.
+            let target = format!("api::{host}{path}#{}", method.to_ascii_uppercase());
+            HostEffect::new(EffectKind::Net, target, input, EffectDetail::None, None)
+        }
+    }
+}
+
+/// Build the `{status, body, body_b64}` JSON envelope the HTTP polyfill
+/// decodes. `body_b64` is authoritative for non-UTF-8 bodies; `body` carries
+/// the UTF-8 text or an empty string. Shared by the v1 and v2 request paths
+/// (record) and by replay, so the wire shape is produced in exactly one place.
+fn http_response_envelope(status: u16, body: &[u8]) -> String {
+    let body_text = std::str::from_utf8(body)
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let body_b64 = B64.encode(body);
+    format!(
+        r#"{{"status":{status},"body":{},"body_b64":{}}}"#,
+        js_string_literal(&body_text),
+        js_string_literal(&body_b64),
+    )
 }

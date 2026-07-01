@@ -69,11 +69,13 @@ pub mod ts;
 // These flatten the most common API surface so callers can write
 // `use afterburner::Manifold` instead of `use afterburner::core::Manifold`.
 pub use afterburner_core::{
-    AfterburnerError, BurnCache, BurnCacheBackend, Combustor, EngineMode, EnvAccess, FsAccess,
-    FuelGauge, HostContext, HostFunction, HttpMethod, HttpResponse, InMemoryStateStore,
-    InProcessCacheBackend, ListenAccess, LogLevel, Manifold, NetAccess, NullHost, OutputValue,
-    RegistryStats, Result, ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore, StateStore,
-    sha256,
+    AfterburnerError, BurnCache, BurnCacheBackend, CallSite, Combustor, EffectDetail, EffectKind,
+    EffectStatus, EngineMode, EnvAccess, FileOp, FsAccess, FuelGauge, HostContext, HostEffect,
+    HostEffectRecord, HostFunction, HttpMethod, HttpResponse, InMemoryStateStore,
+    InProcessCacheBackend, ListenAccess, LogLevel, Manifold, NetAccess, NullHost, OutputTag,
+    OutputValue, RegistryStats, Result, RunResult, ScriptId, ScriptInvocation, ScriptOutcome,
+    Session, SharedStateStore, StateStore, content_hash, decode_frame, decode_output_value,
+    encode_frame, encode_output_value, sha256,
 };
 
 // ---- Full sibling-crate re-exports ---------------------------------

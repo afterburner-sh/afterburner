@@ -16,78 +16,17 @@
 
 use std::path::Path;
 
-use afterburner_core::{AfterburnerError, Result, ScriptOutcome};
-use serde_json::Value;
+use afterburner_core::{AfterburnerError, OutputValue, Result, ScriptOutcome};
 
 /// A source language supported by the afterburner runtime.
 ///
-/// Used with [`crate::Afterburner::run_source`] and
-/// [`crate::Afterburner::run_file`] to select the execution path.
-/// Construct via `Language::from_extension` (from a file extension) or
-/// use the variants directly.
-///
-/// # Compile-to-WASM languages
-///
-/// `Rust`, `Go`, `C`, and `Cpp` do not have a source-interpreter path.
-/// Calling `run_source` with one of these variants returns a typed error
-/// directing the caller to `register_precompiled`. Pre-compiled WASM
-/// modules should be registered via
-/// [`Afterburner::register_precompiled`](crate::Afterburner::register_precompiled).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Language {
-    /// JavaScript source, run via the JS/WASM engine.
-    Js,
-    /// TypeScript source, stripped to JS then run via the JS/WASM engine.
-    Ts,
-    /// Rust source. No source-interpreter; use `register_precompiled` with
-    /// a pre-compiled `wasm32-wasip1` module.
-    Rust,
-    /// Go source. No source-interpreter; use `register_precompiled` with a
-    /// pre-compiled `wasm32-wasip1` module.
-    Go,
-    /// C source. No source-interpreter; use `register_precompiled` with a
-    /// pre-compiled `wasm32-wasip1` module.
-    C,
-    /// C++ source. No source-interpreter; use `register_precompiled` with a
-    /// pre-compiled `wasm32-wasip1` module.
-    Cpp,
-    /// Python source, run via the bundled Pyodide/CPython-WASI runtime.
-    /// Requires the `wasm` feature.
-    Python,
-    /// Ruby source, run via the bundled ruby.wasm/CRuby-WASI runtime.
-    /// Requires the `wasm` feature.
-    Ruby,
-}
-
-impl Language {
-    /// Detect the language from a file extension (lowercased, without the dot).
-    ///
-    /// | Extension      | Language     |
-    /// |----------------|--------------|
-    /// | `rb`           | `Ruby`       |
-    /// | `py`           | `Python`     |
-    /// | `js`           | `Js`         |
-    /// | `ts`           | `Ts`         |
-    /// | `rs`           | `Rust`       |
-    /// | `go`           | `Go`         |
-    /// | `c`            | `C`          |
-    /// | `cc`, `cpp`    | `Cpp`        |
-    ///
-    /// Returns `None` for any other extension.
-    pub fn from_extension(ext: &str) -> Option<Self> {
-        match ext.trim().to_ascii_lowercase().as_str() {
-            "rb" => Some(Self::Ruby),
-            "py" => Some(Self::Python),
-            "js" => Some(Self::Js),
-            "ts" => Some(Self::Ts),
-            "rs" => Some(Self::Rust),
-            "go" => Some(Self::Go),
-            "c" => Some(Self::C),
-            "cc" | "cpp" => Some(Self::Cpp),
-            _ => None,
-        }
-    }
-}
+/// Re-exported from `afterburner-core` so the facade and every substrate
+/// contract name the same one enum. Used with
+/// [`crate::Afterburner::run_source`] and [`crate::Afterburner::run_file`] to
+/// select the execution path. `Rust` / `Go` / `C` / `Cpp` have no
+/// source-interpreter path: `run_source` with one of them returns a typed
+/// error directing the caller to `register_precompiled`.
+pub use afterburner_core::Language;
 
 /// Unified output from [`crate::Afterburner::run_source`] and
 /// [`crate::Afterburner::run_file`].
@@ -100,29 +39,55 @@ impl Language {
 /// to `false` but does NOT produce an `Err` - the program ran to
 /// completion. `Err` is reserved for infrastructural failures (runtime not
 /// found, compile failure, WASM trap, I/O error reading the source file).
+///
+/// Binary-first: `stdout` / `stderr` are raw bytes (a run may emit invalid
+/// UTF-8 or NULs; multimodal payloads are byte-exact) and are never passed
+/// through a lossy conversion at capture time. Use [`Outcome::stdout_str`] /
+/// [`Outcome::stderr_str`] for a lossy `String` view when text is what you
+/// want.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Outcome {
-    /// Text written to stdout during the run (captured, not printed).
-    pub stdout: String,
-    /// Text written to stderr during the run (captured). Empty on a clean run.
-    pub stderr: String,
-    /// The script's return value, when the language surfaces one.
-    /// Currently `None` for all languages: script-mode runs capture text
-    /// output, not structured return values.
-    ///
-    /// vertexia: future per-language value extraction (e.g. JSON last-expr
-    /// for JS) goes here; add Language-specific From impls when available.
-    pub value: Option<Value>,
+    /// Bytes written to stdout during the run (captured, not printed),
+    /// byte-exact.
+    pub stdout: Vec<u8>,
+    /// Bytes written to stderr during the run (captured), byte-exact. Empty
+    /// on a clean run.
+    pub stderr: Vec<u8>,
+    /// The run's typed return value. `OutputValue::Json(Value::Null)` means
+    /// no return value was surfaced (a plain script-mode run that only wrote
+    /// stdout - the current state for every language until per-substrate
+    /// value capture lands).
+    pub output: OutputValue,
     /// `true` when the program exited with code 0.
     pub ok: bool,
+}
+
+impl Outcome {
+    /// A lossy `String` view of [`stdout`](Self::stdout), for callers that
+    /// want text. Back-compat shim for the pre-binary `stdout: String` field;
+    /// invalid UTF-8 becomes the replacement character.
+    pub fn stdout_str(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+
+    /// A lossy `String` view of [`stderr`](Self::stderr). See
+    /// [`stdout_str`](Self::stdout_str).
+    pub fn stderr_str(&self) -> String {
+        String::from_utf8_lossy(&self.stderr).into_owned()
+    }
+}
+
+/// The "no return value surfaced" sentinel: `OutputValue::Json(Value::Null)`.
+fn no_output() -> OutputValue {
+    OutputValue::Json(serde_json::Value::Null)
 }
 
 impl From<ScriptOutcome> for Outcome {
     fn from(s: ScriptOutcome) -> Self {
         Self {
-            stdout: String::from_utf8_lossy(&s.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&s.stderr).into_owned(),
-            value: None,
+            stdout: s.stdout,
+            stderr: s.stderr,
+            output: no_output(),
             ok: s.exit_code == 0,
         }
     }
@@ -132,9 +97,9 @@ impl From<ScriptOutcome> for Outcome {
 impl From<afterburner_wasi::pyodide_runner::PyodideRunOutput> for Outcome {
     fn from(p: afterburner_wasi::pyodide_runner::PyodideRunOutput) -> Self {
         Self {
-            stdout: String::from_utf8_lossy(&p.stdout).into_owned(),
-            stderr: String::new(),
-            value: None,
+            stdout: p.stdout,
+            stderr: p.stderr,
+            output: p.output,
             ok: p.exit_code == 0,
         }
     }
@@ -144,9 +109,9 @@ impl From<afterburner_wasi::pyodide_runner::PyodideRunOutput> for Outcome {
 impl From<afterburner_wasi::ruby_runner::RubyRunOutput> for Outcome {
     fn from(r: afterburner_wasi::ruby_runner::RubyRunOutput) -> Self {
         Self {
-            stdout: String::from_utf8_lossy(&r.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&r.stderr).into_owned(),
-            value: None,
+            stdout: r.stdout,
+            stderr: r.stderr,
+            output: r.output,
             ok: r.exit_code == 0,
         }
     }

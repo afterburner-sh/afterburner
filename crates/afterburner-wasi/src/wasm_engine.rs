@@ -31,7 +31,8 @@ use crate::nozzle::parse_output;
 use afterburner_core::log::Level;
 use afterburner_core::{
     AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Manifold, OutputValue,
-    Result, ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore, ab_event, sha256,
+    Result, RunResult, ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore, ab_event,
+    sha256,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -1521,45 +1522,100 @@ impl Combustor for WasmCombustor {
         let stdout_bytes = drain_stdout(&mut store);
         let stderr_bytes = store.data().stderr.contents().to_vec();
 
-        if let Err(trap) = call_result {
-            if let Some(exit) = trap.downcast_ref::<I32Exit>() {
-                // `process.exit(N)` path: preserve N as the exit code.
-                // I32Exit(0) is a clean exit through WASI `proc_exit(0)`.
-                ab_event!(Level::Info, "wasm.script.proc_exit", "code" => exit.0);
-                return Ok(ScriptOutcome {
-                    stdout: stdout_bytes,
-                    stderr: stderr_bytes,
-                    exit_code: exit.0,
-                });
-            } else if let Some(t) = trap.downcast_ref::<Trap>() {
-                match t {
-                    Trap::Interrupt => {
-                        ab_event!(Level::Warn, "wasm.script.timeout");
-                        return Err(AfterburnerError::Timeout);
-                    }
-                    Trap::OutOfFuel => {
-                        ab_event!(Level::Warn, "wasm.script.fuel_exhausted");
-                        return Err(AfterburnerError::FuelExhausted);
-                    }
-                    _ => {
-                        return map_script_trap(stdout_bytes, stderr_bytes);
-                    }
-                }
-            } else {
-                let chain: Vec<String> = trap.chain().map(|e| format!("{e}")).collect();
-                let full = chain.join(" => ");
-                if full.contains("memory minimum size") || full.contains("memory size") {
-                    ab_event!(Level::Warn, "wasm.script.memory_limit");
-                    return Err(AfterburnerError::MemoryLimit);
-                }
-                return map_script_trap(stdout_bytes, stderr_bytes);
-            }
+        // The script-mode trap contract is shared with `run_with_result`; keep
+        // it in one place so the two never diverge (proc_exit vs timeout vs
+        // uncaught exception).
+        let (stdout, stderr, exit_code) =
+            finish_script_run(call_result, stdout_bytes, stderr_bytes)?;
+        Ok(ScriptOutcome {
+            stdout,
+            stderr,
+            exit_code,
+        })
+    }
+
+    /// Script mode with a typed result and a host seam (R2/R3): run `source`
+    /// exactly as [`run_script`](Self::run_script), threading the borrowed
+    /// `host` through every `afterburner:host` effect import (the record /
+    /// replay seam), and surface the module's typed return alongside the
+    /// captured streams.
+    ///
+    /// The typed [`OutputValue`] comes from the native binary channel: a run
+    /// that posted bytes through `host_raw_output` yields
+    /// [`OutputValue::Bytes`]; otherwise the result is
+    /// [`OutputValue::Json`]`(Null)` - "no value surfaced". JS script mode has
+    /// no JSON-return envelope (its top-level completion value is `null`; see
+    /// the plugin's `modes/script.rs`), so stdout is deliberately **not**
+    /// reparsed as the return value: stdout is console output, and coercing it
+    /// into `output` would fabricate a return the script never made (and error
+    /// on any non-JSON log). JS is the one substrate with a first-class binary
+    /// return today; the JSON-return path lights up here the moment a
+    /// script-mode value convention lands plugin-side.
+    #[fastrace::trace(name = "WasmCombustor::run_with_result")]
+    fn run_with_result(
+        &self,
+        source: &[u8],
+        invocation: &ScriptInvocation,
+        limits: &FuelGauge,
+        host: &dyn afterburner_core::HostContext,
+    ) -> Result<RunResult> {
+        let source_str = std::str::from_utf8(source).map_err(|e| {
+            AfterburnerError::Engine(format!("run_with_result: source is not utf-8: {e}"))
+        })?;
+        // Bridge the borrowed host into the 'static Store for the run's
+        // duration. Sound: the Store (sole long-lived owner) and every seam
+        // clone are dropped before this call returns - before `host`'s borrow
+        // ends - even on an unwinding trap. See `effect_seam::borrow_host`.
+        let bridged: Arc<dyn afterburner_core::HostContext> =
+            unsafe { crate::effect_seam::borrow_host(host) };
+
+        let envelope = serde_json::json!({
+            "mode": "script",
+            "source": source_str,
+            "argv": invocation.argv,
+            "env": invocation.env,
+            "cwd": invocation.cwd,
+        });
+        let envelope_bytes = serde_json::to_vec(&envelope)?;
+
+        let mut state = HostState::new(
+            &envelope_bytes,
+            limits.memory_bytes,
+            limits.output_ceiling(),
+            limits.manifold.clone(),
+            self.state_store.clone(),
+            Some(bridged),
+        );
+        state.transpile_hook = self.transpile_hook.clone();
+        let mut store = chamber::prepare_store(&self.engine, state, limits)?;
+        let call_result = chamber::instantiate_and_start(&mut store, &self.instance_pre)?;
+
+        if store.data().output_overflowed() {
+            let limit = store.data().output_ceiling;
+            ab_event!(Level::Warn, "wasm.run_with_result.output_too_large", "limit" => limit);
+            return Err(AfterburnerError::OutputTooLarge { limit });
         }
 
-        Ok(ScriptOutcome {
-            stdout: stdout_bytes,
-            stderr: stderr_bytes,
-            exit_code: 0,
+        // Typed return: the native binary channel wins; otherwise no value was
+        // surfaced (see the doc comment for why stdout is not reparsed).
+        let output = match store.data_mut().pending_raw_output.take() {
+            Some(bytes) => OutputValue::Bytes(bytes),
+            None => OutputValue::Json(Value::Null),
+        };
+
+        let stdout_bytes = drain_stdout(&mut store);
+        let stderr_bytes = store.data().stderr.contents().to_vec();
+        // Drop the Store (and with it the bridged host Arc) before returning,
+        // so the borrowed host outlives every clone of the bridge.
+        drop(store);
+
+        let (stdout, stderr, exit_code) =
+            finish_script_run(call_result, stdout_bytes, stderr_bytes)?;
+        Ok(RunResult {
+            stdout,
+            stderr,
+            exit_code,
+            output,
         })
     }
 }
@@ -1581,6 +1637,55 @@ fn map_script_trap(stdout: Vec<u8>, stderr: Vec<u8>) -> Result<ScriptOutcome> {
         stderr,
         exit_code: 1,
     })
+}
+
+/// Apply the script-mode trap contract to a finished `_start` call, shared by
+/// [`WasmCombustor::run_script`] and [`WasmCombustor::run_with_result`] so the
+/// two never diverge on how a `proc_exit`, a timeout / fuel / memory trap, or
+/// an uncaught JS exception maps to `(stdout, stderr, exit_code)` or an `Err`.
+///
+/// `proc_exit(N)` -> exit code `N`; interrupt -> [`AfterburnerError::Timeout`];
+/// out-of-fuel -> [`AfterburnerError::FuelExhausted`]; a memory-size trap ->
+/// [`AfterburnerError::MemoryLimit`]; a compile preface -> the
+/// [`AfterburnerError::CompileFailed`] from [`map_script_trap`]; any other trap
+/// -> exit code 1 with the captured output (an uncaught user exception).
+fn finish_script_run(
+    call_result: std::result::Result<(), wasmtime::Error>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+) -> Result<(Vec<u8>, Vec<u8>, i32)> {
+    let Err(trap) = call_result else {
+        return Ok((stdout, stderr, 0));
+    };
+    if let Some(exit) = trap.downcast_ref::<I32Exit>() {
+        // `process.exit(N)` path: preserve N. I32Exit(0) is a clean WASI exit.
+        ab_event!(Level::Info, "wasm.script.proc_exit", "code" => exit.0);
+        return Ok((stdout, stderr, exit.0));
+    }
+    if let Some(t) = trap.downcast_ref::<Trap>() {
+        match t {
+            Trap::Interrupt => {
+                ab_event!(Level::Warn, "wasm.script.timeout");
+                return Err(AfterburnerError::Timeout);
+            }
+            Trap::OutOfFuel => {
+                ab_event!(Level::Warn, "wasm.script.fuel_exhausted");
+                return Err(AfterburnerError::FuelExhausted);
+            }
+            _ => {}
+        }
+    } else {
+        let chain: Vec<String> = trap.chain().map(|e| format!("{e}")).collect();
+        let full = chain.join(" => ");
+        if full.contains("memory minimum size") || full.contains("memory size") {
+            ab_event!(Level::Warn, "wasm.script.memory_limit");
+            return Err(AfterburnerError::MemoryLimit);
+        }
+    }
+    // Uncaught JS exception (or a compile preface) -> the script's captured
+    // output with exit code 1, or `CompileFailed` when the plugin flagged it.
+    let outcome = map_script_trap(stdout, stderr)?;
+    Ok((outcome.stdout, outcome.stderr, outcome.exit_code))
 }
 
 /// Trim trailing whitespace + null bytes from a stdout capture before
@@ -2043,5 +2148,94 @@ mod tests {
             .execute_batch(&id, &input, &FuelGauge::unlimited())
             .unwrap();
         assert_eq!(out, json!([{"doubled": 2}, {"doubled": 4}, {"doubled": 6}]));
+    }
+
+    #[test]
+    fn run_with_result_captures_stdout_and_no_typed_output() {
+        let c = make_combustor();
+        let r = c
+            .run_with_result(
+                b"console.log('hi from run_with_result')",
+                &ScriptInvocation::default(),
+                &FuelGauge::unlimited(),
+                &afterburner_core::NullHost,
+            )
+            .unwrap();
+        assert_eq!(
+            r.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert!(String::from_utf8_lossy(&r.stdout).contains("hi from run_with_result"));
+        // JS script mode has no JSON-return envelope: no value surfaced.
+        assert_eq!(r.output, OutputValue::Json(Value::Null));
+    }
+
+    #[test]
+    fn run_with_result_records_fs_read_effect_through_the_seam() {
+        use afterburner_core::effect::{EffectKind, FileOp, HostEffectRecord};
+        use afterburner_core::{FsAccess, HostContext, Manifold};
+        use std::sync::Mutex;
+
+        // A recording host: journals every effect, replays none.
+        #[derive(Default)]
+        struct RecordingHost {
+            log: Mutex<Vec<HostEffectRecord>>,
+        }
+        impl HostContext for RecordingHost {
+            fn record_host_effect(&self, r: HostEffectRecord) {
+                self.log.lock().unwrap().push(r);
+            }
+            fn get_effect_log(&self) -> Vec<HostEffectRecord> {
+                self.log.lock().unwrap().clone()
+            }
+        }
+
+        // A file the guest will read through the seamed fs import.
+        let dir = std::env::temp_dir().join(format!("afb-rwr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("payload.txt");
+        std::fs::write(&file, b"recorded-content").unwrap();
+        let file_str = file.to_str().unwrap().to_owned();
+
+        let mut limits = FuelGauge::unlimited();
+        limits.manifold = Manifold {
+            fs: FsAccess::ReadOnly(vec![dir.clone()]),
+            ..Manifold::sealed()
+        };
+
+        let c = make_combustor();
+        let host = RecordingHost::default();
+        let src = format!(
+            "const fs = require('fs'); process.stdout.write(fs.readFileSync({file_str:?}, 'utf8'));"
+        );
+        let r = c
+            .run_with_result(src.as_bytes(), &ScriptInvocation::default(), &limits, &host)
+            .unwrap();
+        assert_eq!(
+            r.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        // Runtime frames captured stdout with a trailing newline; the
+        // byte-exact fidelity check is the recorded effect output below.
+        assert_eq!(
+            String::from_utf8_lossy(&r.stdout).trim_end(),
+            "recorded-content"
+        );
+
+        // The seam journaled the read with the raw file content as its output.
+        let log = host.get_effect_log();
+        assert!(
+            log.iter()
+                .any(|e| matches!(e.effect.kind, EffectKind::Fs(FileOp::Read))
+                    && e.output == b"recorded-content"),
+            "expected a recorded Fs(Read) effect carrying the file content; log kinds: {:?}",
+            log.iter().map(|e| e.effect.kind).collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

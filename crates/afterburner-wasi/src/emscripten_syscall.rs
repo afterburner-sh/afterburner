@@ -26,7 +26,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use afterburner_core::{AfterburnerError, Result};
+use afterburner_core::{
+    AfterburnerError, EffectDetail, EffectKind, EffectStatus, FileOp, HostContext, HostEffect,
+    HostEffectRecord, Result, fs_target, is_internal_capture_path,
+};
 use wasmtime::{Caller, Linker};
 
 // ---- process-wide advisory lock table ----------------------------------------
@@ -92,6 +95,226 @@ fn log_stat(tag: &str, abs: &str, rc: i32, mode_size: Option<(u32, u64)>) {
             abs
         ),
         None => pyo_trace!("[{tag}] {:?} -> rc={rc}", abs),
+    }
+}
+
+/// The record/replay effect seam for one filesystem `__syscall_*` effect.
+///
+/// This upgrades the diagnostic [`MechCallLog`] ring (name + two scalar args)
+/// into a byte-level [`HostEffectRecord`]: the guest-absolute path, the raw
+/// write payload or the raw read/stat/list bytes, and the syscall return code,
+/// each content-addressed by BLAKE3 through [`HostEffect::new`].
+///
+/// # Byte-identical default
+///
+/// The [`FsSeam::for_fd`] / [`FsSeam::record_path`] / [`FsSeam::record_fd`]
+/// constructors read [`EmbedderState::host_context`]; with no host attached
+/// (the sealed / default path, i.e. every run today) they return
+/// [`FsSeam::Off`] after one `Option<Arc>` clone and **no** path allocation, so
+/// an instrumented handler runs its normal in-memory / host-FS operation with
+/// no observable change.
+///
+/// # Record vs replay
+///
+/// With a host attached, [`HostContext::on_host_call`] selects the mode:
+///
+/// - it returns `None` -> [`FsSeam::Record`]: the handler runs the real op and
+///   then calls [`FsSeam::finish`] with the produced bytes + return code, which
+///   appends one [`HostEffectRecord`].
+/// - it returns `Some(record)` -> [`FsSeam::Serve`]: the handler substitutes
+///   `record.output` (read/stat/list bytes) or simply returns the recorded
+///   code (write/delete), performing **no** real filesystem effect. This is the
+///   replay direction; a recording host returns `None` on the original run, so
+///   serve only fires on a deliberate re-execution.
+pub(crate) enum FsSeam {
+    /// No host attached (or no seam for this call): run the real op unchanged.
+    Off,
+    /// The host serves a recorded result: substitute its bytes / return code.
+    Serve(HostEffectRecord),
+    /// The host is recording: run the real op, then [`FsSeam::finish`].
+    Record {
+        ctx: Arc<dyn HostContext>,
+        effect: HostEffect,
+        t0: std::time::Instant,
+    },
+}
+
+impl FsSeam {
+    /// Offer a read/write fs effect whose target path is resolved from the open
+    /// `fd`'s guest path. Cheap [`FsSeam::Off`] when no host is attached (the
+    /// `fd` -> path lookup is skipped entirely).
+    pub(crate) fn for_fd(
+        caller: &Caller<'_, EmbedderState>,
+        op: FileOp,
+        fd: i32,
+        input: Vec<u8>,
+    ) -> FsSeam {
+        let Some(ctx) = caller.data().host_context.clone() else {
+            return FsSeam::Off;
+        };
+        let abs = caller.data().fs.fd_path(fd).unwrap_or_default().to_owned();
+        Self::offer(ctx, op, &abs, input)
+    }
+
+    /// Offer a [`FileOp::Write`] on the open `fd`, taking the payload by
+    /// reference so the copy into the record happens **only** when a host is
+    /// attached (the sealed path clones nothing).
+    pub(crate) fn for_fd_write(
+        caller: &Caller<'_, EmbedderState>,
+        fd: i32,
+        input: &[u8],
+    ) -> FsSeam {
+        let Some(ctx) = caller.data().host_context.clone() else {
+            return FsSeam::Off;
+        };
+        let abs = caller.data().fs.fd_path(fd).unwrap_or_default().to_owned();
+        Self::offer(ctx, FileOp::Write, &abs, input.to_vec())
+    }
+
+    /// A record-only fs effect: always [`FsSeam::Record`] when a host is
+    /// attached, never [`FsSeam::Serve`]. Used by `openat`, whose replay cannot
+    /// be a byte substitution (the fd must be really allocated so later reads
+    /// resolve), so the open is still journalled with its resulting fd as the
+    /// status code.
+    pub(crate) fn record_path(caller: &Caller<'_, EmbedderState>, op: FileOp, abs: &str) -> FsSeam {
+        let Some(ctx) = caller.data().host_context.clone() else {
+            return FsSeam::Off;
+        };
+        if is_internal_capture_path(abs) {
+            return FsSeam::Off;
+        }
+        let effect = HostEffect::new(
+            EffectKind::Fs(op),
+            fs_target(abs),
+            Vec::new(),
+            EffectDetail::None,
+            None,
+        );
+        FsSeam::Record {
+            ctx,
+            effect,
+            t0: std::time::Instant::now(),
+        }
+    }
+
+    /// A record-only fs effect keyed on the open `fd`'s guest path. Used by
+    /// `getdents64`, whose directory-cursor advance makes a byte-substitution
+    /// replay unsafe, so the listing is journalled but never served.
+    pub(crate) fn record_fd(caller: &Caller<'_, EmbedderState>, op: FileOp, fd: i32) -> FsSeam {
+        let Some(ctx) = caller.data().host_context.clone() else {
+            return FsSeam::Off;
+        };
+        let abs = caller.data().fs.fd_path(fd).unwrap_or_default().to_owned();
+        if is_internal_capture_path(&abs) {
+            return FsSeam::Off;
+        }
+        let effect = HostEffect::new(
+            EffectKind::Fs(op),
+            fs_target(&abs),
+            Vec::new(),
+            EffectDetail::None,
+            None,
+        );
+        FsSeam::Record {
+            ctx,
+            effect,
+            t0: std::time::Instant::now(),
+        }
+    }
+
+    fn offer(ctx: Arc<dyn HostContext>, op: FileOp, abs: &str, input: Vec<u8>) -> FsSeam {
+        // afterburner's own /.afb capture plumbing is not a guest effect - skip it.
+        if is_internal_capture_path(abs) {
+            return FsSeam::Off;
+        }
+        let effect = HostEffect::new(
+            EffectKind::Fs(op),
+            fs_target(abs),
+            input,
+            EffectDetail::None,
+            None,
+        );
+        match ctx.on_host_call(&effect) {
+            Some(rec) => FsSeam::Serve(rec),
+            None => FsSeam::Record {
+                ctx,
+                effect,
+                t0: std::time::Instant::now(),
+            },
+        }
+    }
+
+    /// The recorded result to substitute when replaying, or `None` on the
+    /// record / off paths.
+    pub(crate) fn served(&self) -> Option<&HostEffectRecord> {
+        match self {
+            FsSeam::Serve(rec) => Some(rec),
+            _ => None,
+        }
+    }
+
+    /// Journal one completed fs effect in a single shot (record-only, never
+    /// serves). For call sites that already hold the full input + output after
+    /// the fact, e.g. `writev` gathering its iovecs. A no-op when no recording
+    /// host is attached.
+    pub(crate) fn record_now(
+        caller: &Caller<'_, EmbedderState>,
+        op: FileOp,
+        abs: &str,
+        input: Vec<u8>,
+        output: Vec<u8>,
+        code: i64,
+    ) {
+        let Some(ctx) = caller.data().host_context.clone() else {
+            return;
+        };
+        if is_internal_capture_path(abs) {
+            return;
+        }
+        let effect = HostEffect::new(
+            EffectKind::Fs(op),
+            fs_target(abs),
+            input,
+            EffectDetail::None,
+            None,
+        );
+        ctx.record_host_effect(HostEffectRecord::new(
+            effect,
+            output,
+            0,
+            EffectStatus::Ok { code, rows: None },
+        ));
+    }
+
+    /// Append a byte-level record of the real op's result. `output` is the
+    /// bytes the op produced (read / stat / list bytes; empty for a write /
+    /// delete); `code` is the syscall return value. A no-op unless recording.
+    pub(crate) fn finish(self, output: Vec<u8>, code: i64) {
+        if let FsSeam::Record { ctx, effect, t0 } = self {
+            let duration_ms = t0.elapsed().as_millis() as u64;
+            ctx.record_host_effect(HostEffectRecord::new(
+                effect,
+                output,
+                duration_ms,
+                EffectStatus::Ok { code, rows: None },
+            ));
+        }
+    }
+}
+
+/// Map `open(2)` `flags` to the [`FileOp`] recorded for an `openat` effect.
+/// The values are the stable musl/wasm32 open flags (mirrors the private
+/// constants in [`crate::emscripten_fs`]).
+fn open_op(flags: i32) -> FileOp {
+    const O_WRONLY: i32 = 1;
+    const O_RDWR: i32 = 2;
+    const O_CREAT: i32 = 64;
+    if flags & O_CREAT != 0 {
+        FileOp::Create
+    } else if flags & (O_WRONLY | O_RDWR) != 0 {
+        FileOp::Write
+    } else {
+        FileOp::Read
     }
 }
 
@@ -291,6 +514,10 @@ pub fn wire_fs_env_funcs(
                         }
                         log.push_back(format!("openat:{abs}"));
                     }
+                    // Effect seam: journal the open (record-only - the fd must
+                    // really be allocated so later reads/writes resolve, so an
+                    // open is never served). Off / byte-identical when no host.
+                    let seam = FsSeam::record_path(&caller, open_op(flags), &abs);
                     // Route to host FS if path is under a rw-preopen.
                     let host_path = InMemFs::resolve_to_host_path(&abs, &caller.data().rw_preopens);
                     let fd = if let Some(hp) = host_path {
@@ -298,6 +525,7 @@ pub fn wire_fs_env_funcs(
                     } else {
                         caller.data_mut().fs.open(abs.clone(), flags)
                     };
+                    seam.finish(Vec::new(), fd as i64);
                     // Extra log for .so / C-extension paths.
                     if abs.ends_with(".so") || abs.contains("_speedups") {
                         pyo_trace!("[openat-SO] {:?} flags={flags} -> fd={fd}", abs);
@@ -435,6 +663,17 @@ pub fn wire_fs_env_funcs(
                             return n as i32;
                         }
                     }
+                    // Effect seam: offer this file read to a recording/replaying
+                    // host (FsSeam::Off and byte-identical when none attached).
+                    let seam = FsSeam::for_fd(&caller, FileOp::Read, fd, Vec::new());
+                    if let Some(rec) = seam.served() {
+                        // Replay: substitute the recorded bytes, no real FS read.
+                        let out = &rec.output;
+                        let n = out.len().min(len);
+                        let mem = memory.data_mut(&mut caller);
+                        mem[start..start + n].copy_from_slice(&out[..n]);
+                        return n as i32;
+                    }
                     // Read from FS into a temp buffer, then write to guest memory.
                     // Host-backed fds are checked first.
                     let mut tmp = vec![0u8; len];
@@ -448,6 +687,7 @@ pub fn wire_fs_env_funcs(
                     }
                     let mem = memory.data_mut(&mut caller);
                     mem[start..start + n as usize].copy_from_slice(&tmp[..n as usize]);
+                    seam.finish(tmp[..n as usize].to_vec(), n as i64);
                     n
                 },
             )
@@ -487,6 +727,12 @@ pub fn wire_fs_env_funcs(
                     let iov_bytes: Vec<u8> =
                         memory.data(&caller)[iov_start..iov_start + iov_array_len].to_vec();
                     let mut total: i32 = 0;
+                    // Effect seam: accumulate file-fd bytes for one Write record
+                    // only when a recording host is attached (None -> no copy,
+                    // byte-identical). File writev is rare; CPython buffered file
+                    // IO uses __syscall_write, which is instrumented separately.
+                    let mut fx_recorded: Option<Vec<u8>> =
+                        caller.data().host_context.is_some().then(Vec::new);
                     for i in 0..iovcnt {
                         let base = i * 8;
                         let buf_ptr =
@@ -566,8 +812,19 @@ pub fn wire_fs_env_funcs(
                             } else {
                                 return EBADF;
                             }
+                            // File-fd write: gather for the record (host only).
+                            if let Some(buf) = fx_recorded.as_mut() {
+                                buf.extend_from_slice(&chunk);
+                            }
                         }
                         total += buf_len as i32;
+                    }
+                    // Effect seam: journal the gathered file bytes as one Write.
+                    if let Some(buf) = fx_recorded
+                        && !buf.is_empty()
+                    {
+                        let abs = caller.data().fs.fd_path(fd).unwrap_or_default().to_owned();
+                        FsSeam::record_now(&caller, FileOp::Write, &abs, buf, Vec::new(), total as i64);
                     }
                     pyo_trace!("[__syscall_writev] fd={fd} total_bytes={total}");
                     total
@@ -649,6 +906,13 @@ pub fn wire_fs_env_funcs(
                             net.write(conn_id, chunk, &mut err_s);
                             return len as i32;
                         }
+                        // Effect seam for a file write (Off/byte-identical, no
+                        // payload copy, when no recording host is attached).
+                        let seam = FsSeam::for_fd_write(&caller, fd, &chunk);
+                        if seam.served().is_some() {
+                            // Replay: report the bytes written, touch no FS.
+                            return len as i32;
+                        }
                         if caller.data().fs.is_host_fd(fd) {
                             let n = match caller.data_mut().fs.write_host(fd, &chunk) {
                                 Some(n) => n,
@@ -665,6 +929,7 @@ pub fn wire_fs_env_funcs(
                         } else {
                             return EBADF;
                         }
+                        seam.finish(Vec::new(), len as i64);
                     }
                     len as i32
                 },
@@ -689,6 +954,25 @@ pub fn wire_fs_env_funcs(
                     let len = count as u32 as usize;
                     if len == 0 {
                         return 0;
+                    }
+                    // Effect seam: a replaying host serves recorded bytes with
+                    // no fd seeking or FS read; recording captures the read
+                    // below. Off / byte-identical when no host is attached.
+                    let seam = FsSeam::for_fd(&caller, FileOp::Read, fd, Vec::new());
+                    if let Some(rec) = seam.served() {
+                        let Some(memory) = caller.data().pyodide_memory else {
+                            return EBADF;
+                        };
+                        let start = buf as u32 as usize;
+                        let mem_len = memory.data_size(&caller);
+                        let n = rec.output.len().min(len);
+                        if start + n > mem_len {
+                            return EINVAL;
+                        }
+                        let out = rec.output[..n].to_vec();
+                        let mem = memory.data_mut(&mut caller);
+                        mem[start..start + n].copy_from_slice(&out);
+                        return n as i32;
                     }
                     // Save current offset, seek to `offset`, read, restore.
                     // Host-backed fds use lseek_host; in-memory fds use InMemFs::lseek.
@@ -743,6 +1027,7 @@ pub fn wire_fs_env_funcs(
                     }
                     let mem = memory.data_mut(&mut caller);
                     mem[start..start + n as usize].copy_from_slice(&tmp[..n as usize]);
+                    seam.finish(tmp[..n as usize].to_vec(), n as i64);
                     n
                 },
             )
@@ -780,21 +1065,32 @@ pub fn wire_fs_env_funcs(
                     }
                     let chunk: Vec<u8> = memory.data(&caller)[start..start + len].to_vec();
                     let off = offset.max(0) as u64;
+                    // Effect seam for a positional file write (Off/no copy when
+                    // no recording host is attached).
+                    let seam = FsSeam::for_fd_write(&caller, fd, &chunk);
+                    if let Some(rec) = seam.served() {
+                        // Replay: return the recorded bytes-written, touch no FS.
+                        return match &rec.status {
+                            EffectStatus::Ok { code, .. } => *code as i32,
+                            EffectStatus::Err(_) => EBADF,
+                        };
+                    }
                     let is_host = caller.data().fs.is_host_fd(fd);
                     pyo_trace!("[pwrite64] fd={fd} len={len} off={off} is_host={is_host}");
-                    if is_host {
-                        let rc = match caller.data_mut().fs.pwrite_host(fd, &chunk, off) {
+                    let rc = if is_host {
+                        match caller.data_mut().fs.pwrite_host(fd, &chunk, off) {
                             Some(n) if n >= 0 => n,
                             Some(_) => EBADF,
                             None => EBADF,
-                        };
-                        pyo_trace!("[pwrite64] fd={fd} -> rc={rc}");
-                        rc
+                        }
                     } else if caller.data().fs.is_fs_fd(fd) {
                         caller.data_mut().fs.pwrite(fd, &chunk, off)
                     } else {
                         EBADF
-                    }
+                    };
+                    pyo_trace!("[pwrite64] fd={fd} -> rc={rc}");
+                    seam.finish(Vec::new(), rc as i64);
+                    rc
                 },
             )
             .map_err(|e| AfterburnerError::Engine(format!("__syscall_pwrite64: {e}")))?;
@@ -911,6 +1207,14 @@ pub fn wire_fs_env_funcs(
                         return EINVAL;
                     }
                     mem[start..start + EM_STAT_STRUCT_BYTES].copy_from_slice(&buf);
+                    // Effect seam: journal the fstat + its struct bytes
+                    // (record-only; Off / byte-identical when no host attached).
+                    FsSeam::record_path(
+                        &caller,
+                        FileOp::Stat,
+                        path_for_log.as_deref().unwrap_or_default(),
+                    )
+                    .finish(buf.to_vec(), 0);
                     0
                 },
             )
@@ -964,6 +1268,9 @@ pub fn wire_fs_env_funcs(
                         return EINVAL;
                     }
                     mem[start..start + EM_STAT_STRUCT_BYTES].copy_from_slice(&buf);
+                    // Effect seam: journal the stat + its struct bytes
+                    // (record-only; Off / byte-identical when no host attached).
+                    FsSeam::record_path(&caller, FileOp::Stat, &abs).finish(buf.to_vec(), 0);
                     0
                 },
             )
@@ -1013,6 +1320,9 @@ pub fn wire_fs_env_funcs(
                         return EINVAL;
                     }
                     mem[start..start + EM_STAT_STRUCT_BYTES].copy_from_slice(&buf);
+                    // Effect seam: journal the lstat + its struct bytes
+                    // (record-only; Off / byte-identical when no host attached).
+                    FsSeam::record_path(&caller, FileOp::Stat, &abs).finish(buf.to_vec(), 0);
                     0
                 },
             )
@@ -1067,6 +1377,9 @@ pub fn wire_fs_env_funcs(
                         return EINVAL;
                     }
                     mem[start..start + EM_STAT_STRUCT_BYTES].copy_from_slice(&buf);
+                    // Effect seam: journal the stat + its struct bytes
+                    // (record-only; Off / byte-identical when no host attached).
+                    FsSeam::record_path(&caller, FileOp::Stat, &abs).finish(buf.to_vec(), 0);
                     0
                 },
             )
@@ -1173,11 +1486,15 @@ pub fn wire_fs_env_funcs(
                         return EBADF;
                     };
                     let start = dirp as u32 as usize;
+                    // Effect seam: journal the directory-listing bytes
+                    // (record-only; Off / byte-identical when no host attached).
+                    let seam = FsSeam::record_fd(&caller, FileOp::List, fd);
                     let mem = memory.data_mut(&mut caller);
                     if start + n as usize > mem.len() {
                         return EINVAL;
                     }
                     mem[start..start + n as usize].copy_from_slice(&tmp);
+                    seam.finish(tmp, n as i64);
                     n
                 },
             )
@@ -1333,8 +1650,11 @@ pub fn wire_fs_env_funcs(
                     };
                     let abs = caller.data().fs.resolve(&base, &path_str);
                     pyo_trace!("[unlinkat] abs={abs:?}");
+                    // Effect seam: journal the delete (record-only; Off /
+                    // byte-identical when no recording host is attached).
+                    let seam = FsSeam::record_path(&caller, FileOp::Delete, &abs);
                     // Route host-backed paths to the real filesystem.
-                    if let Some(host_path) =
+                    let rc = if let Some(host_path) =
                         InMemFs::resolve_to_host_path(&abs, &caller.data().rw_preopens)
                     {
                         // On Linux, deleting an open file unlinks the directory
@@ -1348,7 +1668,9 @@ pub fn wire_fs_env_funcs(
                     } else {
                         // MEMFS unlink.
                         caller.data_mut().fs.unlink(&abs)
-                    }
+                    };
+                    seam.finish(Vec::new(), rc as i64);
+                    rc
                 },
             )
             .map_err(|e| AfterburnerError::Engine(format!("__syscall_unlinkat: {e}")))?;

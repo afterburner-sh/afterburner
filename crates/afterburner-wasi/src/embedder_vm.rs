@@ -422,6 +422,18 @@ pub struct EmbedderState {
     /// deterministic (sealed) or real OS (live-net) entropy. Defaults to
     /// `Deterministic`; set to `RealOs` for daemon runs that perform live TLS.
     pub entropy: EntropySource,
+    /// Optional record/replay effect seam for a recording host (causarum).
+    /// `None` on sealed / default runs, so the `__syscall_*` filesystem shims
+    /// behave byte-identically (no per-call allocation, no path lookup). When
+    /// `Some`, each instrumented filesystem handler offers a
+    /// [`HostEffect`](afterburner_core::HostEffect) via
+    /// [`on_host_call`](afterburner_core::HostContext::on_host_call) (a `Some`
+    /// return replays recorded bytes without touching the FS) and reports the
+    /// real op's byte-level result via
+    /// [`record_host_effect`](afterburner_core::HostContext::record_host_effect).
+    /// Set by the [`crate::pyodide_runner`] session/record path, never by the
+    /// sealed run core.
+    pub host_context: Option<Arc<dyn afterburner_core::HostContext>>,
 }
 
 impl EmbedderState {
@@ -464,6 +476,7 @@ impl EmbedderState {
             daemon_unix: None,
             rw_preopens: Vec::new(),
             entropy: EntropySource::Deterministic,
+            host_context: None,
         }
     }
 
@@ -518,6 +531,7 @@ impl EmbedderState {
             daemon_unix: None,
             rw_preopens: Vec::new(),
             entropy: EntropySource::Deterministic,
+            host_context: None,
         }
     }
 
@@ -566,6 +580,7 @@ impl EmbedderState {
             daemon_unix: None,
             rw_preopens: Vec::new(),
             entropy: EntropySource::Deterministic,
+            host_context: None,
         }
     }
 
@@ -835,6 +850,7 @@ impl EmbedderVm {
                 #[cfg(all(feature = "daemon", unix))]
                 daemon_unix: None,
                 entropy: EntropySource::Deterministic,
+                host_context: None,
             }
         } else {
             EmbedderState {
@@ -873,6 +889,7 @@ impl EmbedderVm {
                 #[cfg(all(feature = "daemon", unix))]
                 daemon_unix: None,
                 entropy: EntropySource::Deterministic,
+                host_context: None,
             }
         };
 
@@ -958,6 +975,43 @@ impl EmbedderVm {
         opts: WasiCommandOpts,
         fuel: Option<u64>,
     ) -> Result<EmbedderRunOutput> {
+        self.run_command_impl(module, opts, fuel, None)
+    }
+
+    /// Like [`run_command`][Self::run_command] but threads a recording /
+    /// replaying host ([`HostContext`](afterburner_core::HostContext)) into the
+    /// run. The effect-wrapped preview1 imports (see [`crate::effect_wasi`])
+    /// read it from [`EmbedderState::host_context`] at call time:
+    /// `on_host_call` returning `Some` replays a recorded value, `None` records
+    /// the produced one. Pass `None` for a sealed run (identical to
+    /// [`run_command`][Self::run_command]).
+    ///
+    /// This is the R4 seam: a session reuses one host and one preopen root
+    /// across successive calls, so a later run observes what an earlier one
+    /// recorded.
+    pub fn run_command_with_host(
+        &self,
+        module: &EmbedderModule,
+        opts: WasiCommandOpts,
+        fuel: Option<u64>,
+        host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+    ) -> Result<EmbedderRunOutput> {
+        self.run_command_impl(module, opts, fuel, host_context)
+    }
+
+    /// Shared body of [`run_command`][Self::run_command] and
+    /// [`run_command_with_host`][Self::run_command_with_host]: the one canonical
+    /// WASI-command run path (DRY - the two public entry points differ only in
+    /// whether a recording host is supplied). The host, when present, is placed
+    /// in [`EmbedderState::host_context`] so the effect-wrapped preview1 shims
+    /// can consult it.
+    fn run_command_impl(
+        &self,
+        module: &EmbedderModule,
+        opts: WasiCommandOpts,
+        fuel: Option<u64>,
+        host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+    ) -> Result<EmbedderRunOutput> {
         if !module.wasi {
             return Err(AfterburnerError::Engine(
                 "run_command requires a module compiled with wasi: true".into(),
@@ -1042,6 +1096,9 @@ impl EmbedderVm {
             #[cfg(all(feature = "daemon", unix))]
             daemon_unix: None,
             entropy: EntropySource::Deterministic,
+            // R4: the per-run recording/replaying host consulted by the
+            // effect-wrapped preview1 shims (see `crate::effect_wasi`).
+            host_context,
         };
 
         let mut store = Store::new(&module.engine, state);
