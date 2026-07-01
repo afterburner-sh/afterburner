@@ -171,6 +171,24 @@ impl FsSeam {
         Self::offer(ctx, FileOp::Write, &abs, input.to_vec())
     }
 
+    /// Offer a path-keyed fs effect that **consults** `on_host_call` (so it can
+    /// serve on replay), for a caller that already holds the resolved guest
+    /// path. Unlike [`FsSeam::record_path`] (always [`FsSeam::Record`]), this is
+    /// the record/serve seam the host-backed `path_open` uses: on the original
+    /// run it records the real open; on replay it serves, so the open allocates
+    /// a placeholder fd and never touches the host filesystem.
+    pub(crate) fn for_path(
+        caller: &Caller<'_, EmbedderState>,
+        op: FileOp,
+        abs: &str,
+        input: Vec<u8>,
+    ) -> FsSeam {
+        let Some(ctx) = caller.data().host_context.clone() else {
+            return FsSeam::Off;
+        };
+        Self::offer(ctx, op, abs, input)
+    }
+
     /// A record-only fs effect: always [`FsSeam::Record`] when a host is
     /// attached, never [`FsSeam::Serve`]. Used by `openat`, whose replay cannot
     /// be a byte substitution (the fd must be really allocated so later reads

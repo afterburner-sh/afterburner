@@ -34,6 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use afterburner_core::{AfterburnerError, HostContext, OutputValue, Result, decode_output_value};
 
 use crate::effect_wasi::wire_effect_wrapped_wasi;
+use crate::effect_wasi_fs::wire_effect_wrapped_wasi_fs;
 use crate::embedder_vm::{EmbedderVm, WasiCommandOpts};
 
 /// Instruction budget for one `ruby -e` run. CRuby's WASI boot (interpreter
@@ -84,6 +85,13 @@ const GUEST_AFB_MOUNT: &str = "/.afb";
 
 /// File name the guest writes its return frame to, under [`GUEST_AFB_MOUNT`].
 const OUTPUT_FRAME_NAME: &str = "output.frame";
+
+/// Guest mount point for a fresh read-write scratch directory, preopened for
+/// every run and removed after it. Distinct from the package mount so guest
+/// scratch files (`File.binwrite("/work/x.bin", ...)`) never collide with the
+/// script's own tree, and it gives a host-backed capture run a writable host
+/// root under a stable path.
+const GUEST_WORK_MOUNT: &str = "/work";
 
 /// A fully-resolved Ruby runtime: the standalone interpreter wasm and the
 /// stdlib dir to mount read-only.
@@ -295,11 +303,19 @@ fn run_ruby_pkg(
         .map_err(|e| AfterburnerError::Engine(format!("read {}: {e}", rt.wasm_path.display())))?;
 
     let vm = EmbedderVm::new()?;
-    // R1: wire the effect-wrapped preview1 imports (clock_time_get / random_get
-    // record-replay) over the stock wasmtime-wasi ones. A sealed run
-    // (host = None) still gets deterministic clock/random; a recording host
-    // captures them. See `crate::effect_wasi`.
-    let module = vm.compile(&wasm_bytes, true, wire_effect_wrapped_wasi)?;
+    // R1 / increment 2: pick the preview1 wiring by host presence.
+    //   * host = None  -> sealed run: the clock/random-only shadows over stock
+    //     wasmtime-wasi fs. Byte-identical to before (the fs is never shadowed).
+    //   * host = Some  -> capture run: the full fs-shadow variant that owns the
+    //     fd table over Ruby's real preopens, so File I/O is captured as Fs
+    //     effects. `run_command_impl` seeds the host-backed table from the opts
+    //     preopens below.
+    // Two distinct `fn` items, so the compile call itself is branched.
+    let module = if host.is_some() {
+        vm.compile(&wasm_bytes, true, wire_effect_wrapped_wasi_fs)?
+    } else {
+        vm.compile(&wasm_bytes, true, wire_effect_wrapped_wasi)?
+    };
 
     // The entry's guest path: under the package mount, with forward slashes.
     let entry_fwd = entry_rel.replace('\\', "/");
@@ -342,17 +358,28 @@ fn run_ruby_pkg(
     }
     opts = opts.preopen_rw(pkg_dir, GUEST_PKG_MOUNT);
 
+    // A fresh read-write scratch dir preopened at guest `/work`, removed after
+    // the run. Gives guest scratch writes a stable, isolated host-backed root.
+    let work_dir = unique_tmp_dir("burn-rb-work");
+    std::fs::create_dir_all(&work_dir)
+        .map_err(|e| AfterburnerError::Engine(format!("create {}: {e}", work_dir.display())))?;
+    opts = opts.preopen_rw(&work_dir, GUEST_WORK_MOUNT);
+
     // R2/R3: a fresh host dir preopened rw at guest `/.afb`. The guest may write
     // its typed return value there as an AFBF frame; the host reads it back.
+    // Added last so `/.afb` is the final preopen (highest fd) - the fd order is
+    // irrelevant to correctness but keeps the return channel out of the way of
+    // the user-visible mounts.
     let afb_dir = unique_tmp_dir("burn-rb-afb");
     std::fs::create_dir_all(&afb_dir)
         .map_err(|e| AfterburnerError::Engine(format!("create {}: {e}", afb_dir.display())))?;
     opts = opts.preopen_rw(&afb_dir, GUEST_AFB_MOUNT);
 
     let run_res = vm.run_command_with_host(&module, opts, Some(RUBY_FUEL), host);
-    // Read the return frame regardless of the run outcome, then clean the dir.
+    // Read the return frame regardless of the run outcome, then clean the dirs.
     let frame_res = read_output_frame(&afb_dir);
     let _ = std::fs::remove_dir_all(&afb_dir);
+    let _ = std::fs::remove_dir_all(&work_dir);
 
     // A run failure (fuel/trap) takes precedence over a frame-decode failure.
     let out = run_res?;

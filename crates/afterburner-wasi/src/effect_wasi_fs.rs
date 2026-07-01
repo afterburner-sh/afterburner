@@ -51,9 +51,10 @@ use crate::effect_wasi_abi::{
     ERRNO_ACCES, ERRNO_BADF, ERRNO_FAULT, ERRNO_INVAL, ERRNO_ISDIR, ERRNO_NOENT, ERRNO_NOTDIR,
     ERRNO_SUCCESS, read_bytes, read_iovecs, write_bytes, write_u32, write_u64,
 };
+use crate::effect_wasi_fs_ext::wire_effect_wrapped_wasi_fs_ext;
 use crate::embedder_vm::{EmbedderLinker, EmbedderState};
 use crate::emscripten_abi::VIRTUAL_EPOCH_NS;
-use crate::emscripten_fs::{EACCES, EBADF, EINVAL, EISDIR, ENOENT, ENOTDIR};
+use crate::emscripten_fs::{EACCES, EBADF, EINVAL, EISDIR, ENOENT, ENOTDIR, host_node_info};
 use crate::emscripten_syscall::FsSeam;
 
 // ---- wasip1 <-> emscripten flag / errno translation --------------------------
@@ -82,7 +83,7 @@ const FILESTAT_BYTES: usize = 64;
 
 /// Map an `InMemFs` negative Linux-style errno to its positive wasip1 `errno`.
 /// A non-negative input is not an error and must never reach here.
-fn em2wasi(neg: i32) -> i32 {
+pub(crate) fn em2wasi(neg: i32) -> i32 {
     match neg {
         ENOENT => ERRNO_NOENT,   // -2  -> 44
         EBADF => ERRNO_BADF,     // -9  -> 8
@@ -158,6 +159,21 @@ fn path_open(
     let base = caller.data().fs.fd_path(dirfd).unwrap_or("/").to_owned();
     let abs = caller.data().fs.resolve(&base, &path);
 
+    // Host-backed preopen? A `Some` routes the open to the real host filesystem
+    // (increment 2); a `None` keeps it on the in-memory `InMemFs` (increment 1,
+    // the WAT path), which is the unchanged branch below.
+    if let Some((host_path, writable)) = caller.data().resolve_host_backed(&abs) {
+        return path_open_host(
+            caller,
+            abs,
+            host_path,
+            writable,
+            oflags,
+            rights_base,
+            opened_fd_out,
+        );
+    }
+
     // Record-only Create, and only for a node that does not yet exist.
     let creating = oflags & OFLAGS_CREAT != 0 && caller.data().fs.get(&abs).is_none();
     let seam = if creating {
@@ -170,6 +186,76 @@ fn path_open(
         .data_mut()
         .fs
         .open(abs, open_flags(oflags, rights_base));
+    if fd < 0 {
+        return em2wasi(fd);
+    }
+    if !write_u32(&mut caller, opened_fd_out, fd as u32) {
+        return ERRNO_FAULT;
+    }
+    seam.finish(Vec::new(), fd as i64);
+    ERRNO_SUCCESS
+}
+
+/// True when the wasip1 open flags/rights request any form of write access
+/// (create, truncate, or the `fd_write` right). Used to deny a write open under
+/// a read-only host preopen.
+fn wants_write(oflags: i32, rights_base: i64) -> bool {
+    oflags & (OFLAGS_CREAT | OFLAGS_TRUNC) != 0 || rights_base & RIGHTS_FD_WRITE != 0
+}
+
+/// The host-backed `path_open` leg (increment 2): open the real host file
+/// (record) or allocate a placeholder in-memory fd (replay), threading the
+/// shared record/serve [`FsSeam`] so a replay never touches the host disk.
+///
+/// A read-only preopen rejects a write open with `EACCES` (the InMemFs
+/// `open_host` does not itself enforce read-only). A `Create` (new file) records
+/// as [`FileOp::Create`]; any other open records/serves as [`FileOp::Read`] so
+/// the open is serveable on replay and the later `fd_read` serves recorded bytes
+/// without re-reading the host.
+fn path_open_host(
+    mut caller: Caller<'_, EmbedderState>,
+    abs: String,
+    host_path: std::path::PathBuf,
+    writable: bool,
+    oflags: i32,
+    rights_base: i64,
+    opened_fd_out: i32,
+) -> i32 {
+    if !writable && wants_write(oflags, rights_base) {
+        return ERRNO_ACCES;
+    }
+
+    let op = if oflags & OFLAGS_CREAT != 0 {
+        FileOp::Create
+    } else {
+        FileOp::Read
+    };
+    let seam = FsSeam::for_path(&caller, op, &abs, Vec::new());
+
+    if seam.served().is_some() {
+        // Replay: no real host op. Allocate a path-only placeholder fd so the
+        // fd number matches the record run (both go through `alloc_fd`) and the
+        // later `fd_read` serves recorded bytes from the seam.
+        caller.data_mut().fs.insert_file(&abs, Vec::new());
+        let fd = caller
+            .data_mut()
+            .fs
+            .open(abs, open_flags(oflags, rights_base));
+        if fd < 0 {
+            return em2wasi(fd);
+        }
+        return if write_u32(&mut caller, opened_fd_out, fd as u32) {
+            ERRNO_SUCCESS
+        } else {
+            ERRNO_FAULT
+        };
+    }
+
+    // Record: the real host open.
+    let fd = caller
+        .data_mut()
+        .fs
+        .open_host(abs, host_path, open_flags(oflags, rights_base));
     if fd < 0 {
         return em2wasi(fd);
     }
@@ -234,11 +320,22 @@ fn fd_read(
     }
 
     // Record / off: read the real bytes, scatter to the guest, journal them.
+    // A host-backed fd reads from the real `std::fs::File`; an in-memory fd from
+    // the `InMemFs` node. Same `FsSeam` capture wraps both.
+    let host = caller.data().fs.is_host_fd(fd);
     let mut scratch = Vec::new();
     let mut total = 0usize;
     for (buf, len) in &iovecs {
         let mut chunk = vec![0u8; *len as usize];
-        let n = caller.data_mut().fs.read(fd, &mut chunk);
+        let n = if host {
+            caller
+                .data_mut()
+                .fs
+                .read_host(fd, &mut chunk)
+                .unwrap_or(EBADF)
+        } else {
+            caller.data_mut().fs.read(fd, &mut chunk)
+        };
         if n < 0 {
             return em2wasi(n);
         }
@@ -311,12 +408,21 @@ fn fd_pread(
         };
     }
 
+    let host = caller.data().fs.is_host_fd(fd);
     let mut scratch = Vec::new();
     let mut total = 0usize;
     let mut cur = offset as u64;
     for (buf, len) in &iovecs {
         let mut chunk = vec![0u8; *len as usize];
-        let n = caller.data_mut().fs.pread(fd, &mut chunk, cur);
+        let n = if host {
+            caller
+                .data_mut()
+                .fs
+                .pread_host(fd, &mut chunk, cur)
+                .unwrap_or(EBADF)
+        } else {
+            caller.data_mut().fs.pread(fd, &mut chunk, cur)
+        };
         if n < 0 {
             return em2wasi(n);
         }
@@ -399,7 +505,11 @@ fn fd_write(
         };
     }
 
-    let n = caller.data_mut().fs.write(fd, &bytes);
+    let n = if caller.data().fs.is_host_fd(fd) {
+        caller.data_mut().fs.write_host(fd, &bytes).unwrap_or(EBADF)
+    } else {
+        caller.data_mut().fs.write(fd, &bytes)
+    };
     if n < 0 {
         return em2wasi(n);
     }
@@ -450,7 +560,15 @@ fn fd_pwrite(
         };
     }
 
-    let n = caller.data_mut().fs.pwrite(fd, &bytes, offset as u64);
+    let n = if caller.data().fs.is_host_fd(fd) {
+        caller
+            .data_mut()
+            .fs
+            .pwrite_host(fd, &bytes, offset as u64)
+            .unwrap_or(EBADF)
+    } else {
+        caller.data_mut().fs.pwrite(fd, &bytes, offset as u64)
+    };
     if n < 0 {
         return em2wasi(n);
     }
@@ -472,7 +590,15 @@ fn fd_seek(
     whence: i32,
     newoffset_out: i32,
 ) -> i32 {
-    let r = caller.data_mut().fs.lseek(fd, offset, whence);
+    let r = if caller.data().fs.is_host_fd(fd) {
+        caller
+            .data_mut()
+            .fs
+            .lseek_host(fd, offset, whence)
+            .unwrap_or(EBADF as i64)
+    } else {
+        caller.data_mut().fs.lseek(fd, offset, whence)
+    };
     if r < 0 {
         return em2wasi(r as i32);
     }
@@ -483,9 +609,14 @@ fn fd_seek(
     }
 }
 
-/// `fd_close(fd) -> errno`. fd lifecycle, not journalled.
+/// `fd_close(fd) -> errno`. fd lifecycle, not journalled. A host-backed fd drops
+/// the real `std::fs::File`; an in-memory fd releases its table slot.
 fn fd_close(mut caller: Caller<'_, EmbedderState>, fd: i32) -> i32 {
-    let r = caller.data_mut().fs.close(fd);
+    let r = if caller.data().fs.is_host_fd(fd) {
+        caller.data_mut().fs.close_host(fd).unwrap_or(EBADF)
+    } else {
+        caller.data_mut().fs.close(fd)
+    };
     if r < 0 { em2wasi(r) } else { ERRNO_SUCCESS }
 }
 
@@ -506,10 +637,20 @@ fn fd_filestat_get(mut caller: Caller<'_, EmbedderState>, fd: i32, filestat_out:
             ERRNO_FAULT
         };
     }
-    let Some(info) = caller.data_mut().fs.node_info(&abs) else {
-        return ERRNO_NOENT;
-    };
-    let buf = write_filestat(info.ino, info.filetype, info.size);
+    // A host-backed fd stats the real host path; an in-memory fd its node.
+    let (ino, filetype, size) =
+        if let Some((host_path, _)) = caller.data().resolve_host_backed(&abs) {
+            let Some(info) = host_node_info(&host_path) else {
+                return ERRNO_NOENT;
+            };
+            info
+        } else {
+            let Some(info) = caller.data_mut().fs.node_info(&abs) else {
+                return ERRNO_NOENT;
+            };
+            (info.ino, info.filetype, info.size)
+        };
+    let buf = write_filestat(ino, filetype, size);
     if !write_bytes(&mut caller, filestat_out, &buf) {
         return ERRNO_FAULT;
     }
@@ -534,10 +675,21 @@ fn path_filestat_get(
     let base = caller.data().fs.fd_path(dirfd).unwrap_or("/").to_owned();
     let abs = caller.data().fs.resolve(&base, &path);
     let seam = FsSeam::record_path(&caller, FileOp::Stat, &abs);
-    let Some(info) = caller.data_mut().fs.node_info(&abs) else {
-        return ERRNO_NOENT;
-    };
-    let buf = write_filestat(info.ino, info.filetype, info.size);
+    // A path under a host-backed preopen stats the real host path; otherwise the
+    // in-memory node.
+    let (ino, filetype, size) =
+        if let Some((host_path, _)) = caller.data().resolve_host_backed(&abs) {
+            let Some(info) = host_node_info(&host_path) else {
+                return ERRNO_NOENT;
+            };
+            info
+        } else {
+            let Some(info) = caller.data_mut().fs.node_info(&abs) else {
+                return ERRNO_NOENT;
+            };
+            (info.ino, info.filetype, info.size)
+        };
+    let buf = write_filestat(ino, filetype, size);
     if !write_bytes(&mut caller, filestat_out, &buf) {
         return ERRNO_FAULT;
     }
@@ -585,16 +737,24 @@ fn path_unlink_file(
     if r < 0 { em2wasi(r) } else { ERRNO_SUCCESS }
 }
 
-/// `fd_prestat_get(fd, prestat_out) -> errno`. Advertises exactly one preopen:
-/// the `InMemFs` root at fd 3 (`{ tag: 0 (dir), pr_name_len: 1 }`); every other
-/// fd is EBADF so wasi-libc stops walking the preopen list. Not journalled.
+/// `fd_prestat_get(fd, prestat_out) -> errno`. Advertises each preopen in
+/// [`EmbedderState::fs_preopens`] as `{ tag: 0 (dir), pr_name_len }`; a fd with
+/// no preopen entry is EBADF so wasi-libc stops walking the list. Not
+/// journalled. The WAT path (a single `{fd:3, "/"}`) reproduces increment 1's
+/// exact bytes; the host-backed path advertises the enumerated set (fds 3..).
 fn fd_prestat_get(mut caller: Caller<'_, EmbedderState>, fd: i32, prestat_out: i32) -> i32 {
-    if fd != 3 {
+    let Some(name_len) = caller
+        .data()
+        .fs_preopens
+        .iter()
+        .find(|p| p.fd == fd)
+        .map(|p| p.guest_path.len())
+    else {
         return ERRNO_BADF;
-    }
+    };
     let mut buf = [0u8; 8];
     buf[0] = 0; // tag: __WASI_PREOPENTYPE_DIR
-    buf[4..8].copy_from_slice(&1u32.to_le_bytes()); // pr_name_len = len("/")
+    buf[4..8].copy_from_slice(&(name_len as u32).to_le_bytes()); // pr_name_len
     if write_bytes(&mut caller, prestat_out, &buf) {
         ERRNO_SUCCESS
     } else {
@@ -602,18 +762,25 @@ fn fd_prestat_get(mut caller: Caller<'_, EmbedderState>, fd: i32, prestat_out: i
     }
 }
 
-/// `fd_prestat_dir_name(fd, path, path_len) -> errno`. Writes the preopen name
-/// `"/"` for fd 3. Not journalled.
+/// `fd_prestat_dir_name(fd, path, path_len) -> errno`. Writes the guest name of
+/// the preopen at `fd` (looked up in [`EmbedderState::fs_preopens`]). Not
+/// journalled.
 fn fd_prestat_dir_name(
     mut caller: Caller<'_, EmbedderState>,
     fd: i32,
     path_ptr: i32,
     _path_len: i32,
 ) -> i32 {
-    if fd != 3 {
+    let Some(name) = caller
+        .data()
+        .fs_preopens
+        .iter()
+        .find(|p| p.fd == fd)
+        .map(|p| p.guest_path.clone())
+    else {
         return ERRNO_BADF;
-    }
-    if write_bytes(&mut caller, path_ptr, b"/") {
+    };
+    if write_bytes(&mut caller, path_ptr, name.as_bytes()) {
         ERRNO_SUCCESS
     } else {
         ERRNO_FAULT
@@ -654,6 +821,11 @@ pub fn wire_effect_wrapped_wasi_fs(linker: &mut EmbedderLinker<'_>) -> Result<()
     linker.func_wrap(m, "path_unlink_file", path_unlink_file)?;
     linker.func_wrap(m, "fd_prestat_get", fd_prestat_get)?;
     linker.func_wrap(m, "fd_prestat_dir_name", fd_prestat_dir_name)?;
+
+    // The additional wasip1 fs imports a real CRuby boot needs (fdstat, readlink,
+    // readdir, and the defensive tell/sync/advise no-ops). Kept in a sibling
+    // module to hold both files under the ~1000-line limit.
+    wire_effect_wrapped_wasi_fs_ext(linker)?;
     Ok(())
 }
 
