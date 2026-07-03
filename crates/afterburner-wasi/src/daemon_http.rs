@@ -666,7 +666,16 @@ mod axum_server {
             return resp;
         };
         event_tx.send_async(event).await;
-        let reply = reply_rx.recv_async().await;
+        // `recv_async` now resolves to `None` when the reply sender is dropped
+        // without responding (worker/shard gone) rather than parking forever;
+        // surface a 500 instead of hanging.
+        let Some(reply) = reply_rx.recv_async().await else {
+            let mut resp = hyper::Response::new(axum::body::Body::from(
+                "burn: no reply from daemon\n".to_string(),
+            ));
+            *resp.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
+            return resp;
+        };
 
         let mut builder = hyper::Response::builder().status(reply.status);
         for (name, value) in &reply.headers {
