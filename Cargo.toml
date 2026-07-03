@@ -117,8 +117,8 @@ tempfile = "3"
 flate2 = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 brotli = { version = "8", default-features = false, features = ["std"] }
-kovan-map = "0.1.14"
-kovan-channel = "0.1.14"
+kovan-map = "0.1.15"
+kovan-channel = "0.1.15"
 libc = "0.2"
 # Colored + animated `burn` CLI output (brand palette spinners/styling). Used
 # only by the `bin` feature.
