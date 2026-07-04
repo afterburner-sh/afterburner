@@ -153,10 +153,11 @@ pub(crate) type WtResult<T> = wasmtime::Result<T>;
 
 /// Shared log of JS-FFI function names called during the Pyodide boot attempt.
 ///
-/// Lock-free: each stub uses `kovan_map::HashMap::get_or_insert` (CAS-based)
-/// to mark the name as called, and a separate `AtomicUsize` for the total.
+/// Lock-free: each stub uses `kovan_map::HopscotchMap::get_or_insert`
+/// (CAS-based) to mark the name as called, and a separate `AtomicUsize` for
+/// the total.
 pub struct JsFfiCallLog {
-    names: kovan_map::HashMap<String, u64>,
+    names: kovan_map::HopscotchMap<String, u64>,
     total: AtomicUsize,
 }
 
@@ -164,7 +165,7 @@ impl JsFfiCallLog {
     /// Create an empty log.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            names: kovan_map::HashMap::new(),
+            names: kovan_map::HopscotchMap::new(),
             total: AtomicUsize::new(0),
         })
     }

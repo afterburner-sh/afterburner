@@ -251,7 +251,12 @@ async fn handle_h3_request(
         return;
     };
     event_tx.send_async(event).await;
-    let reply = reply_rx.recv_async().await;
+    // `recv_async` now resolves to `None` when the reply sender is dropped
+    // without responding (worker/shard gone) rather than parking forever.
+    let Some(reply) = reply_rx.recv_async().await else {
+        send_simple_response(&mut stream, 500, b"burn: no reply from daemon").await;
+        return;
+    };
 
     let mut resp_builder = hyper::Response::builder().status(reply.status);
     for (name, value) in &reply.headers {
