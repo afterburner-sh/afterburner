@@ -296,3 +296,126 @@ fn bench_warm_reuse_vs_cold() {
         cold.as_secs_f64() / warm.as_secs_f64().max(1e-9)
     );
 }
+
+/// `WarmPyInterpreter`: persistent mode carries state across calls (a REPL
+/// needs this), `reset_persistent` drops it, and isolated mode on the SAME
+/// interpreter still isolates.
+#[test]
+#[ignore]
+fn warm_interpreter_persistent_and_isolated_modes() {
+    if !batch_runtime_available() {
+        eprintln!("[pyodide_integration] SKIP: no ~/.burn pyodide runtime");
+        return;
+    }
+    use afterburner_wasi::pyodide_runner::WarmPyInterpreter;
+
+    let mut interp = WarmPyInterpreter::boot_resolved().expect("boot+warm");
+
+    // Persistent: a name bound on one call is visible on the next.
+    interp.run_persistent("x = 40").expect("bind x");
+    let o = interp.run_persistent("print(x + 2)").expect("use x");
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).trim(),
+        "42",
+        "persistent namespace must carry state across calls"
+    );
+
+    // reset drops the namespace: x is gone on the next persistent call.
+    interp.reset_persistent().expect("reset");
+    let o = interp.run_persistent("print('x' in dir())").expect("post-reset");
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).trim(),
+        "False",
+        "reset_persistent must clear the persistent namespace"
+    );
+
+    // Isolated mode on the SAME interpreter still isolates between calls.
+    interp.run_isolated("leaked2 = 7").expect("iso bind");
+    let o = interp
+        .run_isolated("print('leaked2' in globals())")
+        .expect("iso check");
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).trim(),
+        "False",
+        "isolated mode must not carry state between calls"
+    );
+}
+
+/// A raising program on the warm interpreter must be CAUGHT (no wasm trap): the
+/// run returns Ok, the error is captured to stderr, and the interpreter survives
+/// for the next run. (Regression guard: `traceback.print_exc` trapped here.)
+#[test]
+#[ignore]
+fn warm_interpreter_error_does_not_trap() {
+    if !batch_runtime_available() {
+        eprintln!("[pyodide_integration] SKIP: no ~/.burn pyodide runtime");
+        return;
+    }
+    use afterburner_wasi::pyodide_runner::WarmPyInterpreter;
+
+    let mut interp = WarmPyInterpreter::boot_resolved().expect("boot+warm");
+    let o = interp
+        .run_persistent("undefined_name_xyz")
+        .expect("a raising program must be caught, not trap");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("NameError"),
+        "the error must be captured to stderr, got: {err:?}"
+    );
+    // The interpreter survives the error: the next run still works.
+    let o2 = interp.run_persistent("print(6 * 7)").expect("post-error run");
+    assert_eq!(
+        String::from_utf8_lossy(&o2.stdout).trim(),
+        "42",
+        "interpreter must stay usable after an error"
+    );
+}
+
+/// Benchmark the REPL model: the OLD approach (re-run the accumulated program
+/// on a fresh boot per line) vs the NEW warm interpreter (one boot, each line
+/// runs on the persistent namespace). Prints per-line times + speedup.
+#[test]
+#[ignore]
+fn bench_repl_warm_vs_replay() {
+    if !batch_runtime_available() {
+        eprintln!("[pyodide_integration] SKIP: no ~/.burn pyodide runtime");
+        return;
+    }
+    use afterburner_wasi::pyodide_runner::{resolve_runtime, run_pyodide_with, WarmPyInterpreter};
+
+    let lines = [
+        "x = 1",
+        "x += 1",
+        "y = x * 10",
+        "print(y)",
+        "z = [i * i for i in range(x)]",
+        "print(sum(z))",
+    ];
+    let n = lines.len();
+    let rt = resolve_runtime().expect("runtime");
+
+    // OLD REPL model: each line re-runs the accumulated program on a fresh boot.
+    let t = std::time::Instant::now();
+    let mut acc = String::new();
+    for line in &lines {
+        acc.push_str(line);
+        acc.push('\n');
+        run_pyodide_with(&rt, &acc).expect("replay run");
+    }
+    let old = t.elapsed();
+
+    // NEW REPL model: one warm interpreter, each line on the persistent namespace.
+    let t = std::time::Instant::now();
+    let mut interp = WarmPyInterpreter::boot_resolved().expect("boot");
+    for line in &lines {
+        interp.run_persistent(line).expect("warm line");
+    }
+    let new = t.elapsed();
+
+    eprintln!(
+        "[bench-repl] {n} lines: replay(old) {old:?} ({}ms/line) | warm(new) {new:?} ({}ms/line) | speedup {:.1}x",
+        old.as_millis() / n as u128,
+        new.as_millis() / n as u128,
+        old.as_secs_f64() / new.as_secs_f64().max(1e-9)
+    );
+}

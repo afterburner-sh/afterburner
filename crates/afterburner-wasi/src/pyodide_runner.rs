@@ -1231,83 +1231,167 @@ const WARM_DRIVER: &[u8] = concat!(
     "try:\n",
     " _afb_ns={'__name__':'__main__','__builtins__':__builtins__}\n",
     " exec(compile(open('/.afb/script.py','rb').read(),'/.afb/script.py','exec'),_afb_ns)\n",
-    "except BaseException:\n",
-    " import traceback as _t\n",
-    " _t.print_exc(file=_sys.stderr)\n",
+    "except BaseException as _exc:\n",
+    " _sys.stderr.write(type(_exc).__name__ + ': ' + str(_exc) + '\\n')\n",
     "finally:\n",
     " __afb_finalize__()\n",
     "\0"
 )
 .as_bytes();
 
-/// Run one script on an interpreter already warmed by [`run_pyodide_batch`],
-/// via `PyRun_SimpleString` - skipping the ~350 ms CPython bringup. Output and
-/// return-value capture are identical to the cold path (`/.afb/stdout.bin`,
-/// `/.afb/stderr.bin`, `/.afb/output.frame`).
-///
-/// v1 note: a script that raises is caught and its traceback captured to
-/// stderr, but `exit_code` stays 0 (the cold path surfaces a non-zero code); the
-/// error is visible in stderr and the output frame is absent (`output = Null`).
-fn run_warm_script(
-    source: &str,
-    store: &mut Store<EmbedderState>,
-    pyrun: &wasmtime::Func,
-    driver_ptr: u32,
-) -> Result<PyodideRunOutput> {
-    store.data_mut().wasi_stdout.clear();
-    // Fresh fuel per thrust; the warm store accumulates consumption otherwise.
-    let _ = store.set_fuel(PYODIDE_FUEL);
-    // Hand the user source to the guest via a file so the fixed driver execs it
-    // in a fresh namespace - no per-thrust wasm allocation, no source escaping.
-    store
-        .data_mut()
-        .fs
-        .insert_file("/.afb/script.py", source.as_bytes().to_vec());
+/// Like [`WARM_DRIVER`] but runs the user source in a PERSISTENT namespace
+/// (`_afb_repl_ns`, created lazily once) so state carries across calls - the
+/// semantics a REPL needs (define a name, use it on the next line). Compiled in
+/// `exec` mode; expression echoing is the caller's concern (the REPL wraps a
+/// bare expression in `print(repr(...))`).
+const WARM_REPL_DRIVER: &[u8] = concat!(
+    "_afb_out[0]=False\n",
+    "_afb_out[1]=None\n",
+    "_afb_o=open('/.afb/stdout.bin','wb',buffering=0)\n",
+    "_afb_e=open('/.afb/stderr.bin','wb',buffering=0)\n",
+    "_sys.stdout=_io.TextIOWrapper(_afb_o,encoding='utf-8',write_through=True)\n",
+    "_sys.stderr=_io.TextIOWrapper(_afb_e,encoding='utf-8',errors='backslashreplace',write_through=True)\n",
+    "try:\n _afb_repl_ns\n",
+    "except NameError:\n _afb_repl_ns={'__name__':'__main__','__builtins__':__builtins__}\n",
+    "try:\n",
+    " exec(compile(open('/.afb/script.py','rb').read(),'<repl>','exec'),_afb_repl_ns)\n",
+    "except BaseException as _exc:\n",
+    " _sys.stderr.write(type(_exc).__name__ + ': ' + str(_exc) + '\\n')\n",
+    "finally:\n",
+    " __afb_finalize__()\n",
+    "\0"
+)
+.as_bytes();
 
-    let mut ret = [wasmtime::Val::I32(-1)];
-    pyrun
-        .call(&mut *store, &[wasmtime::Val::I32(driver_ptr as i32)], &mut ret)
-        .map_err(|e| AfterburnerError::Engine(format!("warm PyRun_SimpleString trapped: {e}")))?;
-    let exit_code = match ret[0] {
-        wasmtime::Val::I32(v) => v,
-        _ => -99,
-    };
-    Ok(PyodideRunOutput {
-        stdout: captured_stdout(store),
-        stderr: captured_stderr(store),
-        exit_code,
-        output: captured_output(store)?,
-    })
+/// Drop the persistent REPL namespace so the next persistent run rebuilds a
+/// fresh one (a REPL `:clear`). Runs directly in `__main__` (not redirected into
+/// a namespace) so `del` targets the module global.
+const WARM_REPL_RESET: &[u8] = b"try:\n del _afb_repl_ns\nexcept NameError:\n pass\n\0";
+
+/// A booted + warmed CPython interpreter that runs many Python programs without
+/// paying the ~490 ms boot + `site`/stdlib bringup again (#53 warm reuse).
+///
+/// Holds the live wasmtime `Store` + `Instance`, so it is single-threaded: keep
+/// and drive it from ONE thread (a REPL session, a batch loop). Each run resets
+/// the `/.afb` capture sinks and runs via `PyRun_SimpleString` (~0 ms bringup).
+///
+/// Two run modes:
+/// - [`run_isolated`](Self::run_isolated): each program in a FRESH namespace
+///   (no leakage between programs) - for batch execution.
+/// - [`run_persistent`](Self::run_persistent): programs share ONE namespace
+///   (state carries across calls) - for a REPL.
+///
+/// Note: a program that raises is caught and its traceback captured to stderr,
+/// with `exit_code` 0 and an absent output frame (`output = Null`); the cold
+/// path instead surfaces a non-zero exit code.
+pub struct WarmPyInterpreter {
+    store: Store<EmbedderState>,
+    #[allow(dead_code)]
+    instance: Instance,
+    pyrun: wasmtime::Func,
+    driver_isolated: u32,
+    driver_persistent: u32,
+    driver_reset: u32,
+}
+
+impl WarmPyInterpreter {
+    /// Boot + warm an interpreter on `rt`. Pays the full boot + bringup once.
+    pub fn boot(rt: &PyRuntime) -> Result<Self> {
+        let (mut store, instance, _got) = boot_pyodide_instance(rt, &[])?;
+        // Warm once: Py_Initialize + site/stdlib import + install the capture
+        // machinery (which then persists for every run below). The `pass`
+        // program's own (empty) output is discarded.
+        let _ = run_booted_pyodide("pass", None, &mut store, &instance)?;
+
+        let pyrun = instance.get_func(&mut store, "PyRun_SimpleString").ok_or_else(|| {
+            AfterburnerError::Engine("PyRun_SimpleString not exported by the python runtime".into())
+        })?;
+        // Allocate the fixed drivers once; reuse their pointers for every run so
+        // no wasm page grows per program.
+        let driver_isolated = alloc_cstr(&mut store, WARM_DRIVER)?;
+        let driver_persistent = alloc_cstr(&mut store, WARM_REPL_DRIVER)?;
+        let driver_reset = alloc_cstr(&mut store, WARM_REPL_RESET)?;
+        Ok(Self {
+            store,
+            instance,
+            pyrun,
+            driver_isolated,
+            driver_persistent,
+            driver_reset,
+        })
+    }
+
+    /// Boot + warm an interpreter on the resolved runtime (bundle or
+    /// `BURN_PYTHON_RUNTIME`).
+    pub fn boot_resolved() -> Result<Self> {
+        let rt = resolve_runtime()?;
+        Self::boot(&rt)
+    }
+
+    /// Run `source` in a FRESH namespace (isolation between calls).
+    pub fn run_isolated(&mut self, source: &str) -> Result<PyodideRunOutput> {
+        let driver = self.driver_isolated;
+        self.run_via(source, driver)
+    }
+
+    /// Run `source` in the PERSISTENT namespace (state carries across calls).
+    pub fn run_persistent(&mut self, source: &str) -> Result<PyodideRunOutput> {
+        let driver = self.driver_persistent;
+        self.run_via(source, driver)
+    }
+
+    /// Drop the persistent namespace so the next [`run_persistent`](Self::run_persistent)
+    /// starts fresh (a REPL `:clear`).
+    pub fn reset_persistent(&mut self) -> Result<()> {
+        let mut ret = [wasmtime::Val::I32(-1)];
+        self.pyrun
+            .call(
+                &mut self.store,
+                &[wasmtime::Val::I32(self.driver_reset as i32)],
+                &mut ret,
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("warm reset trapped: {e}")))?;
+        Ok(())
+    }
+
+    fn run_via(&mut self, source: &str, driver_ptr: u32) -> Result<PyodideRunOutput> {
+        let store = &mut self.store;
+        store.data_mut().wasi_stdout.clear();
+        // Fresh fuel per run; the warm store accumulates consumption otherwise.
+        let _ = store.set_fuel(PYODIDE_FUEL);
+        // Hand the user source to the guest via a file so the fixed driver execs
+        // it - no per-run wasm allocation, no source escaping.
+        store
+            .data_mut()
+            .fs
+            .insert_file("/.afb/script.py", source.as_bytes().to_vec());
+
+        let mut ret = [wasmtime::Val::I32(-1)];
+        self.pyrun
+            .call(&mut *store, &[wasmtime::Val::I32(driver_ptr as i32)], &mut ret)
+            .map_err(|e| {
+                AfterburnerError::Engine(format!("warm PyRun_SimpleString trapped: {e}"))
+            })?;
+        let exit_code = match ret[0] {
+            wasmtime::Val::I32(v) => v,
+            _ => -99,
+        };
+        Ok(PyodideRunOutput {
+            stdout: captured_stdout(store),
+            stderr: captured_stderr(store),
+            exit_code,
+            output: captured_output(store)?,
+        })
+    }
 }
 
 /// Run many Python sources on ONE interpreter (#53 warm-interpreter reuse): pay
 /// the ~490 ms boot + CPython `site`/stdlib bringup ONCE, then run each source
 /// via `PyRun_SimpleString` (~0 ms bringup each). Each source runs in a fresh
-/// module namespace, so globals do not leak between them. This is the in-process
-/// form of the warm-reuse win a daemon shard would use to serve repeated Python
-/// thrusts.
+/// module namespace, so globals do not leak between them.
 pub fn run_pyodide_batch(rt: &PyRuntime, sources: &[&str]) -> Result<Vec<PyodideRunOutput>> {
-    let (mut store, instance, _got) = boot_pyodide_instance(rt, &[])?;
-    // Warm once: Py_Initialize + site/stdlib import + install the capture
-    // machinery, which then persists for every warm run below. The `pass`
-    // program's own (empty) output is discarded.
-    let _ = run_booted_pyodide("pass", None, &mut store, &instance)?;
-
-    let pyrun = instance
-        .get_func(&mut store, "PyRun_SimpleString")
-        .ok_or_else(|| {
-            AfterburnerError::Engine(
-                "PyRun_SimpleString not exported by the python runtime".into(),
-            )
-        })?;
-    // Allocate the fixed driver once; reuse its pointer for every thrust.
-    let driver_ptr = alloc_cstr(&mut store, WARM_DRIVER)?;
-
-    let mut out = Vec::with_capacity(sources.len());
-    for source in sources {
-        out.push(run_warm_script(source, &mut store, &pyrun, driver_ptr)?);
-    }
-    Ok(out)
+    let mut interp = WarmPyInterpreter::boot(rt)?;
+    sources.iter().map(|s| interp.run_isolated(s)).collect()
 }
 
 /// Daemon-capable boot + run: boots the interpreter, wires the daemon
