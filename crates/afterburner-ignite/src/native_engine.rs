@@ -101,9 +101,12 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 use kovan_map::HopscotchMap;
-use rquickjs::{Context, Ctx, Error as RquickjsError, Runtime, Value as RqValue};
+use rquickjs::{
+    Context, Ctx, Error as RquickjsError, Function, Persistent, Runtime, Value as RqValue,
+};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -153,6 +156,24 @@ thread_local! {
     /// [`ScriptCaptureGuard`]; never observed across calls because
     /// each `run_script` activates and drops its own guard.
     static SCRIPT_CAPTURE: RefCell<Option<ScriptCapture>> = const { RefCell::new(None) };
+
+    /// Per-thread cache of compiled UDF entry functions, keyed by
+    /// script hash. QuickJS parsing + compiling the envelope was the
+    /// dominant native warm cost (~158us p50) - caching the compiled
+    /// `Function` means that work happens once per (thread, script)
+    /// instead of once per thrust. Content-addressed key: a hit is
+    /// never stale, only ever a memory concern (see `extinguish`).
+    static ENTRY_CACHE: RefCell<HashMap<[u8; 32], Persistent<Function<'static>>>> =
+        RefCell::new(HashMap::new());
+
+    /// Per-thread fuel accounting for the shared interrupt handler that
+    /// `ThreadRuntime::new` installs ONCE per Runtime. `do_thrust` /
+    /// `run_script` reset the counter and set the limit before each call; the
+    /// handler bumps the counter and interrupts when it reaches the limit. A
+    /// `u64::MAX` limit means fuel is disabled (never interrupt). This replaces
+    /// a per-thrust `Arc<AtomicU64>` + boxed closure + two FFI set-calls (#36).
+    static FUEL_COUNTER: AtomicU64 = const { AtomicU64::new(0) };
+    static FUEL_LIMIT: AtomicU64 = const { AtomicU64::new(u64::MAX) };
 }
 
 /// Per-script-mode-call capture buffers that `__host_log` writes into.
@@ -255,6 +276,15 @@ impl ThreadRuntime {
             Ok(())
         })?;
 
+        // Install the fuel interrupt handler ONCE, after the handler-free setup
+        // evals above. It reads the per-thread FUEL_COUNTER/FUEL_LIMIT that each
+        // thrust resets, so no per-thrust closure allocation or FFI set-call is
+        // needed (#36). u64::MAX limit means fuel is disabled (never interrupt).
+        runtime.set_interrupt_handler(Some(Box::new(|| {
+            let limit = FUEL_LIMIT.with(|l| l.load(Ordering::Relaxed));
+            FUEL_COUNTER.with(|c| c.fetch_add(1, Ordering::Relaxed)) >= limit
+        })));
+
         Ok(Self { runtime, context })
     }
 }
@@ -313,7 +343,7 @@ fn with_thread_rt<R>(f: impl FnOnce(&ThreadRuntime) -> Result<R>) -> Result<R> {
 }
 
 pub struct NativeCombustor {
-    source_store: HopscotchMap<[u8; 32], String>,
+    source_store: HopscotchMap<[u8; 32], Arc<str>>,
     state_store: SharedStateStore,
     host_context: Option<Arc<dyn afterburner_core::HostContext>>,
 }
@@ -361,7 +391,7 @@ impl Combustor for NativeCombustor {
         let source = normalized.as_str();
         let hash = sha256(source.as_bytes());
         // Fast-path: source already registered - skip the parse probe.
-        if self.source_store.get(&hash).is_some() {
+        if self.source_store.contains_key(&hash) {
             ab_event!(Level::Debug, "native.ignite.cache_hit");
             return Ok(ScriptId {
                 hash,
@@ -386,7 +416,7 @@ impl Combustor for NativeCombustor {
                 Ok(())
             })
         })?;
-        self.source_store.insert(hash, source.to_string());
+        self.source_store.insert(hash, Arc::from(source));
         ab_event!(Level::Info, "native.ignite.compiled", "source_bytes" => source.len());
         Ok(ScriptId {
             hash,
@@ -409,13 +439,21 @@ impl Combustor for NativeCombustor {
                 .host_context
                 .as_ref()
                 .map(|c| afterburner_node_compat::host_context_active::activate(c.clone()));
-            do_thrust(rt, &source, &input_json, limits)
+            do_thrust(rt, id.hash, &source, &input_json, limits)
         })?;
         Ok(serde_json::from_str(&output_json)?)
     }
 
     fn extinguish(&self, id: &ScriptId) {
         self.source_store.remove(&id.hash);
+        // vertexia: cardinality is bounded by extinguish, but only on
+        // this thread - other threads' cached entries for this script
+        // are reclaimed when those threads next extinguish it or exit.
+        // A per-thread size cap (LRU) is the upgrade path if
+        // distinct-script cardinality ever grows unbounded.
+        ENTRY_CACHE.with(|c| {
+            c.borrow_mut().remove(&id.hash);
+        });
         ab_event!(Level::Info, "native.extinguish");
     }
 
@@ -459,19 +497,14 @@ impl Combustor for NativeCombustor {
             rt.runtime
                 .set_memory_limit(limits.memory_bytes.unwrap_or(0));
             let fuel_budget = limits.fuel;
-            let counter = Arc::new(AtomicU64::new(0));
-            let counter_clone = counter.clone();
-            rt.runtime
-                .set_interrupt_handler(Some(Box::new(move || match fuel_budget {
-                    Some(budget) => counter_clone.fetch_add(1, Ordering::Relaxed) >= budget,
-                    None => false,
-                })));
+            // Shared interrupt handler (installed once in ThreadRuntime::new);
+            // reset the per-thread fuel accounting instead of a per-call closure.
+            FUEL_COUNTER.with(|c| c.store(0, Ordering::Relaxed));
+            FUEL_LIMIT.with(|l| l.store(fuel_budget.unwrap_or(u64::MAX), Ordering::Relaxed));
 
             let res = rt
                 .context
                 .with(|ctx| -> Result<()> { run_script_stage(&ctx, &stage) });
-
-            rt.runtime.set_interrupt_handler(None);
 
             // Translate the JS-side outcome into a Node-style exit code.
             // Anything that's *not* a script-level exception bubbles up
@@ -480,7 +513,7 @@ impl Combustor for NativeCombustor {
                 Ok(()) => Ok(0),
                 Err(e) => {
                     if let Some(budget) = fuel_budget
-                        && counter.load(Ordering::Relaxed) >= budget
+                        && FUEL_COUNTER.with(|c| c.load(Ordering::Relaxed)) >= budget
                     {
                         ab_event!(
                             Level::Warn,
@@ -664,6 +697,7 @@ fn exception_detail(value: &rquickjs::Value<'_>) -> String {
 /// thread-local `ThreadRuntime`.
 fn do_thrust(
     rt: &ThreadRuntime,
+    hash: [u8; 32],
     source: &str,
     input_json: &str,
     limits: &FuelGauge,
@@ -677,20 +711,14 @@ fn do_thrust(
         .set_memory_limit(limits.memory_bytes.unwrap_or(0));
 
     let fuel_budget = limits.fuel;
-    let counter = Arc::new(AtomicU64::new(0));
-    let counter_clone = counter.clone();
-    rt.runtime
-        .set_interrupt_handler(Some(Box::new(move || match fuel_budget {
-            Some(budget) => counter_clone.fetch_add(1, Ordering::Relaxed) >= budget,
-            None => false,
-        })));
+    // Reset the per-thread fuel accounting for the shared interrupt handler
+    // (installed once in ThreadRuntime::new); u64::MAX limit = fuel disabled.
+    FUEL_COUNTER.with(|c| c.store(0, Ordering::Relaxed));
+    FUEL_LIMIT.with(|l| l.store(fuel_budget.unwrap_or(u64::MAX), Ordering::Relaxed));
 
     let result = rt
         .context
-        .with(|ctx| -> Result<String> { run_script(&ctx, source, input_json) });
-
-    // Unwire the interrupt handler so a stale closure doesn't outlive the call.
-    rt.runtime.set_interrupt_handler(None);
+        .with(|ctx| -> Result<String> { run_script(&ctx, hash, source, input_json) });
 
     match result {
         Ok(v) => {
@@ -706,7 +734,7 @@ fn do_thrust(
         }
         Err(e) => {
             if let Some(budget) = fuel_budget
-                && counter.load(Ordering::Relaxed) >= budget
+                && FUEL_COUNTER.with(|c| c.load(Ordering::Relaxed)) >= budget
             {
                 ab_event!(Level::Warn, "native.thrust.fuel_exhausted", "budget" => budget);
                 return Err(AfterburnerError::FuelExhausted);
@@ -732,12 +760,60 @@ fn map_value_api_markers(e: AfterburnerError) -> AfterburnerError {
     e
 }
 
+/// Build the input-independent envelope wrapper for a UDF's compiled
+/// entry point. Byte-for-byte the same module/exports/`__abr`
+/// semantics `run_script` has always evaluated, except the input
+/// arrives as the `__input_json` parameter instead of being spliced
+/// into the source text as a string literal (#14) - that's what makes
+/// the compiled function safe to cache and reuse across thrusts with
+/// different inputs (#24).
+fn build_entry_wrapper(source: &str) -> String {
+    format!(
+        r#"
+        (function(__input_json) {{
+            var __module = {{ exports: undefined }};
+            var module = __module;
+            var exports = __module.exports;
+            var __input = JSON.parse(__input_json);
+            (function() {{
+                {user_source}
+            }})();
+            var __fn = module.exports;
+            // __abr: value-API parity with the wasm path - raw byte
+            // returns surface the __AB_UNEXPECTED_RAW__ marker (mapped
+            // to UnexpectedRawOutput host-side).
+            var __abr=function(r){{if(r&&(r instanceof Uint8Array||r instanceof ArrayBuffer))throw Error('__AB_UNEXPECTED_RAW__:'+r.byteLength);return JSON.stringify(r===undefined?null:r);}};
+            var __result = (typeof __fn === 'function') ? __fn(__input) : __fn;
+            // If the user didn't return a thenable, hand back the
+            // stringified result directly - no Promise wrap, no pump.
+            if (__result === null || typeof __result !== 'object' || typeof __result.then !== 'function') {{
+                return __abr(__result);
+            }}
+            // Slow path: thenable. Return the Promise chain; caller
+            // will pump microtasks and `.finish::<String>()` on it.
+            return __result.then(__abr);
+        }})
+        "#,
+        user_source = source,
+    )
+}
+
 /// Build + evaluate the envelope-wrapped script and return
 /// `JSON.stringify(result)`.
 ///
-/// Fast path: the user function returns a non-Promise. We `eval` the
-/// envelope, get a `String` back, done - no pending-job pump, no extra
-/// allocation. This is the vast majority of scripts (UDFs,
+/// The compiled entry function is cached per (thread, script-hash) in
+/// `ENTRY_CACHE` - QuickJS parses and compiles the envelope once per
+/// thread instead of once per thrust, which was the dominant native
+/// warm cost. Caching the *function* rather than any result preserves
+/// the feature-safety invariant: every thrust still runs the user's
+/// top-level code against a fresh `module` (reset semantics), so e.g.
+/// `let n = 0; module.exports = () => ++n` returns `1` on every
+/// thrust - matching the wasm reference path, which constructs a
+/// fresh `new Function(...)` per invoke.
+///
+/// Fast path: the user function returns a non-Promise. We call the
+/// cached envelope, get a `String` back, done - no pending-job pump,
+/// no extra allocation. This is the vast majority of scripts (UDFs,
 /// transforms, flow ops).
 ///
 /// Slow path: the user function returns a Promise (directly or via
@@ -746,39 +822,26 @@ fn map_value_api_markers(e: AfterburnerError) -> AfterburnerError {
 /// the Javy `event_loop(true)` behavior on the WASM side so scripts
 /// that use `fetch().then(...)` or `await` work identically across
 /// engines.
-fn run_script(ctx: &Ctx<'_>, source: &str, input_json: &str) -> Result<String> {
-    let stage = format!(
-        r#"
-        (function() {{
-            var __module = {{ exports: undefined }};
-            var module = __module;
-            var exports = __module.exports;
-            var __input = JSON.parse({input});
-            (function() {{
-                {user_source}
-            }})();
-            var __fn = module.exports;
-            var __result = (typeof __fn === 'function') ? __fn(__input) : __fn;
-            // If the user didn't return a thenable, hand back the
-            // stringified result directly - no Promise wrap, no pump.
-            // __abr: value-API parity with the wasm path - raw byte
-            // returns surface the __AB_UNEXPECTED_RAW__ marker (mapped
-            // to UnexpectedRawOutput host-side). Kept terse: this
-            // envelope is parsed per call, so source bytes are latency.
-            var __abr=function(r){{if(r&&(r instanceof Uint8Array||r instanceof ArrayBuffer))throw Error('__AB_UNEXPECTED_RAW__:'+r.byteLength);return JSON.stringify(r===undefined?null:r);}};
-            if (__result === null || typeof __result !== 'object' || typeof __result.then !== 'function') {{
-                return __abr(__result);
-            }}
-            // Slow path: thenable. Return the Promise chain; caller
-            // will pump microtasks and `.finish::<String>()` on it.
-            return __result.then(__abr);
-        }})()
-        "#,
-        input = js_string_literal(input_json),
-        user_source = source,
-    );
-    let result_val: rquickjs::Value<'_> = ctx
-        .eval(stage.as_bytes())
+fn run_script(ctx: &Ctx<'_>, hash: [u8; 32], source: &str, input_json: &str) -> Result<String> {
+    let cached = ENTRY_CACHE.with(|c| c.borrow().get(&hash).cloned());
+    let entry: Function<'_> = match cached {
+        Some(persistent) => persistent
+            .restore(ctx)
+            .map_err(|e| map_script_err(ctx, e))?,
+        None => {
+            let wrapper = build_entry_wrapper(source);
+            let func: Function<'_> = ctx
+                .eval(wrapper.as_bytes())
+                .map_err(|e| map_script_err(ctx, e))?;
+            ENTRY_CACHE.with(|c| {
+                c.borrow_mut()
+                    .insert(hash, Persistent::save(ctx, func.clone()));
+            });
+            func
+        }
+    };
+    let result_val: rquickjs::Value<'_> = entry
+        .call((input_json,))
         .map_err(|e| map_script_err(ctx, e))?;
 
     // Fast path: plain string result - done.
@@ -1039,5 +1102,85 @@ mod tests {
         }
         let outs: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         assert_eq!(outs, vec![json!(2), json!(4), json!(6), json!(8)]);
+    }
+
+    // -- #14/#24: cached entry-function feature safety -----------------
+
+    #[test]
+    fn cached_entry_resets_module_state_per_thrust() {
+        // Pins the reset invariant: the compiled entry function is
+        // reused across thrusts, but the user's top-level code (and
+        // therefore `n`) must still run fresh each time. If the cache
+        // ever skipped re-running the top level, this would observe
+        // 1, 2, 3 instead of 1, 1, 1.
+        let c = NativeCombustor::new().unwrap();
+        let id = c.ignite("let n = 0; module.exports = () => ++n;").unwrap();
+        for _ in 0..3 {
+            let out = c
+                .thrust(&id, &json!(null), &FuelGauge::unlimited())
+                .unwrap();
+            assert_eq!(out, json!(1));
+        }
+    }
+
+    #[test]
+    fn cached_entry_sees_fresh_input_each_thrust() {
+        // Proves the cached function is input-independent: different
+        // inputs on the same script id against the same cache entry
+        // still produce different, correct outputs.
+        let c = NativeCombustor::new().unwrap();
+        let id = c.ignite("module.exports = (d) => d.n + 1;").unwrap();
+        let out1 = c
+            .thrust(&id, &json!({"n": 1}), &FuelGauge::unlimited())
+            .unwrap();
+        let out2 = c
+            .thrust(&id, &json!({"n": 2}), &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(out1, json!(2));
+        assert_eq!(out2, json!(3));
+    }
+
+    #[test]
+    fn cached_entry_supports_async_export() {
+        let out = combust("module.exports = async (x) => x.n + 1;", json!({"n": 1})).unwrap();
+        assert_eq!(out, json!(2));
+    }
+
+    #[test]
+    fn cached_entry_surfaces_unexpected_raw_output() {
+        let c = NativeCombustor::new().unwrap();
+        let id = c
+            .ignite("module.exports = () => new Uint8Array([1, 2, 3]);")
+            .unwrap();
+        let err = c
+            .thrust(&id, &json!(null), &FuelGauge::unlimited())
+            .unwrap_err();
+        match err {
+            AfterburnerError::UnexpectedRawOutput { len } => assert_eq!(len, 3),
+            other => panic!("expected UnexpectedRawOutput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reignite_after_extinguish_recompiles_and_runs() {
+        // Extinguish drops this thread's cache entry; re-igniting the
+        // same source (same content hash) must still compile and run
+        // correctly rather than serving a stale or missing entry.
+        let c = NativeCombustor::new().unwrap();
+        let src = "module.exports = () => 41 + 1;";
+        let id1 = c.ignite(src).unwrap();
+        let out1 = c
+            .thrust(&id1, &json!(null), &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(out1, json!(42));
+
+        c.extinguish(&id1);
+
+        let id2 = c.ignite(src).unwrap();
+        assert_eq!(id1.hash, id2.hash);
+        let out2 = c
+            .thrust(&id2, &json!(null), &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(out2, json!(42));
     }
 }
