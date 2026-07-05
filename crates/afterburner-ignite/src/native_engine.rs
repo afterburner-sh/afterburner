@@ -877,7 +877,10 @@ fn run_script(ctx: &Ctx<'_>, hash: [u8; 32], source: &str, input_json: &str) -> 
                 }
                 cache.insert(
                     hash,
-                    (Persistent::save(ctx, func.clone()), Cell::new(next_entry_tick())),
+                    (
+                        Persistent::save(ctx, func.clone()),
+                        Cell::new(next_entry_tick()),
+                    ),
                 );
             });
             func
@@ -972,7 +975,9 @@ mod tests {
         for i in 0..(ENTRY_CACHE_CAP + 100) {
             let src = format!("module.exports = () => {i};");
             let id = c.ignite(&src).unwrap();
-            let out = c.thrust(&id, &json!(null), &FuelGauge::unlimited()).unwrap();
+            let out = c
+                .thrust(&id, &json!(null), &FuelGauge::unlimited())
+                .unwrap();
             assert_eq!(out, json!(i));
         }
         let len = ENTRY_CACHE.with(|cache| cache.borrow().len());

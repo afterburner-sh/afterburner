@@ -869,7 +869,10 @@ fn shard_event_loop(
             // bounded by the next timer's fire-time so timers fire on schedule.
             let sleep_dur = daemon
                 .next_timer_deadline()
-                .map(|d| d.saturating_duration_since(Instant::now()).min(idle_backoff))
+                .map(|d| {
+                    d.saturating_duration_since(Instant::now())
+                        .min(idle_backoff)
+                })
                 .unwrap_or(idle_backoff);
             std::thread::sleep(sleep_dur);
             idle_backoff = (idle_backoff * 2).min(max_idle);

@@ -51,7 +51,9 @@ pub fn gen_salt(rounds: u32) -> Result<String, String> {
     // behavior and to stop the 2-digit "{:02}" cost field below from
     // overflowing the 29-char salt for a cost >= 100.
     if !(4..=31).contains(&rounds) {
-        return Err(format!("bcrypt gen_salt: cost {rounds} out of range (4..=31)"));
+        return Err(format!(
+            "bcrypt gen_salt: cost {rounds} out of range (4..=31)"
+        ));
     }
     // The 16-byte salt is random and independent of cost; only the
     // discarded KDF suffix scales with cost. Generate the salt at the

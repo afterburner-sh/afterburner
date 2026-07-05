@@ -564,7 +564,11 @@ fn boot_pyodide_instance(
     if has_wheels || has_extra {
         let site_pkgs = site_packages(&rt.python_xy);
         for bytes in wheel_blobs {
-            mount_wheel(&mut store.data_mut().fs, std::sync::Arc::from(bytes), &site_pkgs);
+            mount_wheel(
+                &mut store.data_mut().fs,
+                std::sync::Arc::from(bytes),
+                &site_pkgs,
+            );
         }
         for bytes in extra_wheel_bytes {
             mount_wheel(
@@ -1303,9 +1307,13 @@ impl WarmPyInterpreter {
         // program's own (empty) output is discarded.
         let _ = run_booted_pyodide("pass", None, &mut store, &instance)?;
 
-        let pyrun = instance.get_func(&mut store, "PyRun_SimpleString").ok_or_else(|| {
-            AfterburnerError::Engine("PyRun_SimpleString not exported by the python runtime".into())
-        })?;
+        let pyrun = instance
+            .get_func(&mut store, "PyRun_SimpleString")
+            .ok_or_else(|| {
+                AfterburnerError::Engine(
+                    "PyRun_SimpleString not exported by the python runtime".into(),
+                )
+            })?;
         // Allocate the fixed drivers once; reuse their pointers for every run so
         // no wasm page grows per program.
         let driver_isolated = alloc_cstr(&mut store, WARM_DRIVER)?;
@@ -1368,7 +1376,11 @@ impl WarmPyInterpreter {
 
         let mut ret = [wasmtime::Val::I32(-1)];
         self.pyrun
-            .call(&mut *store, &[wasmtime::Val::I32(driver_ptr as i32)], &mut ret)
+            .call(
+                &mut *store,
+                &[wasmtime::Val::I32(driver_ptr as i32)],
+                &mut ret,
+            )
             .map_err(|e| {
                 AfterburnerError::Engine(format!("warm PyRun_SimpleString trapped: {e}"))
             })?;

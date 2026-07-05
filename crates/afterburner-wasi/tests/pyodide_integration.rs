@@ -322,7 +322,9 @@ fn warm_interpreter_persistent_and_isolated_modes() {
 
     // reset drops the namespace: x is gone on the next persistent call.
     interp.reset_persistent().expect("reset");
-    let o = interp.run_persistent("print('x' in dir())").expect("post-reset");
+    let o = interp
+        .run_persistent("print('x' in dir())")
+        .expect("post-reset");
     assert_eq!(
         String::from_utf8_lossy(&o.stdout).trim(),
         "False",
@@ -363,7 +365,9 @@ fn warm_interpreter_error_does_not_trap() {
         "the error must be captured to stderr, got: {err:?}"
     );
     // The interpreter survives the error: the next run still works.
-    let o2 = interp.run_persistent("print(6 * 7)").expect("post-error run");
+    let o2 = interp
+        .run_persistent("print(6 * 7)")
+        .expect("post-error run");
     assert_eq!(
         String::from_utf8_lossy(&o2.stdout).trim(),
         "42",
@@ -381,7 +385,7 @@ fn bench_repl_warm_vs_replay() {
         eprintln!("[pyodide_integration] SKIP: no ~/.burn pyodide runtime");
         return;
     }
-    use afterburner_wasi::pyodide_runner::{resolve_runtime, run_pyodide_with, WarmPyInterpreter};
+    use afterburner_wasi::pyodide_runner::{WarmPyInterpreter, resolve_runtime, run_pyodide_with};
 
     let lines = [
         "x = 1",

@@ -48,8 +48,8 @@
 use afterburner_core::{AfterburnerError, Result};
 use kovan_map::HopscotchMap;
 use parking_lot_proxy::PerInstanceLock;
-use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use wasmtime::{Engine, Func, Instance, Module, Store, Val, ValType};
 
 pub type ModuleId = u64;

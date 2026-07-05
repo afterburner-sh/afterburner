@@ -343,7 +343,11 @@ fn step1_succeeded(
                 .data_mut()
                 .fs
                 .insert_file(STDLIB_ZIP_MOUNT_PATH, zip_bytes.clone());
-            match mount_zip_into_fs(&mut store.data_mut().fs, STDLIB_MOUNT_PREFIX, ::std::sync::Arc::from(zip_bytes.clone())) {
+            match mount_zip_into_fs(
+                &mut store.data_mut().fs,
+                STDLIB_MOUNT_PREFIX,
+                ::std::sync::Arc::from(zip_bytes.clone()),
+            ) {
                 Ok(n) => eprintln!("[probe] mounted {n} stdlib files at {STDLIB_MOUNT_PREFIX}"),
                 Err(e) => eprintln!("[probe] WARN: stdlib mount error: {e}"),
             }

@@ -388,7 +388,11 @@ fn run_probe() -> String {
                 .data_mut()
                 .fs
                 .insert_file(STDLIB_ZIP_MOUNT_PATH, zip_bytes.clone());
-            match mount_zip_into_fs(&mut store.data_mut().fs, STDLIB_MOUNT_PREFIX, ::std::sync::Arc::from(zip_bytes.clone())) {
+            match mount_zip_into_fs(
+                &mut store.data_mut().fs,
+                STDLIB_MOUNT_PREFIX,
+                ::std::sync::Arc::from(zip_bytes.clone()),
+            ) {
                 Ok(n) => eprintln!("[numpy_probe] mounted {n} stdlib files"),
                 Err(e) => eprintln!("[numpy_probe] WARN: stdlib mount: {e}"),
             }

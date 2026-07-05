@@ -477,7 +477,8 @@ impl InMemFs {
         if let Some(parent) = parent_of(&path) {
             self.mkdir_p(&parent);
         }
-        self.nodes.insert(path, FsNode::File(FileData::Owned(contents)));
+        self.nodes
+            .insert(path, FsNode::File(FileData::Owned(contents)));
     }
 
     /// Insert a lazily-decompressed file (#23): its bytes stay compressed inside
@@ -532,7 +533,8 @@ impl InMemFs {
                 if let Some(parent) = parent_of(&path) {
                     self.mkdir_p(&parent);
                 }
-                self.nodes.insert(path.clone(), FsNode::File(FileData::Owned(Vec::new())));
+                self.nodes
+                    .insert(path.clone(), FsNode::File(FileData::Owned(Vec::new())));
                 self.alloc_fd(path)
             }
             None => ENOENT,
@@ -544,7 +546,8 @@ impl InMemFs {
             }
             Some(FsNode::File(_)) => {
                 if trunc && want_write {
-                    self.nodes.insert(path.clone(), FsNode::File(FileData::Owned(Vec::new())));
+                    self.nodes
+                        .insert(path.clone(), FsNode::File(FileData::Owned(Vec::new())));
                 }
                 self.alloc_fd(path)
             }

@@ -411,7 +411,11 @@ fn run_probe() -> String {
                 .data_mut()
                 .fs
                 .insert_file(STDLIB_ZIP_MOUNT_PATH, zip_bytes.clone());
-            match mount_zip_into_fs(&mut store.data_mut().fs, STDLIB_MOUNT_PREFIX, ::std::sync::Arc::from(zip_bytes.clone())) {
+            match mount_zip_into_fs(
+                &mut store.data_mut().fs,
+                STDLIB_MOUNT_PREFIX,
+                ::std::sync::Arc::from(zip_bytes.clone()),
+            ) {
                 Ok(n) => eprintln!(
                     "[markupsafe_probe] mounted {n} stdlib files at {STDLIB_MOUNT_PREFIX}"
                 ),
