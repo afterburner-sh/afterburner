@@ -204,7 +204,7 @@ fn run_probe() -> String {
             );
 
             // Mount extracted files at /lib/python3.12 for the directory path.
-            match mount_zip_into_fs(&mut store.data_mut().fs, STDLIB_MOUNT_PREFIX, &zip_bytes) {
+            match mount_zip_into_fs(&mut store.data_mut().fs, STDLIB_MOUNT_PREFIX, ::std::sync::Arc::from(zip_bytes.clone())) {
                 Ok(n) => eprintln!(
                     "[probe] mounted {n} stdlib files from {PYTHON_STDLIB_ZIP_PATH} at {STDLIB_MOUNT_PREFIX}"
                 ),

@@ -26,8 +26,8 @@ use afterburner_core::{
     decode_output_value, encode_frame,
 };
 use wasmtime::{
-    FuncType, Global, GlobalType, Instance, Linker, Module, Mutability, Store, Tag, TagType, Val,
-    ValType,
+    Engine, FuncType, Global, GlobalType, Instance, Linker, Module, Mutability, Store, Tag,
+    TagType, Val, ValType,
 };
 
 use crate::{
@@ -189,10 +189,10 @@ fn is_metadata_entry(name: &str) -> bool {
 /// keeps the two metadata files `importlib.metadata` reads (see
 /// [`is_metadata_entry`]). Returns the count mounted. Supports the two zip
 /// methods Pyodide wheels use: 0 (stored) and 8 (deflate).
-fn mount_wheel(fs: &mut InMemFs, wheel_bytes: &[u8], guest_prefix: &str) -> usize {
-    use flate2::read::DeflateDecoder;
-    use std::io::Read;
-
+fn mount_wheel(fs: &mut InMemFs, wheel: std::sync::Arc<[u8]>, guest_prefix: &str) -> usize {
+    // #23: index each wheel entry lazily against the shared `wheel` blob; the
+    // bytes decompress on first read, so an unimported numpy/pandas never pays.
+    let wheel_bytes: &[u8] = &wheel;
     let mut count = 0usize;
     let mut pos = 0usize;
     while pos + 30 <= wheel_bytes.len() {
@@ -207,6 +207,8 @@ fn mount_wheel(fs: &mut InMemFs, wheel_bytes: &[u8], guest_prefix: &str) -> usiz
         let method = u16::from_le_bytes(wheel_bytes[pos + 8..pos + 10].try_into().unwrap());
         let comp_size =
             u32::from_le_bytes(wheel_bytes[pos + 18..pos + 22].try_into().unwrap()) as usize;
+        let uncomp_size =
+            u32::from_le_bytes(wheel_bytes[pos + 22..pos + 26].try_into().unwrap()) as usize;
         let name_len =
             u16::from_le_bytes(wheel_bytes[pos + 26..pos + 28].try_into().unwrap()) as usize;
         let extra_len =
@@ -232,28 +234,75 @@ fn mount_wheel(fs: &mut InMemFs, wheel_bytes: &[u8], guest_prefix: &str) -> usiz
             pos = data_end;
             continue;
         }
-        let raw = &wheel_bytes[data_start..data_end];
-        let contents = match method {
-            0 => raw.to_vec(),
-            8 => {
-                let mut dec = DeflateDecoder::new(raw);
-                let mut out = Vec::new();
-                if dec.read_to_end(&mut out).is_err() {
-                    pos = data_end;
-                    continue;
-                }
-                out
+        match method {
+            0 | 8 => {
+                fs.insert_lazy_file(
+                    &format!("{guest_prefix}/{name}"),
+                    wheel.clone(),
+                    data_start,
+                    comp_size,
+                    method,
+                    uncomp_size,
+                );
+                count += 1;
             }
             _ => {
                 pos = data_end;
                 continue;
             }
-        };
-        fs.insert_file(&format!("{guest_prefix}/{name}"), contents);
-        count += 1;
+        }
         pos = data_end;
     }
     count
+}
+
+/// Load the compiled CPython module from its on-disk cwasm cache, compiling and
+/// persisting it on a miss (#56/#62).
+///
+/// Cranelift-compiling the ~25-34 MiB runtime is the bulk of Python cold start.
+/// The cwasm sits next to the wasm (same version-pinned dir, so the source is
+/// immutable per version); it is trusted only when at least as new as the wasm
+/// AND accepted by wasmtime's own version/config header check - any mismatch,
+/// staleness, or corruption falls back to a fresh compile + atomic rewrite.
+fn load_or_compile_pyodide_module(
+    engine: &Engine,
+    wasm_path: &std::path::Path,
+    wasm_bytes: &[u8],
+) -> Result<Module> {
+    let cwasm_path = wasm_path.with_extension("cwasm");
+
+    // Trust the cache only if it is at least as new as the wasm it was built
+    // from (a cheap stat, no re-hash of the 25 MiB source).
+    let cwasm_fresh = std::fs::metadata(&cwasm_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .zip(std::fs::metadata(wasm_path).and_then(|m| m.modified()).ok())
+        .is_some_and(|(cwasm, wasm)| cwasm >= wasm);
+
+    if cwasm_fresh {
+        // SAFETY: the artifact is one we produced via `Module::serialize` with
+        // this same engine config; wasmtime validates its version/config header
+        // and returns Err on any mismatch (then we recompile), so a foreign or
+        // stale artifact can never be executed as code.
+        if let Ok(module) = unsafe { Module::deserialize_file(engine, &cwasm_path) } {
+            return Ok(module);
+        }
+    }
+
+    let module = Module::new(engine, wasm_bytes)
+        .map_err(|e| AfterburnerError::Engine(format!("compile python runtime: {e}")))?;
+
+    // Best-effort persist: write a per-process temp then atomically rename, so a
+    // concurrent boot never observes a half-written cwasm. A failed write just
+    // recompiles next time.
+    if let Ok(serialized) = module.serialize() {
+        let tmp = cwasm_path.with_extension(format!("cwasm.tmp.{}", std::process::id()));
+        if std::fs::write(&tmp, &serialized).is_ok() {
+            let _ = std::fs::rename(&tmp, &cwasm_path);
+        }
+    }
+
+    Ok(module)
 }
 
 /// Extract one named entry from a zip (stored or deflate). Used to pull numpy's
@@ -399,8 +448,10 @@ fn boot_pyodide_instance(
     let layout = MainModuleLayout::from_main_wasm(&wasm_bytes);
 
     let engine = deterministic_engine()?;
-    let module = Module::new(&engine, &wasm_bytes)
-        .map_err(|e| AfterburnerError::Engine(format!("compile python runtime: {e}")))?;
+    // #56/#62: Cranelift-compiling the ~25-34 MiB CPython runtime dominates cold
+    // start. Compile it once, persist the artifact as a cwasm next to the wasm,
+    // and mmap-deserialize it on every subsequent boot.
+    let module = load_or_compile_pyodide_module(&engine, &rt.wasm_path, &wasm_bytes)?;
 
     let mut linker: Linker<EmbedderState> = Linker::new(&engine);
     linker.allow_shadowing(true);
@@ -489,11 +540,15 @@ fn boot_pyodide_instance(
     // Mount stdlib zip under the interpreter's version-specific guest paths.
     if let Ok(zip_bytes) = std::fs::read(&rt.stdlib_path) {
         let (zip_mount, dir_mount) = python_stdlib_mount_paths(&rt.python_xy);
+        // Share one compressed blob between the mounted .zip and every lazy
+        // entry extracted from it (#23); nothing decompresses until first read.
+        let zip: std::sync::Arc<[u8]> = std::sync::Arc::from(zip_bytes);
+        let zip_len = zip.len();
         store
             .data_mut()
             .fs
-            .insert_file(&zip_mount, zip_bytes.clone());
-        let _ = mount_zip_into_fs(&mut store.data_mut().fs, &dir_mount, &zip_bytes);
+            .insert_lazy_file(&zip_mount, zip.clone(), 0, zip_len, 0, zip_len);
+        let _ = mount_zip_into_fs(&mut store.data_mut().fs, &dir_mount, zip);
     }
     store.data_mut().fs.mkdir_p("/tmp");
     // HOME (exposed via environ_get) must exist so a package that writes its
@@ -508,11 +563,15 @@ fn boot_pyodide_instance(
     let has_extra = !extra_wheel_bytes.is_empty();
     if has_wheels || has_extra {
         let site_pkgs = site_packages(&rt.python_xy);
-        for bytes in &wheel_blobs {
-            mount_wheel(&mut store.data_mut().fs, bytes, &site_pkgs);
+        for bytes in wheel_blobs {
+            mount_wheel(&mut store.data_mut().fs, std::sync::Arc::from(bytes), &site_pkgs);
         }
         for bytes in extra_wheel_bytes {
-            mount_wheel(&mut store.data_mut().fs, bytes, &site_pkgs);
+            mount_wheel(
+                &mut store.data_mut().fs,
+                std::sync::Arc::from(bytes.clone()),
+                &site_pkgs,
+            );
         }
     }
 
@@ -1282,7 +1341,6 @@ fn captured_stdout(store: &Store<EmbedderState>) -> Vec<u8> {
         .data()
         .fs
         .read_file("/.afb/stdout.bin")
-        .map(<[u8]>::to_vec)
         .unwrap_or_default();
     if from_file.is_empty() {
         store.data().wasi_stdout.clone()
@@ -1299,7 +1357,6 @@ fn captured_stderr(store: &Store<EmbedderState>) -> Vec<u8> {
         .data()
         .fs
         .read_file("/.afb/stderr.bin")
-        .map(<[u8]>::to_vec)
         .unwrap_or_default()
 }
 

@@ -487,7 +487,7 @@ fn run_probe() -> String {
                 .data_mut()
                 .fs
                 .insert_file(&stdlib_zip_mount_path(), zip_bytes.clone());
-            match mount_zip_into_fs(&mut store.data_mut().fs, &stdlib_mount_prefix(), &zip_bytes) {
+            match mount_zip_into_fs(&mut store.data_mut().fs, &stdlib_mount_prefix(), ::std::sync::Arc::from(zip_bytes.clone())) {
                 Ok(n) => eprintln!("[pandas_probe] mounted {n} stdlib files"),
                 Err(e) => eprintln!("[pandas_probe] WARN: stdlib mount: {e}"),
             }
