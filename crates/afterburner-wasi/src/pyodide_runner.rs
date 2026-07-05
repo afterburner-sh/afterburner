@@ -799,6 +799,20 @@ pub fn run_python_package(entry_source: &str, pkg: &PyPackage) -> Result<Pyodide
     run_pyodide_package_with(&rt, entry_source, pkg)
 }
 
+/// Run many Python programs on ONE warmed interpreter (#53 warm-interpreter
+/// reuse): resolve the runtime, pay the ~490 ms boot + CPython `site`/stdlib
+/// bringup once, then run each source via `PyRun_SimpleString` (~0 ms bringup
+/// each). Each source runs in a fresh module namespace, so globals do not leak
+/// between them. See [`run_pyodide_batch`].
+///
+/// # Errors
+///
+/// Returns `Err` when no runtime is available, or when boot / a run traps.
+pub fn run_python_batch(sources: &[&str]) -> Result<Vec<PyodideRunOutput>> {
+    let rt = resolve_runtime()?;
+    run_pyodide_batch(&rt, sources)
+}
+
 /// Boot Pyodide, run `python -c <python_source>`, and return stdout + exit code.
 ///
 /// The source string is passed verbatim as the `-c` argument to CPython.
@@ -1195,6 +1209,105 @@ fn run_booted_pyodide(
         exit_code,
         output: captured_output(store)?,
     })
+}
+
+/// Guest driver run via `PyRun_SimpleString` on an already-warm interpreter: it
+/// resets the capture state, runs the user script (written to `/.afb/script.py`
+/// by the host) in a FRESH module namespace so globals never leak between
+/// thrusts, and finalizes the output frame - all by reusing the
+/// `__afb_finalize__` / `_afb_out` / `_afb_o` / `_afb_e` machinery installed
+/// once by the warmup's `STDOUT_REDIRECT`. The driver is fixed (reads the source
+/// from a file), so its wasm pointer is allocated once and reused per thrust.
+const WARM_DRIVER: &[u8] = concat!(
+    "_afb_out[0]=False\n",
+    "_afb_out[1]=None\n",
+    // The InMemFs has no ftruncate, so reset each sink by REOPENING it 'wb'
+    // (O_TRUNC clears the node, which is wired); CPython refcounting closes the
+    // previous handles at once, so no guest fd leaks per thrust.
+    "_afb_o=open('/.afb/stdout.bin','wb',buffering=0)\n",
+    "_afb_e=open('/.afb/stderr.bin','wb',buffering=0)\n",
+    "_sys.stdout=_io.TextIOWrapper(_afb_o,encoding='utf-8',write_through=True)\n",
+    "_sys.stderr=_io.TextIOWrapper(_afb_e,encoding='utf-8',errors='backslashreplace',write_through=True)\n",
+    "try:\n",
+    " _afb_ns={'__name__':'__main__','__builtins__':__builtins__}\n",
+    " exec(compile(open('/.afb/script.py','rb').read(),'/.afb/script.py','exec'),_afb_ns)\n",
+    "except BaseException:\n",
+    " import traceback as _t\n",
+    " _t.print_exc(file=_sys.stderr)\n",
+    "finally:\n",
+    " __afb_finalize__()\n",
+    "\0"
+)
+.as_bytes();
+
+/// Run one script on an interpreter already warmed by [`run_pyodide_batch`],
+/// via `PyRun_SimpleString` - skipping the ~350 ms CPython bringup. Output and
+/// return-value capture are identical to the cold path (`/.afb/stdout.bin`,
+/// `/.afb/stderr.bin`, `/.afb/output.frame`).
+///
+/// v1 note: a script that raises is caught and its traceback captured to
+/// stderr, but `exit_code` stays 0 (the cold path surfaces a non-zero code); the
+/// error is visible in stderr and the output frame is absent (`output = Null`).
+fn run_warm_script(
+    source: &str,
+    store: &mut Store<EmbedderState>,
+    pyrun: &wasmtime::Func,
+    driver_ptr: u32,
+) -> Result<PyodideRunOutput> {
+    store.data_mut().wasi_stdout.clear();
+    // Fresh fuel per thrust; the warm store accumulates consumption otherwise.
+    let _ = store.set_fuel(PYODIDE_FUEL);
+    // Hand the user source to the guest via a file so the fixed driver execs it
+    // in a fresh namespace - no per-thrust wasm allocation, no source escaping.
+    store
+        .data_mut()
+        .fs
+        .insert_file("/.afb/script.py", source.as_bytes().to_vec());
+
+    let mut ret = [wasmtime::Val::I32(-1)];
+    pyrun
+        .call(&mut *store, &[wasmtime::Val::I32(driver_ptr as i32)], &mut ret)
+        .map_err(|e| AfterburnerError::Engine(format!("warm PyRun_SimpleString trapped: {e}")))?;
+    let exit_code = match ret[0] {
+        wasmtime::Val::I32(v) => v,
+        _ => -99,
+    };
+    Ok(PyodideRunOutput {
+        stdout: captured_stdout(store),
+        stderr: captured_stderr(store),
+        exit_code,
+        output: captured_output(store)?,
+    })
+}
+
+/// Run many Python sources on ONE interpreter (#53 warm-interpreter reuse): pay
+/// the ~490 ms boot + CPython `site`/stdlib bringup ONCE, then run each source
+/// via `PyRun_SimpleString` (~0 ms bringup each). Each source runs in a fresh
+/// module namespace, so globals do not leak between them. This is the in-process
+/// form of the warm-reuse win a daemon shard would use to serve repeated Python
+/// thrusts.
+pub fn run_pyodide_batch(rt: &PyRuntime, sources: &[&str]) -> Result<Vec<PyodideRunOutput>> {
+    let (mut store, instance, _got) = boot_pyodide_instance(rt, &[])?;
+    // Warm once: Py_Initialize + site/stdlib import + install the capture
+    // machinery, which then persists for every warm run below. The `pass`
+    // program's own (empty) output is discarded.
+    let _ = run_booted_pyodide("pass", None, &mut store, &instance)?;
+
+    let pyrun = instance
+        .get_func(&mut store, "PyRun_SimpleString")
+        .ok_or_else(|| {
+            AfterburnerError::Engine(
+                "PyRun_SimpleString not exported by the python runtime".into(),
+            )
+        })?;
+    // Allocate the fixed driver once; reuse its pointer for every thrust.
+    let driver_ptr = alloc_cstr(&mut store, WARM_DRIVER)?;
+
+    let mut out = Vec::with_capacity(sources.len());
+    for source in sources {
+        out.push(run_warm_script(source, &mut store, &pyrun, driver_ptr)?);
+    }
+    Ok(out)
 }
 
 /// Daemon-capable boot + run: boots the interpreter, wires the daemon

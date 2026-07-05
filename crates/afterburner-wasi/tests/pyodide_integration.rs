@@ -201,3 +201,98 @@ fn live_https_get_returns_200() {
         "expected HTTP status 200 from example.com, got: {text:?}"
     );
 }
+
+// ---- warm-interpreter reuse (#53) ------------------------------------------
+
+/// Whether `run_python_batch` can resolve its runtime (the `BURN_PYTHON_RUNTIME`
+/// override, or the `~/.burn/pyodide-*` bundle).
+fn batch_runtime_available() -> bool {
+    if let Ok(dir) = std::env::var("BURN_PYTHON_RUNTIME")
+        && std::path::Path::new(&dir)
+            .join("pyodide-exnref.wasm")
+            .exists()
+    {
+        return true;
+    }
+    if let Some(home) = std::env::var_os("HOME")
+        && let Ok(entries) = std::fs::read_dir(std::path::Path::new(&home).join(".burn"))
+    {
+        return entries
+            .flatten()
+            .any(|e| e.path().join("pyodide-exnref.wasm").exists());
+    }
+    false
+}
+
+/// A batch of programs runs on ONE warmed interpreter: stdout is captured per
+/// program, each program runs in a FRESH namespace (a name defined by one does
+/// not leak into the next), and a typed return via `__afb_emit__` round-trips.
+#[test]
+#[ignore]
+fn pyodide_warm_batch_reuse_isolated_and_correct() {
+    if !batch_runtime_available() {
+        eprintln!("[pyodide_integration] SKIP: no ~/.burn pyodide runtime");
+        return;
+    }
+    use afterburner_core::OutputValue;
+    use afterburner_wasi::pyodide_runner::run_python_batch;
+
+    let sources = [
+        "leaked = 111\nprint('one', leaked)",
+        "print('two', 'leaked' in globals())",
+        "__afb_emit__({'sum': 7 + 35})",
+    ];
+    let outs = run_python_batch(&sources).expect("warm batch should run");
+    assert_eq!(outs.len(), 3, "one output per source");
+    assert_eq!(
+        String::from_utf8_lossy(&outs[0].stdout).trim(),
+        "one 111",
+        "program 1 stdout captured"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&outs[1].stdout).trim(),
+        "two False",
+        "fresh namespace: program 1's global must not leak into program 2"
+    );
+    match &outs[2].output {
+        OutputValue::Json(v) => assert_eq!(v, &serde_json::json!({ "sum": 42 })),
+        other => panic!("expected Json({{sum:42}}) from __afb_emit__, got {other:?}"),
+    }
+}
+
+/// Benchmark: N cold runs (a boot + CPython bringup each) vs one warm batch (one
+/// boot, then N `PyRun_SimpleString` runs). Prints per-run times + speedup.
+#[test]
+#[ignore]
+fn bench_warm_reuse_vs_cold() {
+    if !batch_runtime_available() {
+        eprintln!("[pyodide_integration] SKIP: no ~/.burn pyodide runtime");
+        return;
+    }
+    use afterburner_wasi::pyodide_runner::{run_python, run_python_batch};
+
+    let script = "print(sum(range(1000)))";
+    let n = 12usize;
+
+    let t = std::time::Instant::now();
+    for _ in 0..n {
+        run_python(script).expect("cold run");
+    }
+    let cold = t.elapsed();
+
+    let sources = vec![script; n];
+    let t = std::time::Instant::now();
+    let outs = run_python_batch(&sources).expect("warm batch");
+    let warm = t.elapsed();
+
+    assert_eq!(outs.len(), n);
+    for o in &outs {
+        assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "499500");
+    }
+    eprintln!(
+        "[bench] N={n}: cold {cold:?} ({}ms/run) | warm {warm:?} ({}ms/run) | speedup {:.1}x",
+        cold.as_millis() / n as u128,
+        warm.as_millis() / n as u128,
+        cold.as_secs_f64() / warm.as_secs_f64().max(1e-9)
+    );
+}
