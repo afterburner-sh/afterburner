@@ -117,8 +117,9 @@ tempfile = "3"
 flate2 = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 brotli = { version = "8", default-features = false, features = ["std"] }
-kovan-map = "0.1.15"
-kovan-channel = "0.1.15"
+kovan-map = "0.1.16"
+kovan-channel = "0.1.16"
+kovan-queue = "0.1.16"
 libc = "0.2"
 # Colored + animated `burn` CLI output (brand palette spinners/styling). Used
 # only by the `bin` feature.
@@ -173,8 +174,10 @@ h3-quinn = "0.0.10"
 # binary — no runtime dependency on `libsqlite3.so`. The Rust crate
 # itself is the only public surface; the C is encapsulated. Gated
 # behind `shadow-sqlite3` so non-SQLite builds don't compile the
-# amalgamation (~2 MB compile-time cost).
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+# amalgamation (~2 MB compile-time cost). `cache` enables
+# `prepare_cached`/`CachedStatement`, so repeated `db.run`/`get`/`all`
+# calls with the same SQL skip re-parsing and re-planning.
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "cache"] }
 
 # L3 shadow for `sharp`. Both crates are 100% pure Rust:
 #   * `image` — codec layer (PNG, JPEG, WebP, GIF, BMP, TIFF)
