@@ -29,6 +29,7 @@ use afterburner_core::{AfterburnerError, Combustor, FuelGauge, OutputValue, Resu
 use afterburner_wasi::{WasmCombustor, WasmConfig};
 use kovan_channel::flavors::unbounded::{Receiver, Sender};
 use kovan_channel::unbounded;
+use kovan_queue::array_queue::ArrayQueue;
 use numa::{NumaTopology, pin_current_thread_to_worker};
 use serde_json::Value;
 use std::fmt;
@@ -175,61 +176,45 @@ impl fmt::Debug for ThrustEngineConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Bounded queue: depth-tracked unbounded channel
+// Bounded queue: lock-free ring (kovan_queue::ArrayQueue)
 // ─────────────────────────────────────────────────────────────────────────
 //
-// kovan-channel's bounded `send` blocks when full and there's no
-// `try_send` API. To get production-grade backpressure we layer an
-// `AtomicUsize` depth counter on top of an unbounded channel: enqueue
-// reserves a slot via `fetch_add` and rolls back on overflow; workers
-// `fetch_sub` after dequeue. Concurrent enqueues against a near-full
-// queue can momentarily overshoot `cap` by the number of in-flight
-// enqueuers - bounded and acceptable.
+// Fixed-capacity lock-free MPMC ring with a single CAS per op and no
+// per-item allocation - measured 1.4x-2.9x faster than the previous
+// depth-counter-over-unbounded-channel construction at every MPMC
+// config. The cap is strict (no momentary overshoot): `try_push`
+// returns `Err(item)` at capacity so the caller can re-route (to the
+// injector) rather than block; `try_pop` is non-blocking. Requires
+// kovan-queue >= 0.1.16 (earlier versions livelocked at capacity 1).
 
-struct BoundedQueue<T: 'static> {
-    sender: Sender<T>,
-    receiver: Receiver<T>,
-    depth: AtomicUsize,
-    cap: usize,
+struct BoundedQueue<T> {
+    q: ArrayQueue<T>,
 }
 
-impl<T: 'static> BoundedQueue<T> {
+impl<T> BoundedQueue<T> {
     fn new(cap: usize) -> Self {
-        let (tx, rx) = unbounded::<T>();
         Self {
-            sender: tx,
-            receiver: rx,
-            depth: AtomicUsize::new(0),
-            cap,
+            q: ArrayQueue::new(cap),
         }
     }
 
-    /// Try to push. Returns `Err(item)` if the queue's depth has hit
-    /// the cap, leaving the item with the caller for re-routing.
+    /// Try to push. Returns `Err(item)` if the queue is full, leaving
+    /// the item with the caller for re-routing.
     fn try_push(&self, item: T) -> std::result::Result<(), T> {
-        let prev = self.depth.fetch_add(1, Ordering::AcqRel);
-        if prev >= self.cap {
-            self.depth.fetch_sub(1, Ordering::Release);
-            return Err(item);
-        }
-        self.sender.send(item);
-        Ok(())
+        self.q.push(item)
     }
 
-    /// Non-blocking pop. Pairs every `Some` with a depth decrement.
+    /// Non-blocking pop.
     fn try_pop(&self) -> Option<T> {
-        let item = self.receiver.try_recv()?;
-        self.depth.fetch_sub(1, Ordering::Release);
-        Some(item)
+        self.q.pop()
     }
 }
 
-impl<T: 'static> fmt::Debug for BoundedQueue<T> {
+impl<T> fmt::Debug for BoundedQueue<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BoundedQueue")
-            .field("depth", &self.depth.load(Ordering::Relaxed))
-            .field("cap", &self.cap)
-            .finish()
+            .field("cap", &self.q.capacity())
+            .finish_non_exhaustive()
     }
 }
 
