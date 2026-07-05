@@ -71,8 +71,8 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, RootCertStore, ServerConfig, SignatureScheme};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Handle;
@@ -570,10 +570,37 @@ impl DaemonTls {
 // rustls config builders
 // ---------------------------------------------------------------------
 
+/// Cached uncustomized client configs (no custom CA, no client cert, no
+/// ALPN) - a rustls `ClientConfig` is immutable once built, so it's safe
+/// to share across every connection that doesn't need customization.
+/// Sharing the `Arc` also means repeat connections reuse the same
+/// session-resumption store instead of each starting a fresh one,
+/// turning would-be full handshakes into resumed ones.
+static DEFAULT_CLIENT_CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+static NOVERIFY_CLIENT_CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+
 fn build_client_config(
     opts: &ConnectOptions,
     last_error: &mut String,
 ) -> Option<Arc<ClientConfig>> {
+    // Fast path: the uncustomized config (no custom CA, no client cert, no
+    // ALPN) is identical every call and is safe to share. Returning a cached
+    // Arc also preserves the rustls session-resumption store across
+    // connections, so repeat HTTPS skips the full handshake. Any customization
+    // falls through to the per-call build below, preserving verification / mTLS
+    // / ALPN exactly.
+    if opts.ca_pem.is_empty()
+        && opts.cert_pem.is_empty()
+        && opts.key_pem.is_empty()
+        && opts.alpn.is_empty()
+    {
+        return Some(if opts.reject_unauthorized {
+            build_default_client_config()
+        } else {
+            build_noverify_client_config()
+        });
+    }
+
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     if !opts.ca_pem.is_empty() {
@@ -654,6 +681,12 @@ fn build_client_config(
 /// used when `DaemonNet::set_tls` upgrades a raw TCP connection to TLS on
 /// behalf of the Python ssl shim (`DaemonNet` piece 1 of the HTTPS path).
 pub(crate) fn build_default_client_config() -> Arc<ClientConfig> {
+    DEFAULT_CLIENT_CONFIG
+        .get_or_init(build_default_client_config_uncached)
+        .clone()
+}
+
+fn build_default_client_config_uncached() -> Arc<ClientConfig> {
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     Arc::new(
@@ -661,6 +694,22 @@ pub(crate) fn build_default_client_config() -> Arc<ClientConfig> {
             .with_root_certificates(roots)
             .with_no_client_auth(),
     )
+}
+
+/// Cached counterpart to `build_default_client_config` for the
+/// `rejectUnauthorized: false` case - same uncustomized shape, permissive
+/// verifier instead of the webpki-roots verifier.
+fn build_noverify_client_config() -> Arc<ClientConfig> {
+    NOVERIFY_CLIENT_CONFIG
+        .get_or_init(|| {
+            Arc::new(
+                ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(NoVerify))
+                    .with_no_client_auth(),
+            )
+        })
+        .clone()
 }
 
 fn build_server_config(

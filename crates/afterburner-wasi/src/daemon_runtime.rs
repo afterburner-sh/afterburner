@@ -29,6 +29,7 @@ use afterburner_core::{
     AfterburnerError, HostContext, InMemoryStateStore, Manifold, Result, ScriptInvocation,
     SharedStateStore,
 };
+use bytes::Bytes;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -135,7 +136,7 @@ impl DaemonRuntime {
     ) -> Result<Self> {
         let state_store = state_store.unwrap_or_else(InMemoryStateStore::shared);
         let mut state = HostState::new(
-            b"",
+            Bytes::new(),
             None,
             DAEMON_STDOUT_CAPACITY,
             manifold,
@@ -246,6 +247,33 @@ impl DaemonRuntime {
     /// Snapshot of captured stderr. Same cumulative semantics.
     pub fn drain_stderr(&self) -> Vec<u8> {
         self.store.data().stderr.contents().to_vec()
+    }
+
+    /// Copy only the captured stdout beyond `from` (the caller's high-water
+    /// mark), so a per-event flush copies just the new tail instead of the
+    /// whole cumulative buffer (which grows unboundedly over a daemon's life,
+    /// making the old drain-then-slice an O(cumulative) copy per flush).
+    /// Returns empty when `from` is at or past the current length.
+    pub fn drain_stdout_from(&self, from: usize) -> Vec<u8> {
+        self.store
+            .data()
+            .stdout
+            .contents()
+            .get(from..)
+            .unwrap_or_default()
+            .to_vec()
+    }
+
+    /// Tail-only counterpart to [`Self::drain_stderr`]. See
+    /// [`Self::drain_stdout_from`].
+    pub fn drain_stderr_from(&self, from: usize) -> Vec<u8> {
+        self.store
+            .data()
+            .stderr
+            .contents()
+            .get(from..)
+            .unwrap_or_default()
+            .to_vec()
     }
 
     /// Access the HTTP coordinator - B2.4 uses this to register axum

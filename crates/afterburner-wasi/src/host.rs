@@ -11,6 +11,7 @@
 use afterburner_core::{HostContext, Manifold, SharedStateStore};
 use afterburner_node_compat::hash_handles::HashHandleStore;
 use afterburner_node_compat::sign_handles::SignHandleStore;
+use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Instant;
 use wasmtime::{ResourceLimiter, StoreLimits, StoreLimitsBuilder};
@@ -219,14 +220,14 @@ impl HostState {
     /// growable ceiling-bounded stdout capture, and a bounded stderr
     /// buffer.
     pub fn new(
-        input: &[u8],
+        input: impl Into<Bytes>,
         memory_bytes: Option<usize>,
         output_ceiling: usize,
         manifold: Manifold,
         state_store: SharedStateStore,
         host_context: Option<Arc<dyn HostContext>>,
     ) -> Self {
-        let stdin = MemoryInputPipe::new(input.to_vec());
+        let stdin = MemoryInputPipe::new(input.into());
         let stdout = CapturePipe::new(output_ceiling);
         // Stderr is bounded too - preserving it unbounded is a memory-
         // exhaustion vector. Surfaced to the caller via WasmTrap on error.
@@ -292,7 +293,7 @@ impl HostState {
     /// `host_get_input` and their framing via `host_input_format`.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_input(
-        envelope: &[u8],
+        envelope: impl Into<Bytes>,
         input: Vec<u8>,
         input_format: InputFormat,
         memory_bytes: Option<usize>,

@@ -673,6 +673,15 @@ fn shard_event_loop(
     stdout_hw: &mut usize,
     stderr_hw: &mut usize,
 ) {
+    // Adaptive idle backoff: poll fast right after activity (an event is often
+    // followed by more), then sleep progressively longer up to a 5ms cap when
+    // persistently idle. Cuts the worst-case event-processing latency of a
+    // fixed 5ms sleep without the idle-CPU cost of a fixed short sleep. Each
+    // sleep is still bounded by the next timer's fire-time, so timers are
+    // unaffected.
+    let min_idle = Duration::from_micros(50);
+    let max_idle = Duration::from_millis(5);
+    let mut idle_backoff = min_idle;
     loop {
         if shutdown.load(Ordering::Acquire) {
             break;
@@ -856,15 +865,17 @@ fn shard_event_loop(
         }
 
         if !did_work {
-            // No events processed this iteration - sleep briefly,
-            // bounded by the next timer's fire-time. Same shape as
-            // the legacy single-shard run loop.
-            let max_sleep = Duration::from_millis(5);
+            // No events this iteration: sleep with adaptive backoff, still
+            // bounded by the next timer's fire-time so timers fire on schedule.
             let sleep_dur = daemon
                 .next_timer_deadline()
-                .map(|d| d.saturating_duration_since(Instant::now()).min(max_sleep))
-                .unwrap_or(max_sleep);
+                .map(|d| d.saturating_duration_since(Instant::now()).min(idle_backoff))
+                .unwrap_or(idle_backoff);
             std::thread::sleep(sleep_dur);
+            idle_backoff = (idle_backoff * 2).min(max_idle);
+        } else {
+            // Activity: reset to the fast poll interval.
+            idle_backoff = min_idle;
         }
     }
 
@@ -981,24 +992,25 @@ fn flush_streams(
     stdout_hw: &mut usize,
     stderr_hw: &mut usize,
 ) -> std::io::Result<()> {
-    let stdout = daemon.drain_stdout();
-    let stderr = daemon.drain_stderr();
-    // Explicit per-shard high-water marks. Each shard's loop owns
-    // its own pair of usize and passes them in by &mut. The shard
-    // never re-emits already-flushed bytes; stdout from different
-    // shards interleaves at line boundaries (best-effort, matches
-    // Node's cluster module).
-    if stdout.len() > *stdout_hw {
+    // Explicit per-shard high-water marks. Each shard's loop owns its own
+    // pair of usize and passes them in by &mut. Copy ONLY the bytes past the
+    // mark (not the whole cumulative buffer) so a flush is O(new bytes), not
+    // O(total output so far). The shard never re-emits already-flushed bytes;
+    // stdout from different shards interleaves at line boundaries (best-effort,
+    // matches Node's cluster module).
+    let new_stdout = daemon.drain_stdout_from(*stdout_hw);
+    if !new_stdout.is_empty() {
         let mut so = std::io::stdout().lock();
-        so.write_all(&stdout[*stdout_hw..])?;
+        so.write_all(&new_stdout)?;
         so.flush()?;
-        *stdout_hw = stdout.len();
+        *stdout_hw += new_stdout.len();
     }
-    if stderr.len() > *stderr_hw {
+    let new_stderr = daemon.drain_stderr_from(*stderr_hw);
+    if !new_stderr.is_empty() {
         let mut se = std::io::stderr().lock();
-        se.write_all(&stderr[*stderr_hw..])?;
+        se.write_all(&new_stderr)?;
         se.flush()?;
-        *stderr_hw = stderr.len();
+        *stderr_hw += new_stderr.len();
     }
     Ok(())
 }
@@ -1025,47 +1037,64 @@ async fn run_dispatcher(
         if shutdown.load(Ordering::Acquire) {
             break;
         }
-        // The kovan_channel `try_recv` is non-blocking; we yield
-        // briefly when empty so the scheduler can pick this task
-        // up promptly when an event arrives without burning CPU
-        // here on idle.
-        match coord.try_recv_event() {
-            Some(event) => {
-                let start = next.fetch_add(1, Ordering::Relaxed) % n;
-                let mut sent = false;
-                for offset in 0..n {
-                    let idx = (start + offset) % n;
-                    if !shard_alives[idx].load(Ordering::Acquire) {
-                        continue;
-                    }
-                    match shard_senders[idx].try_send(event.clone()) {
-                        Ok(()) => {
-                            // Counter increments inside the shard's
-                            // own loop on receipt; we don't double-
-                            // count here.
-                            let _ = &shard_request_counters; // keep alive
-                            sent = true;
-                            break;
-                        }
-                        Err(mpsc::error::TrySendError::Full(_)) => continue,
-                        Err(mpsc::error::TrySendError::Closed(_)) => continue,
-                    }
+        // Park on the event channel instead of busy-polling. The
+        // timeout re-checks `shutdown` periodically without adding
+        // routing latency: an event arriving mid-park wakes this
+        // future immediately.
+        let event = match tokio::time::timeout(Duration::from_millis(250), coord.recv_async_event())
+            .await
+        {
+            Ok(Some(event)) => event,
+            Ok(None) => break,         // all senders dropped - shutting down
+            Err(_elapsed) => continue, // tick: re-check shutdown, keep parking
+        };
+        let start = next.fetch_add(1, Ordering::Relaxed) % n;
+        let mut sent = false;
+        // `Option`-wrapped so a failed `try_send` can hand the event back
+        // without a clone; the borrow checker can't correlate a plain
+        // moved-and-maybe-reinitialized binding with the `sent` flag
+        // across the loop's `break`, but `Option::take` makes each
+        // iteration's move/reinit explicit.
+        let mut pending = Some(event);
+        for offset in 0..n {
+            let idx = (start + offset) % n;
+            if !shard_alives[idx].load(Ordering::Acquire) {
+                continue;
+            }
+            let Some(event) = pending.take() else {
+                break;
+            };
+            match shard_senders[idx].try_send(event) {
+                Ok(()) => {
+                    // Counter increments inside the shard's
+                    // own loop on receipt; we don't double-
+                    // count here.
+                    let _ = &shard_request_counters; // keep alive
+                    sent = true;
+                    break;
                 }
-                if !sent {
-                    // All shards full or down - fall back to async
-                    // send on the originally-chosen shard so we
-                    // backpressure rather than drop.
-                    let idx = start;
-                    if shard_alives[idx].load(Ordering::Acquire) {
-                        let _ = shard_senders[idx].send(event).await;
-                    }
-                    // If all are down: silently drop. Caller's axum
-                    // task observes a stuck reply slot and times out.
+                Err(mpsc::error::TrySendError::Full(ev)) => {
+                    pending = Some(ev);
+                    continue;
+                }
+                Err(mpsc::error::TrySendError::Closed(ev)) => {
+                    pending = Some(ev);
+                    continue;
                 }
             }
-            None => {
-                tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        if !sent {
+            // All shards full or down - fall back to async
+            // send on the originally-chosen shard so we
+            // backpressure rather than drop.
+            let idx = start;
+            if shard_alives[idx].load(Ordering::Acquire)
+                && let Some(event) = pending
+            {
+                let _ = shard_senders[idx].send(event).await;
             }
+            // If all are down: silently drop. Caller's axum
+            // task observes a stuck reply slot and times out.
         }
     }
 }

@@ -48,7 +48,7 @@
 use afterburner_core::{AfterburnerError, Result};
 use kovan_map::HopscotchMap;
 use parking_lot_proxy::PerInstanceLock;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use wasmtime::{Engine, Func, Instance, Module, Store, Val, ValType};
 
@@ -154,13 +154,20 @@ impl std::fmt::Debug for WasmLoader {
     }
 }
 
+/// Process-global wasmtime Engine, shared by every `WasmLoader`. Engines are
+/// immutable after construction and cheap to clone (an internal refcount bump),
+/// and wasmtime intends one Engine to be reused across Stores/threads. Building
+/// one per thrust (via `HostState::new`) was pure waste for the common thrust
+/// that never touches `WebAssembly.*`.
+static SHARED_ENGINE: OnceLock<Engine> = OnceLock::new();
+
 impl WasmLoader {
     pub fn new() -> Self {
         // Default Engine config is fine - wasmtime defaults to
         // sane resource caps. We don't enable async or epoch
         // interruption in v1 since calls cross the wasmtime↔QuickJS
         // boundary synchronously.
-        let engine = Engine::default();
+        let engine = SHARED_ENGINE.get_or_init(Engine::default).clone();
         Self {
             standalone: Arc::new(StandaloneRegistry {
                 next_id: AtomicU64::new(1),
