@@ -44,16 +44,24 @@ pub fn verify(password: &str, hash: &str) -> Result<bool, String> {
 /// output shape ("$2b$12$…" - 29 characters).
 pub fn gen_salt(rounds: u32) -> Result<String, String> {
     let rounds = if rounds == 0 { DEFAULT_COST } else { rounds };
-    // Generate a hash of an empty password, extract the "$2b$CC$SALT"
-    // prefix (the bcrypt crate doesn't expose a salt-only generator
-    // today, but the prefix of a hash IS the salt in bcrypt's wire
-    // format). Prefix is always 29 chars.
-    let h = bcrypt::hash("", rounds).map_err(|e| format!("bcrypt gen_salt: {e}"))?;
-    // Strip the password-hash suffix (everything after the 29-char
-    // header) so callers passing this to hash() get bcrypt's
-    // recompute-from-salt behavior.
+    // Preserve the previous behavior: the old implementation hashed at
+    // `rounds`, so it returned Err for a cost outside bcrypt's valid range
+    // (MIN_COST=4 ..= MAX_COST=31). We now hash at a fixed minimum cost, so
+    // re-validate the requested cost explicitly to keep the same reject
+    // behavior and to stop the 2-digit "{:02}" cost field below from
+    // overflowing the 29-char salt for a cost >= 100.
+    if !(4..=31).contains(&rounds) {
+        return Err(format!("bcrypt gen_salt: cost {rounds} out of range (4..=31)"));
+    }
+    // The 16-byte salt is random and independent of cost; only the
+    // discarded KDF suffix scales with cost. Generate the salt at the
+    // minimum cost (cheap), then splice in the requested cost, instead of
+    // running a full 2^rounds KDF just to read the salt prefix.
+    let h = bcrypt::hash("", 4).map_err(|e| format!("bcrypt gen_salt: {e}"))?;
     if h.len() < 29 {
         return Err(format!("bcrypt: unexpected hash length {}", h.len()));
     }
-    Ok(h[..29].to_string())
+    // h = "$2b$04$<22-char-salt>...". Preserve the version prefix (h[..4]),
+    // rewrite the 2-digit cost, keep the 22-char salt (h[7..29]).
+    Ok(format!("{}{:02}${}", &h[..4], rounds, &h[7..29]))
 }
