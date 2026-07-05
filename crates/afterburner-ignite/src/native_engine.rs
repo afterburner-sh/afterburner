@@ -105,7 +105,7 @@ use rquickjs::{
     Context, Ctx, Error as RquickjsError, Function, Persistent, Runtime, Value as RqValue,
 };
 use serde_json::Value as JsonValue;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -143,6 +143,14 @@ const CALLSITE_PROTO_PATCH: &str = r#"
 })();
 "#;
 
+/// Per-thread ceiling on `ENTRY_CACHE`. Compiled UDF entries are small
+/// (bytecode), so 512 distinct scripts per thread is generous; past it the
+/// least-recently-used entry is evicted (a miss just recompiles once).
+const ENTRY_CACHE_CAP: usize = 512;
+
+/// A cached compiled UDF entry plus its last-access tick (for LRU eviction).
+type CachedEntry = (Persistent<Function<'static>>, Cell<u64>);
+
 thread_local! {
     /// One rquickjs Runtime per client thread. Lazily initialized on
     /// first use. Wrapped in RefCell because we need `&mut` access to
@@ -162,9 +170,15 @@ thread_local! {
     /// dominant native warm cost (~158us p50) - caching the compiled
     /// `Function` means that work happens once per (thread, script)
     /// instead of once per thrust. Content-addressed key: a hit is
-    /// never stale, only ever a memory concern (see `extinguish`).
-    static ENTRY_CACHE: RefCell<HashMap<[u8; 32], Persistent<Function<'static>>>> =
+    /// never stale. Bounded to `ENTRY_CACHE_CAP` entries per thread with
+    /// LRU eviction (the `Cell<u64>` is each entry's last-access tick), so
+    /// a high-cardinality workload (many distinct scripts) cannot grow it
+    /// without bound even when `extinguish` never runs on this thread.
+    static ENTRY_CACHE: RefCell<HashMap<[u8; 32], CachedEntry>> =
         RefCell::new(HashMap::new());
+
+    /// Monotonic per-thread counter feeding `ENTRY_CACHE`'s LRU order.
+    static ENTRY_TICK: Cell<u64> = const { Cell::new(0) };
 
     /// Per-thread fuel accounting for the shared interrupt handler that
     /// `ThreadRuntime::new` installs ONCE per Runtime. `do_thrust` /
@@ -446,11 +460,10 @@ impl Combustor for NativeCombustor {
 
     fn extinguish(&self, id: &ScriptId) {
         self.source_store.remove(&id.hash);
-        // vertexia: cardinality is bounded by extinguish, but only on
-        // this thread - other threads' cached entries for this script
-        // are reclaimed when those threads next extinguish it or exit.
-        // A per-thread size cap (LRU) is the upgrade path if
-        // distinct-script cardinality ever grows unbounded.
+        // Drop this thread's compiled entry. Other threads' entries for
+        // this script are reclaimed on their own extinguish/exit, or
+        // evicted by the per-thread LRU cap (`ENTRY_CACHE_CAP`), so the
+        // cache stays bounded regardless of the extinguish pattern.
         ENTRY_CACHE.with(|c| {
             c.borrow_mut().remove(&id.hash);
         });
@@ -822,8 +835,22 @@ fn build_entry_wrapper(source: &str) -> String {
 /// the Javy `event_loop(true)` behavior on the WASM side so scripts
 /// that use `fetch().then(...)` or `await` work identically across
 /// engines.
+/// Next per-thread LRU tick for `ENTRY_CACHE`.
+fn next_entry_tick() -> u64 {
+    ENTRY_TICK.with(|t| {
+        let n = t.get().wrapping_add(1);
+        t.set(n);
+        n
+    })
+}
+
 fn run_script(ctx: &Ctx<'_>, hash: [u8; 32], source: &str, input_json: &str) -> Result<String> {
-    let cached = ENTRY_CACHE.with(|c| c.borrow().get(&hash).cloned());
+    let cached = ENTRY_CACHE.with(|c| {
+        c.borrow().get(&hash).map(|(func, tick)| {
+            tick.set(next_entry_tick());
+            func.clone()
+        })
+    });
     let entry: Function<'_> = match cached {
         Some(persistent) => persistent
             .restore(ctx)
@@ -834,8 +861,24 @@ fn run_script(ctx: &Ctx<'_>, hash: [u8; 32], source: &str, input_json: &str) -> 
                 .eval(wrapper.as_bytes())
                 .map_err(|e| map_script_err(ctx, e))?;
             ENTRY_CACHE.with(|c| {
-                c.borrow_mut()
-                    .insert(hash, Persistent::save(ctx, func.clone()));
+                let mut cache = c.borrow_mut();
+                // Bound the per-thread cache: when full, evict the
+                // least-recently-used entry so a high-cardinality script
+                // workload cannot grow it without bound (extinguish only
+                // reclaims the calling thread's entry).
+                if cache.len() >= ENTRY_CACHE_CAP
+                    && !cache.contains_key(&hash)
+                    && let Some(lru) = cache
+                        .iter()
+                        .min_by_key(|(_, (_, tick))| tick.get())
+                        .map(|(k, _)| *k)
+                {
+                    cache.remove(&lru);
+                }
+                cache.insert(
+                    hash,
+                    (Persistent::save(ctx, func.clone()), Cell::new(next_entry_tick())),
+                );
             });
             func
         }
@@ -917,6 +960,26 @@ mod tests {
     fn eval_arithmetic() {
         let out = combust("module.exports = () => 1 + 2", json!(null)).unwrap();
         assert_eq!(out, json!(3));
+    }
+
+    #[test]
+    fn entry_cache_is_bounded_by_cap() {
+        // Thrust many DISTINCT scripts on this thread without extinguishing
+        // any. The per-thread compile cache must stay <= ENTRY_CACHE_CAP via
+        // LRU eviction, so a high-cardinality workload cannot grow it without
+        // bound (the failure mode a missing size cap would produce).
+        let c = NativeCombustor::new().unwrap();
+        for i in 0..(ENTRY_CACHE_CAP + 100) {
+            let src = format!("module.exports = () => {i};");
+            let id = c.ignite(&src).unwrap();
+            let out = c.thrust(&id, &json!(null), &FuelGauge::unlimited()).unwrap();
+            assert_eq!(out, json!(i));
+        }
+        let len = ENTRY_CACHE.with(|cache| cache.borrow().len());
+        assert!(
+            len <= ENTRY_CACHE_CAP,
+            "ENTRY_CACHE grew to {len}, exceeding cap {ENTRY_CACHE_CAP}"
+        );
     }
 
     #[test]
