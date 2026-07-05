@@ -11,7 +11,7 @@ documentation.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme.workspace = true
-description = "Afterburner - JS ~> WASM Sandboxed Execution VM"
+description = "Afterburner - Polyglot, deterministic, sandboxed WebAssembly runtime."
 
 [lib]
 path = "src/lib.rs"
