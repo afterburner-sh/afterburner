@@ -201,3 +201,225 @@ fn live_https_get_returns_200() {
         "expected HTTP status 200 from example.com, got: {text:?}"
     );
 }
+
+// ---- warm-interpreter reuse (#53) ------------------------------------------
+
+/// Whether `run_python_batch` can resolve its runtime (the `BURN_PYTHON_RUNTIME`
+/// override, or the `~/.burn/pyodide-*` bundle).
+fn batch_runtime_available() -> bool {
+    if let Ok(dir) = std::env::var("BURN_PYTHON_RUNTIME")
+        && std::path::Path::new(&dir)
+            .join("pyodide-exnref.wasm")
+            .exists()
+    {
+        return true;
+    }
+    if let Some(home) = std::env::var_os("HOME")
+        && let Ok(entries) = std::fs::read_dir(std::path::Path::new(&home).join(".burn"))
+    {
+        return entries
+            .flatten()
+            .any(|e| e.path().join("pyodide-exnref.wasm").exists());
+    }
+    false
+}
+
+/// A batch of programs runs on ONE warmed interpreter: stdout is captured per
+/// program, each program runs in a FRESH namespace (a name defined by one does
+/// not leak into the next), and a typed return via `__afb_emit__` round-trips.
+#[test]
+#[ignore]
+fn pyodide_warm_batch_reuse_isolated_and_correct() {
+    if !batch_runtime_available() {
+        eprintln!("[pyodide_integration] SKIP: no ~/.burn pyodide runtime");
+        return;
+    }
+    use afterburner_core::OutputValue;
+    use afterburner_wasi::pyodide_runner::run_python_batch;
+
+    let sources = [
+        "leaked = 111\nprint('one', leaked)",
+        "print('two', 'leaked' in globals())",
+        "__afb_emit__({'sum': 7 + 35})",
+    ];
+    let outs = run_python_batch(&sources).expect("warm batch should run");
+    assert_eq!(outs.len(), 3, "one output per source");
+    assert_eq!(
+        String::from_utf8_lossy(&outs[0].stdout).trim(),
+        "one 111",
+        "program 1 stdout captured"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&outs[1].stdout).trim(),
+        "two False",
+        "fresh namespace: program 1's global must not leak into program 2"
+    );
+    match &outs[2].output {
+        OutputValue::Json(v) => assert_eq!(v, &serde_json::json!({ "sum": 42 })),
+        other => panic!("expected Json({{sum:42}}) from __afb_emit__, got {other:?}"),
+    }
+}
+
+/// Benchmark: N cold runs (a boot + CPython bringup each) vs one warm batch (one
+/// boot, then N `PyRun_SimpleString` runs). Prints per-run times + speedup.
+#[test]
+#[ignore]
+fn bench_warm_reuse_vs_cold() {
+    if !batch_runtime_available() {
+        eprintln!("[pyodide_integration] SKIP: no ~/.burn pyodide runtime");
+        return;
+    }
+    use afterburner_wasi::pyodide_runner::{run_python, run_python_batch};
+
+    let script = "print(sum(range(1000)))";
+    let n = 12usize;
+
+    let t = std::time::Instant::now();
+    for _ in 0..n {
+        run_python(script).expect("cold run");
+    }
+    let cold = t.elapsed();
+
+    let sources = vec![script; n];
+    let t = std::time::Instant::now();
+    let outs = run_python_batch(&sources).expect("warm batch");
+    let warm = t.elapsed();
+
+    assert_eq!(outs.len(), n);
+    for o in &outs {
+        assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "499500");
+    }
+    eprintln!(
+        "[bench] N={n}: cold {cold:?} ({}ms/run) | warm {warm:?} ({}ms/run) | speedup {:.1}x",
+        cold.as_millis() / n as u128,
+        warm.as_millis() / n as u128,
+        cold.as_secs_f64() / warm.as_secs_f64().max(1e-9)
+    );
+}
+
+/// `WarmPyInterpreter`: persistent mode carries state across calls (a REPL
+/// needs this), `reset_persistent` drops it, and isolated mode on the SAME
+/// interpreter still isolates.
+#[test]
+#[ignore]
+fn warm_interpreter_persistent_and_isolated_modes() {
+    if !batch_runtime_available() {
+        eprintln!("[pyodide_integration] SKIP: no ~/.burn pyodide runtime");
+        return;
+    }
+    use afterburner_wasi::pyodide_runner::WarmPyInterpreter;
+
+    let mut interp = WarmPyInterpreter::boot_resolved().expect("boot+warm");
+
+    // Persistent: a name bound on one call is visible on the next.
+    interp.run_persistent("x = 40").expect("bind x");
+    let o = interp.run_persistent("print(x + 2)").expect("use x");
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).trim(),
+        "42",
+        "persistent namespace must carry state across calls"
+    );
+
+    // reset drops the namespace: x is gone on the next persistent call.
+    interp.reset_persistent().expect("reset");
+    let o = interp
+        .run_persistent("print('x' in dir())")
+        .expect("post-reset");
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).trim(),
+        "False",
+        "reset_persistent must clear the persistent namespace"
+    );
+
+    // Isolated mode on the SAME interpreter still isolates between calls.
+    interp.run_isolated("leaked2 = 7").expect("iso bind");
+    let o = interp
+        .run_isolated("print('leaked2' in globals())")
+        .expect("iso check");
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).trim(),
+        "False",
+        "isolated mode must not carry state between calls"
+    );
+}
+
+/// A raising program on the warm interpreter must be CAUGHT (no wasm trap): the
+/// run returns Ok, the error is captured to stderr, and the interpreter survives
+/// for the next run. (Regression guard: `traceback.print_exc` trapped here.)
+#[test]
+#[ignore]
+fn warm_interpreter_error_does_not_trap() {
+    if !batch_runtime_available() {
+        eprintln!("[pyodide_integration] SKIP: no ~/.burn pyodide runtime");
+        return;
+    }
+    use afterburner_wasi::pyodide_runner::WarmPyInterpreter;
+
+    let mut interp = WarmPyInterpreter::boot_resolved().expect("boot+warm");
+    let o = interp
+        .run_persistent("undefined_name_xyz")
+        .expect("a raising program must be caught, not trap");
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("NameError"),
+        "the error must be captured to stderr, got: {err:?}"
+    );
+    // The interpreter survives the error: the next run still works.
+    let o2 = interp
+        .run_persistent("print(6 * 7)")
+        .expect("post-error run");
+    assert_eq!(
+        String::from_utf8_lossy(&o2.stdout).trim(),
+        "42",
+        "interpreter must stay usable after an error"
+    );
+}
+
+/// Benchmark the REPL model: the OLD approach (re-run the accumulated program
+/// on a fresh boot per line) vs the NEW warm interpreter (one boot, each line
+/// runs on the persistent namespace). Prints per-line times + speedup.
+#[test]
+#[ignore]
+fn bench_repl_warm_vs_replay() {
+    if !batch_runtime_available() {
+        eprintln!("[pyodide_integration] SKIP: no ~/.burn pyodide runtime");
+        return;
+    }
+    use afterburner_wasi::pyodide_runner::{WarmPyInterpreter, resolve_runtime, run_pyodide_with};
+
+    let lines = [
+        "x = 1",
+        "x += 1",
+        "y = x * 10",
+        "print(y)",
+        "z = [i * i for i in range(x)]",
+        "print(sum(z))",
+    ];
+    let n = lines.len();
+    let rt = resolve_runtime().expect("runtime");
+
+    // OLD REPL model: each line re-runs the accumulated program on a fresh boot.
+    let t = std::time::Instant::now();
+    let mut acc = String::new();
+    for line in &lines {
+        acc.push_str(line);
+        acc.push('\n');
+        run_pyodide_with(&rt, &acc).expect("replay run");
+    }
+    let old = t.elapsed();
+
+    // NEW REPL model: one warm interpreter, each line on the persistent namespace.
+    let t = std::time::Instant::now();
+    let mut interp = WarmPyInterpreter::boot_resolved().expect("boot");
+    for line in &lines {
+        interp.run_persistent(line).expect("warm line");
+    }
+    let new = t.elapsed();
+
+    eprintln!(
+        "[bench-repl] {n} lines: replay(old) {old:?} ({}ms/line) | warm(new) {new:?} ({}ms/line) | speedup {:.1}x",
+        old.as_millis() / n as u128,
+        new.as_millis() / n as u128,
+        old.as_secs_f64() / new.as_secs_f64().max(1e-9)
+    );
+}

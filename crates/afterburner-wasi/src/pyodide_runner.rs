@@ -26,8 +26,8 @@ use afterburner_core::{
     decode_output_value, encode_frame,
 };
 use wasmtime::{
-    FuncType, Global, GlobalType, Instance, Linker, Module, Mutability, Store, Tag, TagType, Val,
-    ValType,
+    Engine, FuncType, Global, GlobalType, Instance, Linker, Module, Mutability, Store, Tag,
+    TagType, Val, ValType,
 };
 
 use crate::{
@@ -189,10 +189,10 @@ fn is_metadata_entry(name: &str) -> bool {
 /// keeps the two metadata files `importlib.metadata` reads (see
 /// [`is_metadata_entry`]). Returns the count mounted. Supports the two zip
 /// methods Pyodide wheels use: 0 (stored) and 8 (deflate).
-fn mount_wheel(fs: &mut InMemFs, wheel_bytes: &[u8], guest_prefix: &str) -> usize {
-    use flate2::read::DeflateDecoder;
-    use std::io::Read;
-
+fn mount_wheel(fs: &mut InMemFs, wheel: std::sync::Arc<[u8]>, guest_prefix: &str) -> usize {
+    // #23: index each wheel entry lazily against the shared `wheel` blob; the
+    // bytes decompress on first read, so an unimported numpy/pandas never pays.
+    let wheel_bytes: &[u8] = &wheel;
     let mut count = 0usize;
     let mut pos = 0usize;
     while pos + 30 <= wheel_bytes.len() {
@@ -207,6 +207,8 @@ fn mount_wheel(fs: &mut InMemFs, wheel_bytes: &[u8], guest_prefix: &str) -> usiz
         let method = u16::from_le_bytes(wheel_bytes[pos + 8..pos + 10].try_into().unwrap());
         let comp_size =
             u32::from_le_bytes(wheel_bytes[pos + 18..pos + 22].try_into().unwrap()) as usize;
+        let uncomp_size =
+            u32::from_le_bytes(wheel_bytes[pos + 22..pos + 26].try_into().unwrap()) as usize;
         let name_len =
             u16::from_le_bytes(wheel_bytes[pos + 26..pos + 28].try_into().unwrap()) as usize;
         let extra_len =
@@ -232,28 +234,75 @@ fn mount_wheel(fs: &mut InMemFs, wheel_bytes: &[u8], guest_prefix: &str) -> usiz
             pos = data_end;
             continue;
         }
-        let raw = &wheel_bytes[data_start..data_end];
-        let contents = match method {
-            0 => raw.to_vec(),
-            8 => {
-                let mut dec = DeflateDecoder::new(raw);
-                let mut out = Vec::new();
-                if dec.read_to_end(&mut out).is_err() {
-                    pos = data_end;
-                    continue;
-                }
-                out
+        match method {
+            0 | 8 => {
+                fs.insert_lazy_file(
+                    &format!("{guest_prefix}/{name}"),
+                    wheel.clone(),
+                    data_start,
+                    comp_size,
+                    method,
+                    uncomp_size,
+                );
+                count += 1;
             }
             _ => {
                 pos = data_end;
                 continue;
             }
-        };
-        fs.insert_file(&format!("{guest_prefix}/{name}"), contents);
-        count += 1;
+        }
         pos = data_end;
     }
     count
+}
+
+/// Load the compiled CPython module from its on-disk cwasm cache, compiling and
+/// persisting it on a miss (#56/#62).
+///
+/// Cranelift-compiling the ~25-34 MiB runtime is the bulk of Python cold start.
+/// The cwasm sits next to the wasm (same version-pinned dir, so the source is
+/// immutable per version); it is trusted only when at least as new as the wasm
+/// AND accepted by wasmtime's own version/config header check - any mismatch,
+/// staleness, or corruption falls back to a fresh compile + atomic rewrite.
+fn load_or_compile_pyodide_module(
+    engine: &Engine,
+    wasm_path: &std::path::Path,
+    wasm_bytes: &[u8],
+) -> Result<Module> {
+    let cwasm_path = wasm_path.with_extension("cwasm");
+
+    // Trust the cache only if it is at least as new as the wasm it was built
+    // from (a cheap stat, no re-hash of the 25 MiB source).
+    let cwasm_fresh = std::fs::metadata(&cwasm_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .zip(std::fs::metadata(wasm_path).and_then(|m| m.modified()).ok())
+        .is_some_and(|(cwasm, wasm)| cwasm >= wasm);
+
+    if cwasm_fresh {
+        // SAFETY: the artifact is one we produced via `Module::serialize` with
+        // this same engine config; wasmtime validates its version/config header
+        // and returns Err on any mismatch (then we recompile), so a foreign or
+        // stale artifact can never be executed as code.
+        if let Ok(module) = unsafe { Module::deserialize_file(engine, &cwasm_path) } {
+            return Ok(module);
+        }
+    }
+
+    let module = Module::new(engine, wasm_bytes)
+        .map_err(|e| AfterburnerError::Engine(format!("compile python runtime: {e}")))?;
+
+    // Best-effort persist: write a per-process temp then atomically rename, so a
+    // concurrent boot never observes a half-written cwasm. A failed write just
+    // recompiles next time.
+    if let Ok(serialized) = module.serialize() {
+        let tmp = cwasm_path.with_extension(format!("cwasm.tmp.{}", std::process::id()));
+        if std::fs::write(&tmp, &serialized).is_ok() {
+            let _ = std::fs::rename(&tmp, &cwasm_path);
+        }
+    }
+
+    Ok(module)
 }
 
 /// Extract one named entry from a zip (stored or deflate). Used to pull numpy's
@@ -399,8 +448,10 @@ fn boot_pyodide_instance(
     let layout = MainModuleLayout::from_main_wasm(&wasm_bytes);
 
     let engine = deterministic_engine()?;
-    let module = Module::new(&engine, &wasm_bytes)
-        .map_err(|e| AfterburnerError::Engine(format!("compile python runtime: {e}")))?;
+    // #56/#62: Cranelift-compiling the ~25-34 MiB CPython runtime dominates cold
+    // start. Compile it once, persist the artifact as a cwasm next to the wasm,
+    // and mmap-deserialize it on every subsequent boot.
+    let module = load_or_compile_pyodide_module(&engine, &rt.wasm_path, &wasm_bytes)?;
 
     let mut linker: Linker<EmbedderState> = Linker::new(&engine);
     linker.allow_shadowing(true);
@@ -489,11 +540,15 @@ fn boot_pyodide_instance(
     // Mount stdlib zip under the interpreter's version-specific guest paths.
     if let Ok(zip_bytes) = std::fs::read(&rt.stdlib_path) {
         let (zip_mount, dir_mount) = python_stdlib_mount_paths(&rt.python_xy);
+        // Share one compressed blob between the mounted .zip and every lazy
+        // entry extracted from it (#23); nothing decompresses until first read.
+        let zip: std::sync::Arc<[u8]> = std::sync::Arc::from(zip_bytes);
+        let zip_len = zip.len();
         store
             .data_mut()
             .fs
-            .insert_file(&zip_mount, zip_bytes.clone());
-        let _ = mount_zip_into_fs(&mut store.data_mut().fs, &dir_mount, &zip_bytes);
+            .insert_lazy_file(&zip_mount, zip.clone(), 0, zip_len, 0, zip_len);
+        let _ = mount_zip_into_fs(&mut store.data_mut().fs, &dir_mount, zip);
     }
     store.data_mut().fs.mkdir_p("/tmp");
     // HOME (exposed via environ_get) must exist so a package that writes its
@@ -508,11 +563,19 @@ fn boot_pyodide_instance(
     let has_extra = !extra_wheel_bytes.is_empty();
     if has_wheels || has_extra {
         let site_pkgs = site_packages(&rt.python_xy);
-        for bytes in &wheel_blobs {
-            mount_wheel(&mut store.data_mut().fs, bytes, &site_pkgs);
+        for bytes in wheel_blobs {
+            mount_wheel(
+                &mut store.data_mut().fs,
+                std::sync::Arc::from(bytes),
+                &site_pkgs,
+            );
         }
         for bytes in extra_wheel_bytes {
-            mount_wheel(&mut store.data_mut().fs, bytes, &site_pkgs);
+            mount_wheel(
+                &mut store.data_mut().fs,
+                std::sync::Arc::from(bytes.clone()),
+                &site_pkgs,
+            );
         }
     }
 
@@ -738,6 +801,20 @@ pub fn run_python_with_preopens(
 pub fn run_python_package(entry_source: &str, pkg: &PyPackage) -> Result<PyodideRunOutput> {
     let rt = resolve_runtime()?;
     run_pyodide_package_with(&rt, entry_source, pkg)
+}
+
+/// Run many Python programs on ONE warmed interpreter (#53 warm-interpreter
+/// reuse): resolve the runtime, pay the ~490 ms boot + CPython `site`/stdlib
+/// bringup once, then run each source via `PyRun_SimpleString` (~0 ms bringup
+/// each). Each source runs in a fresh module namespace, so globals do not leak
+/// between them. See [`run_pyodide_batch`].
+///
+/// # Errors
+///
+/// Returns `Err` when no runtime is available, or when boot / a run traps.
+pub fn run_python_batch(sources: &[&str]) -> Result<Vec<PyodideRunOutput>> {
+    let rt = resolve_runtime()?;
+    run_pyodide_batch(&rt, sources)
 }
 
 /// Boot Pyodide, run `python -c <python_source>`, and return stdout + exit code.
@@ -1138,6 +1215,197 @@ fn run_booted_pyodide(
     })
 }
 
+/// Guest driver run via `PyRun_SimpleString` on an already-warm interpreter: it
+/// resets the capture state, runs the user script (written to `/.afb/script.py`
+/// by the host) in a FRESH module namespace so globals never leak between
+/// thrusts, and finalizes the output frame - all by reusing the
+/// `__afb_finalize__` / `_afb_out` / `_afb_o` / `_afb_e` machinery installed
+/// once by the warmup's `STDOUT_REDIRECT`. The driver is fixed (reads the source
+/// from a file), so its wasm pointer is allocated once and reused per thrust.
+const WARM_DRIVER: &[u8] = concat!(
+    "_afb_out[0]=False\n",
+    "_afb_out[1]=None\n",
+    // The InMemFs has no ftruncate, so reset each sink by REOPENING it 'wb'
+    // (O_TRUNC clears the node, which is wired); CPython refcounting closes the
+    // previous handles at once, so no guest fd leaks per thrust.
+    "_afb_o=open('/.afb/stdout.bin','wb',buffering=0)\n",
+    "_afb_e=open('/.afb/stderr.bin','wb',buffering=0)\n",
+    "_sys.stdout=_io.TextIOWrapper(_afb_o,encoding='utf-8',write_through=True)\n",
+    "_sys.stderr=_io.TextIOWrapper(_afb_e,encoding='utf-8',errors='backslashreplace',write_through=True)\n",
+    "try:\n",
+    " _afb_ns={'__name__':'__main__','__builtins__':__builtins__}\n",
+    " exec(compile(open('/.afb/script.py','rb').read(),'/.afb/script.py','exec'),_afb_ns)\n",
+    "except BaseException as _exc:\n",
+    " _sys.stderr.write(type(_exc).__name__ + ': ' + str(_exc) + '\\n')\n",
+    "finally:\n",
+    " __afb_finalize__()\n",
+    "\0"
+)
+.as_bytes();
+
+/// Like [`WARM_DRIVER`] but runs the user source in a PERSISTENT namespace
+/// (`_afb_repl_ns`, created lazily once) so state carries across calls - the
+/// semantics a REPL needs (define a name, use it on the next line). Compiled in
+/// `exec` mode; expression echoing is the caller's concern (the REPL wraps a
+/// bare expression in `print(repr(...))`).
+const WARM_REPL_DRIVER: &[u8] = concat!(
+    "_afb_out[0]=False\n",
+    "_afb_out[1]=None\n",
+    "_afb_o=open('/.afb/stdout.bin','wb',buffering=0)\n",
+    "_afb_e=open('/.afb/stderr.bin','wb',buffering=0)\n",
+    "_sys.stdout=_io.TextIOWrapper(_afb_o,encoding='utf-8',write_through=True)\n",
+    "_sys.stderr=_io.TextIOWrapper(_afb_e,encoding='utf-8',errors='backslashreplace',write_through=True)\n",
+    "try:\n _afb_repl_ns\n",
+    "except NameError:\n _afb_repl_ns={'__name__':'__main__','__builtins__':__builtins__}\n",
+    "try:\n",
+    " exec(compile(open('/.afb/script.py','rb').read(),'<repl>','exec'),_afb_repl_ns)\n",
+    "except BaseException as _exc:\n",
+    " _sys.stderr.write(type(_exc).__name__ + ': ' + str(_exc) + '\\n')\n",
+    "finally:\n",
+    " __afb_finalize__()\n",
+    "\0"
+)
+.as_bytes();
+
+/// Drop the persistent REPL namespace so the next persistent run rebuilds a
+/// fresh one (a REPL `:clear`). Runs directly in `__main__` (not redirected into
+/// a namespace) so `del` targets the module global.
+const WARM_REPL_RESET: &[u8] = b"try:\n del _afb_repl_ns\nexcept NameError:\n pass\n\0";
+
+/// A booted + warmed CPython interpreter that runs many Python programs without
+/// paying the ~490 ms boot + `site`/stdlib bringup again (#53 warm reuse).
+///
+/// Holds the live wasmtime `Store` + `Instance`, so it is single-threaded: keep
+/// and drive it from ONE thread (a REPL session, a batch loop). Each run resets
+/// the `/.afb` capture sinks and runs via `PyRun_SimpleString` (~0 ms bringup).
+///
+/// Two run modes:
+/// - [`run_isolated`](Self::run_isolated): each program in a FRESH namespace
+///   (no leakage between programs) - for batch execution.
+/// - [`run_persistent`](Self::run_persistent): programs share ONE namespace
+///   (state carries across calls) - for a REPL.
+///
+/// Note: a program that raises is caught and its traceback captured to stderr,
+/// with `exit_code` 0 and an absent output frame (`output = Null`); the cold
+/// path instead surfaces a non-zero exit code.
+pub struct WarmPyInterpreter {
+    store: Store<EmbedderState>,
+    #[allow(dead_code)]
+    instance: Instance,
+    pyrun: wasmtime::Func,
+    driver_isolated: u32,
+    driver_persistent: u32,
+    driver_reset: u32,
+}
+
+impl WarmPyInterpreter {
+    /// Boot + warm an interpreter on `rt`. Pays the full boot + bringup once.
+    pub fn boot(rt: &PyRuntime) -> Result<Self> {
+        let (mut store, instance, _got) = boot_pyodide_instance(rt, &[])?;
+        // Warm once: Py_Initialize + site/stdlib import + install the capture
+        // machinery (which then persists for every run below). The `pass`
+        // program's own (empty) output is discarded.
+        let _ = run_booted_pyodide("pass", None, &mut store, &instance)?;
+
+        let pyrun = instance
+            .get_func(&mut store, "PyRun_SimpleString")
+            .ok_or_else(|| {
+                AfterburnerError::Engine(
+                    "PyRun_SimpleString not exported by the python runtime".into(),
+                )
+            })?;
+        // Allocate the fixed drivers once; reuse their pointers for every run so
+        // no wasm page grows per program.
+        let driver_isolated = alloc_cstr(&mut store, WARM_DRIVER)?;
+        let driver_persistent = alloc_cstr(&mut store, WARM_REPL_DRIVER)?;
+        let driver_reset = alloc_cstr(&mut store, WARM_REPL_RESET)?;
+        Ok(Self {
+            store,
+            instance,
+            pyrun,
+            driver_isolated,
+            driver_persistent,
+            driver_reset,
+        })
+    }
+
+    /// Boot + warm an interpreter on the resolved runtime (bundle or
+    /// `BURN_PYTHON_RUNTIME`).
+    pub fn boot_resolved() -> Result<Self> {
+        let rt = resolve_runtime()?;
+        Self::boot(&rt)
+    }
+
+    /// Run `source` in a FRESH namespace (isolation between calls).
+    pub fn run_isolated(&mut self, source: &str) -> Result<PyodideRunOutput> {
+        let driver = self.driver_isolated;
+        self.run_via(source, driver)
+    }
+
+    /// Run `source` in the PERSISTENT namespace (state carries across calls).
+    pub fn run_persistent(&mut self, source: &str) -> Result<PyodideRunOutput> {
+        let driver = self.driver_persistent;
+        self.run_via(source, driver)
+    }
+
+    /// Drop the persistent namespace so the next [`run_persistent`](Self::run_persistent)
+    /// starts fresh (a REPL `:clear`).
+    pub fn reset_persistent(&mut self) -> Result<()> {
+        let mut ret = [wasmtime::Val::I32(-1)];
+        self.pyrun
+            .call(
+                &mut self.store,
+                &[wasmtime::Val::I32(self.driver_reset as i32)],
+                &mut ret,
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("warm reset trapped: {e}")))?;
+        Ok(())
+    }
+
+    fn run_via(&mut self, source: &str, driver_ptr: u32) -> Result<PyodideRunOutput> {
+        let store = &mut self.store;
+        store.data_mut().wasi_stdout.clear();
+        // Fresh fuel per run; the warm store accumulates consumption otherwise.
+        let _ = store.set_fuel(PYODIDE_FUEL);
+        // Hand the user source to the guest via a file so the fixed driver execs
+        // it - no per-run wasm allocation, no source escaping.
+        store
+            .data_mut()
+            .fs
+            .insert_file("/.afb/script.py", source.as_bytes().to_vec());
+
+        let mut ret = [wasmtime::Val::I32(-1)];
+        self.pyrun
+            .call(
+                &mut *store,
+                &[wasmtime::Val::I32(driver_ptr as i32)],
+                &mut ret,
+            )
+            .map_err(|e| {
+                AfterburnerError::Engine(format!("warm PyRun_SimpleString trapped: {e}"))
+            })?;
+        let exit_code = match ret[0] {
+            wasmtime::Val::I32(v) => v,
+            _ => -99,
+        };
+        Ok(PyodideRunOutput {
+            stdout: captured_stdout(store),
+            stderr: captured_stderr(store),
+            exit_code,
+            output: captured_output(store)?,
+        })
+    }
+}
+
+/// Run many Python sources on ONE interpreter (#53 warm-interpreter reuse): pay
+/// the ~490 ms boot + CPython `site`/stdlib bringup ONCE, then run each source
+/// via `PyRun_SimpleString` (~0 ms bringup each). Each source runs in a fresh
+/// module namespace, so globals do not leak between them.
+pub fn run_pyodide_batch(rt: &PyRuntime, sources: &[&str]) -> Result<Vec<PyodideRunOutput>> {
+    let mut interp = WarmPyInterpreter::boot(rt)?;
+    sources.iter().map(|s| interp.run_isolated(s)).collect()
+}
+
 /// Daemon-capable boot + run: boots the interpreter, wires the daemon
 /// coordinators for real socket + thread access, installs rw-preopens, then
 /// runs `python_source` via `-c`. Called by [`run_python_with_net`].
@@ -1282,7 +1550,6 @@ fn captured_stdout(store: &Store<EmbedderState>) -> Vec<u8> {
         .data()
         .fs
         .read_file("/.afb/stdout.bin")
-        .map(<[u8]>::to_vec)
         .unwrap_or_default();
     if from_file.is_empty() {
         store.data().wasi_stdout.clone()
@@ -1299,7 +1566,6 @@ fn captured_stderr(store: &Store<EmbedderState>) -> Vec<u8> {
         .data()
         .fs
         .read_file("/.afb/stderr.bin")
-        .map(<[u8]>::to_vec)
         .unwrap_or_default()
 }
 

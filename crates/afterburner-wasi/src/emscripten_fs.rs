@@ -180,11 +180,102 @@ const S_IRWXU: u32 = 0o000_755;
 
 // ---- fs node ---------------------------------------------------------------
 
+/// A file's byte contents, either materialized in memory or still held
+/// compressed in its source archive (#23). Lazy entries are decompressed on
+/// first byte access (`materialize`) and cached as `Owned` thereafter; `stat`
+/// and size queries read `len()` without decompressing. This keeps the whole
+/// decompressed stdlib + numpy/pandas wheels (~45 MB) out of RSS until the
+/// bytes are actually read - a script that never imports numpy never pays for
+/// its 11.7 MB.
+#[derive(Clone, Debug)]
+pub enum FileData {
+    /// Materialized bytes (host-written files, or a lazy entry after first read).
+    Owned(Vec<u8>),
+    /// A file whose bytes still live compressed in a shared source archive.
+    Lazy(LazyFile),
+}
+
+/// A not-yet-decompressed file: a `(offset, len, method)` view into a shared
+/// archive blob (a stdlib zip or a wheel), plus the known uncompressed size.
+#[derive(Clone, Debug)]
+pub struct LazyFile {
+    /// The compressed source archive, shared by every lazy entry from it. The
+    /// blob stays resident only while some entry still references it; once all
+    /// its entries are materialized, the `Arc` drops and the blob frees.
+    source: std::sync::Arc<[u8]>,
+    /// Offset of this entry's (possibly compressed) data within `source`.
+    data_off: usize,
+    /// Length of this entry's data within `source`.
+    comp_len: usize,
+    /// Zip compression method: 0 = stored, 8 = DEFLATE.
+    method: u16,
+    /// Uncompressed size (from the zip header) - returned by `len()`/`stat`
+    /// with no decompression.
+    size: usize,
+}
+
+impl LazyFile {
+    /// Decompress this entry to owned bytes.
+    fn decompress(&self) -> Vec<u8> {
+        use std::io::Read;
+        let comp = &self.source[self.data_off..self.data_off + self.comp_len];
+        match self.method {
+            0 => comp.to_vec(),
+            8 => {
+                let mut out = Vec::with_capacity(self.size);
+                // Best-effort: a malformed entry yields whatever decoded before
+                // the error, matching the eager path's tolerance for partial
+                // archives (it skipped unreadable entries).
+                let _ = flate2::read::DeflateDecoder::new(comp).read_to_end(&mut out);
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl FileData {
+    /// Uncompressed byte length, without decompressing a lazy entry.
+    fn len(&self) -> usize {
+        match self {
+            FileData::Owned(v) => v.len(),
+            FileData::Lazy(l) => l.size,
+        }
+    }
+
+    /// Whether the file is empty, without decompressing a lazy entry.
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Owned copy of the bytes, decompressing a lazy entry by value without
+    /// caching (for cold `&self` reads that copy anyway).
+    fn to_owned_bytes(&self) -> Vec<u8> {
+        match self {
+            FileData::Owned(v) => v.clone(),
+            FileData::Lazy(l) => l.decompress(),
+        }
+    }
+
+    /// Decompress a lazy entry in place (cache as `Owned`) and return the bytes
+    /// for mutation. Idempotent for already-owned data.
+    fn materialize(&mut self) -> &mut Vec<u8> {
+        if let FileData::Lazy(l) = self {
+            *self = FileData::Owned(l.decompress());
+        }
+        match self {
+            FileData::Owned(v) => v,
+            FileData::Lazy(_) => unreachable!("materialize left a Lazy variant"),
+        }
+    }
+}
+
 /// One node in the in-memory filesystem tree.
 #[derive(Clone, Debug)]
 pub enum FsNode {
-    /// A regular file with its byte contents.
-    File(Vec<u8>),
+    /// A regular file with its byte contents (owned or lazily-compressed).
+    File(FileData),
     /// A directory (children are tracked by path prefix in the parent map).
     Dir,
 }
@@ -386,7 +477,37 @@ impl InMemFs {
         if let Some(parent) = parent_of(&path) {
             self.mkdir_p(&parent);
         }
-        self.nodes.insert(path, FsNode::File(contents));
+        self.nodes
+            .insert(path, FsNode::File(FileData::Owned(contents)));
+    }
+
+    /// Insert a lazily-decompressed file (#23): its bytes stay compressed inside
+    /// the shared archive `source` until first read. `method` is the zip
+    /// compression (0=stored, 8=deflate), `size` the uncompressed length used by
+    /// `stat`/`len` without decompressing.
+    pub fn insert_lazy_file(
+        &mut self,
+        abs_path: &str,
+        source: std::sync::Arc<[u8]>,
+        data_off: usize,
+        comp_len: usize,
+        method: u16,
+        size: usize,
+    ) {
+        let path = canonicalize(abs_path);
+        if let Some(parent) = parent_of(&path) {
+            self.mkdir_p(&parent);
+        }
+        self.nodes.insert(
+            path,
+            FsNode::File(FileData::Lazy(LazyFile {
+                source,
+                data_off,
+                comp_len,
+                method,
+                size,
+            })),
+        );
     }
 
     /// Look up a node by its absolute canonical path.
@@ -412,7 +533,8 @@ impl InMemFs {
                 if let Some(parent) = parent_of(&path) {
                     self.mkdir_p(&parent);
                 }
-                self.nodes.insert(path.clone(), FsNode::File(Vec::new()));
+                self.nodes
+                    .insert(path.clone(), FsNode::File(FileData::Owned(Vec::new())));
                 self.alloc_fd(path)
             }
             None => ENOENT,
@@ -424,7 +546,8 @@ impl InMemFs {
             }
             Some(FsNode::File(_)) => {
                 if trunc && want_write {
-                    self.nodes.insert(path.clone(), FsNode::File(Vec::new()));
+                    self.nodes
+                        .insert(path.clone(), FsNode::File(FileData::Owned(Vec::new())));
                 }
                 self.alloc_fd(path)
             }
@@ -462,10 +585,11 @@ impl InMemFs {
             None => return EBADF,
             Some(e) => (e.path.clone(), e.offset),
         };
-        match self.nodes.get(&path) {
+        match self.nodes.get_mut(&path) {
             None => ENOENT,
             Some(FsNode::Dir) => EISDIR,
-            Some(FsNode::File(data)) => {
+            Some(FsNode::File(fdata)) => {
+                let data = fdata.materialize();
                 let start = offset.min(data.len() as u64) as usize;
                 let available = data.len() - start;
                 let n = dst.len().min(available);
@@ -491,7 +615,7 @@ impl InMemFs {
             None => ENOENT,
             Some(FsNode::Dir) => EISDIR,
             Some(FsNode::File(buf)) => {
-                buf.extend_from_slice(data);
+                buf.materialize().extend_from_slice(data);
                 let n = data.len();
                 self.fds[fd_usize].as_mut().unwrap().offset += n as u64;
                 n as i32
@@ -500,9 +624,13 @@ impl InMemFs {
     }
 
     /// Return the contents of the file at `abs_path`, or `None` if absent/dir.
-    pub fn read_file(&self, abs_path: &str) -> Option<&[u8]> {
+    /// Return an owned copy of the file at `abs_path`, or `None` if absent/dir.
+    /// Returns owned bytes (a lazy/compressed entry is decompressed by value)
+    /// because every caller copies the result anyway; this keeps the signature
+    /// `&self` and off the hot fd-read path.
+    pub fn read_file(&self, abs_path: &str) -> Option<Vec<u8>> {
         match self.nodes.get(abs_path) {
-            Some(FsNode::File(data)) => Some(data.as_slice()),
+            Some(FsNode::File(data)) => Some(data.to_owned_bytes()),
             _ => None,
         }
     }
@@ -771,10 +899,11 @@ impl InMemFs {
             None => return EBADF,
             Some(e) => e.path.clone(),
         };
-        match self.nodes.get(&path) {
+        match self.nodes.get_mut(&path) {
             None => ENOENT,
             Some(FsNode::Dir) => EISDIR,
-            Some(FsNode::File(data)) => {
+            Some(FsNode::File(fdata)) => {
+                let data = fdata.materialize();
                 let start = offset.min(data.len() as u64) as usize;
                 let available = data.len() - start;
                 let n = dst.len().min(available);
@@ -801,7 +930,8 @@ impl InMemFs {
         match self.nodes.get_mut(&path) {
             None => ENOENT,
             Some(FsNode::Dir) => EISDIR,
-            Some(FsNode::File(data)) => {
+            Some(FsNode::File(fdata)) => {
+                let data = fdata.materialize();
                 let start = offset as usize;
                 let end = start + src.len();
                 if end > data.len() {
@@ -1332,10 +1462,14 @@ pub fn write_dirent64(
 ///
 /// vertexia: hand-rolled minimal zip parser; upgrade path is the `zip` crate
 /// if additional compression methods or ZIP64 are needed.
-pub fn mount_zip_into_fs(fs: &mut InMemFs, prefix: &str, zip_data: &[u8]) -> Result<usize, String> {
-    use flate2::read::DeflateDecoder;
-    use std::io::Read;
-
+pub fn mount_zip_into_fs(
+    fs: &mut InMemFs,
+    prefix: &str,
+    zip: std::sync::Arc<[u8]>,
+) -> Result<usize, String> {
+    // #23: index each entry lazily against the shared `zip` blob instead of
+    // decompressing it here; the bytes materialize on first read.
+    let zip_data: &[u8] = &zip;
     let mut count = 0usize;
     let mut pos = 0usize;
 
@@ -1410,21 +1544,19 @@ pub fn mount_zip_into_fs(fs: &mut InMemFs, prefix: &str, zip_data: &[u8]) -> Res
             // Directory entry.
             fs.mkdir_p(&abs_path);
         } else {
-            // File entry.
-            let contents = match compression {
-                0 => {
-                    // Stored (no compression).
-                    zip_data[data_start..data_end].to_vec()
-                }
-                8 => {
-                    // DEFLATE - use flate2's raw DeflateDecoder.
-                    let compressed = &zip_data[data_start..data_end];
-                    let mut decoder = DeflateDecoder::new(compressed);
-                    let mut out = Vec::with_capacity(uncompressed_size);
-                    decoder
-                        .read_to_end(&mut out)
-                        .map_err(|e| format!("deflate error for {entry_name}: {e}"))?;
-                    out
+            // File entry - index it lazily against the shared zip; the bytes
+            // decompress on first read (#23).
+            match compression {
+                0 | 8 => {
+                    fs.insert_lazy_file(
+                        &abs_path,
+                        zip.clone(),
+                        data_start,
+                        compressed_size,
+                        compression,
+                        uncompressed_size,
+                    );
+                    count += 1;
                 }
                 other => {
                     // Unsupported - skip silently (e.g. bzip2, lzma).
@@ -1434,9 +1566,7 @@ pub fn mount_zip_into_fs(fs: &mut InMemFs, prefix: &str, zip_data: &[u8]) -> Res
                     pos = data_end;
                     continue;
                 }
-            };
-            fs.insert_file(&abs_path, contents);
-            count += 1;
+            }
         }
 
         pos = data_end;

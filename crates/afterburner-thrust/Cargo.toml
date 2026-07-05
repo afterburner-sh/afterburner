@@ -21,6 +21,7 @@ afterburner-core.workspace = true
 afterburner-wasi.workspace = true
 kovan-channel.workspace = true
 kovan-map.workspace = true
+kovan-queue.workspace = true
 serde_json.workspace = true
 
 # Linux-only: NUMA topology (sysfs parse) + sched_setaffinity pinning.

@@ -18,7 +18,7 @@
 
 use kovan_map::HopscotchMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 /// Pluggable cross-invocation key/value storage.
 ///
@@ -63,6 +63,10 @@ pub type SharedStateStore = Arc<dyn StateStore>;
 pub struct InMemoryStateStore {
     bytes: HopscotchMap<String, Vec<u8>>,
     counters: HopscotchMap<String, Arc<AtomicI64>>,
+    /// Set once, the first time a counter is created. Gates all
+    /// `counters` map access in `get`/`set`/`delete` so pure-KV
+    /// workloads (no `increment_i64` ever called) never touch it.
+    counters_live: AtomicBool,
 }
 
 impl InMemoryStateStore {
@@ -76,21 +80,30 @@ impl InMemoryStateStore {
 
 impl StateStore for InMemoryStateStore {
     fn get(&self, key: &str) -> Option<Vec<u8>> {
-        // Prefer the counter value so `increment` is observable.
-        if let Some(counter) = self.counters.get(key) {
+        // Prefer the counter value so `increment` is observable. Gated
+        // on counters_live: skip the counters map entirely until a
+        // counter has ever existed.
+        if self.counters_live.load(Ordering::Relaxed)
+            && let Some(counter) = self.counters.get(key)
+        {
             return Some(counter.load(Ordering::Acquire).to_string().into_bytes());
         }
         self.bytes.get(key)
     }
     fn set(&self, key: &str, value: Vec<u8>) {
         // Writing a fresh value clears any counter at the same key so
-        // `set` then `get` returns what was written.
-        self.counters.remove(key);
+        // `set` then `get` returns what was written. Gated: nothing to
+        // clear if no counter has ever existed.
+        if self.counters_live.load(Ordering::Relaxed) {
+            self.counters.remove(key);
+        }
         self.bytes.insert(key.to_string(), value);
     }
     fn delete(&self, key: &str) {
         self.bytes.remove(key);
-        self.counters.remove(key);
+        if self.counters_live.load(Ordering::Relaxed) {
+            self.counters.remove(key);
+        }
     }
     fn increment_i64(&self, key: &str, delta: i64) -> i64 {
         // Fast path: counter already exists.
@@ -110,6 +123,9 @@ impl StateStore for InMemoryStateStore {
             })
             .unwrap_or(0);
         let fresh = Arc::new(AtomicI64::new(seed));
+        // A counter is about to exist; unblock the gated counter-map reads
+        // in get/set/delete before publishing it.
+        self.counters_live.store(true, Ordering::Relaxed);
         let counter = match self
             .counters
             .insert_if_absent(key.to_string(), fresh.clone())

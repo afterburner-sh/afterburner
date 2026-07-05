@@ -340,8 +340,8 @@ fn do_exec(conn: &Connection, sql: &str) -> Result<()> {
     conn.execute_batch(sql).map_err(map_err)
 }
 
-fn prepare<'c>(conn: &'c Connection, sql: &str) -> Result<rusqlite::Statement<'c>> {
-    conn.prepare(sql).map_err(map_err)
+fn prepare<'c>(conn: &'c Connection, sql: &str) -> Result<rusqlite::CachedStatement<'c>> {
+    conn.prepare_cached(sql).map_err(map_err)
 }
 
 fn map_err(e: rusqlite::Error) -> AfterburnerError {

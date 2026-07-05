@@ -1085,7 +1085,7 @@ pub fn wire_dlopen_dlsym(linker: &mut Linker<EmbedderState>) -> Result<()> {
                     let mut found = None;
                     for p in &candidates {
                         if let Some(b) = caller.data().fs.read_file(p.as_str()) {
-                            found = Some(b.to_vec());
+                            found = Some(b);
                             pyo_trace!("[dlopen_js] found '{name}' at '{p}'");
                             break;
                         }

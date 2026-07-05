@@ -222,10 +222,7 @@ pub fn stats(source_json: &str) -> Result<String, String> {
     let s: serde_json::Value = serde_json::from_str(source_json)
         .map_err(|e| format!("sharp.stats: bad source JSON: {e}"))?;
     let source = parse_source(&s)?;
-    let bytes = match &source {
-        Source::Buffer(b) => b.clone(),
-        Source::File(p) => std::fs::read(p).map_err(|e| format!("sharp: read {p}: {e}"))?,
-    };
+    let bytes = source_bytes(&source)?;
     let img = image::load_from_memory(&bytes).map_err(|e| format!("sharp.stats: decode: {e}"))?;
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width() as u64, rgba.height() as u64);
@@ -543,11 +540,19 @@ fn parse_output(v: &serde_json::Value) -> Result<Output, String> {
 
 // ----- decode / metadata --------------------------------------------------
 
+/// Bytes backing a source. `Buffer` already owns them in memory, so we
+/// borrow rather than clone; `File` has to read from disk regardless.
+fn source_bytes(source: &Source) -> Result<std::borrow::Cow<'_, [u8]>, String> {
+    Ok(match source {
+        Source::Buffer(b) => std::borrow::Cow::Borrowed(b),
+        Source::File(p) => {
+            std::borrow::Cow::Owned(std::fs::read(p).map_err(|e| format!("sharp: read {p}: {e}"))?)
+        }
+    })
+}
+
 fn decode_source(source: &Source) -> Result<DynamicImage, String> {
-    let bytes = match source {
-        Source::Buffer(b) => b.clone(),
-        Source::File(p) => std::fs::read(p).map_err(|e| format!("sharp: read {p}: {e}"))?,
-    };
+    let bytes = source_bytes(source)?;
     let reader = ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
         .map_err(|e| format!("sharp: guess format: {e}"))?;
@@ -555,10 +560,7 @@ fn decode_source(source: &Source) -> Result<DynamicImage, String> {
 }
 
 fn metadata_for_source(source: &Source) -> Result<String, String> {
-    let bytes = match source {
-        Source::Buffer(b) => b.clone(),
-        Source::File(p) => std::fs::read(p).map_err(|e| format!("sharp: read {p}: {e}"))?,
-    };
+    let bytes = source_bytes(source)?;
     let reader = ImageReader::new(Cursor::new(&bytes))
         .with_guessed_format()
         .map_err(|e| format!("sharp: guess format: {e}"))?;

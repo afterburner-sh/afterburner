@@ -45,7 +45,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
     },
 };
 
@@ -841,6 +841,25 @@ const GOT_MEM_NAMES: &[&str] = &["__heap_base", "__stack_low", "__stack_high"];
 // All invoke_* share one generic dispatch path: params[0] is the index,
 // params[1..] are forwarded to the funcref. The result is written to results.
 
+/// Cached `BURN_TRACE_INVOKE` flag: 0 = unchecked, 1 = off, 2 = on. The invoke
+/// trampoline is the hottest Python shim, so it pays a single relaxed load per
+/// call instead of an `env::var_os` (ENV_LOCK mutex + environ scan) each time.
+/// Mirrors `pyodide_trace::enabled`.
+static INVOKE_TRACE: AtomicU8 = AtomicU8::new(0);
+
+#[inline]
+fn invoke_trace_enabled() -> bool {
+    match INVOKE_TRACE.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let on = std::env::var_os("BURN_TRACE_INVOKE").is_some();
+            INVOKE_TRACE.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
 pub(crate) fn invoke_dispatch(
     mut caller: wasmtime::Caller<'_, EmbedderState>,
     params: &[Val],
@@ -861,7 +880,7 @@ pub(crate) fn invoke_dispatch(
     caller.data_mut().last_invoke_idx = idx;
 
     let slot_content = tbl.get(&mut caller, idx);
-    if std::env::var_os("BURN_TRACE_INVOKE").is_some() {
+    if invoke_trace_enabled() {
         let is_null = !matches!(&slot_content, Some(wasmtime::Ref::Func(Some(_))));
         pyo_trace!(
             "[invoke_dispatch] idx={idx} slot_is_null={is_null} params_len={}",

@@ -542,6 +542,17 @@ impl DaemonHttp {
         self.event_rx.as_ref().and_then(|rx| rx.try_recv())
     }
 
+    /// Await the next event. Resolves to `None` when the channel's senders
+    /// have all dropped (daemon shutting down). Lets the dispatcher park
+    /// instead of busy-polling with a fixed sleep.
+    #[cfg(feature = "daemon")]
+    pub async fn recv_async_event(&self) -> Option<DaemonEvent> {
+        match self.event_rx.as_ref() {
+            Some(rx) => rx.recv_async().await,
+            None => None,
+        }
+    }
+
     #[cfg(not(feature = "daemon"))]
     pub fn try_recv_event(&self) -> Option<DaemonEvent> {
         None

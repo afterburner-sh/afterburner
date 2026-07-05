@@ -973,15 +973,12 @@ fn wrap_fs(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     Some(p) => p,
                     None => return E_OTHER,
                 };
-                let data_b64 = match read_str(&memory, &caller, data_ptr, data_len) {
-                    Some(s) => s,
-                    None => {
-                        record(&mut caller, "invalid utf-8 in fs write data");
-                        return E_OTHER;
-                    }
+                let Some(data_b64) = guest_slice(&memory, &caller, data_ptr, data_len) else {
+                    record(&mut caller, "invalid utf-8 in fs write data");
+                    return E_OTHER;
                 };
                 use base64::Engine as _;
-                let data = match base64::engine::general_purpose::STANDARD.decode(&data_b64) {
+                let data = match base64::engine::general_purpose::STANDARD.decode(data_b64) {
                     Ok(b) => b,
                     Err(e) => {
                         record(&mut caller, &format!("fs.write base64: {e}"));
@@ -1470,11 +1467,10 @@ fn wrap_crypto(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 // The plugin passes the candidate as a hex-encoded
                 // string (matches the convention `host_crypto_hash` /
                 // `host_crypto_random_bytes` use for output bytes).
-                let s = match read_str(&memory, &caller, cand_ptr, cand_len) {
-                    Some(s) => s,
-                    None => return E_OTHER,
+                let Some(slice) = guest_slice(&memory, &caller, cand_ptr, cand_len) else {
+                    return E_OTHER;
                 };
-                let cand = match hex::decode(s.trim()) {
+                let cand = match hex::decode(slice.trim_ascii()) {
                     Ok(b) => b,
                     Err(_) => return E_OTHER,
                 };
@@ -1890,11 +1886,11 @@ pub(crate) fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), Afterburne
                     None => return E_OTHER,
                 };
                 let headers: Vec<(String, String)> = if headers_len > 0 {
-                    let raw = match read_str(&memory, &caller, headers_ptr, headers_len) {
-                        Some(s) => s,
-                        None => return E_OTHER,
+                    let Some(raw) = guest_slice(&memory, &caller, headers_ptr, headers_len) else {
+                        return E_OTHER;
                     };
-                    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw) {
+                    match serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(raw)
+                    {
                         Ok(map) => map
                             .into_iter()
                             .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
@@ -3111,11 +3107,10 @@ fn wrap_state(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     Some(s) => s,
                     None => return E_OTHER,
                 };
-                let value_b64 = match read_str(&memory, &caller, value_ptr, value_len) {
-                    Some(s) => s,
-                    None => return E_OTHER,
+                let Some(value_b64) = guest_slice(&memory, &caller, value_ptr, value_len) else {
+                    return E_OTHER;
                 };
-                let value = match B64.decode(value_b64.as_bytes()) {
+                let value = match B64.decode(value_b64) {
                     Ok(v) => v,
                     Err(_) => return E_OTHER,
                 };
@@ -3190,11 +3185,10 @@ fn wrap_zlib(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                     };
                     // Bytes come in as a base64 string - matches the
                     // native path wire format.
-                    let input_b64 = match read_str(&memory, &caller, ptr, len) {
-                        Some(s) => s,
-                        None => return E_OTHER,
+                    let Some(input_b64) = guest_slice(&memory, &caller, ptr, len) else {
+                        return E_OTHER;
                     };
-                    let input = match B64.decode(input_b64.as_bytes()) {
+                    let input = match B64.decode(input_b64) {
                         Ok(v) => v,
                         Err(e) => {
                             record(&mut caller, &format!("base64 decode: {e}"));
@@ -3359,11 +3353,10 @@ fn wrap_host_context(linker: &mut Linker<HostState>) -> Result<(), AfterburnerEr
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
-                let row_json = match read_str(&memory, &caller, row_ptr, row_len) {
-                    Some(s) => s,
-                    None => return E_OTHER,
+                let Some(row_json) = guest_slice(&memory, &caller, row_ptr, row_len) else {
+                    return E_OTHER;
                 };
-                let row: serde_json::Value = match serde_json::from_str(&row_json) {
+                let row: serde_json::Value = match serde_json::from_slice(row_json) {
                     Ok(v) => v,
                     Err(e) => {
                         record(&mut caller, &format!("emit_row: {e}"));
@@ -3465,11 +3458,14 @@ fn wrap_input(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError> {
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
-                // Clone is required because `write_out` borrows the
-                // store mutably for the memory write; we can't hold a
-                // shared borrow on `pending_input` simultaneously.
-                let input = caller.data().pending_input.clone();
-                write_out(&mut caller, &memory, out_ptr, out_cap, &input)
+                // Move the buffer out so `write_out` can borrow the store
+                // mutably without aliasing a shared borrow of `pending_input`;
+                // restore it before returning so the E_BUF_TOO_SMALL retry sees
+                // byte-identical bytes. Zero heap copy of the payload.
+                let input = std::mem::take(&mut caller.data_mut().pending_input);
+                let r = write_out(&mut caller, &memory, out_ptr, out_cap, &input);
+                caller.data_mut().pending_input = input;
+                r
             },
         )
         .map_err(link_err)?;
@@ -3632,8 +3628,10 @@ fn wrap_envelope(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError>
                 let Some(memory) = guest_memory(&mut caller) else {
                     return E_OTHER;
                 };
-                let env = caller.data().pending_envelope.clone();
-                write_out(&mut caller, &memory, out_ptr, out_cap, &env)
+                let env = std::mem::take(&mut caller.data_mut().pending_envelope);
+                let r = write_out(&mut caller, &memory, out_ptr, out_cap, &env);
+                caller.data_mut().pending_envelope = env;
+                r
             },
         )
         .map_err(link_err)?;
@@ -6952,9 +6950,13 @@ fn http_response_envelope(status: u16, body: &[u8]) -> String {
         .map(str::to_owned)
         .unwrap_or_default();
     let body_b64 = B64.encode(body);
+    // base64's alphabet (A-Za-z0-9+/=) contains no character that needs
+    // JSON/JS string escaping, so emit body_b64 with plain quotes instead of
+    // a full escape scan over the ~1.33x-body-size encoded string. body_text
+    // is arbitrary UTF-8 and still needs escaping.
     format!(
-        r#"{{"status":{status},"body":{},"body_b64":{}}}"#,
+        r#"{{"status":{status},"body":{},"body_b64":"{}"}}"#,
         js_string_literal(&body_text),
-        js_string_literal(&body_b64),
+        body_b64,
     )
 }

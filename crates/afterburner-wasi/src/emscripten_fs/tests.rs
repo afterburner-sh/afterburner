@@ -153,7 +153,7 @@ fn write_appends_and_grows_vec() {
     assert_eq!(n2, 6);
 
     // Node now contains concatenated data.
-    assert_eq!(fs.read_file("/w.txt"), Some(b"hello world".as_slice()));
+    assert_eq!(fs.read_file("/w.txt"), Some(b"hello world".to_vec()));
 }
 
 #[test]
@@ -813,7 +813,7 @@ fn write_outside_preopen_stays_in_inmemfs() {
     fs.close(fd);
 
     // The file must be in InMemFs.
-    assert_eq!(fs.read_file(&guest_abs), Some(b"inmem".as_slice()));
+    assert_eq!(fs.read_file(&guest_abs), Some(b"inmem".to_vec()));
 
     // But NOT on the host filesystem.
     let host_secret = host_root.join("secret.txt");

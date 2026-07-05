@@ -98,7 +98,6 @@ fn is_ident_char(b: u8) -> bool {
 /// together, with the input literal inlined into the JS text.
 pub fn wrap_user_source(user: &str, input_json: &str) -> String {
     let user = normalize_leading_hashbang(user);
-    let user_lit = js_string_literal(&user);
     let input_lit = js_string_literal(input_json);
     format!(
         r#"
@@ -107,8 +106,14 @@ pub fn wrap_user_source(user: &str, input_json: &str) -> String {
         }}
         const __ab_data = JSON.parse({input_lit});
         const __ab_module = {{ exports: undefined }};
-        const __ab_user = new Function('module', 'exports', 'require', {user_lit});
-        __ab_user(__ab_module, __ab_module.exports, globalThis.require);
+        // #57: inline the user source as an IIFE so it compiles into the
+        // envelope bytecode ONCE at ignite, instead of re-parsing it via
+        // `new Function(<source string>)` on every warm thrust (~150us). Same
+        // module/exports/require param scoping as before; matches the native
+        // tier's compiled-once entry (#24).
+        (function (module, exports, require) {{
+            {user}
+        }})(__ab_module, __ab_module.exports, globalThis.require);
         const __ab_fn = __ab_module.exports;
         const __ab_maybe = (typeof __ab_fn === 'function') ? __ab_fn(__ab_data) : __ab_fn;
         const __ab_result = (__ab_maybe !== null && typeof __ab_maybe === 'object' && typeof __ab_maybe.then === 'function')
@@ -146,7 +151,6 @@ pub fn wrap_user_source(user: &str, input_json: &str) -> String {
 /// the raw-output slot.)
 pub fn wrap_user_source_with_input_global(user: &str) -> String {
     let user = normalize_leading_hashbang(user);
-    let user_lit = js_string_literal(&user);
     format!(
         r#"
         function __ab_write_stdout(s) {{
@@ -155,8 +159,11 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
         const __ab_input = __AB_GET_INPUT_VALUE__();
         const __ab_data = (typeof __ab_input === 'string') ? JSON.parse(__ab_input) : __ab_input;
         const __ab_module = {{ exports: undefined }};
-        const __ab_user = new Function('module', 'exports', 'require', {user_lit});
-        __ab_user(__ab_module, __ab_module.exports, globalThis.require);
+        // #57: inline user source (compiled once at ignite) instead of
+        // re-parsing via `new Function(<source>)` every warm thrust (~150us).
+        (function (module, exports, require) {{
+            {user}
+        }})(__ab_module, __ab_module.exports, globalThis.require);
         const __ab_fn = __ab_module.exports;
         const __ab_maybe = (typeof __ab_fn === 'function') ? __ab_fn(__ab_data) : __ab_fn;
         const __ab_result = (__ab_maybe !== null && typeof __ab_maybe === 'object' && typeof __ab_maybe.then === 'function')
@@ -188,12 +195,14 @@ pub fn wrap_user_source_with_input_global(user: &str) -> String {
 /// pure compute and sync, so this is the right default.
 pub fn wrap_user_source_columnar(user: &str) -> String {
     let user = normalize_leading_hashbang(user);
-    let user_lit = js_string_literal(&user);
     format!(
         r#"
         const __ab_module = {{ exports: undefined }};
-        const __ab_user = new Function('module', 'exports', 'require', {user_lit});
-        __ab_user(__ab_module, __ab_module.exports, globalThis.require);
+        // #57: inline user source (compiled once at ignite) instead of
+        // re-parsing via `new Function(<source>)` every warm thrust (~150us).
+        (function (module, exports, require) {{
+            {user}
+        }})(__ab_module, __ab_module.exports, globalThis.require);
         __ab_columnar_dispatch(__ab_module.exports);
         "#
     )

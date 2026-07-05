@@ -5,24 +5,18 @@
 
 //! The Python REPL backend, over the Pyodide (CPython-WASI) runtime.
 //!
-//! The runtime runs `python -c <source>` on a freshly booted CPython per call
-//! and does not carry interpreter state across boots. To present a stateful
-//! REPL on top of that, the session accumulates the lines entered so far and
-//! re-runs the whole accumulated program each line. Because each step extends
-//! the program by exactly the new line, the prior run's stdout is a prefix of
-//! the new run's stdout, so only the new suffix is shown.
+//! The session boots + warms ONE CPython interpreter up front (via
+//! [`WarmPyInterpreter`](afterburner_wasi::pyodide_runner::WarmPyInterpreter))
+//! and runs every line on it through `PyRun_SimpleString` in a PERSISTENT
+//! namespace. So assignments and `def`/`import` persist across lines for free
+//! (they live in the interpreter), and each line costs ~ms instead of a fresh
+//! ~490 ms CPython boot. No session replay, no output slicing: a line's stdout
+//! is exactly that line's output. `:clear` drops the persistent namespace.
 //!
-//! That makes assignments and `def`/`import` persist across lines for free.
 //! A bare expression prints via an injected `print(repr(...))` wrapper
-//! (mirroring the interactive interpreter echoing a value); because that echo
-//! adds bytes the next baseline must not count, an echoed expression runs the
-//! committed program a second time to re-measure the baseline. The per-line
-//! cost is therefore one CPython boot for a statement, two when echoing a value.
-//!
-//! Limitation (honest): the committed lines are replayed each line, so a line
-//! whose output is non-deterministic across runs (unseeded `random`, a clock
-//! read, network) can mis-slice the shown suffix. Pure compute - the REPL's
-//! common case - is exact.
+//! (mirroring the interactive interpreter echoing a value); a statement runs
+//! as-is. A raised line routes its traceback to stderr and does not corrupt the
+//! namespace (a failed statement simply leaves its binding unmade).
 //!
 //! Uses the self-contained Pyodide runtime by default (the bundle the build
 //! script assembles), so the REPL needs no configuration; `BURN_PYTHON_RUNTIME`
@@ -40,32 +34,25 @@ use super::super::args::Cli;
 #[cfg(feature = "wasm")]
 pub fn run(_cli: &Cli) -> Result<()> {
     use super::{Flow, read_loop};
-    use std::cell::RefCell;
+    use afterburner_wasi::pyodide_runner::WarmPyInterpreter;
+    use std::io::Write;
 
-    let runtime =
-        afterburner_wasi::pyodide_runner::resolve_runtime().map_err(|e| anyhow::anyhow!("{e}"))?;
     style::repl_banner_lang(env!("CARGO_PKG_VERSION"), "python");
     eprintln!(
         "  {}",
-        style::muted(
-            "each line re-runs the session (one CPython boot per line; two when echoing a value)"
-        )
+        style::muted("warming a persistent CPython interpreter (state carries across lines)...")
     );
+    // Boot + warm ONE interpreter for the whole session (#53): pay the ~490 ms
+    // CPython bringup once here, then each line runs on it in ~ms. State lives in
+    // the interpreter's persistent namespace, so there is no per-line boot and no
+    // session replay - a name bound on one line is simply present on the next.
+    let mut interp = WarmPyInterpreter::boot_resolved().map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // The committed session lines (each replayed as a plain statement so its
-    // side effects persist), and the byte length of the stdout the committed
-    // plain program produces. That plain output is a strict prefix of any
-    // display run (which only appends the current line on top), so the new
-    // line's output is the suffix past `baseline`.
-    let session: RefCell<Vec<String>> = RefCell::new(Vec::new());
-    let baseline: RefCell<usize> = RefCell::new(0);
-
-    read_loop("py", |trimmed| {
+    read_loop("py", move |trimmed| {
         if let Some(rest) = trimmed.strip_prefix(':') {
             match rest.trim() {
                 "clear" | "reset" => {
-                    session.borrow_mut().clear();
-                    *baseline.borrow_mut() = 0;
+                    let _ = interp.reset_persistent();
                     eprintln!("  {}", style::muted("session cleared"));
                 }
                 "help" | "?" => print_help(),
@@ -78,46 +65,27 @@ pub fn run(_cli: &Cli) -> Result<()> {
             return Flow::Continue;
         }
 
+        // Run ONLY the current line on the warm interpreter, echoed to print its
+        // value when it is a bare expression. No session accumulation, no output
+        // slicing: the line's stdout IS the line's output.
         let is_expr = looks_like_expression(trimmed);
-        // Display program: committed lines (plain) + the current line, echoed
-        // when it is a bare expression so its value shows.
-        let display = build_program(&session.borrow(), trimmed, is_expr);
-        let prev = *baseline.borrow();
-        match run_program(&runtime, &display) {
-            Ok(stdout) => {
-                let suffix = if stdout.len() >= prev {
-                    &stdout[prev..]
+        let program = build_program(trimmed, is_expr);
+        match interp.run_persistent(&program) {
+            Ok(out) => {
+                // A raised program routes its traceback to stderr (exit_code 0 on
+                // the warm path); a clean run leaves stderr empty.
+                let err = String::from_utf8_lossy(&out.stderr);
+                if !err.trim().is_empty() {
+                    eprintln!("  {}", style::fail(&clean_py_err(&err)));
                 } else {
-                    // Non-monotonic (a non-deterministic replayed line): show the
-                    // whole output rather than panic-slicing.
-                    &stdout[..]
-                };
-                if !suffix.is_empty() {
-                    print!("{suffix}");
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    if !stdout.is_empty() {
+                        print!("{stdout}");
+                        let _ = std::io::stdout().flush();
+                    }
                 }
-                // Commit the line and advance the baseline to the committed
-                // PLAIN output. For a statement the display program already is
-                // the plain program, so reuse its length (no extra boot); for an
-                // echoed expression, run the plain program once to measure it
-                // (the echo's repr output must not poison the next baseline).
-                session.borrow_mut().push(trimmed.to_string());
-                let new_baseline = if is_expr {
-                    let plain = build_program(&session.borrow(), "", false);
-                    run_program(&runtime, &plain)
-                        .map(|s| s.len())
-                        .unwrap_or(stdout.len())
-                } else {
-                    stdout.len()
-                };
-                *baseline.borrow_mut() = new_baseline;
             }
-            Err(e) => {
-                // A failed line does NOT join the session (so the next line is
-                // not poisoned by a broken statement). The baseline is unchanged.
-                eprintln!("  {}", style::fail(&clean_py_err(&e.to_string())));
-            }
+            Err(e) => eprintln!("  {}", style::fail(&clean_py_err(&e.to_string()))),
         }
         Flow::Continue
     })
@@ -130,50 +98,23 @@ pub fn run(_cli: &Cli) -> Result<()> {
     anyhow::bail!("Python REPL requires the `wasm` cargo feature (rebuild with `--features wasm`).")
 }
 
-/// Run an accumulated Python program and return its stdout as a String.
-#[cfg(feature = "wasm")]
-fn run_program(rt: &afterburner_wasi::pyodide_runner::PyRuntime, program: &str) -> Result<String> {
-    use afterburner_wasi::pyodide_runner::run_pyodide_with;
-    let out =
-        run_pyodide_with(rt, program).map_err(|e| anyhow::anyhow!("python runtime error: {e}"))?;
-    // A non-zero exit means the program raised; surface its stderr-shaped
-    // output (CPython writes tracebacks to stdout under `-c` here) as an error.
-    if out.exit_code != 0 {
-        let text = String::from_utf8_lossy(&out.stdout).into_owned();
-        anyhow::bail!("{}", text.trim());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-/// Build the program to run: the committed session lines (each as a plain
-/// statement so its side effects persist), then the current `line`. When
-/// `echo` is true the current line is wrapped in `print(repr(...))` so its
-/// value shows (the interactive-interpreter feel); otherwise it runs as-is.
-///
-/// An empty `line` builds the committed-plain program (no current line), used
-/// to measure the baseline output after an echoed expression is committed.
-fn build_program(session: &[String], line: &str, echo: bool) -> String {
-    let mut out = String::new();
-    for prior in session {
-        out.push_str(prior);
-        out.push('\n');
-    }
+/// Build the program to run for one REPL line: the `line` itself, wrapped in
+/// `print(repr(...))` when `echo` is true so a bare expression shows its value
+/// (the interactive-interpreter feel); otherwise the line runs as-is. State
+/// persists in the warm interpreter's namespace, so no prior lines are replayed.
+fn build_program(line: &str, echo: bool) -> String {
     let line = line.trim();
     if line.is_empty() {
-        return out;
+        return String::new();
     }
     if echo {
         // Echo the value like the interactive interpreter. `repr` so strings
-        // show quoted; `None` (e.g. a bare `print(...)` call slipped through)
-        // is suppressed to avoid a stray `None`.
-        out.push_str("__burn_v = (");
-        out.push_str(line);
-        out.push_str(")\nif __burn_v is not None:\n    print(repr(__burn_v))\n");
+        // show quoted; `None` (e.g. a bare `print(...)` call slipped through) is
+        // suppressed to avoid a stray `None`.
+        format!("__burn_v = ({line})\nif __burn_v is not None:\n    print(repr(__burn_v))\n")
     } else {
-        out.push_str(line);
-        out.push('\n');
+        format!("{line}\n")
     }
-    out
 }
 
 /// Heuristic: is this line a bare expression to be echoed, rather than a
@@ -298,26 +239,22 @@ mod tests {
 
     #[test]
     fn expression_is_wrapped_to_echo_its_value() {
-        let p = build_program(&[], "1 + 1", true);
+        let p = build_program("1 + 1", true);
         assert!(p.contains("__burn_v = (1 + 1)"), "got: {p}");
         assert!(p.contains("print(repr(__burn_v))"), "echoes value: {p}");
     }
 
     #[test]
     fn assignment_is_a_statement_not_echoed() {
-        let p = build_program(&[], "x = 5", false);
+        let p = build_program("x = 5", false);
         assert!(p.contains("x = 5"), "got: {p}");
         assert!(!p.contains("__burn_v"), "assignment is not echoed: {p}");
     }
 
     #[test]
-    fn empty_current_line_yields_committed_plain_program() {
-        // Baseline measurement: prior lines only, no echo wrapper, no new line.
-        let session = vec!["x = 1".to_string(), "print(x)".to_string()];
-        let p = build_program(&session, "", false);
-        assert!(p.contains("x = 1"), "prior assignment present: {p}");
-        assert!(p.contains("print(x)"), "prior call present: {p}");
-        assert!(!p.contains("__burn_v"), "no echo wrapper: {p}");
+    fn empty_line_yields_empty_program() {
+        assert!(build_program("", false).is_empty());
+        assert!(build_program("   ", true).is_empty());
     }
 
     #[test]
@@ -355,15 +292,6 @@ mod tests {
         assert!(!is_top_level_assignment("a == b"));
         assert!(!is_top_level_assignment("a != b"));
         assert!(!is_top_level_assignment("a >= b"));
-    }
-
-    #[test]
-    fn prior_session_lines_precede_the_current_line() {
-        let session = vec!["x = 10".to_string()];
-        let p = build_program(&session, "x * 2", true);
-        let x_at = p.find("x = 10").expect("session line present");
-        let expr_at = p.find("x * 2").expect("current line present");
-        assert!(x_at < expr_at, "session replays before the line: {p}");
     }
 
     #[cfg(feature = "wasm")]

@@ -36,6 +36,7 @@ use afterburner_core::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use bytes::Bytes;
 use kovan_map::HopscotchMap;
 use serde_json::Value;
 use std::sync::Arc;
@@ -167,8 +168,8 @@ pub struct WasmConfig {
 }
 
 /// Cached payload for a registered script. Built once in `ignite` so
-/// per-call paths (`thrust`, `thrust_columnar`) become slice borrows
-/// + instantiate.
+/// per-call paths (`thrust`, `thrust_columnar`) become a cheap `Bytes`
+/// clone (`Arc` bump) + instantiate.
 ///
 /// `raw` is the bytecode for the regular JSON-shaped UDF wrapper
 /// (compiled by the plugin's `compile` mode); `columnar_raw` is the
@@ -177,19 +178,19 @@ pub struct WasmConfig {
 /// non-invoke consumers. The pre-serialised invoke envelopes -
 /// `invoke_envelope_bytes` (regular) and `columnar_invoke_envelope_bytes`
 /// (columnar) - are the hot-path payload that
-/// `Combustor::thrust` / `WasmCombustor::thrust_columnar` borrow
-/// directly, so per-call work is just a slice borrow. Building all
-/// four eagerly at register time costs one extra plugin compile
-/// (~2 ms per registration) and ~12 KB extra in cache per script;
-/// in exchange every per-call path skips both base64 encoding and
-/// `serde_json::to_vec` on the envelope.
+/// `Combustor::thrust` / `WasmCombustor::thrust_columnar` clone
+/// directly, so per-call work is just an `Arc` bump, never a memcpy of
+/// the ~40 KB envelope. Building all four eagerly at register time
+/// costs one extra plugin compile (~2 ms per registration) and ~12 KB
+/// extra in cache per script; in exchange every per-call path skips
+/// both base64 encoding and `serde_json::to_vec` on the envelope.
 pub(crate) struct CompiledScript {
     #[allow(dead_code)]
     pub raw: Vec<u8>,
     #[allow(dead_code)]
     pub columnar_raw: Vec<u8>,
-    pub invoke_envelope_bytes: Vec<u8>,
-    pub columnar_invoke_envelope_bytes: Vec<u8>,
+    pub invoke_envelope_bytes: Bytes,
+    pub columnar_invoke_envelope_bytes: Bytes,
 }
 
 /// A pre-compiled, self-contained (SEALED) WASM module registered via
@@ -363,7 +364,7 @@ impl WasmCombustor {
         // `javy_plugin_api::compile_src` and write base64 to stdout.
         let limits = FuelGauge::unlimited();
         let state = HostState::new(
-            &envelope_bytes,
+            envelope_bytes,
             None, // no per-call memory cap during compile
             limits.output_ceiling(),
             Manifold::sealed(),
@@ -536,7 +537,7 @@ impl WasmCombustor {
         // default), preserving the zero-capability posture for any existing
         // call site that does not explicitly opt in to net access.
         let state = HostState::new(
-            &input_bytes,
+            input_bytes,
             limits.memory_bytes,
             limits.output_ceiling(),
             limits.manifold.clone(),
@@ -586,7 +587,7 @@ impl WasmCombustor {
         // HostState carries the caller's Manifold so every `afterburner:host`
         // import is gated by it when the plugin resolves a JS host call.
         let state = HostState::new(
-            &input_bytes,
+            input_bytes,
             limits.memory_bytes,
             limits.output_ceiling(),
             limits.manifold.clone(),
@@ -708,7 +709,7 @@ impl WasmCombustor {
         // emit base64 on stdout.
         let limits = FuelGauge::unlimited();
         let state = HostState::new(
-            &envelope_bytes,
+            envelope_bytes,
             None,
             limits.output_ceiling(),
             Manifold::sealed(),
@@ -854,7 +855,9 @@ impl WasmCombustor {
         // inside `HostState::new_with_input` when it stashes the bytes
         // into `pending_input`; the guest copies from there into linmem
         // via `host_get_input`. There is no third copy in this path.
-        let envelope_bytes: &[u8] = &compiled.columnar_invoke_envelope_bytes;
+        // The envelope itself is the same bytes every call for this
+        // script, so cloning `Bytes` is an `Arc` bump, not a memcpy.
+        let envelope_bytes = compiled.columnar_invoke_envelope_bytes.clone();
 
         let mut state = HostState::new_with_input(
             envelope_bytes,
@@ -962,10 +965,11 @@ impl WasmCombustor {
     /// [`Self::thrust_raw_out`]): per-call `Store` setup, plugin
     /// instantiation, `_start` dispatch, trap mapping, result
     /// extraction. The invoke envelope (mode + base64 bytecode) was
-    /// built once at `ignite` time and lives in `Arc<CompiledScript>`,
-    /// so every call for the same script borrows the cached bytes
-    /// directly, saving ~40 µs/call (base64 encode of ~30 KB bytecode)
-    /// plus the per-call `serde_json::to_vec` on the envelope. One
+    /// built once at `ignite` time and lives in `Arc<CompiledScript>`
+    /// as a `Bytes`, so every call for the same script clones the
+    /// cached bytes via an `Arc` bump (not a memcpy), saving ~40 µs/call
+    /// (base64 encode of ~30 KB bytecode) plus the per-call
+    /// `serde_json::to_vec` on the envelope. One
     /// bytecode serves both input framings (`format` rides in
     /// `HostState`, read by the guest through `host_input_format`)
     /// and both output framings (the wrapper branches on the module's
@@ -982,7 +986,7 @@ impl WasmCombustor {
             .bytecode_cache
             .get(&id.hash)
             .ok_or(AfterburnerError::ScriptNotFound)?;
-        let envelope_bytes: &[u8] = &compiled.invoke_envelope_bytes;
+        let envelope_bytes = compiled.invoke_envelope_bytes.clone();
 
         let mut state = HostState::new_with_input(
             envelope_bytes,
@@ -1342,7 +1346,7 @@ impl Combustor for WasmCombustor {
             "mode": "invoke",
             "bytecode_b64": bytecode_b64,
         });
-        let invoke_envelope_bytes = serde_json::to_vec(&invoke_envelope)?;
+        let invoke_envelope_bytes = Bytes::from(serde_json::to_vec(&invoke_envelope)?);
 
         // Columnar wrapper compile - produces a separate bytecode
         // that wires `module.exports` to `__ab_columnar_dispatch`.
@@ -1357,7 +1361,7 @@ impl Combustor for WasmCombustor {
             "mode": "columnar-invoke",
             "bytecode_b64": columnar_bytecode_b64,
         });
-        let columnar_invoke_envelope_bytes = serde_json::to_vec(&columnar_envelope)?;
+        let columnar_invoke_envelope_bytes = Bytes::from(serde_json::to_vec(&columnar_envelope)?);
         self.source_store.insert(hash, source.to_string());
         self.bytecode_cache.insert(
             hash,
@@ -1495,7 +1499,7 @@ impl Combustor for WasmCombustor {
         let envelope_bytes = serde_json::to_vec(&envelope)?;
 
         let mut state = HostState::new(
-            &envelope_bytes,
+            envelope_bytes,
             limits.memory_bytes,
             limits.output_ceiling(),
             limits.manifold.clone(),
@@ -1579,7 +1583,7 @@ impl Combustor for WasmCombustor {
         let envelope_bytes = serde_json::to_vec(&envelope)?;
 
         let mut state = HostState::new(
-            &envelope_bytes,
+            envelope_bytes,
             limits.memory_bytes,
             limits.output_ceiling(),
             limits.manifold.clone(),
