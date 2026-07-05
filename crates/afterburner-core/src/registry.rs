@@ -118,7 +118,7 @@ impl CompileCell {
 pub struct BurnCache {
     engine: Box<dyn Combustor>,
     compiled: HopscotchMap<[u8; 32], Arc<CompileCell>>,
-    source_store: HopscotchMap<[u8; 32], String>,
+    source_store: HopscotchMap<[u8; 32], Arc<str>>,
     /// Optional cross-process / cross-node backend. Local-only builds
     /// set this to `None` (equivalent to `InProcessCacheBackend`
     /// behavior) so there's no hot-path branch unless the caller opted
@@ -157,14 +157,14 @@ impl BurnCache {
     pub fn register_by_hash(&self, hash: &[u8; 32]) -> Result<ScriptId> {
         // Fast path: source already cached locally.
         if let Some(src) = self.source_store.get(hash) {
-            return self.register(&src);
+            return self.register_with_known_hash(*hash, &src);
         }
         let backend = self
             .backend
             .as_ref()
             .ok_or(AfterburnerError::ScriptNotFound)?;
         match backend.fetch(hash)? {
-            Some(src) => self.register(&src),
+            Some(src) => self.register_with_known_hash(*hash, &src),
             None => Err(AfterburnerError::ScriptNotFound),
         }
     }
@@ -178,7 +178,13 @@ impl BurnCache {
     #[fastrace::trace(name = "BurnCache::register")]
     pub fn register(&self, source: &str) -> Result<ScriptId> {
         let hash = sha256(source.as_bytes());
+        self.register_with_known_hash(hash, source)
+    }
 
+    /// Same as [`register`](Self::register), but for a caller that
+    /// already knows `source`'s hash (`register_by_hash`'s local-cache
+    /// and backend-fetch paths) - skips recomputing the SHA-256.
+    fn register_with_known_hash(&self, hash: [u8; 32], source: &str) -> Result<ScriptId> {
         // Fast hit: cell exists and the result is already published.
         if let Some(cell) = self.compiled.get(&hash)
             && let Some(outcome) = cell.result.get()
@@ -213,7 +219,7 @@ impl BurnCache {
                 "hash" => hex32(&hash),
                 "source_bytes" => source.len(),
             );
-            self.source_store.insert(hash, source.to_string());
+            self.source_store.insert(hash, Arc::from(source));
             // Publish to the distributed backend (if attached) so peer
             // nodes can fetch the source by hash. Publish failures are
             // logged but don't abort registration - local compilation
@@ -398,7 +404,7 @@ impl BurnCache {
 
     /// Retrieve the original source for a `ScriptId`, if still cached.
     pub fn source(&self, id: &ScriptId) -> Option<String> {
-        self.source_store.get(&id.hash)
+        self.source_store.get(&id.hash).map(|s| s.to_string())
     }
 
     pub fn stats(&self) -> &RegistryStats {
