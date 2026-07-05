@@ -111,8 +111,14 @@ impl AdaptiveCombustor {
 
     /// Wait until the WASM compile for `id` settles or `max_wait_ms` elapses.
     pub fn wait_for_compile(&self, id: &ScriptId, max_wait_ms: u64) -> CompileOutcome {
-        let step = Duration::from_millis(10);
         let deadline = Instant::now() + Duration::from_millis(max_wait_ms);
+        // Adaptive backoff instead of a fixed 10ms poll: a compile that settles
+        // within a couple ms (the common warm-ish case) is now detected in well
+        // under 1ms rather than waiting out a full 10ms tick, cutting the
+        // first-wasm-call latency floor. Capped at 10ms so a slow compile still
+        // polls no more often than before.
+        let mut step = Duration::from_micros(200);
+        let cap = Duration::from_millis(10);
         loop {
             match self
                 .state
@@ -128,6 +134,7 @@ impl AdaptiveCombustor {
                 return CompileOutcome::Pending;
             }
             thread::sleep(step);
+            step = (step * 2).min(cap);
         }
     }
 
