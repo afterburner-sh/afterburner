@@ -3100,18 +3100,18 @@
   <section class="bench" id="bench">
     <div class="container">
       <div class="bench__head reveal">
-        <span class="kicker">// No boot tax</span>
-        <h2>A run in <em class="grad-text">about a millisecond.</em></h2>
-        <p>Firecracker, Daytona, a Docker container: each boots a fresh sandbox for every run. A resident runtime skips that, so a run takes about a millisecond and turns around hundreds of times a second.</p>
+        <span class="kicker">// Sub-millisecond sandbox</span>
+        <h2>A sandboxed run in <em class="grad-text">under a millisecond.</em></h2>
+        <p>Firecracker, Daytona, a Docker container: each boots a fresh sandbox for every run. A resident sandbox runtime skips that, so a sandboxed run takes about 500 microseconds and turns around a couple thousand times a second.</p>
       </div>
 
       <div class="bench__card reveal" id="benchSandboxCard">
         <div class="bench__hot">
-          <span class="bench__hot-stat">~1 ms per run</span>
-          <span class="bench__hot-sub">Firecracker, Daytona, E2B and a container each boot a fresh sandbox for every run, paying the startup each time. A resident runtime does about 920 a second per core.</span>
+          <span class="bench__hot-stat">~500 µs per sandboxed run</span>
+          <span class="bench__hot-sub">Firecracker, Daytona, E2B and a container each boot a fresh sandbox for every run, paying the startup each time. A resident sandbox runtime does about 2,000 a second per core.</span>
         </div>
 
-        <p style="font-family: var(--font-mono); font-size: 13px; color: var(--fg); margin: 0 0 4px;">time to a run, ms (lower is better)</p>
+        <p style="font-family: var(--font-mono); font-size: 13px; color: var(--fg); margin: 0 0 4px;">time to a run (lower is better)</p>
         <div class="bench__chart" id="benchLatChart"></div>
 
         <p style="font-family: var(--font-mono); font-size: 13px; color: var(--fg); margin: 28px 0 4px;">runs per second (more is better)</p>
@@ -3998,14 +3998,14 @@ puts "ruby: sum(1..=100)=#{total} fib(20)=#{fib(20)}"`
 
       const GROUPS = [
         { el: 'benchLatChart', max: 2000, suffix: ' ms', bars: [
-          { name: 'Afterburner', value:    1, brand: true  },
+          { name: 'Afterburner', value:  0.5, displayVal: 500, suffix: ' µs', brand: true },
           { name: 'Daytona',     value:   90, brand: false },
           { name: 'Firecracker', value:  125, brand: false },
           { name: 'E2B',         value:  150, brand: false },
           { name: 'Docker',      value: 2000, brand: false },
         ] },
-        { el: 'benchTputChart', max: 1000, suffix: ' /s', bars: [
-          { name: 'Afterburner', value: 920, brand: true  },
+        { el: 'benchTputChart', max: 2500, suffix: ' /s', bars: [
+          { name: 'Afterburner', value: 2000, brand: true  },
           { name: 'Daytona',     value:  11, brand: false },
           { name: 'Firecracker', value:   8, brand: false },
           { name: 'E2B',         value:   7, brand: false },
@@ -4041,7 +4041,7 @@ puts "ruby: sum(1..=100)=#{total} fib(20)=#{fib(20)}"`
           row.appendChild(value);
 
           chart.appendChild(row);
-          return { fill, num, val: b.value, suffix: g.suffix, pct: (b.value / g.max) * 100 };
+          return { fill, num, val: (b.displayVal ?? b.value), suffix: (b.suffix ?? g.suffix), pct: (b.value / g.max) * 100 };
         });
       }
 
