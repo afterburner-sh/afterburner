@@ -133,12 +133,24 @@ pub(super) fn call_read<F>(mut call: F) -> Result<String, String>
 where
     F: FnMut(*mut u8, u32) -> i32,
 {
-    let mut buf = vec![0u8; DEFAULT_BUF];
-    let mut cap = buf.len();
+    // Uninitialized capacity, not a zero-filled Vec: the host overwrites
+    // exactly the bytes it reports (n >= 0), and build.sh lowers
+    // `memory.fill` to a per-byte store loop, so pre-zeroing 64 KiB is a
+    // metered waste dwarfing the typical tiny reply. Mirrors
+    // `read_pending_input` below.
+    let mut cap = DEFAULT_BUF;
+    let mut buf: Vec<u8> = Vec::with_capacity(cap);
     loop {
         let n = call(buf.as_mut_ptr(), cap as u32);
         if n >= 0 {
-            buf.truncate(n as usize);
+            let filled = n as usize;
+            if filled > cap {
+                return Err(format!("call_read: host overran buffer ({filled} > {cap})"));
+            }
+            // SAFETY: the host wrote exactly `filled <= cap` bytes into the
+            // buffer's spare capacity; every byte below `filled` is now
+            // initialized and `filled` does not exceed the allocation.
+            unsafe { buf.set_len(filled) };
             return String::from_utf8(buf).map_err(|e| format!("utf8: {e}"));
         }
         if n == -4 {
@@ -146,7 +158,7 @@ where
             if cap > 16 * 1024 * 1024 {
                 return Err("output exceeded 16 MiB cap".to_string());
             }
-            buf.resize(cap, 0);
+            buf = Vec::with_capacity(cap);
             continue;
         }
         return Err(read_last_error(n));
