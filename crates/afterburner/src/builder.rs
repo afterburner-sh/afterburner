@@ -10,7 +10,7 @@
 //! for the multi-threaded path. The caller sees one shape; dispatch is
 //! compiled away when only one backend feature is enabled.
 
-#[cfg(any(feature = "flow", feature = "thrust", test))]
+#[cfg(any(feature = "flow", feature = "thrust", not(feature = "native"), test))]
 use afterburner_core::AfterburnerError;
 use afterburner_core::{
     BurnCache, BurnCacheBackend, Combustor, FuelGauge, HostContext, InMemoryStateStore, Manifold,
