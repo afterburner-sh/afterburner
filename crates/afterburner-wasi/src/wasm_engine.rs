@@ -15,8 +15,10 @@
 //!
 //! ### Lifecycle
 //!
-//! * `WasmCombustor::new` pre-compiles the plugin module once and
-//!   starts the shared epoch ticker.
+//! * `WasmCombustor::new` pre-compiles the plugin module once and, unless
+//!   [`WasmConfig::spawn_epoch_ticker`] opts out, starts the shared epoch
+//!   ticker. An embedder that opts out drives the wall-clock deadline
+//!   itself via `engine().increment_epoch()` on its own scheduler.
 //! * `ignite(source)` hashes the source and stashes it in-memory - no
 //!   compilation. `ScriptId` is content-addressed so identical sources
 //!   hash identically across backends (`Adaptive` relies on that).
@@ -115,10 +117,14 @@ fn max_linear_memory_bytes() -> usize {
         .min(WASM32_MAX_LINEAR_MEMORY_BYTES)
 }
 
-/// Maximum concurrently-instantiated plugin instances. Pool reserves
+/// Default maximum concurrently-instantiated plugin instances, used when
+/// [`WasmConfig::pool_total_instances`] is `None`. Pool reserves
 /// virtual-only address space; on a 64-bit host this is "free" until a
 /// slot is touched. 128 covers an 8-core box driven at 16x burst, which
-/// is a generous default for commodity hardware.
+/// is a generous default for commodity hardware. An embedder with a
+/// known, fixed concurrency ceiling (a bounded worker pool, for
+/// instance) should size this to that ceiling via
+/// `WasmConfig::pool_total_instances` instead of the generic default.
 const POOL_TOTAL_MEMORIES: u32 = 128;
 
 /// Resident bytes kept warm per freed pool slot - CoW reset back to this
@@ -165,6 +171,60 @@ pub struct WasmConfig {
     /// proceeds without a cache - this knob is purely an optimisation
     /// and never affects correctness.
     pub compile_cache_dir: Option<std::path::PathBuf>,
+    /// `None` (default) keeps today's behaviour: Cranelift compiles
+    /// functions in parallel across wasmtime's process-global `rayon`
+    /// pool (`build_engine`'s `parallel_compilation`). `Some(false)`
+    /// forces every compile - the plugin module and every
+    /// `register_precompiled` / `register_dyn` call - onto the calling
+    /// thread, single-threaded, touching `rayon` never.
+    ///
+    /// An embedder that already runs its own CPU-bound work on the same
+    /// process-global `rayon` pool (a common default in Rust servers)
+    /// should set `Some(false)`: `rayon`'s pool is shared and
+    /// unpartitioned, so a wasm compile fanning out across it competes
+    /// directly with unrelated work, and whichever caller touches
+    /// `rayon` first determines the pool's inherited thread priority and
+    /// affinity for the rest of the process. Single-threaded compilation
+    /// costs cold-start latency (no parallel speedup) in exchange for
+    /// zero interaction with any other `rayon` consumer.
+    pub parallel_compilation: Option<bool>,
+    /// `None` (default) keeps today's behaviour: `WasmCombustor::new`
+    /// spawns a dedicated `afterburner-epoch-ticker` thread that sleeps
+    /// `crate::chamber::TICK_PERIOD_MS` and calls
+    /// `Engine::increment_epoch()` in a loop for the lifetime of the
+    /// combustor (joined on [`Drop`]). `Some(false)` suppresses that
+    /// spawn entirely - `WasmCombustor::new` then owns zero threads on
+    /// this axis.
+    ///
+    /// An embedder that opts out is responsible for calling
+    /// `engine().increment_epoch()` periodically itself (from whatever
+    /// scheduler it already runs - a timer task on an existing async
+    /// runtime, for instance), or every `Store`'s epoch deadline
+    /// (`FuelGauge::timeout_ms`) never fires and only the fuel bound
+    /// remains. [`WasmCombustor::engine`] returns a `Clone`-able handle
+    /// for exactly this purpose; `Engine::increment_epoch(&self)` takes
+    /// a shared reference, so no synchronization is needed to drive it
+    /// from another thread.
+    pub spawn_epoch_ticker: Option<bool>,
+    /// `None` (default) keeps today's hard-coded pool size
+    /// (`POOL_TOTAL_MEMORIES`, 128). `Some(n)` sizes the pooling
+    /// allocator's instance and linear-memory slot counts to `n`
+    /// instead, shrinking (or growing) the pool's virtual address-space
+    /// reservation (`n * max_memory_size`) to match an embedder's own
+    /// concurrency ceiling rather than a generic commodity-hardware
+    /// default.
+    pub pool_total_instances: Option<u32>,
+    /// `None` (default) keeps today's behaviour: the per-instance linear
+    /// memory ceiling comes from the `BURN_MAX_LINEAR_MEMORY`
+    /// environment variable (or the 1 GiB default) via
+    /// `max_linear_memory_bytes`. `Some(bytes)` sets the ceiling
+    /// programmatically instead, taking priority over the environment
+    /// variable - the only reliable option for a library embedder, since
+    /// mutating process environment variables from a multithreaded
+    /// program is `unsafe` as of Rust 2024. Clamped to
+    /// `WASM32_MAX_LINEAR_MEMORY_BYTES` exactly like the
+    /// environment-variable path.
+    pub pool_max_linear_memory_bytes: Option<usize>,
 }
 
 /// Cached payload for a registered script. Built once in `ignite` so
@@ -271,14 +331,18 @@ pub struct WasmCombustor {
     /// Transpile hook threaded into every Store's HostState so the JS
     /// require resolver can call `__host_ts_transpile` for TS / ESM.
     transpile_hook: Option<crate::host::TranspileFn>,
-    /// Long-lived epoch ticker; one per `WasmCombustor`.
+    /// Shutdown flag for `ticker`, always allocated even when no ticker
+    /// is spawned (`Drop`'s store into it is then a harmless no-op).
     ticker_shutdown: Arc<AtomicBool>,
+    /// Long-lived epoch ticker; one per `WasmCombustor`, unless
+    /// [`WasmConfig::spawn_epoch_ticker`] is `Some(false)`, in which case
+    /// this is `None` and the embedder is driving the epoch itself.
     ticker: Option<JoinHandle<()>>,
 }
 
 impl WasmCombustor {
     pub fn new(config: WasmConfig) -> Result<Self> {
-        let engine = build_engine(config.compile_cache_dir.as_deref())?;
+        let engine = build_engine(&config)?;
         let plugin_module = build_plugin_module(&engine)?;
 
         // Build the linker once with every host import resolved, then
@@ -293,18 +357,22 @@ impl WasmCombustor {
             .map_err(|e| AfterburnerError::Engine(format!("plugin instantiate_pre: {e}")))?;
 
         let ticker_shutdown = Arc::new(AtomicBool::new(false));
-        let ticker = {
+        let ticker = if config.spawn_epoch_ticker.unwrap_or(true) {
             let engine = engine.clone();
             let shutdown = ticker_shutdown.clone();
-            thread::Builder::new()
-                .name("afterburner-epoch-ticker".into())
-                .spawn(move || {
-                    while !shutdown.load(Ordering::Acquire) {
-                        thread::sleep(Duration::from_millis(TICK_PERIOD_MS));
-                        engine.increment_epoch();
-                    }
-                })
-                .map_err(|e| AfterburnerError::Engine(format!("epoch ticker spawn: {e}")))?
+            Some(
+                thread::Builder::new()
+                    .name("afterburner-epoch-ticker".into())
+                    .spawn(move || {
+                        while !shutdown.load(Ordering::Acquire) {
+                            thread::sleep(Duration::from_millis(TICK_PERIOD_MS));
+                            engine.increment_epoch();
+                        }
+                    })
+                    .map_err(|e| AfterburnerError::Engine(format!("epoch ticker spawn: {e}")))?,
+            )
+        } else {
+            None
         };
 
         let state_store = config
@@ -323,7 +391,7 @@ impl WasmCombustor {
             host_context: config.host_context,
             transpile_hook: config.transpile_hook,
             ticker_shutdown,
-            ticker: Some(ticker),
+            ticker,
         })
     }
 
@@ -406,6 +474,11 @@ impl WasmCombustor {
     /// `wasm` bytes returns the same `ScriptId` and skips re-compilation of
     /// the module's native code. `wasm` may be a raw `.wasm` binary or a WAT
     /// text module (wasmtime accepts both).
+    ///
+    /// An embedder that owns an on-disk AOT cache keyed by `wasm`'s
+    /// content digest should try [`Self::register_precompiled_deserialize`]
+    /// first and fall back to this method (then [`Self::serialize_module`]
+    /// to populate the cache) only on a miss.
     pub fn register_precompiled(&self, wasm: &[u8], target: &str) -> Result<ScriptId> {
         if target == DYN_TARGET {
             return self.register_dyn(wasm);
@@ -426,6 +499,142 @@ impl WasmCombustor {
         let module = Module::new(&self.engine, wasm)
             .map_err(|e| AfterburnerError::CompileFailed(format!("sealed module compile: {e}")))?;
 
+        self.sealed_cache
+            .insert(hash, self.build_sealed_module(module)?);
+        ab_event!(
+            Level::Info,
+            "wasm.sealed.registered",
+            "hash" => hex8(&hash),
+            "wasm_bytes" => wasm.len(),
+        );
+
+        Ok(ScriptId {
+            hash,
+            mode: EngineMode::Wasm,
+        })
+    }
+
+    /// Register a precompiled native artifact (a `.cwasm`) previously
+    /// produced by [`Self::serialize_module`] (or wasmtime's own
+    /// `Module::serialize` / `Engine::precompile_module`), skipping
+    /// Cranelift entirely. This is the embedder-owned AOT cache hook:
+    /// afterburner installs no on-disk compile cache of its own for
+    /// user modules ([`WasmConfig::compile_cache_dir`] is a separate,
+    /// wasmtime-managed cache for a different purpose and is not
+    /// required for this path) - the embedder reads its own cache
+    /// directory, and on a hit calls this instead of
+    /// [`Self::register_precompiled`].
+    ///
+    /// `target` selects sealed (`"wasm32-wasip1"`) vs dynamically-linked
+    /// (`"wasm32-wasip1-dyn"`) exactly like [`Self::register_precompiled`].
+    /// Registration is content-addressed by the **`cwasm` bytes**, not
+    /// an original `.wasm` source - calling this twice with identical
+    /// `cwasm` is a cache hit, not a double-deserialize. The resulting
+    /// `ScriptId` is therefore independent of whatever `ScriptId` a cold
+    /// `register_precompiled(wasm, target)` call for the same logical
+    /// module would have produced in another process; callers key their
+    /// own persistent identity (a content digest of the original `wasm`,
+    /// for instance) separately and only use the returned `ScriptId` as
+    /// this process's in-memory dispatch handle.
+    ///
+    /// # Safety
+    ///
+    /// `cwasm` must be exactly the unmodified output of a prior
+    /// [`Self::serialize_module`] call (or wasmtime's own
+    /// `Module::serialize` / `Engine::precompile_module`) against a
+    /// compatible `Engine` - see [`Module::deserialize`]'s safety
+    /// section for the full contract. Deserializing untrusted or
+    /// tampered bytes is a memory-safety violation, not a recoverable
+    /// error, which is why this method is `unsafe`. A version, config,
+    /// or target-triple mismatch in a *legitimately produced* cache
+    /// entry is safe and simply returns `Err` (wasmtime validates a
+    /// compatibility header before trusting anything else in the blob);
+    /// the danger is exclusively bytes from an untrusted origin. Callers
+    /// MUST store cache files under a directory an attacker cannot
+    /// write to (mirror this crate's own `private_cache_dir`: created
+    /// `0700`, owned by the current user).
+    pub unsafe fn register_precompiled_deserialize(
+        &self,
+        cwasm: &[u8],
+        target: &str,
+    ) -> Result<ScriptId> {
+        if target == DYN_TARGET {
+            // Safety: forwarded from this function's own contract.
+            return unsafe { self.register_dyn_deserialize(cwasm) };
+        }
+
+        let hash = sha256(cwasm);
+
+        if self.sealed_cache.get(&hash).is_some() {
+            ab_event!(Level::Debug, "wasm.sealed.cache_hit", "hash" => hex8(&hash));
+            return Ok(ScriptId {
+                hash,
+                mode: EngineMode::Wasm,
+            });
+        }
+
+        // Safety: forwarded from this function's own contract - `cwasm`
+        // must be trusted, unmodified `serialize()` output.
+        let module = unsafe { Module::deserialize(&self.engine, cwasm) }.map_err(|e| {
+            AfterburnerError::CompileFailed(format!("sealed module deserialize: {e}"))
+        })?;
+
+        self.sealed_cache
+            .insert(hash, self.build_sealed_module(module)?);
+        ab_event!(
+            Level::Info,
+            "wasm.sealed.registered_from_cache",
+            "hash" => hex8(&hash),
+            "cwasm_bytes" => cwasm.len(),
+        );
+
+        Ok(ScriptId {
+            hash,
+            mode: EngineMode::Wasm,
+        })
+    }
+
+    /// Return the native-compiled artifact for a module previously
+    /// registered via [`Self::register_precompiled`] or
+    /// [`Self::register_precompiled_deserialize`], so the embedder can
+    /// persist it as its own AOT cache entry (atomically - write to a
+    /// temp file in the same directory, then rename into place, the
+    /// same pattern this crate uses for its own plugin `.cwasm` cache).
+    ///
+    /// The bytes are wasmtime's `Module::serialize` output: keyed by
+    /// the module contents plus the compiling `Engine`'s exact `Config`
+    /// plus the wasmtime version, so an engine upgrade or a config
+    /// change lands on a fresh cache key and a stale entry is simply
+    /// never accepted by [`Self::register_precompiled_deserialize`]
+    /// (never silently misread).
+    ///
+    /// Returns [`AfterburnerError::ScriptNotFound`] if `id` does not
+    /// name a currently-registered sealed or dynamically-linked module -
+    /// a JS/TS `ScriptId` from [`Combustor::ignite`], for instance, has no
+    /// compiled `Module` to serialize.
+    pub fn serialize_module(&self, id: &ScriptId) -> Result<Vec<u8>> {
+        if let Some(sealed) = self.sealed_cache.get(&id.hash) {
+            return sealed
+                .instance_pre
+                .module()
+                .serialize()
+                .map_err(|e| AfterburnerError::Engine(format!("sealed module serialize: {e}")));
+        }
+        if let Some(dyn_module) = self.dyn_cache.get(&id.hash) {
+            return dyn_module
+                .module
+                .serialize()
+                .map_err(|e| AfterburnerError::Engine(format!("dyn module serialize: {e}")));
+        }
+        Err(AfterburnerError::ScriptNotFound)
+    }
+
+    /// Wire a compiled or deserialized sealed `Module` into a fresh
+    /// WASI-only linker and pre-resolve instantiation. Shared by the
+    /// compile path ([`Self::register_precompiled`]) and the AOT-cache
+    /// deserialize path ([`Self::register_precompiled_deserialize`]) so
+    /// the two can never drift apart.
+    fn build_sealed_module(&self, module: Module) -> Result<Arc<SealedModule>> {
         let mut wasi_linker: Linker<HostState> = Linker::new(&self.engine);
         add_to_linker_sync(&mut wasi_linker, |s: &mut HostState| &mut s.wasi)
             .map_err(|e| AfterburnerError::Engine(format!("sealed wasi linker: {e}")))?;
@@ -442,19 +651,7 @@ impl WasmCombustor {
             .instantiate_pre(&module)
             .map_err(|e| AfterburnerError::Engine(format!("sealed instantiate_pre: {e}")))?;
 
-        self.sealed_cache
-            .insert(hash, Arc::new(SealedModule { instance_pre }));
-        ab_event!(
-            Level::Info,
-            "wasm.sealed.registered",
-            "hash" => hex8(&hash),
-            "wasm_bytes" => wasm.len(),
-        );
-
-        Ok(ScriptId {
-            hash,
-            mode: EngineMode::Wasm,
-        })
+        Ok(Arc::new(SealedModule { instance_pre }))
     }
 
     /// Register a dynamically-linked module (`"wasm32-wasip1-dyn"` target).
@@ -489,6 +686,39 @@ impl WasmCombustor {
             "wasm.dyn.registered",
             "hash" => hex8(&hash),
             "wasm_bytes" => wasm.len(),
+        );
+
+        Ok(ScriptId {
+            hash,
+            mode: EngineMode::Wasm,
+        })
+    }
+
+    /// Deserialize path for [`Self::register_precompiled_deserialize`]
+    /// when `target == "wasm32-wasip1-dyn"`. See that method's safety
+    /// section - the same contract applies here.
+    unsafe fn register_dyn_deserialize(&self, cwasm: &[u8]) -> Result<ScriptId> {
+        let hash = sha256(cwasm);
+
+        if self.dyn_cache.get(&hash).is_some() {
+            ab_event!(Level::Debug, "wasm.dyn.cache_hit", "hash" => hex8(&hash));
+            return Ok(ScriptId {
+                hash,
+                mode: EngineMode::Wasm,
+            });
+        }
+
+        // Safety: forwarded from this function's own contract - `cwasm`
+        // must be trusted, unmodified `serialize()` output.
+        let module = unsafe { Module::deserialize(&self.engine, cwasm) }
+            .map_err(|e| AfterburnerError::CompileFailed(format!("dyn module deserialize: {e}")))?;
+
+        self.dyn_cache.insert(hash, Arc::new(DynModule { module }));
+        ab_event!(
+            Level::Info,
+            "wasm.dyn.registered_from_cache",
+            "hash" => hex8(&hash),
+            "cwasm_bytes" => cwasm.len(),
         );
 
         Ok(ScriptId {
@@ -1064,13 +1294,28 @@ impl Drop for WasmCombustor {
 ///   density is high enough that epoch interruption fires inside guest
 ///   loops including the Javy microtask pump (verified by the
 ///   `wasm_infinite_microtask_chain_is_bounded` regression test).
-/// * `parallel_compilation(true)` - Cranelift uses rayon to compile
-///   functions in parallel; cuts cold-start when the plugin module
-///   first instantiates. Available on every platform.
+/// * `parallel_compilation(..)` - Cranelift uses rayon to compile
+///   functions in parallel when [`WasmConfig::parallel_compilation`] is
+///   `None` or `Some(true)` (today's default); cuts cold-start when the
+///   plugin module first instantiates. `Some(false)` forces every
+///   compile onto the calling thread instead, touching the process's
+///   `rayon` global pool never - see the field doc for why an embedder
+///   would choose that. Available on every platform.
+/// * `wasm_threads(false)` - unconditional, not configurable. The
+///   `threads` proposal (shared memories, `wait`/`notify`) is refused at
+///   compile time for every module this engine ever compiles. Nothing
+///   in this crate's execution model uses it: only `wasi_snapshot_preview1`
+///   is linked (no `wasi-threads` import), so a guest could not spawn a
+///   thread even with `wasm_threads(true)` - this is defense in depth,
+///   matching [`crate::embedder_vm::deterministic_engine`]'s posture,
+///   with no functional cost to any caller.
 /// * `allocation_strategy(Pooling)` - pre-reserved per-instance
-///   linear-memory + table slots. Slot-affine reuse means
-///   re-instantiation skips page zeroing for the first
-///   `LINEAR_MEMORY_KEEP_RESIDENT` bytes. Cross-platform.
+///   linear-memory + table slots, sized by
+///   [`WasmConfig::pool_total_instances`] /
+///   [`WasmConfig::pool_max_linear_memory_bytes`] (defaults:
+///   [`POOL_TOTAL_MEMORIES`] instances, [`max_linear_memory_bytes`] each).
+///   Slot-affine reuse means re-instantiation skips page zeroing for the
+///   first `LINEAR_MEMORY_KEEP_RESIDENT` bytes. Cross-platform.
 ///
 /// Optional sub-features (memory protection keys, etc.) that are
 /// platform-specific would be runtime-probed here and silently fall
@@ -1080,17 +1325,22 @@ impl Drop for WasmCombustor {
 /// `compile_cache_dir` (see [`WasmConfig::compile_cache_dir`]) enables
 /// wasmtime's on-disk compilation cache rooted at the given absolute
 /// path. Cache initialisation failure is downgraded to a warning - the
-/// cache is an optimisation, never a correctness dependency.
-fn build_engine(compile_cache_dir: Option<&std::path::Path>) -> Result<Engine> {
+/// cache is an optimisation, never a correctness dependency. An embedder
+/// that wants to own its AOT cache directly (no background cache
+/// worker at all) leaves this `None` and uses
+/// [`WasmCombustor::serialize_module`] /
+/// [`WasmCombustor::register_precompiled_deserialize`] instead.
+fn build_engine(wasm_config: &WasmConfig) -> Result<Engine> {
     let mut config = Config::new();
     config
         .consume_fuel(true)
         .epoch_interruption(true)
         .memory_init_cow(true)
         .cranelift_opt_level(OptLevel::Speed)
-        .parallel_compilation(true);
+        .parallel_compilation(wasm_config.parallel_compilation.unwrap_or(true))
+        .wasm_threads(false);
 
-    if let Some(dir) = compile_cache_dir {
+    if let Some(dir) = wasm_config.compile_cache_dir.as_deref() {
         let mut cache_config = wasmtime::CacheConfig::new();
         cache_config.with_directory(dir);
         match wasmtime::Cache::new(cache_config) {
@@ -1106,10 +1356,18 @@ fn build_engine(compile_cache_dir: Option<&std::path::Path>) -> Result<Engine> {
         }
     }
 
+    let total_instances = wasm_config
+        .pool_total_instances
+        .unwrap_or(POOL_TOTAL_MEMORIES);
+    let max_memory_size = wasm_config
+        .pool_max_linear_memory_bytes
+        .map(|bytes| bytes.min(WASM32_MAX_LINEAR_MEMORY_BYTES))
+        .unwrap_or_else(max_linear_memory_bytes);
+
     let mut pool = PoolingAllocationConfig::default();
-    pool.total_core_instances(POOL_TOTAL_MEMORIES);
-    pool.total_memories(POOL_TOTAL_MEMORIES);
-    pool.max_memory_size(max_linear_memory_bytes());
+    pool.total_core_instances(total_instances);
+    pool.total_memories(total_instances);
+    pool.max_memory_size(max_memory_size);
     pool.linear_memory_keep_resident(LINEAR_MEMORY_KEEP_RESIDENT);
     pool.table_keep_resident(TABLE_KEEP_RESIDENT);
     pool.table_elements(POOL_TABLE_ELEMENTS);
@@ -2241,5 +2499,95 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A minimal, real WASI command module: writes the ASCII bytes `"42"`
+    /// to stdout via `fd_write` and exits cleanly. Same hand-rolled-WAT
+    /// technique as `tests/sealed_precompiled.rs`'s HTTP probe (real
+    /// `fd_write` plumbing, no external tool needed to build a fixture).
+    /// Zero imports beyond WASI, so it compiles under any target and
+    /// needs nothing from the `afterburner:host` linker.
+    const SERIALIZE_ROUNDTRIP_WAT: &str = r#"(module
+  (import "wasi_snapshot_preview1" "fd_write"
+    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "proc_exit"
+    (func $proc_exit (param i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "42")
+  (func (export "_start")
+    (i32.store (i32.const 100) (i32.const 0))
+    (i32.store (i32.const 104) (i32.const 2))
+    (drop (call $fd_write (i32.const 1) (i32.const 100) (i32.const 1) (i32.const 200)))
+    (call $proc_exit (i32.const 0))
+  )
+)"#;
+
+    /// A-cache proof: `serialize_module` -> `register_precompiled_deserialize`
+    /// round-trips a compiled module. Covers both directions:
+    ///   1. functional: the module deserialized into a *second, independent*
+    ///      combustor (mimicking a fresh process reading its own on-disk AOT
+    ///      cache) executes and produces the exact same output as the
+    ///      freshly-compiled original;
+    ///   2. byte-exact: re-serializing the deserialized module reproduces the
+    ///      identical bytes wasmtime emitted the first time
+    ///      (serialize -> deserialize -> serialize is the identity).
+    #[test]
+    fn serialize_module_and_register_precompiled_deserialize_round_trip() {
+        let c1 = make_combustor();
+        let id1 = c1
+            .register_precompiled(SERIALIZE_ROUNDTRIP_WAT.as_bytes(), "wasm32-wasip1")
+            .unwrap();
+        let out1 = c1
+            .thrust(&id1, &json!(null), &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(out1, json!(42));
+
+        // The AOT-cache hook an embedder persists to disk.
+        let cwasm = c1.serialize_module(&id1).unwrap();
+        assert!(!cwasm.is_empty(), "serialized module must not be empty");
+
+        // A second, independent engine (mimics a fresh process deserializing
+        // its own on-disk cache entry instead of recompiling).
+        let c2 = make_combustor();
+        // Safety: `cwasm` is exactly `c1.serialize_module`'s output,
+        // unmodified, and `c2`'s engine uses the same `WasmConfig::default()`
+        // (so a compatible compile-config header), satisfying the method's
+        // safety contract.
+        let id2 = unsafe { c2.register_precompiled_deserialize(&cwasm, "wasm32-wasip1") }.unwrap();
+        let out2 = c2
+            .thrust(&id2, &json!(null), &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(
+            out2,
+            json!(42),
+            "module deserialized from the AOT cache must produce identical output"
+        );
+
+        let cwasm_again = c2.serialize_module(&id2).unwrap();
+        assert_eq!(
+            cwasm, cwasm_again,
+            "serialize(deserialize(serialize(module))) must be byte-identical"
+        );
+    }
+
+    /// `serialize_module` on an id the engine has never seen (nor a JS/TS
+    /// `ScriptId` from `ignite`, which has no compiled `Module` at all)
+    /// fails loud with `ScriptNotFound` rather than panicking or silently
+    /// returning empty bytes.
+    #[test]
+    fn serialize_module_unknown_id_returns_script_not_found() {
+        let c = make_combustor();
+        let bogus = ScriptId {
+            hash: [0u8; 32],
+            mode: EngineMode::Wasm,
+        };
+        let err = c.serialize_module(&bogus).unwrap_err();
+        assert!(matches!(err, AfterburnerError::ScriptNotFound));
+
+        // A real, live JS ScriptId (from `ignite`, not `register_precompiled`)
+        // has bytecode, not a compiled `Module` - also ScriptNotFound.
+        let js_id = c.ignite("module.exports = () => 1").unwrap();
+        let err = c.serialize_module(&js_id).unwrap_err();
+        assert!(matches!(err, AfterburnerError::ScriptNotFound));
     }
 }

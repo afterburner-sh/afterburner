@@ -78,6 +78,7 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
         host_context: None,
         transpile_hook: super::daemon::ts_transpile_hook(),
         compile_cache_dir: None,
+        ..Default::default()
     })
     .context("wasm combustor (worker)")?;
 

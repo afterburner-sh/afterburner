@@ -3,6 +3,49 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.2.5] - 2026-07-21
+
+Compile-isolation knobs for embedders that run their own thread topology
+alongside `WasmCombustor`.
+
+### Embedder-controlled compilation and background threads
+
+`WasmConfig` gains `parallel_compilation`: `Some(false)` forces every
+Cranelift compile onto the calling thread, so `WasmCombustor` never touches
+the process's global `rayon` pool - useful for an embedder that runs other
+CPU-bound work on that same shared pool and does not want a wasm compile
+fanning out across it. `WasmConfig` also gains `spawn_epoch_ticker`:
+`Some(false)` suppresses `WasmCombustor::new`'s internal
+`afterburner-epoch-ticker` thread entirely, so an embedder that already runs
+a scheduler of its own can drive `Engine::increment_epoch()` from there
+instead (`WasmCombustor::engine()` returns the `Clone`-able handle for this).
+Both default to today's behavior (`None` = unchanged) - existing callers see
+no difference.
+
+### Embedder-owned AOT cache
+
+`WasmCombustor::serialize_module` and the new (`unsafe`)
+`register_precompiled_deserialize` expose wasmtime's compiled-artifact
+serialize/deserialize directly, so an embedder can own its on-disk AOT cache
+for `register_precompiled` / `register_dyn` modules without afterburner
+installing a `wasmtime::Cache` (and its background cache worker) on its
+behalf.
+
+### Pool sizing without environment variables
+
+`WasmConfig::pool_total_instances` and
+`WasmConfig::pool_max_linear_memory_bytes` size the pooling allocator
+programmatically, matching a library embedder's own concurrency ceiling
+instead of the generic 128-instance / `BURN_MAX_LINEAR_MEMORY` defaults -
+mutating process environment variables from a multithreaded program is
+`unsafe` as of Rust 2024, so a library embedder needs a non-environment path.
+
+### Defense in depth
+
+`build_engine` now sets `wasm_threads(false)` unconditionally, matching
+`embedder_vm::deterministic_engine`'s posture: the `threads` proposal is
+refused at compile time for every module `WasmCombustor` ever compiles.
+
 ## [0.2.4] - 2026-07-01
 
 The recording release. afterburner gains three runtime capabilities for capturing

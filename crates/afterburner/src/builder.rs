@@ -929,6 +929,7 @@ fn build_wasm(
         host_context,
         transpile_hook: None,
         compile_cache_dir,
+        ..Default::default()
     };
     Ok(Box::new(afterburner_wasi::WasmCombustor::new(cfg)?))
 }
@@ -944,6 +945,7 @@ fn build_adaptive(
         host_context,
         transpile_hook: None,
         compile_cache_dir,
+        ..Default::default()
     };
     Ok(Box::new(
         afterburner_adaptive::AdaptiveCombustor::with_wasm_config(cfg)?,
@@ -1039,6 +1041,7 @@ impl ThreadedBuilder {
             host_context: self.parent.host_context.clone(),
             transpile_hook: None,
             compile_cache_dir: self.parent.compile_cache_dir.clone(),
+            ..Default::default()
         };
 
         let cfg = afterburner_thrust::ThrustEngineConfig {
