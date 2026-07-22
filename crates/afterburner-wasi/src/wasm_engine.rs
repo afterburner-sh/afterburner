@@ -2910,7 +2910,7 @@ mod tests {
 
     #[test]
     fn limiter_tripped_flag_is_set_on_memory_cap_denial() {
-        // Mirrors the scramdb finding this flag exists for: a guest
+        // Covers the embedder case this flag exists for: a guest
         // allocation well past FuelGauge::memory_bytes must trip the
         // flag regardless of whether the resulting failure surfaces as
         // a typed MemoryLimit or a generic wasm trap (the guest

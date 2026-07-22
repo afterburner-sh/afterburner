@@ -5,7 +5,7 @@
 
 //! Thread governance - nice / CPU affinity / name-prefix attribution
 //! applied uniformly to every thread Afterburner spawns, so an embedder
-//! (a database, for instance) can subordinate the engine's background
+//! (a latency-sensitive host process, for instance) can subordinate the engine's background
 //! threads to its own priority scheme instead of contending with it at
 //! the OS scheduler's default priority.
 //!

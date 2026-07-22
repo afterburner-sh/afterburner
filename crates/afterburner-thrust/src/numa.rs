@@ -34,7 +34,7 @@ use afterburner_core::{AfterburnerError, Result};
 
 /// How [`ThrustEngine`](crate::ThrustEngine) assigns compute workers to
 /// NUMA nodes (E8 - exposed so an embedder can co-plan its OWN
-/// affinity around what this engine detects, e.g. a database excluding
+/// affinity around what this engine detects, e.g. a host excluding
 /// its query-worker cores from the pool's round-robin).
 ///
 /// `Default` is [`NumaMode::Auto`] - byte-identical to this crate's

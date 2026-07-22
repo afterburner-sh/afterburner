@@ -5,7 +5,7 @@
 
 //! Pluggable, coarse-grained memory-accounting hook. An embedder that
 //! wants every tier's resident bytes routed through its own accounting
-//! (a database's global memory pool, for instance) implements
+//! (an embedder's global memory pool, for instance) implements
 //! [`MemoryLedger`] and wires it in via `WasmConfig::memory_ledger`,
 //! `ThrustEngineConfig::memory_ledger`, and
 //! `NativeCombustor::with_ledger`. `None` (the default in every one of

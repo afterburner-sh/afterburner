@@ -158,7 +158,7 @@ pub struct ThrustEngineConfig {
     /// topology, round-robin workers across it, pin each unless
     /// `governance.affinity` overrides. `Off` and `ExplicitNodes` let
     /// an embedder that already computed its own placement (e.g. a
-    /// database excluding its query-worker cores) co-plan against real
+    /// host excluding its latency-critical cores) co-plan against real
     /// hardware topology via [`NumaTopology`]'s public read API rather
     /// than fighting this engine's own detection.
     pub numa: NumaMode,

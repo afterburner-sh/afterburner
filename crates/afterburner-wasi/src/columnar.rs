@@ -63,7 +63,7 @@
 //!
 //! ## What's NOT in this module
 //!
-//! Anything ScramDB / BORAX / Tundra / scramvm specific. This crate is
+//! Anything embedder-specific. This crate is
 //! open source and the public surface stays vendor-neutral. Embedders
 //! that already store data in a layout-compatible columnar format
 //! (DuckDB-style 2048-row vectors + bit-set-valid validity + 16-byte
@@ -1154,7 +1154,7 @@ mod tests {
 
     /// Build a `(slots: Vec<u8>, heap: Vec<u8>)` pair from a list of
     /// byte sequences using DuckDB-style inline-or-pointer slots.
-    /// Test-only - production callers (ScramDB-side adapter, etc.)
+    /// Test-only - production callers (an embedder-side adapter, etc.)
     /// build their slot arrays from their own internal layouts.
     fn build_var_column(values: &[&[u8]]) -> (Vec<u8>, Vec<u8>) {
         let mut slots = vec![0u8; values.len() * INLINE_SLOT_BYTES];
