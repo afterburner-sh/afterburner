@@ -1058,6 +1058,7 @@ impl ThreadedBuilder {
             shutdown_drain_deadline: self.shutdown_drain_deadline,
             wasm_config,
             governance: ThreadGovernance::default(),
+            numa: afterburner_thrust::NumaMode::default(),
             memory_ledger: None,
         };
 

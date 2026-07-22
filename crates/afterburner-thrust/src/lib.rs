@@ -32,7 +32,8 @@ use afterburner_wasi::{WasmCombustor, WasmConfig};
 use kovan_channel::flavors::unbounded::{Receiver, Sender};
 use kovan_channel::unbounded;
 use kovan_queue::array_queue::ArrayQueue;
-use numa::{NumaTopology, pin_current_thread_to_worker};
+use numa::pin_current_thread_to_worker;
+pub use numa::{NumaMode, NumaTopology};
 use serde_json::Value;
 use std::fmt;
 use std::num::NonZeroU32;
@@ -152,6 +153,16 @@ pub struct ThrustEngineConfig {
     /// today's ungoverned pool, byte-identical.
     pub governance: ThreadGovernance,
 
+    /// NUMA node assignment mode (E8). `Auto` (the default) reproduces
+    /// this crate's pre-E8 behavior byte-for-byte: detect real
+    /// topology, round-robin workers across it, pin each unless
+    /// `governance.affinity` overrides. `Off` and `ExplicitNodes` let
+    /// an embedder that already computed its own placement (e.g. a
+    /// database excluding its query-worker cores) co-plan against real
+    /// hardware topology via [`NumaTopology`]'s public read API rather
+    /// than fighting this engine's own detection.
+    pub numa: NumaMode,
+
     /// Optional embedder-owned memory-accounting hook, charged at job
     /// enqueue (reserve, [`LedgerClass::QueuedJob`]) and at
     /// execute-or-drop (release). Independent of
@@ -175,6 +186,7 @@ impl Default for ThrustEngineConfig {
             shutdown_drain_deadline: Duration::from_secs(5),
             wasm_config: WasmConfig::default(),
             governance: ThreadGovernance::default(),
+            numa: NumaMode::default(),
             memory_ledger: None,
         }
     }
@@ -195,6 +207,7 @@ impl fmt::Debug for ThrustEngineConfig {
             .field("shutdown_drain_deadline", &self.shutdown_drain_deadline)
             .field("wasm_config", &"<opaque>")
             .field("governance", &self.governance)
+            .field("numa", &self.numa)
             .field("memory_ledger", &self.memory_ledger.is_some())
             .finish()
     }
@@ -470,7 +483,13 @@ fn resolve_worker_count(requested: usize) -> usize {
 /// order: own queue → injector → steal from peers → exp-backoff park.
 pub struct ThrustEngine {
     config: ThrustEngineConfig,
-    combustor: Arc<WasmCombustor>,
+    /// `Arc<dyn Combustor>` (E4) rather than a concrete `WasmCombustor`
+    /// so the pool can WRAP an embedder-owned engine instead of always
+    /// building a private one - `new` still builds its own and
+    /// delegates to [`Self::with_combustor`]. The worker loop below
+    /// calls only `Combustor` trait methods, so this substitution is
+    /// invisible to it.
+    combustor: Arc<dyn Combustor>,
     stats: Arc<StatsCounters>,
     /// Per-worker bounded queues. Indexed by worker id. Shared with
     /// workers via `Arc` so each worker can also steal from peers.
@@ -501,10 +520,43 @@ impl ThrustEngine {
     /// facade crate shares one engine across clones of `Afterburner`.
     ///
     /// `config.compute_workers == 0` auto-probes the host parallelism.
+    ///
+    /// Builds a PRIVATE `WasmCombustor` from `config.wasm_config`. An
+    /// embedder that already owns a combustor and wants this pool to
+    /// share its caches instead of paying for a second engine should
+    /// use [`Self::with_combustor`] (E4) instead.
     pub fn new(config: ThrustEngineConfig) -> Result<Arc<Self>> {
-        let combustor = Arc::new(WasmCombustor::new(config.wasm_config.clone())?);
+        let combustor: Arc<dyn Combustor> =
+            Arc::new(WasmCombustor::new(config.wasm_config.clone())?);
+        Self::with_combustor(combustor, config)
+    }
+
+    /// Wrap an EXISTING combustor instead of building a private one
+    /// (E4). [`Self::new`] keeps building its own `WasmCombustor` and
+    /// delegates here - the ONE canonical construction path, so the two
+    /// can never drift apart. `Arc<dyn Combustor>` so the pool can
+    /// serve a wasm OR an adaptive (native+wasm) combustor; the worker
+    /// loop below calls only `Combustor` trait methods, so the
+    /// substitution is invisible to it.
+    ///
+    /// Mandatory for sharing state with an inline (non-pooled) caller
+    /// of the SAME combustor: without this, each side would build its
+    /// own `WasmCombustor` - a second plugin compile, a second
+    /// pooling-allocator virtual reservation, and split module caches.
+    pub fn with_combustor(
+        combustor: Arc<dyn Combustor>,
+        config: ThrustEngineConfig,
+    ) -> Result<Arc<Self>> {
         let stats = Arc::new(StatsCounters::default());
         let shutdown = Arc::new(AtomicU8::new(STATE_RUN));
+
+        // NUMA topology first (E8): it only depends on `n_workers` and
+        // can fail validation (`NumaMode::ExplicitNodes`) - resolving
+        // it before spawning the admission sweep thread means a bad
+        // NUMA config fails construction without spawning anything to
+        // tear back down.
+        let n_workers = resolve_worker_count(config.compute_workers);
+        let numa = Arc::new(NumaTopology::detect_with_mode(n_workers, &config.numa)?);
 
         let admission = match config.admission_tokens_per_sec {
             Some(rate) => Some(TokenBucketAdmission::new(
@@ -515,7 +567,6 @@ impl ThrustEngine {
             None => None,
         };
 
-        let n_workers = resolve_worker_count(config.compute_workers);
         let local_cap = if config.local_queue_capacity == 0 {
             256
         } else {
@@ -533,7 +584,6 @@ impl ThrustEngine {
         }
         let worker_queues: Arc<Vec<BoundedQueue<Job>>> = Arc::new(queues);
         let injector: Arc<BoundedQueue<Job>> = Arc::new(BoundedQueue::new(injector_cap));
-        let numa = Arc::new(NumaTopology::detect(n_workers));
 
         let mut handles = Vec::with_capacity(n_workers);
         for worker_id in 0..n_workers {
@@ -713,12 +763,23 @@ impl ThrustEngine {
         self.combustor.ignite(source)
     }
 
+    /// `DROP FUNCTION` / module-unload reclamation (E4): passthrough to
+    /// the wrapped combustor's own `extinguish`. Previously an embedder
+    /// had no way to actually free a removed module's cache entry
+    /// through this pool; this makes the pool's unload path do the
+    /// same thing an inline caller of the same combustor already can.
+    pub fn extinguish(&self, id: &ScriptId) {
+        self.combustor.extinguish(id);
+    }
+
     /// Columnar UDF entry point. Bypasses the per-job dispatch
     /// pipeline (admission, tenant routing, NUMA-aware steal, etc.)
-    /// and calls directly into the inner [`WasmCombustor`]'s
-    /// columnar path. This is the right shape because:
+    /// and calls directly into the wrapped combustor's columnar path
+    /// (E4 - `self.combustor`, normally a [`WasmCombustor`] but any
+    /// `Combustor` impl works). This is the right shape because:
     ///
-    /// 1. The wasmtime pooling allocator inside `WasmCombustor`
+    /// 1. The wasmtime pooling allocator inside `WasmCombustor` (the
+    ///    default, and the only impl with a columnar ABI today)
     ///    is itself thread-safe - N concurrent submitters from N
     ///    OS threads all check out a fresh slot per call without
     ///    contention.
@@ -746,7 +807,7 @@ impl ThrustEngine {
     }
 
     /// Raw-input fast path. Bypasses the per-job dispatch pipeline and
-    /// calls directly into the inner [`WasmCombustor`]'s raw path, for
+    /// calls directly into the wrapped combustor's raw path, for
     /// the same three reasons as
     /// [`thrust_columnar_bytes`](Self::thrust_columnar_bytes): the
     /// pooling allocator is thread-safe, the payload is a `&[u8]` that
@@ -876,12 +937,24 @@ impl fmt::Debug for ThrustEngine {
 // Worker thread
 // ─────────────────────────────────────────────────────────────────────────
 
+/// The E2/E8 compose rule `spawn_worker` applies: an explicit
+/// `governance.affinity` mask always wins over the engine's own
+/// topology-driven pin ("`Some(mask)` overrides the NUMA pin" - E2's
+/// documented contract on [`ThreadGovernance::affinity`]); `None`
+/// leaves the automatic per-worker NUMA round-robin pin
+/// ([`pin_current_thread_to_worker`]) active. Factored out of
+/// `spawn_worker` so this interplay is its own named, directly
+/// testable fact rather than an inline boolean nobody is watching.
+fn numa_pin_applies(governance: &ThreadGovernance) -> bool {
+    governance.affinity.is_none()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_worker(
     worker_id: usize,
     queues: Arc<Vec<BoundedQueue<Job>>>,
     injector: Arc<BoundedQueue<Job>>,
-    combustor: Arc<WasmCombustor>,
+    combustor: Arc<dyn Combustor>,
     stats: Arc<StatsCounters>,
     shutdown: Arc<AtomicU8>,
     numa: Arc<NumaTopology>,
@@ -896,13 +969,10 @@ fn spawn_worker(
     let stats_for_loop = stats.clone();
     let stats_for_decrement = stats.clone();
     let numa_for_pin = numa.clone();
-    // An explicit affinity mask overrides the NUMA pin - `apply_governance`
-    // (run first, inside `spawn_governed`) already applied it, so the
-    // worker must not then re-pin itself to the NUMA node's wider set.
-    let affinity_overridden = governance.affinity.is_some();
+    let apply_numa_pin = numa_pin_applies(&governance);
     let name = governance.thread_name("afterburner-thrust", &format!("-{worker_id}"));
     let result = spawn_governed(name, governance, move || {
-        if !affinity_overridden {
+        if apply_numa_pin {
             // Pin to our NUMA node's CPU set on Linux multi-socket
             // boxes; no-op elsewhere. Done inside the worker thread so
             // sched_setaffinity applies to the right kernel task.
@@ -947,7 +1017,7 @@ fn worker_loop(
     worker_id: usize,
     queues: Arc<Vec<BoundedQueue<Job>>>,
     injector: Arc<BoundedQueue<Job>>,
-    combustor: Arc<WasmCombustor>,
+    combustor: Arc<dyn Combustor>,
     stats: Arc<StatsCounters>,
     shutdown: Arc<AtomicU8>,
     numa: Arc<NumaTopology>,
@@ -982,7 +1052,7 @@ fn worker_loop(
         if (iter & INJECTOR_POLL_MASK) == 0
             && let Some(job) = injector.try_pop()
         {
-            execute(job, &combustor, &stats);
+            execute(job, &*combustor, &stats);
             park = initial_park;
             iter = iter.wrapping_add(1);
             continue 'outer;
@@ -990,7 +1060,7 @@ fn worker_loop(
 
         // 2. Owner pop.
         if let Some(job) = local.try_pop() {
-            execute(job, &combustor, &stats);
+            execute(job, &*combustor, &stats);
             park = initial_park;
             iter = iter.wrapping_add(1);
             continue 'outer;
@@ -1000,14 +1070,14 @@ fn worker_loop(
         //    injector poll.
         for &idx in &steal_order {
             if let Some(job) = queues[idx].try_pop() {
-                execute(job, &combustor, &stats);
+                execute(job, &*combustor, &stats);
                 park = initial_park;
                 iter = iter.wrapping_add(1);
                 continue 'outer;
             }
         }
         if let Some(job) = injector.try_pop() {
-            execute(job, &combustor, &stats);
+            execute(job, &*combustor, &stats);
             park = initial_park;
             iter = iter.wrapping_add(1);
             continue 'outer;
@@ -1049,7 +1119,7 @@ fn build_steal_order(worker_id: usize, n: usize, numa: &NumaTopology) -> Vec<usi
 }
 
 #[inline]
-fn execute(mut job: Job, combustor: &WasmCombustor, stats: &StatsCounters) {
+fn execute(mut job: Job, combustor: &dyn Combustor, stats: &StatsCounters) {
     // Field access rather than a destructuring move: `Job` implements
     // `Drop` (it releases its `QueuedJob` ledger charge there), and Rust
     // forbids partially moving fields out of a type that implements
@@ -1434,5 +1504,167 @@ mod tests {
             .thrust_sync(&id, json!(null), FuelGauge::unlimited(), None)
             .unwrap();
         assert_eq!(out, json!(5));
+    }
+
+    // ── E8: NUMA topology + governance interplay ────────────────────────
+
+    #[cfg(target_os = "linux")]
+    fn current_affinity() -> Vec<usize> {
+        // SAFETY: a zeroed cpu_set_t is a valid argument to
+        // sched_getaffinity; CPU_ISSET only reads offsets within its
+        // own size. Same pattern as `numa::pin_current_thread_to_worker`.
+        unsafe {
+            let mut set: libc::cpu_set_t = std::mem::zeroed();
+            let ret = libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set);
+            assert_eq!(ret, 0, "sched_getaffinity failed");
+            (0..libc::CPU_SETSIZE as usize)
+                .filter(|&cpu| libc::CPU_ISSET(cpu, &set))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn numa_pin_decision_matches_governance_contract() {
+        // E2's documented contract: `Some(mask)` overrides the NUMA
+        // pin; `None` leaves it active. Pure logic, every platform -
+        // the OS-level proof that the pin itself actually narrows
+        // affinity per node is
+        // `numa_pin_narrows_affinity_to_the_assigned_nodes_real_cpu_set`
+        // below (Linux-only, needs real syscalls).
+        assert!(numa_pin_applies(&ThreadGovernance::default()));
+        assert!(!numa_pin_applies(&ThreadGovernance {
+            affinity: Some(vec![0]),
+            ..Default::default()
+        }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn numa_pin_narrows_affinity_to_the_assigned_nodes_real_cpu_set() {
+        // Proves the other half of the compose rule end to end at the
+        // OS level: when nothing overrides it, the automatic
+        // per-worker NUMA pin actually narrows affinity to that
+        // worker's assigned node - using a synthetic-but-real-cpu
+        // 2-node topology built from this process's own legal cpu set,
+        // since dev/CI boxes are commonly single-socket (real
+        // multi-socket validation is a deployment-hardware exercise,
+        // docs/plans P5.12). Combined with
+        // `affinity_governance_pins_the_worker_thread`
+        // (tests/thread_governance.rs, proving the override side
+        // through the real `ThrustEngine::new` path), both halves of
+        // `numa_pin_applies` are proven at the OS level.
+        let legal = current_affinity();
+        assert!(
+            legal.len() >= 2,
+            "proving per-node pin narrowing needs >=2 legal cpus; got {legal:?}"
+        );
+        let (node0, node1) = legal.split_at(legal.len() / 2);
+        let topo = NumaTopology {
+            node_count: 2,
+            worker_to_node: vec![0, 1],
+            node_cpus: vec![node0.to_vec(), node1.to_vec()],
+        };
+        pin_current_thread_to_worker(&topo, 0);
+        assert_eq!(
+            current_affinity(),
+            node0,
+            "worker 0 must pin to node 0's real cpu set"
+        );
+        pin_current_thread_to_worker(&topo, 1);
+        assert_eq!(
+            current_affinity(),
+            node1,
+            "worker 1 must pin to node 1's real cpu set"
+        );
+    }
+
+    #[test]
+    fn thrust_engine_config_default_numa_mode_is_auto() {
+        assert_eq!(ThrustEngineConfig::default().numa, NumaMode::Auto);
+    }
+
+    #[test]
+    fn engine_constructs_with_numa_off() {
+        let engine = ThrustEngine::new(ThrustEngineConfig {
+            compute_workers: 2,
+            numa: NumaMode::Off,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(engine.numa_node_count(), 1);
+        let id = engine.register("module.exports = () => 7").unwrap();
+        assert_eq!(
+            engine
+                .thrust_sync(&id, json!(null), FuelGauge::unlimited(), None)
+                .unwrap(),
+            json!(7)
+        );
+    }
+
+    #[test]
+    fn engine_construction_fails_loud_on_an_undetected_explicit_node() {
+        let err = ThrustEngine::new(ThrustEngineConfig {
+            compute_workers: 1,
+            numa: NumaMode::ExplicitNodes(vec![usize::MAX]),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err, AfterburnerError::Engine(_)),
+            "expected Engine, got {err}"
+        );
+    }
+
+    // ── E4: shared combustor ─────────────────────────────────────────────
+
+    #[test]
+    fn with_combustor_shares_the_wrapped_engines_cache() {
+        let combustor: Arc<dyn Combustor> =
+            Arc::new(WasmCombustor::new(WasmConfig::default()).unwrap());
+        // Compile directly on the standalone combustor - NOT through
+        // the engine below.
+        let id = combustor.ignite("module.exports = () => 41 + 1").unwrap();
+
+        let engine = ThrustEngine::with_combustor(
+            combustor.clone(),
+            ThrustEngineConfig {
+                compute_workers: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // The pool never called `ignite` itself; if it had built a
+        // private combustor (pre-E4 `new()` shape) this would be
+        // ScriptNotFound instead of the compiled result.
+        let out = engine
+            .thrust_sync(&id, json!(null), FuelGauge::unlimited(), None)
+            .unwrap();
+        assert_eq!(out, json!(42));
+    }
+
+    #[test]
+    fn with_combustor_extinguish_reaches_the_shared_combustor() {
+        let combustor: Arc<dyn Combustor> =
+            Arc::new(WasmCombustor::new(WasmConfig::default()).unwrap());
+        let engine = ThrustEngine::with_combustor(
+            combustor.clone(),
+            ThrustEngineConfig {
+                compute_workers: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let id = engine.register("module.exports = () => 1").unwrap();
+        engine.extinguish(&id);
+        // Extinguished on the SHARED combustor - visible from the
+        // standalone handle too, and the pool can no longer run it.
+        let err = combustor
+            .thrust(&id, &json!(null), &FuelGauge::unlimited())
+            .unwrap_err();
+        assert!(matches!(err, AfterburnerError::ScriptNotFound));
+        let err = engine
+            .thrust_sync(&id, json!(null), FuelGauge::unlimited(), None)
+            .unwrap_err();
+        assert!(matches!(err, AfterburnerError::ScriptNotFound));
     }
 }
