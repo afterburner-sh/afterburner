@@ -29,6 +29,7 @@
 //! next thrust on that hash routes to native; the next ignite reuses the
 //! `FAILED` slot (idempotent, no compile re-attempt).
 
+use afterburner_core::governance::{ThreadGovernance, spawn_governed};
 use afterburner_core::log::Level;
 use afterburner_core::{
     AfterburnerError, Combustor, EngineMode, FuelGauge, OutputValue, Result, ScriptId,
@@ -76,6 +77,17 @@ enum WorkerMsg {
     Shutdown,
 }
 
+/// Configuration for [`AdaptiveCombustor::with_config`]: the wasm-tier
+/// config the background compile worker builds its `WasmCombustor`
+/// from, plus the governance applied to that one compile-worker
+/// thread. `Default` (governance every field `None`) is a pure no-op -
+/// today's ungoverned worker, byte-identical.
+#[derive(Default, Clone)]
+pub struct AdaptiveConfig {
+    pub wasm_config: WasmConfig,
+    pub governance: ThreadGovernance,
+}
+
 pub struct AdaptiveCombustor {
     native: Arc<NativeCombustor>,
     wasm: Arc<WasmCombustor>,
@@ -91,14 +103,29 @@ impl AdaptiveCombustor {
 
     /// Build an adaptive combustor with a custom Wasm-backend config -
     /// useful for tests that want to point at a specific Javy CLI.
+    /// Delegates to [`Self::with_config`] with default (ungoverned)
+    /// governance.
     pub fn with_wasm_config(cfg: WasmConfig) -> Result<Self> {
+        Self::with_config(AdaptiveConfig {
+            wasm_config: cfg,
+            governance: ThreadGovernance::default(),
+        })
+    }
+
+    /// Build an adaptive combustor with a full [`AdaptiveConfig`],
+    /// including governance for the background compile worker thread
+    /// (`afterburner-adaptive-compile`).
+    pub fn with_config(cfg: AdaptiveConfig) -> Result<Self> {
         let native = Arc::new(NativeCombustor::new()?);
-        let wasm = Arc::new(WasmCombustor::new(cfg)?);
+        let wasm = Arc::new(WasmCombustor::new(cfg.wasm_config)?);
         let state: Arc<HopscotchMap<[u8; 32], Arc<Slot>>> = Arc::new(HopscotchMap::new());
         let (tx, rx) = unbounded::<WorkerMsg>();
+        let name = cfg
+            .governance
+            .thread_name("afterburner-adaptive-compile", "");
         let worker = {
             let wasm = wasm.clone();
-            thread::spawn(move || worker_loop(rx, wasm))
+            spawn_governed(name, cfg.governance, move || worker_loop(rx, wasm))?
         };
         Ok(Self {
             native,
@@ -490,6 +517,70 @@ mod tests {
             c.wait_for_compile(&id, 100),
             CompileOutcome::Cancelled,
             "extinguished script should report Cancelled, not Pending"
+        );
+    }
+
+    // ── E2 governance ────────────────────────────────────────────────
+
+    #[test]
+    fn default_config_is_noop_governance() {
+        let cfg = AdaptiveConfig::default();
+        assert_eq!(cfg.governance, ThreadGovernance::default());
+    }
+
+    #[test]
+    fn with_wasm_config_delegates_to_default_governance() {
+        // Byte-identical-defaults proof: the pre-governance constructor
+        // still works exactly as before, and the engine functions
+        // normally (compile worker still spawns ungoverned).
+        let c = AdaptiveCombustor::with_wasm_config(WasmConfig::default()).unwrap();
+        let id = c.ignite("module.exports = () => 1 + 1").unwrap();
+        let out = c
+            .thrust(&id, &json!(null), &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(out, json!(2));
+        assert_eq!(c.wait_for_compile(&id, 60_000), CompileOutcome::Ready);
+    }
+
+    #[test]
+    fn with_config_applies_custom_governance() {
+        // Positive nice never needs CAP_SYS_NICE - must pass on every box.
+        let c = AdaptiveCombustor::with_config(AdaptiveConfig {
+            wasm_config: WasmConfig::default(),
+            governance: ThreadGovernance {
+                nice: Some(7),
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let id = c.ignite("module.exports = (d) => d.x + 1").unwrap();
+        let out = c
+            .thrust(&id, &json!({"x": 41}), &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(out, json!(42));
+        assert_eq!(c.wait_for_compile(&id, 60_000), CompileOutcome::Ready);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn governance_failure_at_construction_is_loud() {
+        // An affinity mask with no CPU below CPU_SETSIZE resolves to an
+        // empty effective mask, which sched_setaffinity rejects - a
+        // deterministic, privilege-independent way to force the
+        // fail-loud-at-construction path.
+        let result = AdaptiveCombustor::with_config(AdaptiveConfig {
+            wasm_config: WasmConfig::default(),
+            governance: ThreadGovernance {
+                affinity: Some(vec![usize::MAX]),
+                ..Default::default()
+            },
+        });
+        // `.unwrap_err()` needs `T: Debug`; `AdaptiveCombustor` isn't
+        // (it holds threads and channels), so extract via `.err()`.
+        let err = result.err().expect("expected an Err");
+        assert!(
+            matches!(err, AfterburnerError::GovernanceFailed(_)),
+            "expected GovernanceFailed, got {err}"
         );
     }
 }

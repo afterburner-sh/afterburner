@@ -110,7 +110,7 @@ pub use daemon_shard_pool::{DaemonShardPool, ShardPoolConfig};
 pub use daemon_tls::{DaemonTls, TlsEvent};
 pub use daemon_workers::{DaemonWorkers, WorkerConfig, WorkerEvent};
 pub use manifold_codec::manifold_to_cli_args;
-pub use wasm_engine::{WasmCombustor, WasmConfig};
+pub use wasm_engine::{ResidentBreakdown, WasmCombustor, WasmConfig};
 
 /// The Wizer-preinitialized Afterburner Javy plugin binary. Exposed for
 /// build-time tools that need to pass it to `javy build -C plugin=...`

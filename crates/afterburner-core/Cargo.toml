@@ -26,4 +26,11 @@ sha2.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
 kovan-map.workspace = true
+kovan-channel.workspace = true
 fastrace.workspace = true
+
+# Linux-only: setpriority/sched_setaffinity for ThreadGovernance.
+# Gated by target_os cfg so non-Linux builds skip entirely (governance
+# on those platforms fails loud in pure Rust, no libc call involved).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

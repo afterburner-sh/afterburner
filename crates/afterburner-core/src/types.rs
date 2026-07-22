@@ -8,6 +8,8 @@
 use crate::manifold::Manifold;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// Identifier returned by `Combustor::ignite` and consumed by `thrust` /
 /// `extinguish`. Content-addressed: the `hash` is SHA-256 of the JS source,
@@ -75,6 +77,16 @@ pub struct FuelGauge {
     /// Capability gate for Node-style built-in modules. Defaults to
     /// [`Manifold::sealed`] - no host-backed modules accessible.
     pub manifold: Manifold,
+    /// Optional sink flipped to `true` the moment the wasm tier's
+    /// `ResourceLimiter` denies a `memory.grow` / `table.grow` request
+    /// during this call (a configured-cap denial, not a genuine
+    /// system-level allocation failure). `None` (the default) costs
+    /// nothing extra; `Some(flag)` survives past the call - the guest
+    /// runtime may still turn a denied growth into a generic wasm trap
+    /// (its own allocator aborting on the -1 return), so this flag is
+    /// the only way to reclassify that trap as a memory-cap error
+    /// after the fact, from outside the `Store` that produced it.
+    pub limiter_tripped: Option<Arc<AtomicBool>>,
 }
 
 impl FuelGauge {
@@ -97,6 +109,7 @@ impl FuelGauge {
             timeout_ms: None,
             output_bytes: None,
             manifold: Manifold::sealed(),
+            limiter_tripped: None,
         }
     }
 
@@ -271,5 +284,32 @@ mod tests {
         assert!(g.fuel.is_none());
         assert!(g.memory_bytes.is_none());
         assert!(g.timeout_ms.is_none());
+        assert!(g.limiter_tripped.is_none());
+    }
+
+    #[test]
+    fn fuel_gauge_default_has_no_limiter_sink() {
+        assert!(FuelGauge::default().limiter_tripped.is_none());
+    }
+
+    #[test]
+    fn fuel_gauge_limiter_tripped_survives_clone() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = Arc::new(AtomicBool::new(false));
+        let g = FuelGauge {
+            limiter_tripped: Some(flag.clone()),
+            ..FuelGauge::unlimited()
+        };
+        let cloned = g.clone();
+        flag.store(true, Ordering::Release);
+        assert!(
+            cloned
+                .limiter_tripped
+                .as_ref()
+                .unwrap()
+                .load(Ordering::Acquire),
+            "clone must share the same underlying flag (Arc), not a fresh false"
+        );
     }
 }

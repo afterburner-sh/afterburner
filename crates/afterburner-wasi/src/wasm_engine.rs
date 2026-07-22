@@ -30,6 +30,8 @@ use crate::chamber::{self, TICK_PERIOD_MS, drain_stdout, format_trap_with_stderr
 use crate::host::{HostState, InputFormat};
 use crate::host_imports;
 use crate::nozzle::parse_output;
+use afterburner_core::governance::{ThreadGovernance, spawn_governed};
+use afterburner_core::ledger::{LedgerClass, MemoryLedger};
 use afterburner_core::log::Level;
 use afterburner_core::{
     AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Manifold, OutputValue,
@@ -42,7 +44,7 @@ use bytes::Bytes;
 use kovan_map::HopscotchMap;
 use serde_json::Value;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use wasmtime::{
@@ -225,6 +227,21 @@ pub struct WasmConfig {
     /// `WASM32_MAX_LINEAR_MEMORY_BYTES` exactly like the
     /// environment-variable path.
     pub pool_max_linear_memory_bytes: Option<usize>,
+    /// Governance (nice / affinity / name prefix) applied to the
+    /// internal `afterburner-epoch-ticker` thread IF this embedder
+    /// keeps it (`spawn_epoch_ticker` unset or `Some(true)`) - ignored
+    /// entirely when the ticker is suppressed, which is the intended
+    /// posture for an embedder driving the epoch itself. `Default`
+    /// (every field `None`) is a pure no-op: today's ungoverned ticker,
+    /// byte-identical.
+    pub ticker_governance: ThreadGovernance,
+    /// Optional embedder-owned memory-accounting hook, charged at
+    /// `bytecode_cache` / `sealed_cache` / `dyn_cache` insert (reserve,
+    /// [`LedgerClass::ModuleCache`]) and evict/extinguish (release).
+    /// `None` (the default) is a pure no-op: every charge point is a
+    /// single `is_some()` branch on an already-cold path (registration,
+    /// never per-call).
+    pub memory_ledger: Option<Arc<dyn MemoryLedger>>,
 }
 
 /// Cached payload for a registered script. Built once in `ignite` so
@@ -253,6 +270,17 @@ pub(crate) struct CompiledScript {
     pub columnar_invoke_envelope_bytes: Bytes,
 }
 
+/// Total bytes a [`CompiledScript`] entry charges to
+/// `LedgerClass::ModuleCache` - the one canonical sizing function used
+/// at both `ignite` (charge) and `extinguish` (release) so the two can
+/// never drift on what a `bytecode_cache` entry costs.
+fn compiled_script_bytes(cs: &CompiledScript) -> usize {
+    cs.raw.len()
+        + cs.columnar_raw.len()
+        + cs.invoke_envelope_bytes.len()
+        + cs.columnar_invoke_envelope_bytes.len()
+}
+
 /// A pre-compiled, self-contained (SEALED) WASM module registered via
 /// [`WasmCombustor::register_precompiled`]. The module imports only
 /// `wasi_snapshot_preview1` (no `afterburner:host`); it is instantiated
@@ -260,6 +288,31 @@ pub(crate) struct CompiledScript {
 /// output on stdout. No plugin envelope, no bytecode compile step.
 pub(crate) struct SealedModule {
     pub instance_pre: InstancePre<HostState>,
+}
+
+/// A measured (not proxy) breakdown of a [`WasmCombustor`]'s resident
+/// bytes, so an embedder's R1/R2-style accounting can true up against
+/// reality instead of a size-at-registration-time estimate. Computed on
+/// demand by [`WasmCombustor::resident_estimate`] - never cached, never
+/// itself charged to any ledger (this is a read-only verification
+/// accessor, not another accounting path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResidentBreakdown {
+    /// Serialized size of the compiled plugin module - the one Wizer-
+    /// preinitialized module every tier shares.
+    pub plugin_module: usize,
+    /// Sum of every currently-registered `ignite`d script's bytecode +
+    /// envelope bytes.
+    pub bytecode_cache: usize,
+    /// Sum of every currently-registered sealed-precompiled module's
+    /// original byte length.
+    pub sealed_modules: usize,
+    /// Sum of every currently-registered dynamically-linked module's
+    /// original byte length.
+    pub dyn_modules: usize,
+    /// The pooling allocator's keep-resident floor:
+    /// `pool_total_instances * (LINEAR_MEMORY_KEEP_RESIDENT + TABLE_KEEP_RESIDENT)`.
+    pub pool_keep_resident: usize,
 }
 
 /// A dynamically-linked module registered via
@@ -313,6 +366,28 @@ pub struct WasmCombustor {
     /// and caller's `Manifold`), then instantiate the package module linking
     /// its `afterburner-plugin-v1` imports to the plugin's exports.
     dyn_cache: HopscotchMap<[u8; 32], Arc<DynModule>>,
+    /// Byte length charged per `sealed_cache` entry, keyed the same as
+    /// it. A companion map rather than widening `SealedModule` itself,
+    /// so every existing `sealed_cache` call site is untouched.
+    sealed_bytes: HopscotchMap<[u8; 32], usize>,
+    /// Same role as `sealed_bytes`, for `dyn_cache`.
+    dyn_bytes: HopscotchMap<[u8; 32], usize>,
+    /// Optional embedder-owned memory ledger - charged at cache
+    /// insert/evict (`LedgerClass::ModuleCache`). `None` is the
+    /// default, zero-cost posture.
+    memory_ledger: Option<Arc<dyn MemoryLedger>>,
+    /// Running totals mirroring the ledger charges (tracked regardless
+    /// of whether a ledger is configured), so `resident_estimate`
+    /// reports real numbers without re-walking a cache or
+    /// re-serializing every entry.
+    bytecode_cache_bytes: AtomicUsize,
+    sealed_modules_bytes: AtomicUsize,
+    dyn_modules_bytes: AtomicUsize,
+    /// Resolved pooling-allocator instance count - mirrors
+    /// `build_engine`'s own `pool_total_instances.unwrap_or(POOL_TOTAL_MEMORIES)` -
+    /// kept so `resident_estimate` can report the pool's keep-resident
+    /// floor without re-deriving it from a discarded `Engine::Config`.
+    pool_total_instances: u32,
     /// Counter incremented every time `compile_to_bytecode` actually
     /// invokes the plugin's compile mode. Used by tests to assert the
     /// hot path is genuinely cached (register-once → N thrusts → 1
@@ -358,19 +433,21 @@ impl WasmCombustor {
 
         let ticker_shutdown = Arc::new(AtomicBool::new(false));
         let ticker = if config.spawn_epoch_ticker.unwrap_or(true) {
-            let engine = engine.clone();
+            let engine_for_ticker = engine.clone();
             let shutdown = ticker_shutdown.clone();
-            Some(
-                thread::Builder::new()
-                    .name("afterburner-epoch-ticker".into())
-                    .spawn(move || {
-                        while !shutdown.load(Ordering::Acquire) {
-                            thread::sleep(Duration::from_millis(TICK_PERIOD_MS));
-                            engine.increment_epoch();
-                        }
-                    })
-                    .map_err(|e| AfterburnerError::Engine(format!("epoch ticker spawn: {e}")))?,
-            )
+            let ticker_name = config
+                .ticker_governance
+                .thread_name("afterburner-epoch-ticker", "");
+            Some(spawn_governed(
+                ticker_name,
+                config.ticker_governance.clone(),
+                move || {
+                    while !shutdown.load(Ordering::Acquire) {
+                        thread::sleep(Duration::from_millis(TICK_PERIOD_MS));
+                        engine_for_ticker.increment_epoch();
+                    }
+                },
+            )?)
         } else {
             None
         };
@@ -378,6 +455,7 @@ impl WasmCombustor {
         let state_store = config
             .state_store
             .unwrap_or_else(InMemoryStateStore::shared);
+        let pool_total_instances = config.pool_total_instances.unwrap_or(POOL_TOTAL_MEMORIES);
 
         Ok(Self {
             engine,
@@ -385,6 +463,13 @@ impl WasmCombustor {
             bytecode_cache: HopscotchMap::new(),
             sealed_cache: HopscotchMap::new(),
             dyn_cache: HopscotchMap::new(),
+            sealed_bytes: HopscotchMap::new(),
+            dyn_bytes: HopscotchMap::new(),
+            memory_ledger: config.memory_ledger,
+            bytecode_cache_bytes: AtomicUsize::new(0),
+            sealed_modules_bytes: AtomicUsize::new(0),
+            dyn_modules_bytes: AtomicUsize::new(0),
+            pool_total_instances,
             compile_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             instance_pre: Arc::new(instance_pre),
             state_store,
@@ -393,6 +478,51 @@ impl WasmCombustor {
             ticker_shutdown,
             ticker,
         })
+    }
+
+    /// Reserve `bytes` against the configured ledger (if any) under
+    /// [`LedgerClass::ModuleCache`] and track the running total either
+    /// way (so [`Self::resident_estimate`] stays accurate with or
+    /// without a ledger). Call BEFORE the cache insert that makes the
+    /// bytes resident; on denial the caller must not proceed with the
+    /// insert.
+    fn charge_module_cache(&self, bytes: usize, total: &AtomicUsize) -> Result<()> {
+        if let Some(ledger) = &self.memory_ledger {
+            ledger
+                .reserve(LedgerClass::ModuleCache, bytes)
+                .map_err(|e| AfterburnerError::LedgerDenied(e.0))?;
+        }
+        total.fetch_add(bytes, Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// Release `bytes` previously charged via [`Self::charge_module_cache`].
+    /// Call AFTER the cache remove.
+    fn release_module_cache(&self, bytes: usize, total: &AtomicUsize) {
+        if let Some(ledger) = &self.memory_ledger {
+            ledger.release(LedgerClass::ModuleCache, bytes);
+        }
+        total.fetch_sub(bytes, Ordering::AcqRel);
+    }
+
+    /// Measure this combustor's resident-byte breakdown right now. Not
+    /// free - the plugin module is re-serialized on every call - so
+    /// this is for occasional verification / true-up, never a hot path.
+    pub fn resident_estimate(&self) -> ResidentBreakdown {
+        let plugin_module = self
+            .instance_pre
+            .module()
+            .serialize()
+            .map(|b| b.len())
+            .unwrap_or(0);
+        ResidentBreakdown {
+            plugin_module,
+            bytecode_cache: self.bytecode_cache_bytes.load(Ordering::Acquire),
+            sealed_modules: self.sealed_modules_bytes.load(Ordering::Acquire),
+            dyn_modules: self.dyn_modules_bytes.load(Ordering::Acquire),
+            pool_keep_resident: self.pool_total_instances as usize
+                * (LINEAR_MEMORY_KEEP_RESIDENT + TABLE_KEEP_RESIDENT),
+        }
     }
 
     /// Exposed so the daemon path can thread the same hook into its
@@ -498,9 +628,12 @@ impl WasmCombustor {
         // cache when `compile_cache_dir` is set).
         let module = Module::new(&self.engine, wasm)
             .map_err(|e| AfterburnerError::CompileFailed(format!("sealed module compile: {e}")))?;
+        let built = self.build_sealed_module(module)?;
 
-        self.sealed_cache
-            .insert(hash, self.build_sealed_module(module)?);
+        let bytes = wasm.len();
+        self.charge_module_cache(bytes, &self.sealed_modules_bytes)?;
+        self.sealed_cache.insert(hash, built);
+        self.sealed_bytes.insert(hash, bytes);
         ab_event!(
             Level::Info,
             "wasm.sealed.registered",
@@ -578,9 +711,12 @@ impl WasmCombustor {
         let module = unsafe { Module::deserialize(&self.engine, cwasm) }.map_err(|e| {
             AfterburnerError::CompileFailed(format!("sealed module deserialize: {e}"))
         })?;
+        let built = self.build_sealed_module(module)?;
 
-        self.sealed_cache
-            .insert(hash, self.build_sealed_module(module)?);
+        let bytes = cwasm.len();
+        self.charge_module_cache(bytes, &self.sealed_modules_bytes)?;
+        self.sealed_cache.insert(hash, built);
+        self.sealed_bytes.insert(hash, bytes);
         ab_event!(
             Level::Info,
             "wasm.sealed.registered_from_cache",
@@ -680,7 +816,10 @@ impl WasmCombustor {
         let module = Module::new(&self.engine, wasm)
             .map_err(|e| AfterburnerError::CompileFailed(format!("dyn module compile: {e}")))?;
 
+        let bytes = wasm.len();
+        self.charge_module_cache(bytes, &self.dyn_modules_bytes)?;
         self.dyn_cache.insert(hash, Arc::new(DynModule { module }));
+        self.dyn_bytes.insert(hash, bytes);
         ab_event!(
             Level::Info,
             "wasm.dyn.registered",
@@ -713,7 +852,10 @@ impl WasmCombustor {
         let module = unsafe { Module::deserialize(&self.engine, cwasm) }
             .map_err(|e| AfterburnerError::CompileFailed(format!("dyn module deserialize: {e}")))?;
 
+        let bytes = cwasm.len();
+        self.charge_module_cache(bytes, &self.dyn_modules_bytes)?;
         self.dyn_cache.insert(hash, Arc::new(DynModule { module }));
+        self.dyn_bytes.insert(hash, bytes);
         ab_event!(
             Level::Info,
             "wasm.dyn.registered_from_cache",
@@ -1620,16 +1762,15 @@ impl Combustor for WasmCombustor {
             "bytecode_b64": columnar_bytecode_b64,
         });
         let columnar_invoke_envelope_bytes = Bytes::from(serde_json::to_vec(&columnar_envelope)?);
+        let compiled = CompiledScript {
+            raw: bytecode,
+            columnar_raw: columnar_bytecode,
+            invoke_envelope_bytes,
+            columnar_invoke_envelope_bytes,
+        };
+        self.charge_module_cache(compiled_script_bytes(&compiled), &self.bytecode_cache_bytes)?;
         self.source_store.insert(hash, source.to_string());
-        self.bytecode_cache.insert(
-            hash,
-            Arc::new(CompiledScript {
-                raw: bytecode,
-                columnar_raw: columnar_bytecode,
-                invoke_envelope_bytes,
-                columnar_invoke_envelope_bytes,
-            }),
-        );
+        self.bytecode_cache.insert(hash, Arc::new(compiled));
         ab_event!(
             Level::Info,
             "wasm.ignite.compiled",
@@ -1701,12 +1842,20 @@ impl Combustor for WasmCombustor {
 
     fn extinguish(&self, id: &ScriptId) {
         self.source_store.remove(&id.hash);
-        self.bytecode_cache.remove(&id.hash);
+        if let Some(compiled) = self.bytecode_cache.remove(&id.hash) {
+            self.release_module_cache(compiled_script_bytes(&compiled), &self.bytecode_cache_bytes);
+        }
         // Also remove from sealed_cache and dyn_cache in case this id was
         // registered via register_precompiled - extinguish is content-addressed
         // and must cover all paths.
         self.sealed_cache.remove(&id.hash);
+        if let Some(bytes) = self.sealed_bytes.remove(&id.hash) {
+            self.release_module_cache(bytes, &self.sealed_modules_bytes);
+        }
         self.dyn_cache.remove(&id.hash);
+        if let Some(bytes) = self.dyn_bytes.remove(&id.hash) {
+            self.release_module_cache(bytes, &self.dyn_modules_bytes);
+        }
         ab_event!(Level::Info, "wasm.extinguish", "hash" => hex8(&id.hash));
     }
 
@@ -2589,5 +2738,241 @@ mod tests {
         let js_id = c.ignite("module.exports = () => 1").unwrap();
         let err = c.serialize_module(&js_id).unwrap_err();
         assert!(matches!(err, AfterburnerError::ScriptNotFound));
+    }
+
+    // ── E2/E3 governance + ledger ──────────────────────────────────────
+
+    #[test]
+    fn default_config_ticker_still_spawns_and_engine_still_works() {
+        // Byte-identical-defaults proof: WasmConfig::default() carries
+        // ThreadGovernance::default() (a no-op) for ticker_governance and
+        // None for memory_ledger - the epoch ticker still spawns
+        // ungoverned exactly as before, and ordinary thrust is unaffected.
+        let c = make_combustor();
+        assert!(c.ticker.is_some(), "default config keeps the epoch ticker");
+        let id = c.ignite("module.exports = () => 1 + 1").unwrap();
+        let out = c
+            .thrust(&id, &json!(null), &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(out, json!(2));
+    }
+
+    #[test]
+    fn ticker_governance_is_ignored_when_ticker_suppressed() {
+        // spawn_epoch_ticker(false) must still suppress the ticker even
+        // when a non-default ticker_governance is configured - governance
+        // never resurrects a thread the embedder explicitly opted out of.
+        let cfg = WasmConfig {
+            spawn_epoch_ticker: Some(false),
+            ticker_governance: ThreadGovernance {
+                name_prefix: Some("myapp-ticker".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let c = WasmCombustor::new(cfg).unwrap();
+        assert!(c.ticker.is_none());
+    }
+
+    #[test]
+    fn resident_estimate_reports_zero_caches_on_a_fresh_combustor() {
+        let c = make_combustor();
+        let r = c.resident_estimate();
+        assert!(r.plugin_module > 0, "plugin module must have a real size");
+        assert_eq!(r.bytecode_cache, 0);
+        assert_eq!(r.sealed_modules, 0);
+        assert_eq!(r.dyn_modules, 0);
+        assert!(r.pool_keep_resident > 0);
+    }
+
+    #[test]
+    fn resident_estimate_tracks_ignite_and_extinguish() {
+        let c = make_combustor();
+        let before = c.resident_estimate().bytecode_cache;
+        let id = c.ignite("module.exports = () => 1").unwrap();
+        let after_ignite = c.resident_estimate().bytecode_cache;
+        assert!(
+            after_ignite > before,
+            "ignite must grow the tracked bytecode_cache total"
+        );
+        c.extinguish(&id);
+        let after_extinguish = c.resident_estimate().bytecode_cache;
+        assert_eq!(
+            after_extinguish, before,
+            "extinguish must release exactly what ignite charged"
+        );
+    }
+
+    #[test]
+    fn resident_estimate_tracks_sealed_register_and_extinguish() {
+        let c = make_combustor();
+        let before = c.resident_estimate().sealed_modules;
+        let id = c
+            .register_precompiled(SERIALIZE_ROUNDTRIP_WAT.as_bytes(), "wasm32-wasip1")
+            .unwrap();
+        let after_register = c.resident_estimate().sealed_modules;
+        assert!(after_register > before);
+        c.extinguish(&id);
+        assert_eq!(c.resident_estimate().sealed_modules, before);
+    }
+
+    /// Records every `reserve`/`release` call so tests can assert both
+    /// the class and the byte count charged, and optionally denies every
+    /// reservation to exercise the loud-failure path.
+    #[derive(Default)]
+    struct MockLedger {
+        deny: bool,
+        reserved: std::sync::Mutex<Vec<(afterburner_core::ledger::LedgerClass, usize)>>,
+        released: std::sync::Mutex<Vec<(afterburner_core::ledger::LedgerClass, usize)>>,
+    }
+
+    impl afterburner_core::ledger::MemoryLedger for MockLedger {
+        fn reserve(
+            &self,
+            class: afterburner_core::ledger::LedgerClass,
+            bytes: usize,
+        ) -> std::result::Result<(), afterburner_core::ledger::LedgerDenied> {
+            if self.deny {
+                return Err(afterburner_core::ledger::LedgerDenied(
+                    "mock ledger denies everything".to_string(),
+                ));
+            }
+            self.reserved.lock().unwrap().push((class, bytes));
+            Ok(())
+        }
+
+        fn release(&self, class: afterburner_core::ledger::LedgerClass, bytes: usize) {
+            self.released.lock().unwrap().push((class, bytes));
+        }
+    }
+
+    #[test]
+    fn memory_ledger_reserve_and_release_round_trip_on_ignite_extinguish() {
+        let ledger = Arc::new(MockLedger::default());
+        let cfg = WasmConfig {
+            memory_ledger: Some(ledger.clone() as Arc<dyn MemoryLedger>),
+            ..Default::default()
+        };
+        let c = WasmCombustor::new(cfg).unwrap();
+
+        let id = c.ignite("module.exports = () => 1").unwrap();
+        {
+            let reserved = ledger.reserved.lock().unwrap();
+            assert_eq!(reserved.len(), 1);
+            assert_eq!(reserved[0].0, LedgerClass::ModuleCache);
+            assert!(reserved[0].1 > 0);
+        }
+        assert!(ledger.released.lock().unwrap().is_empty());
+
+        c.extinguish(&id);
+        let reserved_bytes = ledger.reserved.lock().unwrap()[0].1;
+        let released = ledger.released.lock().unwrap();
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0], (LedgerClass::ModuleCache, reserved_bytes));
+    }
+
+    #[test]
+    fn memory_ledger_denial_is_loud_and_never_registers() {
+        let ledger = Arc::new(MockLedger {
+            deny: true,
+            ..Default::default()
+        });
+        let cfg = WasmConfig {
+            memory_ledger: Some(ledger as Arc<dyn MemoryLedger>),
+            ..Default::default()
+        };
+        let c = WasmCombustor::new(cfg).unwrap();
+
+        let err = c.ignite("module.exports = () => 1").unwrap_err();
+        assert!(
+            matches!(err, AfterburnerError::LedgerDenied(_)),
+            "expected LedgerDenied, got {err}"
+        );
+        // A denied registration must not be resolvable.
+        assert_eq!(c.resident_estimate().bytecode_cache, 0);
+    }
+
+    #[test]
+    fn memory_ledger_none_is_free_and_unchanged() {
+        // No ledger configured: registration succeeds exactly as before,
+        // and resident_estimate still tracks totals (that bookkeeping is
+        // independent of ledger presence).
+        let c = make_combustor();
+        let id = c.ignite("module.exports = () => 1").unwrap();
+        let out = c
+            .thrust(&id, &json!(null), &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(out, json!(1));
+        assert!(c.resident_estimate().bytecode_cache > 0);
+    }
+
+    // ── limiter_tripped ─────────────────────────────────────────────────
+
+    #[test]
+    fn limiter_tripped_flag_is_set_on_memory_cap_denial() {
+        // Mirrors the scramdb finding this flag exists for: a guest
+        // allocation well past FuelGauge::memory_bytes must trip the
+        // flag regardless of whether the resulting failure surfaces as
+        // a typed MemoryLimit or a generic wasm trap (the guest
+        // runtime's own allocator can catch the denial and abort
+        // differently depending on what it was doing).
+        let c = make_combustor();
+        let id = c
+            .ignite(
+                r#"module.exports = () => {
+                    const huge = new Float64Array(8 * 1024 * 1024); // 64MB
+                    huge[0] = 1;
+                    return huge[0];
+                };"#,
+            )
+            .unwrap();
+        let tripped = Arc::new(AtomicBool::new(false));
+        let limits = FuelGauge {
+            memory_bytes: Some(24 * 1024 * 1024),
+            limiter_tripped: Some(tripped.clone()),
+            ..FuelGauge::unlimited()
+        };
+        let result = c.thrust(&id, &json!(null), &limits);
+        assert!(result.is_err(), "an over-budget allocation must fail");
+        assert!(
+            tripped.load(Ordering::Acquire),
+            "the ResourceLimiter denial must set the tripped flag regardless of \
+             how the guest's own runtime surfaced the failure: {result:?}"
+        );
+    }
+
+    #[test]
+    fn limiter_tripped_flag_stays_false_when_never_denied() {
+        let c = make_combustor();
+        let id = c.ignite("module.exports = () => 1 + 1").unwrap();
+        let tripped = Arc::new(AtomicBool::new(false));
+        let limits = FuelGauge {
+            limiter_tripped: Some(tripped.clone()),
+            ..FuelGauge::unlimited()
+        };
+        let out = c.thrust(&id, &json!(null), &limits).unwrap();
+        assert_eq!(out, json!(2));
+        assert!(!tripped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn limiter_tripped_defaults_to_none_and_costs_nothing() {
+        // No sink supplied: HostState::limiter_tripped() reads false and
+        // nothing panics, even under a denial.
+        let c = make_combustor();
+        let id = c
+            .ignite(
+                r#"module.exports = () => {
+                    const huge = new Float64Array(8 * 1024 * 1024);
+                    return huge.length;
+                };"#,
+            )
+            .unwrap();
+        let limits = FuelGauge {
+            memory_bytes: Some(24 * 1024 * 1024),
+            ..FuelGauge::unlimited()
+        };
+        // Must not panic; the caller simply has no sink to consult.
+        let _ = c.thrust(&id, &json!(null), &limits);
     }
 }

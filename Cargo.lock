@@ -169,7 +169,9 @@ version = "0.2.5"
 dependencies = [
  "blake3",
  "fastrace",
+ "kovan-channel",
  "kovan-map",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

@@ -25,6 +25,8 @@ mod admission;
 mod numa;
 
 use admission::TokenBucketAdmission;
+use afterburner_core::governance::{ThreadGovernance, spawn_governed};
+use afterburner_core::ledger::{LedgerClass, MemoryLedger};
 use afterburner_core::{AfterburnerError, Combustor, FuelGauge, OutputValue, Result, ScriptId};
 use afterburner_wasi::{WasmCombustor, WasmConfig};
 use kovan_channel::flavors::unbounded::{Receiver, Sender};
@@ -141,6 +143,24 @@ pub struct ThrustEngineConfig {
     /// WasmCombustor configuration shared across every worker. Cloned per
     /// worker construction; each worker adds its own `HostState` per call.
     pub wasm_config: WasmConfig,
+
+    /// Governance (nice / affinity / name prefix) applied to every
+    /// compute worker and the admission sweep thread this engine spawns.
+    /// `Some(affinity)` overrides the NUMA round-robin pin
+    /// ([`numa::pin_current_thread_to_worker`]) for the workers; `nice`
+    /// applies to both. `Default` (every field `None`) is a pure no-op -
+    /// today's ungoverned pool, byte-identical.
+    pub governance: ThreadGovernance,
+
+    /// Optional embedder-owned memory-accounting hook, charged at job
+    /// enqueue (reserve, [`LedgerClass::QueuedJob`]) and at
+    /// execute-or-drop (release). Independent of
+    /// `wasm_config.memory_ledger`, which charges the wrapped
+    /// combustor's own module cache - this axis charges the thrust
+    /// queue's own resident bytes. `None` (the default) is a pure
+    /// no-op: the per-enqueue sizing pass is skipped entirely when
+    /// unset.
+    pub memory_ledger: Option<Arc<dyn MemoryLedger>>,
 }
 
 impl Default for ThrustEngineConfig {
@@ -154,6 +174,8 @@ impl Default for ThrustEngineConfig {
             injector_capacity: 4096,
             shutdown_drain_deadline: Duration::from_secs(5),
             wasm_config: WasmConfig::default(),
+            governance: ThreadGovernance::default(),
+            memory_ledger: None,
         }
     }
 }
@@ -161,7 +183,8 @@ impl Default for ThrustEngineConfig {
 impl fmt::Debug for ThrustEngineConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // `wasm_config` is opaque on purpose: its `host_context` may be a
-        // user-supplied trait object we can't format safely.
+        // user-supplied trait object we can't format safely. Same for
+        // `memory_ledger` - the embedder's `dyn MemoryLedger` isn't Debug.
         f.debug_struct("ThrustEngineConfig")
             .field("compute_workers", &self.compute_workers)
             .field("io_workers", &self.io_workers)
@@ -171,6 +194,8 @@ impl fmt::Debug for ThrustEngineConfig {
             .field("injector_capacity", &self.injector_capacity)
             .field("shutdown_drain_deadline", &self.shutdown_drain_deadline)
             .field("wasm_config", &"<opaque>")
+            .field("governance", &self.governance)
+            .field("memory_ledger", &self.memory_ledger.is_some())
             .finish()
     }
 }
@@ -344,8 +369,22 @@ struct Job {
     /// Tenant carried through for stats / future admission; unused in T1.
     #[allow(dead_code)]
     tenant: Option<TenantId>,
-    /// One-shot reply channel back to the caller's `ThrustHandle`.
-    reply: Sender<Result<Value>>,
+    /// One-shot reply channel back to the caller's `ThrustHandle`. `Option`
+    /// so `execute` can take it via `&mut self` instead of a partial move
+    /// out of `self` - `Job` implements `Drop` (below), and Rust forbids
+    /// partially moving a field out of a `Drop` type.
+    reply: Option<Sender<Result<Value>>>,
+    /// Mirrors `ThrustEngineConfig::memory_ledger`, carried per-job so
+    /// `Drop` can release without a back-reference to the engine.
+    ledger: Option<Arc<dyn MemoryLedger>>,
+    /// Bytes charged to `LedgerClass::QueuedJob` at enqueue (`thrust()`);
+    /// `0` when no ledger is configured. Released exactly once, by
+    /// `Drop`, covering both terminal paths a queued job can take -
+    /// executed (`execute` drops it at the end of the call) and
+    /// discarded unexecuted (`Overloaded` rejection, or a force-shutdown
+    /// dropping whatever is still queued) - one canonical release path
+    /// instead of one per call site.
+    charged_bytes: usize,
 }
 
 impl fmt::Debug for Job {
@@ -355,6 +394,26 @@ impl fmt::Debug for Job {
             .field("tenant", &self.tenant)
             .finish()
     }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        if self.charged_bytes > 0
+            && let Some(ledger) = &self.ledger
+        {
+            ledger.release(LedgerClass::QueuedJob, self.charged_bytes);
+        }
+    }
+}
+
+/// Coarse byte-size proxy for a queued job's payload, used only for
+/// `LedgerClass::QueuedJob` accounting - never computed when no ledger
+/// is configured (zero-cost-when-unused). The JSON-serialized size of
+/// `input` is the honest, actual byte count that would cross the wasm
+/// boundary if this job executes; `FuelGauge` / `ScriptId` are small and
+/// fixed-size, not worth charging separately.
+fn estimate_job_bytes(input: &Value) -> usize {
+    serde_json::to_vec(input).map(|v| v.len()).unwrap_or(0)
 }
 
 fn hex8(hash: &[u8; 32]) -> String {
@@ -447,9 +506,14 @@ impl ThrustEngine {
         let stats = Arc::new(StatsCounters::default());
         let shutdown = Arc::new(AtomicU8::new(STATE_RUN));
 
-        let admission = config
-            .admission_tokens_per_sec
-            .map(|rate| TokenBucketAdmission::new(rate, config.admission_burst_tokens));
+        let admission = match config.admission_tokens_per_sec {
+            Some(rate) => Some(TokenBucketAdmission::new(
+                rate,
+                config.admission_burst_tokens,
+                config.governance.clone(),
+            )?),
+            None => None,
+        };
 
         let n_workers = resolve_worker_count(config.compute_workers);
         let local_cap = if config.local_queue_capacity == 0 {
@@ -473,7 +537,7 @@ impl ThrustEngine {
 
         let mut handles = Vec::with_capacity(n_workers);
         for worker_id in 0..n_workers {
-            handles.push(spawn_worker(
+            match spawn_worker(
                 worker_id,
                 worker_queues.clone(),
                 injector.clone(),
@@ -481,7 +545,23 @@ impl ThrustEngine {
                 stats.clone(),
                 shutdown.clone(),
                 numa.clone(),
-            ));
+                config.governance.clone(),
+            ) {
+                Ok(handle) => handles.push(handle),
+                Err(e) => {
+                    // Governance failed "at pool construction" (never
+                    // silently mid-pool): signal shutdown, join whatever
+                    // already started, let `admission`'s own Drop join
+                    // its sweep thread, then propagate. Construction
+                    // never returns `Ok` with a partially-governed pool.
+                    shutdown.store(STATE_FORCE, Ordering::Release);
+                    for h in handles {
+                        let _ = h.join();
+                    }
+                    drop(admission);
+                    return Err(e);
+                }
+            }
         }
 
         Ok(Arc::new(Self {
@@ -545,12 +625,31 @@ impl ThrustEngine {
 
         let worker_idx = route_worker(&id.hash, self.n_workers);
 
+        // Charge the queued payload BEFORE it exists in a queue slot.
+        // Skipped entirely (zero cost) when no ledger is configured. A
+        // denial fails the enqueue loudly, before the job is built - the
+        // caller never sees a job that looked queued but wasn't charged.
+        let charged_bytes = match self.config.memory_ledger.as_ref() {
+            Some(ledger) => {
+                let bytes = estimate_job_bytes(&input);
+                if let Err(denied) = ledger.reserve(LedgerClass::QueuedJob, bytes) {
+                    self.stats.thrusts_rejected.fetch_add(1, Ordering::Relaxed);
+                    reply_tx.send(Err(AfterburnerError::LedgerDenied(denied.0)));
+                    return ThrustHandle { rx: reply_rx };
+                }
+                bytes
+            }
+            None => 0,
+        };
+
         let mut job = Job {
             id: *id,
             input,
             limits,
             tenant,
-            reply: reply_tx,
+            reply: Some(reply_tx),
+            ledger: self.config.memory_ledger.clone(),
+            charged_bytes,
         };
 
         // Try local first (affinity). On overflow, try the global
@@ -569,13 +668,17 @@ impl ThrustEngine {
                             .thrusts_via_injector
                             .fetch_add(1, Ordering::Relaxed);
                     }
-                    Err(returned) => {
+                    Err(mut returned) => {
                         // Both queues at cap. Caller must back off.
+                        // `returned`'s Drop releases its ledger charge
+                        // (if any) when it falls out of scope below - the
+                        // one canonical QueuedJob release path.
                         self.stats
                             .thrusts_overloaded
                             .fetch_add(1, Ordering::Relaxed);
-                        let reply = returned.reply;
-                        reply.send(Err(AfterburnerError::Overloaded));
+                        if let Some(reply) = returned.reply.take() {
+                            reply.send(Err(AfterburnerError::Overloaded));
+                        }
                         return ThrustHandle { rx: reply_rx };
                     }
                 }
@@ -773,6 +876,7 @@ impl fmt::Debug for ThrustEngine {
 // Worker thread
 // ─────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_worker(
     worker_id: usize,
     queues: Arc<Vec<BoundedQueue<Job>>>,
@@ -781,33 +885,49 @@ fn spawn_worker(
     stats: Arc<StatsCounters>,
     shutdown: Arc<AtomicU8>,
     numa: Arc<NumaTopology>,
-) -> JoinHandle<()> {
+    governance: ThreadGovernance,
+) -> Result<JoinHandle<()>> {
     // Track liveness so `Drop` can poll for natural drain completion
     // before forcing exit. Increment happens on the *parent* thread so
     // the count is accurate by the time `new()` returns; the spawned
-    // thread decrements when it's done.
+    // thread decrements when it's done (or, if governance fails and the
+    // thread never starts the loop, undone below).
     stats.workers_alive.fetch_add(1, Ordering::AcqRel);
     let stats_for_loop = stats.clone();
+    let stats_for_decrement = stats.clone();
     let numa_for_pin = numa.clone();
-    thread::Builder::new()
-        .name(format!("afterburner-thrust-{worker_id}"))
-        .spawn(move || {
+    // An explicit affinity mask overrides the NUMA pin - `apply_governance`
+    // (run first, inside `spawn_governed`) already applied it, so the
+    // worker must not then re-pin itself to the NUMA node's wider set.
+    let affinity_overridden = governance.affinity.is_some();
+    let name = governance.thread_name("afterburner-thrust", &format!("-{worker_id}"));
+    let result = spawn_governed(name, governance, move || {
+        if !affinity_overridden {
             // Pin to our NUMA node's CPU set on Linux multi-socket
             // boxes; no-op elsewhere. Done inside the worker thread so
             // sched_setaffinity applies to the right kernel task.
             pin_current_thread_to_worker(&numa_for_pin, worker_id);
-            worker_loop(
-                worker_id,
-                queues,
-                injector,
-                combustor,
-                stats_for_loop,
-                shutdown,
-                numa_for_pin,
-            );
-            stats.workers_alive.fetch_sub(1, Ordering::AcqRel);
-        })
-        .expect("failed to spawn thrust worker")
+        }
+        worker_loop(
+            worker_id,
+            queues,
+            injector,
+            combustor,
+            stats_for_loop,
+            shutdown,
+            numa_for_pin,
+        );
+        stats_for_decrement
+            .workers_alive
+            .fetch_sub(1, Ordering::AcqRel);
+    });
+    if result.is_err() {
+        // Governance failed before the body ran, so the body's own
+        // decrement never happened - undo the increment above so a
+        // failed spawn never leaks into the liveness count.
+        stats.workers_alive.fetch_sub(1, Ordering::AcqRel);
+    }
+    result
 }
 
 /// Plan §5.2 worker loop (Tokio's poll-injector-every-N pattern at
@@ -929,18 +1049,19 @@ fn build_steal_order(worker_id: usize, n: usize, numa: &NumaTopology) -> Vec<usi
 }
 
 #[inline]
-fn execute(job: Job, combustor: &WasmCombustor, stats: &StatsCounters) {
-    let Job {
-        id,
-        input,
-        limits,
-        reply,
-        tenant: _,
-    } = job;
-    let result = combustor.thrust(&id, &input, &limits);
+fn execute(mut job: Job, combustor: &WasmCombustor, stats: &StatsCounters) {
+    // Field access rather than a destructuring move: `Job` implements
+    // `Drop` (it releases its `QueuedJob` ledger charge there), and Rust
+    // forbids partially moving fields out of a type that implements
+    // `Drop`. `job`'s own `Drop` fires at the end of this function,
+    // which is exactly the "queued -> executed" transition the ledger
+    // charge's lifetime is defined to cover.
+    let result = combustor.thrust(&job.id, &job.input, &job.limits);
     stats.thrusts_completed.fetch_add(1, Ordering::Relaxed);
     // If the caller dropped the handle, send is a no-op - fine.
-    reply.send(result);
+    if let Some(reply) = job.reply.take() {
+        reply.send(result);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1127,5 +1248,191 @@ mod tests {
         };
         let out = engine.thrust_sync(&id, json!(null), lim, None);
         assert!(matches!(out, Err(AfterburnerError::FuelExhausted)));
+    }
+
+    // ── E2 governance config plumbing ──────────────────────────────────
+
+    #[test]
+    fn config_default_governance_and_ledger_are_noop() {
+        let cfg = ThrustEngineConfig::default();
+        assert_eq!(cfg.governance, ThreadGovernance::default());
+        assert!(cfg.memory_ledger.is_none());
+    }
+
+    #[test]
+    fn engine_constructs_with_custom_governance() {
+        // Positive (nice=5) never needs CAP_SYS_NICE; must succeed
+        // regardless of the box this test runs on.
+        let engine = ThrustEngine::new(ThrustEngineConfig {
+            governance: ThreadGovernance {
+                nice: Some(5),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        let id = engine.register("module.exports = () => 1").unwrap();
+        let out = engine
+            .thrust_sync(&id, json!(null), FuelGauge::unlimited(), None)
+            .unwrap();
+        assert_eq!(out, json!(1));
+    }
+
+    // ── E3 QueuedJob ledger ─────────────────────────────────────────────
+
+    #[derive(Default)]
+    struct MockLedger {
+        deny: bool,
+        reserved: std::sync::Mutex<Vec<(LedgerClass, usize)>>,
+        released: std::sync::Mutex<Vec<(LedgerClass, usize)>>,
+    }
+
+    impl MemoryLedger for MockLedger {
+        fn reserve(
+            &self,
+            class: LedgerClass,
+            bytes: usize,
+        ) -> std::result::Result<(), afterburner_core::ledger::LedgerDenied> {
+            if self.deny {
+                return Err(afterburner_core::ledger::LedgerDenied(
+                    "mock ledger denies everything".to_string(),
+                ));
+            }
+            self.reserved.lock().unwrap().push((class, bytes));
+            Ok(())
+        }
+
+        fn release(&self, class: LedgerClass, bytes: usize) {
+            self.released.lock().unwrap().push((class, bytes));
+        }
+    }
+
+    /// Direct proof of the canonical release mechanism: `Job::drop`
+    /// releases its `QueuedJob` charge exactly once. This covers BOTH
+    /// real terminal paths a queued job can take (`execute` letting
+    /// `job` fall out of scope at the end of the call; the `Overloaded`
+    /// branch letting the returned-but-never-queued `Job` fall out of
+    /// scope) without needing to race a live worker thread to force
+    /// either condition - both paths defer to this one `Drop` impl.
+    #[test]
+    fn job_drop_releases_its_queued_job_charge_exactly_once() {
+        let ledger = Arc::new(MockLedger::default());
+        let (tx, _rx) = unbounded::<Result<Value>>();
+        let job = Job {
+            id: dummy_script_id(),
+            input: json!(null),
+            limits: FuelGauge::unlimited(),
+            tenant: None,
+            reply: Some(tx),
+            ledger: Some(ledger.clone() as Arc<dyn MemoryLedger>),
+            charged_bytes: 42,
+        };
+        drop(job);
+        assert_eq!(
+            ledger.released.lock().unwrap().as_slice(),
+            &[(LedgerClass::QueuedJob, 42)]
+        );
+    }
+
+    #[test]
+    fn job_drop_is_a_noop_when_no_ledger_was_charged() {
+        // charged_bytes == 0 (no ledger configured at enqueue time):
+        // Drop must not call release at all.
+        let ledger = Arc::new(MockLedger::default());
+        let (tx, _rx) = unbounded::<Result<Value>>();
+        let job = Job {
+            id: dummy_script_id(),
+            input: json!(null),
+            limits: FuelGauge::unlimited(),
+            tenant: None,
+            reply: Some(tx),
+            ledger: Some(ledger.clone() as Arc<dyn MemoryLedger>),
+            charged_bytes: 0,
+        };
+        drop(job);
+        assert!(ledger.released.lock().unwrap().is_empty());
+    }
+
+    /// Bounded poll instead of a fixed sleep: the release happens on a
+    /// different (worker) thread than the one observing it, so a tiny
+    /// window exists between `thrust_sync` returning (the reply send)
+    /// and the worker's `Job` actually dropping.
+    fn wait_for<F: Fn() -> bool>(deadline: std::time::Duration, cond: F) -> bool {
+        let start = std::time::Instant::now();
+        loop {
+            if cond() {
+                return true;
+            }
+            if start.elapsed() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn thrust_engine_reserves_and_releases_queued_job_ledger_end_to_end() {
+        let ledger = Arc::new(MockLedger::default());
+        let engine = ThrustEngine::new(ThrustEngineConfig {
+            memory_ledger: Some(ledger.clone() as Arc<dyn MemoryLedger>),
+            ..Default::default()
+        })
+        .unwrap();
+        let id = engine.register("module.exports = () => 1 + 1").unwrap();
+        let out = engine
+            .thrust_sync(&id, json!(null), FuelGauge::unlimited(), None)
+            .unwrap();
+        assert_eq!(out, json!(2));
+
+        assert_eq!(ledger.reserved.lock().unwrap().len(), 1);
+        assert_eq!(ledger.reserved.lock().unwrap()[0].0, LedgerClass::QueuedJob);
+        let charged = ledger.reserved.lock().unwrap()[0].1;
+        assert!(charged > 0);
+
+        assert!(
+            wait_for(std::time::Duration::from_secs(2), || {
+                ledger.released.lock().unwrap().len() == 1
+            }),
+            "expected exactly one release within the deadline"
+        );
+        assert_eq!(
+            ledger.released.lock().unwrap()[0],
+            (LedgerClass::QueuedJob, charged)
+        );
+    }
+
+    #[test]
+    fn thrust_engine_queued_job_ledger_denial_is_loud_and_never_enqueues() {
+        let ledger = Arc::new(MockLedger {
+            deny: true,
+            ..Default::default()
+        });
+        let engine = ThrustEngine::new(ThrustEngineConfig {
+            memory_ledger: Some(ledger as Arc<dyn MemoryLedger>),
+            ..Default::default()
+        })
+        .unwrap();
+        let id = engine.register("module.exports = () => 1").unwrap();
+        let err = engine
+            .thrust_sync(&id, json!(null), FuelGauge::unlimited(), None)
+            .unwrap_err();
+        assert!(
+            matches!(err, AfterburnerError::LedgerDenied(_)),
+            "expected LedgerDenied, got {err}"
+        );
+        let stats = engine.stats();
+        assert_eq!(stats.thrusts_queued, 0, "a denied job must never be queued");
+    }
+
+    #[test]
+    fn thrust_engine_no_ledger_is_unaffected() {
+        // Default config: no memory_ledger. Must behave exactly as
+        // before governance/ledger existed.
+        let engine = ThrustEngine::new(ThrustEngineConfig::default()).unwrap();
+        let id = engine.register("module.exports = () => 5").unwrap();
+        let out = engine
+            .thrust_sync(&id, json!(null), FuelGauge::unlimited(), None)
+            .unwrap();
+        assert_eq!(out, json!(5));
     }
 }

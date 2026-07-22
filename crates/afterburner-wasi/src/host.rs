@@ -13,6 +13,7 @@ use afterburner_node_compat::hash_handles::HashHandleStore;
 use afterburner_node_compat::sign_handles::SignHandleStore;
 use bytes::Bytes;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use wasmtime::{ResourceLimiter, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::p1::WasiP1Ctx;
@@ -66,6 +67,12 @@ pub struct HostState {
     /// `host_raw_output` reply alike.
     pub output_ceiling: usize,
     pub limits: StoreLimits,
+    /// Mirrors `FuelGauge::limiter_tripped` (set by
+    /// `chamber::prepare_store` from the call's `FuelGauge`, the one
+    /// canonical Store-construction choke point). `None` when the
+    /// caller didn't supply a sink - the common case - in which case a
+    /// denial is simply not recorded anywhere, at zero cost.
+    pub(crate) limiter_tripped: Option<Arc<AtomicBool>>,
     /// Capability profile consulted by every `afterburner:host` import.
     pub manifold: Manifold,
     /// Cross-invocation key/value store, read by `afterburner:state`.
@@ -250,6 +257,7 @@ impl HostState {
             stderr,
             output_ceiling,
             limits,
+            limiter_tripped: None,
             manifold,
             state_store,
             host_context,
@@ -316,7 +324,7 @@ impl HostState {
     }
 
     pub fn limiter(&mut self) -> &mut dyn ResourceLimiter {
-        &mut self.limits
+        self
     }
 
     /// `true` when this call's output exceeded [`Self::output_ceiling`]
@@ -326,5 +334,82 @@ impl HostState {
     /// existing taxonomy, never a bare trap.
     pub fn output_overflowed(&self) -> bool {
         self.raw_output_overflow || self.stdout.overflowed()
+    }
+
+    /// A `memory.grow` / `table.grow` request was denied by the
+    /// configured cap during this call. Distinct from a genuine
+    /// system-level allocation failure (`memory_grow_failed` /
+    /// `table_grow_failed`), which does not set this - only a
+    /// configured-cap denial does, since that is the only case this
+    /// flag exists to reclassify. `false` when no
+    /// `FuelGauge::limiter_tripped` sink was supplied for this call.
+    pub fn limiter_tripped(&self) -> bool {
+        self.limiter_tripped
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Acquire))
+    }
+
+    /// Record a growth denial: mirrors into the caller-supplied sink
+    /// (if any). Shared by both `ResourceLimiter` methods below so the
+    /// two axes (memory, table) can never drift on how a denial is
+    /// reported.
+    fn trip_limiter(&self) {
+        if let Some(flag) = &self.limiter_tripped {
+            flag.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Delegates every check to the wrapped `wasmtime::StoreLimits` (the
+/// existing, already-correct enforcement - never reimplemented here),
+/// and additionally records a growth denial via [`HostState::trip_limiter`]
+/// so a caller-supplied `FuelGauge::limiter_tripped` sink can reclassify
+/// a guest's resulting trap as a memory-cap error after the call
+/// returns, from outside the `Store` that produced it.
+impl ResourceLimiter for HostState {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        let allowed = self.limits.memory_growing(current, desired, maximum)?;
+        if !allowed {
+            self.trip_limiter();
+        }
+        Ok(allowed)
+    }
+
+    fn memory_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.limits.memory_grow_failed(error)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        let allowed = self.limits.table_growing(current, desired, maximum)?;
+        if !allowed {
+            self.trip_limiter();
+        }
+        Ok(allowed)
+    }
+
+    fn table_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.limits.table_grow_failed(error)
+    }
+
+    fn instances(&self) -> usize {
+        self.limits.instances()
+    }
+
+    fn tables(&self) -> usize {
+        self.limits.tables()
+    }
+
+    fn memories(&self) -> usize {
+        self.limits.memories()
     }
 }

@@ -28,6 +28,7 @@
 //! threads, so the memory footprint is bounded and the throughput win
 //! is substantial.
 
+use afterburner_core::ledger::{LedgerClass, MemoryLedger};
 use afterburner_core::log::Level;
 use afterburner_core::{
     AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Result, ScriptId,
@@ -148,8 +149,24 @@ const CALLSITE_PROTO_PATCH: &str = r#"
 /// least-recently-used entry is evicted (a miss just recompiles once).
 const ENTRY_CACHE_CAP: usize = 512;
 
-/// A cached compiled UDF entry plus its last-access tick (for LRU eviction).
-type CachedEntry = (Persistent<Function<'static>>, Cell<u64>);
+/// Approximate per-thread-`Runtime` residual (rquickjs `Runtime` +
+/// `Context` overhead before any script runs) charged to
+/// `LedgerClass::NativeRuntime` - a proxy, not a measured value (no
+/// portable way to ask rquickjs/QuickJS for its own footprint). Named
+/// so the charge site and this doc stay in one place; revisit if a
+/// measured number becomes available upstream.
+const RUNTIME_RESIDENT_BYTES: usize = 100 * 1024;
+
+/// A cached compiled UDF entry, its last-access tick (LRU order), and
+/// the bytes it was charged against `LedgerClass::ModuleCache` - a
+/// compiled `Persistent<Function>` exposes no byte size of its own, so
+/// the JS source length (charged at insert, read back at both LRU
+/// eviction and `extinguish`) is the proxy used here.
+struct CachedEntry {
+    func: Persistent<Function<'static>>,
+    tick: Cell<u64>,
+    charged_bytes: usize,
+}
 
 thread_local! {
     /// One rquickjs Runtime per client thread. Lazily initialized on
@@ -179,6 +196,15 @@ thread_local! {
 
     /// Monotonic per-thread counter feeding `ENTRY_CACHE`'s LRU order.
     static ENTRY_TICK: Cell<u64> = const { Cell::new(0) };
+
+    /// Running total of bytes currently charged to
+    /// `LedgerClass::ModuleCache` for this thread's `ENTRY_CACHE`
+    /// (mirrors its LRU insert/evict exactly). Released in one shot by
+    /// `ThreadRuntime`'s `Drop` at thread exit, alongside the
+    /// `NativeRuntime` charge - the two thread-locals share one
+    /// lifetime by construction (every native-tier public method
+    /// touches `THREAD_RT` before `ENTRY_CACHE`).
+    static ENTRY_CACHE_CHARGED_BYTES: Cell<usize> = const { Cell::new(0) };
 
     /// Per-thread fuel accounting for the shared interrupt handler that
     /// `ThreadRuntime::new` installs ONCE per Runtime. `do_thrust` /
@@ -257,10 +283,15 @@ fn capture_is_active() -> bool {
 struct ThreadRuntime {
     runtime: Runtime,
     context: Context,
+    /// Ledger this runtime's `NativeRuntime` charge (and any
+    /// outstanding `ENTRY_CACHE` `ModuleCache` charge) releases against
+    /// at `Drop` (thread exit). `None` when no ledger was configured -
+    /// `Drop` is then a no-op on both charges.
+    ledger: Option<Arc<dyn MemoryLedger>>,
 }
 
 impl ThreadRuntime {
-    fn new() -> std::result::Result<Self, AfterburnerError> {
+    fn new(ledger: Option<Arc<dyn MemoryLedger>>) -> std::result::Result<Self, AfterburnerError> {
         let runtime = Runtime::new()
             .map_err(|e| AfterburnerError::Engine(format!("engine runtime init: {e}")))?;
         let context = Context::full(&runtime)
@@ -299,7 +330,30 @@ impl ThreadRuntime {
             FUEL_COUNTER.with(|c| c.fetch_add(1, Ordering::Relaxed)) >= limit
         })));
 
-        Ok(Self { runtime, context })
+        // Charge LAST, once every other fallible step has succeeded, so
+        // a denial never leaves a runtime half-built to unwind.
+        if let Some(l) = &ledger {
+            l.reserve(LedgerClass::NativeRuntime, RUNTIME_RESIDENT_BYTES)
+                .map_err(|e| AfterburnerError::LedgerDenied(e.0))?;
+        }
+
+        Ok(Self {
+            runtime,
+            context,
+            ledger,
+        })
+    }
+}
+
+impl Drop for ThreadRuntime {
+    fn drop(&mut self) {
+        if let Some(ledger) = &self.ledger {
+            ledger.release(LedgerClass::NativeRuntime, RUNTIME_RESIDENT_BYTES);
+            let remaining = ENTRY_CACHE_CHARGED_BYTES.with(|c| c.replace(0));
+            if remaining > 0 {
+                ledger.release(LedgerClass::ModuleCache, remaining);
+            }
+        }
     }
 }
 
@@ -342,12 +396,18 @@ fn host_log(level: &str, msg: &str) {
 }
 
 /// Run a closure with access to the current thread's `ThreadRuntime`,
-/// initializing it lazily on first use.
-fn with_thread_rt<R>(f: impl FnOnce(&ThreadRuntime) -> Result<R>) -> Result<R> {
+/// initializing it lazily on first use. `ledger` is only consumed on
+/// the lazy-init branch (the first call on this thread); every
+/// subsequent call passes it for free (an `Option<Arc<_>>` clone) and
+/// it is ignored.
+fn with_thread_rt<R>(
+    ledger: Option<Arc<dyn MemoryLedger>>,
+    f: impl FnOnce(&ThreadRuntime) -> Result<R>,
+) -> Result<R> {
     THREAD_RT.with(|slot| {
         let mut borrow = slot.borrow_mut();
         if borrow.is_none() {
-            *borrow = Some(ThreadRuntime::new()?);
+            *borrow = Some(ThreadRuntime::new(ledger)?);
         }
         let rt = borrow
             .as_ref()
@@ -360,6 +420,11 @@ pub struct NativeCombustor {
     source_store: HopscotchMap<[u8; 32], Arc<str>>,
     state_store: SharedStateStore,
     host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+    /// Optional embedder-owned memory ledger, charged at per-thread
+    /// `Runtime` creation (`LedgerClass::NativeRuntime`) and at
+    /// `ENTRY_CACHE` insert/evict (`LedgerClass::ModuleCache`). `None`
+    /// (the default) is a pure no-op.
+    memory_ledger: Option<Arc<dyn MemoryLedger>>,
 }
 
 impl NativeCombustor {
@@ -369,11 +434,12 @@ impl NativeCombustor {
 
     /// Construct a combustor backed by an explicit state store.
     pub fn with_state_store(state_store: SharedStateStore) -> Result<Self> {
-        with_thread_rt(|_rt| Ok(()))?;
+        with_thread_rt(None, |_rt| Ok(()))?;
         Ok(Self {
             source_store: HopscotchMap::new(),
             state_store,
             host_context: None,
+            memory_ledger: None,
         })
     }
 
@@ -383,6 +449,30 @@ impl NativeCombustor {
     /// column / swallows emitted rows.
     pub fn with_host_context(mut self, ctx: Arc<dyn afterburner_core::HostContext>) -> Self {
         self.host_context = Some(ctx);
+        self
+    }
+
+    /// Attach an embedder-owned [`MemoryLedger`]. Charged at per-thread
+    /// `Runtime` creation (once, lazily, the first time a client thread
+    /// calls into this combustor) and at `ENTRY_CACHE` insert/evict on
+    /// every subsequent call from that thread.
+    ///
+    /// Per-thread `ThreadRuntime` state is lazy-initialized once and
+    /// then reused (see the module doc) - a thread whose runtime is
+    /// already live (initialized before `with_ledger` was called, or by
+    /// an earlier `NativeCombustor` sharing the same thread) keeps
+    /// running against whatever ledger (or none) was current at ITS
+    /// init time; it is never retroactively rebound. Concretely: the
+    /// thread that calls the constructor itself
+    /// ([`Self::new`]/[`Self::with_state_store`] eagerly warms that
+    /// thread's runtime to validate it) will not be charged even after
+    /// chaining `.with_ledger(..)`, if that same thread later calls
+    /// `ignite`/`thrust`. Attach the ledger, then hand the combustor to
+    /// the threads that will actually execute on it (the intended
+    /// shape: a pool of worker threads distinct from the one that
+    /// constructed it) for accounting to be observed correctly.
+    pub fn with_ledger(mut self, ledger: Arc<dyn MemoryLedger>) -> Self {
+        self.memory_ledger = Some(ledger);
         self
     }
 
@@ -414,7 +504,7 @@ impl Combustor for NativeCombustor {
         }
         // Cheap parse check against this thread's Runtime. Syntax errors
         // surface here rather than at thrust time.
-        with_thread_rt(|rt| {
+        with_thread_rt(self.memory_ledger.clone(), |rt| {
             rt.context.with(|ctx| -> Result<()> {
                 let probe = format!("(function(){{ {source}\nreturn undefined; }})");
                 let _: RqValue<'_> = ctx.eval(probe.as_bytes()).map_err(|e| {
@@ -445,7 +535,7 @@ impl Combustor for NativeCombustor {
             .get(&id.hash)
             .ok_or(AfterburnerError::ScriptNotFound)?;
         let input_json = serde_json::to_string(input)?;
-        let output_json = with_thread_rt(|rt| {
+        let output_json = with_thread_rt(self.memory_ledger.clone(), |rt| {
             // Thread the engine's state store + optional host context
             // into the per-thrust slots.
             let _g = afterburner_node_compat::state_active::activate(self.state_store.clone());
@@ -464,9 +554,13 @@ impl Combustor for NativeCombustor {
         // this script are reclaimed on their own extinguish/exit, or
         // evicted by the per-thread LRU cap (`ENTRY_CACHE_CAP`), so the
         // cache stays bounded regardless of the extinguish pattern.
-        ENTRY_CACHE.with(|c| {
-            c.borrow_mut().remove(&id.hash);
-        });
+        let removed = ENTRY_CACHE.with(|c| c.borrow_mut().remove(&id.hash));
+        if let Some(entry) = removed {
+            ENTRY_CACHE_CHARGED_BYTES.with(|c| c.set(c.get().saturating_sub(entry.charged_bytes)));
+            if let Some(ledger) = &self.memory_ledger {
+                ledger.release(LedgerClass::ModuleCache, entry.charged_bytes);
+            }
+        }
         ab_event!(Level::Info, "native.extinguish");
     }
 
@@ -499,7 +593,7 @@ impl Combustor for NativeCombustor {
         let stage = build_script_stage(source, &argv_json, &env_json, &cwd_json);
 
         let _capture_guard = ScriptCaptureGuard::activate();
-        let exit_code = with_thread_rt(|rt| {
+        let exit_code = with_thread_rt(self.memory_ledger.clone(), |rt| {
             let _g = afterburner_node_compat::state_active::activate(self.state_store.clone());
             let _hg = self
                 .host_context
@@ -729,9 +823,9 @@ fn do_thrust(
     FUEL_COUNTER.with(|c| c.store(0, Ordering::Relaxed));
     FUEL_LIMIT.with(|l| l.store(fuel_budget.unwrap_or(u64::MAX), Ordering::Relaxed));
 
-    let result = rt
-        .context
-        .with(|ctx| -> Result<String> { run_script(&ctx, hash, source, input_json) });
+    let result = rt.context.with(|ctx| -> Result<String> {
+        run_script(&ctx, hash, source, input_json, rt.ledger.as_ref())
+    });
 
     match result {
         Ok(v) => {
@@ -844,11 +938,17 @@ fn next_entry_tick() -> u64 {
     })
 }
 
-fn run_script(ctx: &Ctx<'_>, hash: [u8; 32], source: &str, input_json: &str) -> Result<String> {
+fn run_script(
+    ctx: &Ctx<'_>,
+    hash: [u8; 32],
+    source: &str,
+    input_json: &str,
+    ledger: Option<&Arc<dyn MemoryLedger>>,
+) -> Result<String> {
     let cached = ENTRY_CACHE.with(|c| {
-        c.borrow().get(&hash).map(|(func, tick)| {
-            tick.set(next_entry_tick());
-            func.clone()
+        c.borrow().get(&hash).map(|entry| {
+            entry.tick.set(next_entry_tick());
+            entry.func.clone()
         })
     });
     let entry: Function<'_> = match cached {
@@ -860,6 +960,18 @@ fn run_script(ctx: &Ctx<'_>, hash: [u8; 32], source: &str, input_json: &str) -> 
             let func: Function<'_> = ctx
                 .eval(wrapper.as_bytes())
                 .map_err(|e| map_script_err(ctx, e))?;
+
+            // Charge BEFORE the entry becomes resident in the cache. A
+            // denial here means the freshly-compiled Function is simply
+            // dropped uncached (never mutates ENTRY_CACHE) - the next
+            // call for this script recompiles and tries again.
+            let charged_bytes = source.len();
+            if let Some(l) = ledger {
+                l.reserve(LedgerClass::ModuleCache, charged_bytes)
+                    .map_err(|e| AfterburnerError::LedgerDenied(e.0))?;
+            }
+            ENTRY_CACHE_CHARGED_BYTES.with(|c| c.set(c.get() + charged_bytes));
+
             ENTRY_CACHE.with(|c| {
                 let mut cache = c.borrow_mut();
                 // Bound the per-thread cache: when full, evict the
@@ -870,17 +982,23 @@ fn run_script(ctx: &Ctx<'_>, hash: [u8; 32], source: &str, input_json: &str) -> 
                     && !cache.contains_key(&hash)
                     && let Some(lru) = cache
                         .iter()
-                        .min_by_key(|(_, (_, tick))| tick.get())
+                        .min_by_key(|(_, e)| e.tick.get())
                         .map(|(k, _)| *k)
+                    && let Some(evicted) = cache.remove(&lru)
                 {
-                    cache.remove(&lru);
+                    ENTRY_CACHE_CHARGED_BYTES
+                        .with(|c| c.set(c.get().saturating_sub(evicted.charged_bytes)));
+                    if let Some(l) = ledger {
+                        l.release(LedgerClass::ModuleCache, evicted.charged_bytes);
+                    }
                 }
                 cache.insert(
                     hash,
-                    (
-                        Persistent::save(ctx, func.clone()),
-                        Cell::new(next_entry_tick()),
-                    ),
+                    CachedEntry {
+                        func: Persistent::save(ctx, func.clone()),
+                        tick: Cell::new(next_entry_tick()),
+                        charged_bytes,
+                    },
                 );
             });
             func
@@ -1250,5 +1368,213 @@ mod tests {
             .thrust(&id2, &json!(null), &FuelGauge::unlimited())
             .unwrap();
         assert_eq!(out2, json!(42));
+    }
+
+    // ── E3 memory ledger ────────────────────────────────────────────────
+
+    #[derive(Default)]
+    struct MockLedger {
+        /// When set, `reserve` denies exactly this class (others still
+        /// succeed) - lets a test isolate the `NativeRuntime` charge
+        /// (first-use, inside `ignite`'s lazy `ThreadRuntime` init) from
+        /// the `ModuleCache` charge (`ENTRY_CACHE` insert, inside
+        /// `thrust`), which a blanket deny cannot distinguish since
+        /// `NativeRuntime` is always charged first.
+        deny_class: Option<LedgerClass>,
+        reserved: std::sync::Mutex<Vec<(LedgerClass, usize)>>,
+        released: std::sync::Mutex<Vec<(LedgerClass, usize)>>,
+    }
+
+    impl MemoryLedger for MockLedger {
+        fn reserve(
+            &self,
+            class: LedgerClass,
+            bytes: usize,
+        ) -> std::result::Result<(), afterburner_core::ledger::LedgerDenied> {
+            if self.deny_class == Some(class) {
+                return Err(afterburner_core::ledger::LedgerDenied(format!(
+                    "mock ledger denies {class:?}"
+                )));
+            }
+            self.reserved.lock().unwrap().push((class, bytes));
+            Ok(())
+        }
+
+        fn release(&self, class: LedgerClass, bytes: usize) {
+            self.released.lock().unwrap().push((class, bytes));
+        }
+    }
+
+    #[test]
+    fn with_ledger_sets_the_field() {
+        let ledger = Arc::new(MockLedger::default());
+        let c = NativeCombustor::new()
+            .unwrap()
+            .with_ledger(ledger as Arc<dyn MemoryLedger>);
+        assert!(c.memory_ledger.is_some());
+    }
+
+    #[test]
+    fn no_ledger_is_unaffected() {
+        // Default (memory_ledger: None): behaves exactly as before the
+        // ledger existed.
+        let out = combust("module.exports = () => 1 + 2", json!(null)).unwrap();
+        assert_eq!(out, json!(3));
+    }
+
+    /// Constructs on the test-harness thread, then executes on a
+    /// dedicated spawned thread. This ordering matters: the
+    /// constructor's own eager runtime-validation call warms the
+    /// *constructing* thread's `ThreadRuntime` before `with_ledger`
+    /// attaches, so that thread is never charged (see `with_ledger`'s
+    /// doc). Executing on a fresh, never-before-used thread is the only
+    /// way to deterministically observe the first-use charge and the
+    /// thread-exit release.
+    #[test]
+    fn native_runtime_and_module_cache_charge_and_release_across_thread_lifetime() {
+        let ledger = Arc::new(MockLedger::default());
+        let c = Arc::new(
+            NativeCombustor::new()
+                .unwrap()
+                .with_ledger(ledger.clone() as Arc<dyn MemoryLedger>),
+        );
+        let c2 = c.clone();
+        let handle = std::thread::spawn(move || {
+            let id = c2.ignite("module.exports = () => 1 + 1").unwrap();
+            let out = c2
+                .thrust(&id, &json!(null), &FuelGauge::unlimited())
+                .unwrap();
+            assert_eq!(out, json!(2));
+        });
+        handle.join().unwrap();
+
+        {
+            let reserved = ledger.reserved.lock().unwrap();
+            assert!(
+                reserved
+                    .iter()
+                    .any(|(class, _)| *class == LedgerClass::NativeRuntime),
+                "expected a NativeRuntime reservation; got {reserved:?}"
+            );
+            assert!(
+                reserved
+                    .iter()
+                    .any(|(class, _)| *class == LedgerClass::ModuleCache),
+                "expected a ModuleCache reservation; got {reserved:?}"
+            );
+        }
+
+        // The spawned thread has fully exited by the time `join`
+        // returns: `ThreadRuntime`'s `Drop` must have released both the
+        // NativeRuntime charge and the still-outstanding ModuleCache
+        // charge for the one cached entry.
+        let released = ledger.released.lock().unwrap();
+        assert!(
+            released
+                .iter()
+                .any(|(class, _)| *class == LedgerClass::NativeRuntime),
+            "expected a NativeRuntime release on thread exit; got {released:?}"
+        );
+        assert!(
+            released
+                .iter()
+                .any(|(class, _)| *class == LedgerClass::ModuleCache),
+            "expected a ModuleCache release on thread exit; got {released:?}"
+        );
+    }
+
+    #[test]
+    fn extinguish_releases_module_cache_immediately_not_just_at_thread_exit() {
+        let ledger = Arc::new(MockLedger::default());
+        let c = Arc::new(
+            NativeCombustor::new()
+                .unwrap()
+                .with_ledger(ledger.clone() as Arc<dyn MemoryLedger>),
+        );
+        let c2 = c.clone();
+        let ledger2 = ledger.clone();
+        let handle = std::thread::spawn(move || {
+            let id = c2.ignite("module.exports = () => 1").unwrap();
+            c2.thrust(&id, &json!(null), &FuelGauge::unlimited())
+                .unwrap();
+            assert!(
+                ledger2
+                    .released
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|(class, _)| *class != LedgerClass::ModuleCache),
+                "must not release before extinguish runs"
+            );
+            c2.extinguish(&id);
+            assert!(
+                ledger2
+                    .released
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(class, _)| *class == LedgerClass::ModuleCache),
+                "extinguish must release its ModuleCache charge immediately"
+            );
+        });
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn native_runtime_denial_is_loud_from_ignite() {
+        // ignite()'s parse probe runs via with_thread_rt, which lazily
+        // builds this thread's ThreadRuntime FIRST (before any
+        // ENTRY_CACHE interaction) - denying NativeRuntime surfaces
+        // there, on the very first call.
+        let ledger = Arc::new(MockLedger {
+            deny_class: Some(LedgerClass::NativeRuntime),
+            ..Default::default()
+        });
+        let c = Arc::new(
+            NativeCombustor::new()
+                .unwrap()
+                .with_ledger(ledger as Arc<dyn MemoryLedger>),
+        );
+        let c2 = c.clone();
+        let handle = std::thread::spawn(move || {
+            let err = c2.ignite("module.exports = () => 1").unwrap_err();
+            assert!(
+                matches!(err, AfterburnerError::LedgerDenied(_)),
+                "expected LedgerDenied, got {err}"
+            );
+        });
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn module_cache_denial_is_loud_and_the_entry_is_never_cached() {
+        // NativeRuntime is allowed (so the thread's ThreadRuntime builds
+        // fine and ignite's probe succeeds); only ModuleCache is denied,
+        // isolating the ENTRY_CACHE insert charge inside `thrust`.
+        let ledger = Arc::new(MockLedger {
+            deny_class: Some(LedgerClass::ModuleCache),
+            ..Default::default()
+        });
+        let c = Arc::new(
+            NativeCombustor::new()
+                .unwrap()
+                .with_ledger(ledger as Arc<dyn MemoryLedger>),
+        );
+        let c2 = c.clone();
+        let handle = std::thread::spawn(move || {
+            let id = c2.ignite("module.exports = () => 1").unwrap();
+            let err = c2
+                .thrust(&id, &json!(null), &FuelGauge::unlimited())
+                .unwrap_err();
+            assert!(
+                matches!(err, AfterburnerError::LedgerDenied(_)),
+                "expected LedgerDenied, got {err}"
+            );
+            // The denied entry must not be cached: ENTRY_CACHE stays
+            // empty on this (fresh) thread.
+            let len = ENTRY_CACHE.with(|c| c.borrow().len());
+            assert_eq!(len, 0, "a denied entry must never be cached");
+        });
+        handle.join().unwrap();
     }
 }

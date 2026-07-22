@@ -12,6 +12,8 @@
 
 #[cfg(any(feature = "flow", feature = "thrust", not(feature = "native"), test))]
 use afterburner_core::AfterburnerError;
+#[cfg(feature = "thrust")]
+use afterburner_core::governance::ThreadGovernance;
 use afterburner_core::{
     BurnCache, BurnCacheBackend, Combustor, FuelGauge, HostContext, InMemoryStateStore, Manifold,
     OutputValue, Result, ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore,
@@ -841,6 +843,7 @@ impl AfterburnerBuilder {
             timeout_ms: self.timeout_ms,
             output_bytes: self.output_bytes,
             manifold: manifold.clone(),
+            limiter_tripped: None,
         };
 
         let mode = self.mode.unwrap_or_default();
@@ -1034,6 +1037,7 @@ impl ThreadedBuilder {
             timeout_ms: self.parent.timeout_ms,
             output_bytes: self.parent.output_bytes,
             manifold: manifold.clone(),
+            limiter_tripped: None,
         };
 
         let wasm_config = afterburner_wasi::WasmConfig {
@@ -1053,6 +1057,8 @@ impl ThreadedBuilder {
             injector_capacity: self.injector_capacity,
             shutdown_drain_deadline: self.shutdown_drain_deadline,
             wasm_config,
+            governance: ThreadGovernance::default(),
+            memory_ledger: None,
         };
 
         let engine = afterburner_thrust::ThrustEngine::new(cfg)?;

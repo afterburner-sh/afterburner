@@ -94,6 +94,21 @@ pub enum AfterburnerError {
     #[error("engine overloaded (in-flight cap reached)")]
     Overloaded,
 
+    /// A spawned thread's [`crate::governance::ThreadGovernance`] (nice /
+    /// affinity) could not be applied. Surfaced at the spawning call
+    /// ("pool construction"), never silently inside a thread whose
+    /// caller has already moved on - the inner string names the failed
+    /// knob and the OS-level reason.
+    #[error("thread governance failed: {0}")]
+    GovernanceFailed(String),
+
+    /// An embedder's [`crate::ledger::MemoryLedger::reserve`] denied a
+    /// reservation before the triggering bytes were allowed to exist (a
+    /// module-cache insert, a native runtime creation, a queued job).
+    /// The inner string is the ledger's own reason.
+    #[error("memory ledger denied reservation: {0}")]
+    LedgerDenied(String),
+
     /// The script called `process.exit(n)` inside daemon mode. The CLI
     /// propagates the exit code to `std::process::exit`; library callers
     /// can inspect the code and decide what to do.
