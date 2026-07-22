@@ -388,7 +388,7 @@ fn banner_subtitle(version: &str, tail: &str) {
     eprintln!(
         "  {} {}",
         accent("Afterburner"),
-        muted("· sandboxed JavaScript runtime")
+        muted("· polyglot, deterministic, sandboxed runtime")
     );
     eprintln!("  {}", muted(&format!("v{version}{tail}")));
     eprintln!();
