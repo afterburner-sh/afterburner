@@ -418,10 +418,65 @@ impl Afterburner {
         limits: &FuelGauge,
     ) -> Result<afterburner_wasi::ColumnarOutput> {
         let encoded = afterburner_wasi::encode_batch(batch)?;
+        self.dispatch_columnar_bytes(id, encoded.bytes, limits)
+    }
+
+    /// Like [`run_columnar_with`](Self::run_columnar_with), but `constants`
+    /// carries scalar arguments broadcast across every row at O(1) transfer
+    /// cost instead of a fully-materialized [`afterburner_wasi::ColumnRef`]
+    /// column - see [`afterburner_wasi::encode_batch_with_constants`] and
+    /// [`afterburner_wasi::ConstantColumnRef`]. `constants: &[]` behaves
+    /// identically to [`run_columnar_with`](Self::run_columnar_with).
+    #[cfg(feature = "wasm")]
+    pub fn run_columnar_with_constants(
+        &self,
+        id: &ScriptId,
+        batch: &afterburner_wasi::ColumnarBatch<'_>,
+        constants: &[afterburner_wasi::ConstantColumnRef<'_>],
+        limits: &FuelGauge,
+    ) -> Result<afterburner_wasi::ColumnarOutput> {
+        let encoded = afterburner_wasi::encode_batch_with_constants(batch, constants)?;
+        self.dispatch_columnar_bytes(id, encoded.bytes, limits)
+    }
+
+    /// Like [`run_columnar_with`](Self::run_columnar_with), but variable-width
+    /// columns may be supplied as [`afterburner_wasi::PtrSlotColumnRef`] (E6):
+    /// long slots carrying a raw host pointer instead of a pre-built heap,
+    /// dereferenced directly into the wire blob with no intermediate
+    /// materialization. See [`afterburner_wasi::encode_batch_ptr_slots`].
+    ///
+    /// # Safety
+    /// Same contract as [`afterburner_wasi::encode_batch_ptr_slots`]: every
+    /// long slot's embedded pointer must be valid for reads of its `len`
+    /// bytes for the duration of this call.
+    #[cfg(feature = "wasm")]
+    pub unsafe fn run_columnar_ptr_slots(
+        &self,
+        id: &ScriptId,
+        batch: &afterburner_wasi::PtrSlotBatch<'_>,
+        limits: &FuelGauge,
+    ) -> Result<afterburner_wasi::ColumnarOutput> {
+        // SAFETY: forwarded from this function's own safety contract.
+        let encoded = unsafe { afterburner_wasi::encode_batch_ptr_slots(batch)? };
+        self.dispatch_columnar_bytes(id, encoded.bytes, limits)
+    }
+
+    /// Shared dispatch for every `run_columnar*` variant: send the
+    /// already-encoded wire blob through the active engine and decode the
+    /// reply. Keeps the `EngineHolder` match in exactly one place so the
+    /// three encode-side entry points can never drift on how the bytes
+    /// reach the engine.
+    #[cfg(feature = "wasm")]
+    fn dispatch_columnar_bytes(
+        &self,
+        id: &ScriptId,
+        encoded: Vec<u8>,
+        limits: &FuelGauge,
+    ) -> Result<afterburner_wasi::ColumnarOutput> {
         let reply = match &self.engine {
-            EngineHolder::Cache(c) => c.execute_columnar_bytes(id, &encoded.bytes, limits)?,
+            EngineHolder::Cache(c) => c.execute_columnar_bytes(id, &encoded, limits)?,
             #[cfg(feature = "thrust")]
-            EngineHolder::Thrust(t) => t.thrust_columnar_bytes(id, &encoded.bytes, limits)?,
+            EngineHolder::Thrust(t) => t.thrust_columnar_bytes(id, &encoded, limits)?,
         };
         afterburner_wasi::decode_batch(&reply)
     }

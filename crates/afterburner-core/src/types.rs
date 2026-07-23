@@ -59,6 +59,18 @@ pub enum EngineMode {
 pub struct FuelGauge {
     /// Backend-specific instruction budget. See type-level docs for the
     /// per-mode semantics - values are NOT comparable across modes.
+    ///
+    /// Fully embedder-settable per invocation, with no additional
+    /// engine-side ceiling: `None` maps to `u64::MAX` (effectively
+    /// unlimited) on the wasm tier (`prepare_store`, chamber.rs), and
+    /// `Some(n)` is used exactly as given. There is no clamp anywhere
+    /// between this field and the engine's fuel counter, so a caller
+    /// scaling fuel with batch size or guest workload (a CPU-heavy
+    /// script needs proportionally more fuel per row) is fully
+    /// supported today - set a larger `fuel` value per call, not a
+    /// build-time constant. `FuelGauge` is constructed per call (see
+    /// `Combustor::thrust*` / `thrust_columnar_bytes`), so this scaling
+    /// carries no extra cost when unused.
     pub fuel: Option<u64>,
     /// Maximum bytes of linear memory (Wasm) or heap (native).
     pub memory_bytes: Option<usize>,

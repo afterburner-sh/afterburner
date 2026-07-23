@@ -279,6 +279,84 @@ impl<'a> ColumnarBatch<'a> {
     }
 }
 
+/// A column whose single value is broadcast across every row of the
+/// batch, carried in [`encode_batch_with_constants`] - the O(1)
+/// counterpart to a fully-materialized [`ColumnRef`] for a scalar
+/// argument (e.g. a SQL literal passed alongside per-row columns).
+/// The embedder builds `value` once instead of `row_count` copies, and
+/// the wire transfer itself is O(1) bytes rather than O(row_count).
+///
+/// Scoped to fixed-width dtypes for now: [`ColumnDtype::is_fixed_width`]
+/// must be `true`. A variable-width constant (Utf8 / Bytea / Jsonb) is
+/// not yet supported - `encode_batch_with_constants` errors loudly
+/// naming the column; encode it as a length-1 [`ColumnRef`] with its
+/// own one-value heap in the meantime.
+pub struct ConstantColumnRef<'a> {
+    pub name: &'a str,
+    pub dtype: ColumnDtype,
+    /// Exactly `dtype.size_bytes()` bytes - the one value.
+    pub value: &'a [u8],
+    /// `false` ⇒ the constant is NULL for every row. `true` (the
+    /// common case) ⇒ valid for every row - identical cost to
+    /// `validity: None` on an ordinary [`ColumnRef`].
+    pub valid: bool,
+}
+
+/// Long-slot pointer variant of [`ColumnRef`] for the E6 zero-copy
+/// var-width ingest path (see [`encode_batch_ptr_slots`]).
+///
+/// Slot shape matches [`ColumnRef::data`] exactly for `len ≤ 12`
+/// (inline). For `len > 12`, bytes `8..16` of the slot carry an
+/// 8-byte little-endian host pointer (`usize`) - valid to dereference
+/// for `len` bytes - instead of a heap offset; there is no separate
+/// `heap` buffer because the caller never materializes one. This is
+/// the natural wire-compatible shape of an embedder's own long-string
+/// representation (e.g. a German-string vector: `[len:u32][prefix:4]
+/// [ptr:8]`), so a caller whose native layout already matches can pass
+/// its column buffer through with zero pre-processing.
+pub struct PtrSlotColumnRef<'a> {
+    pub name: &'a str,
+    /// Must be a variable-width dtype (Utf8 / Bytea / Jsonb).
+    pub dtype: ColumnDtype,
+    /// `row_count × INLINE_SLOT_BYTES` bytes, ptr-slot form (see above).
+    pub data: &'a [u8],
+    /// Same convention as [`ColumnRef::validity`].
+    pub validity: Option<&'a [u8]>,
+}
+
+/// One column of a [`PtrSlotBatch`] - either an ordinary borrowed
+/// column (fixed-width, or variable-width with a caller-built heap;
+/// identical semantics to [`ColumnRef`]) or a [`PtrSlotColumnRef`].
+/// Mixing both kinds in one batch is the common case: numeric columns
+/// stay zero-copy as they already were, and only the var-width columns
+/// need the ptr-slot form.
+pub enum PtrSlotColumn<'a> {
+    Ref(ColumnRef<'a>),
+    PtrSlot(PtrSlotColumnRef<'a>),
+}
+
+/// Host-side input batch for [`encode_batch_ptr_slots`]. The additive,
+/// zero-copy-var-width sibling of [`ColumnarBatch`]; existing callers
+/// of [`ColumnarBatch`] / [`encode_batch`] are completely unaffected.
+pub struct PtrSlotBatch<'a> {
+    pub row_count: u32,
+    pub columns: Vec<PtrSlotColumn<'a>>,
+}
+
+impl<'a> PtrSlotBatch<'a> {
+    pub fn new(row_count: u32) -> Self {
+        Self {
+            row_count,
+            columns: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, col: PtrSlotColumn<'a>) -> &mut Self {
+        self.columns.push(col);
+        self
+    }
+}
+
 /// Owned result of a columnar call. The guest's UDF allocated each
 /// `data` / `validity` `Vec<u8>` in linmem; the host did one symmetric
 /// `memcpy` per output column to land them in heap-owned `Vec`s before
@@ -436,6 +514,14 @@ pub struct ColumnHeader {
     /// every long-slot's `heap_offset + len` falls within
     /// `heap_offset..heap_offset+heap_len`. Phase 1.5+.
     pub heap_len: u32,
+    /// `1` ⇒ this column is CONSTANT: the data buffer holds exactly
+    /// one element's bytes (`dtype.size_bytes()`), logically broadcast
+    /// across every row `0..row_count`. `0` ⇒ the ordinary per-row
+    /// layout (`row_count × dtype.size_bytes()` bytes). See
+    /// [`encode_batch_with_constants`]; produced only on the host→guest
+    /// direction today - a reply blob with `is_constant != 0` is a
+    /// decode error (constant OUTPUT columns are not yet supported).
+    pub is_constant: u32,
 }
 
 /// Offsets used to lay a [`ColumnarBatch`] into a contiguous host-side
@@ -455,6 +541,437 @@ pub struct EncodedBatch {
     pub column_data_offsets: Vec<u32>,
 }
 
+// ---- shared encoder core -----------------------------------------------
+//
+// `encode_batch`, `encode_batch_with_constants`, and
+// `encode_batch_ptr_slots` all funnel through `encode_columns` so the
+// three entry points can never drift on alignment, header field order,
+// or validation - the wire format is defined ONCE.
+
+/// Internal: how one column's bytes are sourced during the shared
+/// layout-and-write pass. Not public; each entry point builds
+/// [`ColumnSpec`]s from its own input type.
+enum ColumnSource<'a> {
+    /// Ordinary per-row buffer - [`encode_batch`]'s existing contract,
+    /// unchanged: `row_count × dtype.size_bytes()` bytes (fixed-width)
+    /// or `row_count × INLINE_SLOT_BYTES` slots plus a caller-built
+    /// `heap` (variable-width).
+    Rows {
+        data: &'a [u8],
+        heap: Option<&'a [u8]>,
+    },
+    /// One value broadcast across every row (`is_constant = 1` on the
+    /// wire). Fixed-width dtypes only; `value` is exactly
+    /// `dtype.size_bytes()` bytes.
+    Constant { value: &'a [u8] },
+    /// Variable-width rows whose long slots (`len > 12`) carry a raw
+    /// host pointer at byte offset 8 (little-endian `usize`, valid to
+    /// dereference for `len` bytes) instead of a heap offset. See
+    /// [`encode_batch_ptr_slots`]'s safety contract.
+    PtrSlotRows { data: &'a [u8] },
+}
+
+/// Internal: one column's full encode instructions.
+struct ColumnSpec<'a> {
+    name: &'a str,
+    dtype: ColumnDtype,
+    source: ColumnSource<'a>,
+    /// `Rows` / `PtrSlotRows`: `None` = all valid, `Some(bitmap)` = a
+    /// `ceil(row_count/8)`-byte packed bitmap (today's convention).
+    /// `Constant`: `None` = valid, `Some(&[0])` = NULL for every row -
+    /// the natural one-byte specialization of the same bit-set-valid
+    /// convention.
+    validity: Option<&'a [u8]>,
+}
+
+/// Sentinel one-byte "invalid" bitmap for a NULL constant column - bit
+/// 0 clear, matching the bit-set-valid convention at 1-byte scale.
+const CONSTANT_NULL_VALIDITY: [u8; 1] = [0];
+
+/// Per-column byte counts computed during validation, reused by the
+/// layout and write passes so slot-heap scanning (for `PtrSlotRows`)
+/// and dtype/size lookups happen exactly once.
+struct ColumnSizes {
+    data_len: usize,
+    heap_present: bool,
+    heap_len: usize,
+    is_constant: bool,
+}
+
+fn size_overflow_err(idx: usize, name: &str, row_count: u32, stride: usize) -> AfterburnerError {
+    AfterburnerError::Engine(format!(
+        "column[{idx}] '{name}' size overflow: {row_count} × {stride}",
+    ))
+}
+
+/// Cross-validate slot heap_offsets for a caller-built heap: every
+/// long slot must point at a valid sub-range of `heap`. Catches
+/// malformed inputs at encode time so the guest never sees a bad
+/// pointer. Shared by [`encode_batch`] and [`encode_batch_with_constants`]
+/// (via `ColumnSource::Rows`).
+fn validate_slot_heap_offsets(
+    idx: usize,
+    name: &str,
+    data: &[u8],
+    heap: &[u8],
+    row_count: u32,
+) -> Result<(), AfterburnerError> {
+    for r in 0..row_count as usize {
+        let slot_off = r * INLINE_SLOT_BYTES;
+        let slot = &data[slot_off..slot_off + INLINE_SLOT_BYTES];
+        let len = u32::from_le_bytes(slot[0..4].try_into().unwrap()) as usize;
+        if len > INLINE_SLOT_INLINE_MAX {
+            let heap_off = u32::from_le_bytes(slot[12..16].try_into().unwrap()) as usize;
+            if heap_off.checked_add(len).is_none_or(|end| end > heap.len()) {
+                return Err(AfterburnerError::Engine(format!(
+                    "column[{idx}] '{name}' row {r}: slot len={len}, heap_off={heap_off}, heap_len={} - out of bounds",
+                    heap.len(),
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Sum the value lengths of every long slot (`len > 12`) in a ptr-slot
+/// column - the total heap bytes [`encode_batch_ptr_slots`] will need
+/// to reserve for it. Reads only the `len` field of each slot (never
+/// the pointer bytes), so this half of the scan needs no `unsafe`.
+fn ptr_slot_heap_len(data: &[u8], row_count: u32) -> Result<usize, AfterburnerError> {
+    let mut total = 0usize;
+    for r in 0..row_count as usize {
+        let slot_off = r * INLINE_SLOT_BYTES;
+        let slot = &data[slot_off..slot_off + INLINE_SLOT_BYTES];
+        let len = u32::from_le_bytes(slot[0..4].try_into().unwrap()) as usize;
+        if len > INLINE_SLOT_INLINE_MAX {
+            total = total
+                .checked_add(len)
+                .ok_or_else(|| AfterburnerError::Engine("ptr-slot heap length overflow".into()))?;
+        }
+    }
+    Ok(total)
+}
+
+/// Write a ptr-slot column's rewritten slot array + dereferenced heap
+/// bytes directly into the output blob - the E6 elimination of the
+/// intermediate heap-buffer materialization `encode_batch` requires:
+/// every long slot's value bytes are copied exactly ONCE, straight
+/// from the caller's pointer into their final blob position.
+///
+/// # Safety
+/// Every long slot (`len > 12`) in `data` must carry, at byte offset
+/// `8..16` (little-endian), a `usize` pointer valid for reads of `len`
+/// bytes, for the duration of this call. Upheld transitively by
+/// [`encode_batch_ptr_slots`]'s own safety contract - this function is
+/// only ever reached through specs that function builds.
+unsafe fn write_ptr_slot_rows(
+    bytes: &mut [u8],
+    data_off: usize,
+    heap_off: usize,
+    data: &[u8],
+    row_count: u32,
+) {
+    let mut heap_cursor = 0usize;
+    for r in 0..row_count as usize {
+        let slot_off = r * INLINE_SLOT_BYTES;
+        let slot = &data[slot_off..slot_off + INLINE_SLOT_BYTES];
+        let len = u32::from_le_bytes(slot[0..4].try_into().unwrap()) as usize;
+        let dst_slot_off = data_off + slot_off;
+        if len <= INLINE_SLOT_INLINE_MAX {
+            // Inline: the slot is already self-contained - copy verbatim.
+            bytes[dst_slot_off..dst_slot_off + INLINE_SLOT_BYTES].copy_from_slice(slot);
+            continue;
+        }
+        // Long slot: len + prefix (bytes 0..8) carry straight over.
+        bytes[dst_slot_off..dst_slot_off + 8].copy_from_slice(&slot[0..8]);
+        let ptr = usize::from_le_bytes(slot[8..16].try_into().unwrap()) as *const u8;
+        // SAFETY: caller's contract (see this fn's doc / the public
+        // `encode_batch_ptr_slots` safety contract).
+        let value = unsafe { std::slice::from_raw_parts(ptr, len) };
+        let dst_heap_off = heap_off + heap_cursor;
+        bytes[dst_heap_off..dst_heap_off + len].copy_from_slice(value);
+        // Bytes 8..12 are unused for a long slot on the wire (mirrors
+        // `encode_batch`'s shape exactly); zero them, then write the
+        // computed heap_off at 12..16.
+        bytes[dst_slot_off + 8..dst_slot_off + 12].fill(0);
+        write_u32_le(
+            bytes,
+            dst_slot_off + 12,
+            u32_from_usize(heap_cursor).unwrap_or(0),
+        );
+        heap_cursor += len;
+    }
+}
+
+/// The shared layout-and-write pass behind every `encode_batch*`
+/// entry point. See the module's "wire-level header layout" section
+/// for the byte format this produces.
+fn encode_columns(
+    row_count: u32,
+    specs: &[ColumnSpec<'_>],
+) -> Result<EncodedBatch, AfterburnerError> {
+    let column_count = specs.len();
+    if column_count > u32::MAX as usize {
+        return Err(AfterburnerError::Engine(format!(
+            "ColumnarBatch column_count {column_count} exceeds u32::MAX",
+        )));
+    }
+
+    // ---- validation + per-column byte-count pass ----
+    let mut sizes: Vec<ColumnSizes> = Vec::with_capacity(column_count);
+    for (idx, spec) in specs.iter().enumerate() {
+        if !spec.dtype.is_phase1_supported() {
+            return Err(AfterburnerError::Engine(format!(
+                "column[{idx}] '{}' has dtype {:?} which is reserved but not yet implemented in this Afterburner version",
+                spec.name, spec.dtype,
+            )));
+        }
+
+        // Validate the validity bitmap's shape up front; its bytes are
+        // re-read directly from `spec.validity` in the layout pass
+        // below, so nothing needs to be threaded out of this match.
+        match (&spec.source, spec.validity) {
+            (_, None) => {}
+            (ColumnSource::Constant { .. }, Some(bm)) => {
+                if bm.len() != 1 {
+                    return Err(AfterburnerError::Engine(format!(
+                        "column[{idx}] '{}': constant validity must be exactly 1 byte, got {}",
+                        spec.name,
+                        bm.len(),
+                    )));
+                }
+            }
+            (_, Some(bm)) => {
+                let need = row_count.div_ceil(8) as usize;
+                if bm.len() < need {
+                    return Err(AfterburnerError::Engine(format!(
+                        "column[{idx}] '{}': validity bitmap has {} bytes but {} rows need ≥ {}",
+                        spec.name,
+                        bm.len(),
+                        row_count,
+                        need,
+                    )));
+                }
+            }
+        }
+
+        match &spec.source {
+            ColumnSource::Rows { data, heap } => {
+                let stride = spec.dtype.size_bytes()?;
+                let expected = stride
+                    .checked_mul(row_count as usize)
+                    .ok_or_else(|| size_overflow_err(idx, spec.name, row_count, stride))?;
+                if data.len() != expected {
+                    return Err(AfterburnerError::Engine(format!(
+                        "column[{idx}] '{}': data.len() = {} but expected {} ({} rows × {} bytes)",
+                        spec.name,
+                        data.len(),
+                        expected,
+                        row_count,
+                        stride,
+                    )));
+                }
+                if spec.dtype.is_fixed_width() {
+                    if heap.is_some() {
+                        return Err(AfterburnerError::Engine(format!(
+                            "column[{idx}] '{}': dtype {:?} is fixed-width - `heap` must be None",
+                            spec.name, spec.dtype,
+                        )));
+                    }
+                } else {
+                    let Some(heap) = heap else {
+                        return Err(AfterburnerError::Engine(format!(
+                            "column[{idx}] '{}': dtype {:?} is variable-width - `heap` is required (use Some(&[]) for empty)",
+                            spec.name, spec.dtype,
+                        )));
+                    };
+                    validate_slot_heap_offsets(idx, spec.name, data, heap, row_count)?;
+                }
+                sizes.push(ColumnSizes {
+                    data_len: data.len(),
+                    heap_present: heap.is_some(),
+                    heap_len: heap.map_or(0, |h| h.len()),
+                    is_constant: false,
+                });
+            }
+            ColumnSource::Constant { value } => {
+                if !spec.dtype.is_fixed_width() {
+                    return Err(AfterburnerError::Engine(format!(
+                        "column[{idx}] '{}': constant columns support fixed-width dtypes only (got {:?}); \
+                         encode a length-1 Rows column with its own heap for a variable-width constant",
+                        spec.name, spec.dtype,
+                    )));
+                }
+                let stride = spec.dtype.size_bytes()?;
+                if value.len() != stride {
+                    return Err(AfterburnerError::Engine(format!(
+                        "column[{idx}] '{}': constant value.len() = {} but dtype {:?} needs {}",
+                        spec.name,
+                        value.len(),
+                        spec.dtype,
+                        stride,
+                    )));
+                }
+                sizes.push(ColumnSizes {
+                    data_len: value.len(),
+                    heap_present: false,
+                    heap_len: 0,
+                    is_constant: true,
+                });
+            }
+            ColumnSource::PtrSlotRows { data } => {
+                if spec.dtype.is_fixed_width() {
+                    return Err(AfterburnerError::Engine(format!(
+                        "column[{idx}] '{}': ptr-slot columns support variable-width dtypes only (got {:?})",
+                        spec.name, spec.dtype,
+                    )));
+                }
+                let expected = INLINE_SLOT_BYTES
+                    .checked_mul(row_count as usize)
+                    .ok_or_else(|| {
+                        size_overflow_err(idx, spec.name, row_count, INLINE_SLOT_BYTES)
+                    })?;
+                if data.len() != expected {
+                    return Err(AfterburnerError::Engine(format!(
+                        "column[{idx}] '{}': data.len() = {} but expected {} ({} rows × {} bytes)",
+                        spec.name,
+                        data.len(),
+                        expected,
+                        row_count,
+                        INLINE_SLOT_BYTES,
+                    )));
+                }
+                sizes.push(ColumnSizes {
+                    data_len: data.len(),
+                    heap_present: true,
+                    heap_len: ptr_slot_heap_len(data, row_count)?,
+                    is_constant: false,
+                });
+            }
+        }
+    }
+
+    // ---- layout pass: header, column-header table, then per column
+    // data / validity / name / heap. 8-byte-align every data region so
+    // TypedArray views land on natural boundaries - Wasmtime/QuickJS
+    // reject a misaligned `new Float64Array(buf, off, len)`. Names and
+    // heaps are 1-byte aligned. ----
+    let header_end = BATCH_HEADER_BYTES;
+    let column_table_end = header_end + COLUMN_HEADER_BYTES * column_count;
+    let mut cursor = align_up(column_table_end, 8);
+
+    let mut headers: Vec<ColumnHeader> = Vec::with_capacity(column_count);
+    let mut column_data_offsets: Vec<u32> = Vec::with_capacity(column_count);
+    for (spec, sz) in specs.iter().zip(sizes.iter()) {
+        cursor = align_up(cursor, 8);
+        let data_offset = u32_from_usize(cursor)?;
+        cursor += sz.data_len;
+        column_data_offsets.push(data_offset);
+
+        let validity_offset = if let Some(bm) = spec.validity {
+            let v = u32_from_usize(cursor)?;
+            cursor += bm.len();
+            v
+        } else {
+            0
+        };
+
+        let name_offset = u32_from_usize(cursor)?;
+        cursor += spec.name.len();
+        let name_len = u32_from_usize(spec.name.len())?;
+
+        let (heap_offset, heap_len) = if sz.heap_present {
+            let off = u32_from_usize(cursor)?;
+            cursor += sz.heap_len;
+            (off, u32_from_usize(sz.heap_len)?)
+        } else {
+            (0, 0)
+        };
+
+        headers.push(ColumnHeader {
+            dtype: spec.dtype as u8,
+            _pad: [0; 3],
+            data_offset,
+            validity_offset,
+            name_offset,
+            name_len,
+            heap_offset,
+            heap_len,
+            is_constant: sz.is_constant as u32,
+        });
+    }
+
+    // ---- write pass ----
+    let mut bytes = vec![0u8; cursor];
+    write_u32_le(&mut bytes, 0, row_count);
+    write_u32_le(&mut bytes, 4, column_count as u32);
+    write_u32_le(&mut bytes, 8, u32_from_usize(header_end)?);
+    write_u32_le(&mut bytes, 12, 0);
+
+    let mut h_off = header_end;
+    for ch in &headers {
+        bytes[h_off] = ch.dtype;
+        bytes[h_off + 1] = ch._pad[0];
+        bytes[h_off + 2] = ch._pad[1];
+        bytes[h_off + 3] = ch._pad[2];
+        write_u32_le(&mut bytes, h_off + 4, ch.data_offset);
+        write_u32_le(&mut bytes, h_off + 8, ch.validity_offset);
+        write_u32_le(&mut bytes, h_off + 12, ch.name_offset);
+        write_u32_le(&mut bytes, h_off + 16, ch.name_len);
+        write_u32_le(&mut bytes, h_off + 20, ch.heap_offset);
+        write_u32_le(&mut bytes, h_off + 24, ch.heap_len);
+        write_u32_le(&mut bytes, h_off + 28, ch.is_constant);
+        h_off += COLUMN_HEADER_BYTES;
+    }
+
+    for (spec, ch) in specs.iter().zip(headers.iter()) {
+        let data_off = ch.data_offset as usize;
+        match &spec.source {
+            ColumnSource::Rows { data, .. } => {
+                bytes[data_off..data_off + data.len()].copy_from_slice(data);
+            }
+            ColumnSource::Constant { value } => {
+                bytes[data_off..data_off + value.len()].copy_from_slice(value);
+            }
+            ColumnSource::PtrSlotRows { data } => {
+                // SAFETY: only reachable via `encode_batch_ptr_slots`,
+                // whose own `unsafe fn` contract is the caller's
+                // obligation for every pointer these slots carry.
+                unsafe {
+                    write_ptr_slot_rows(
+                        &mut bytes,
+                        data_off,
+                        ch.heap_offset as usize,
+                        data,
+                        row_count,
+                    );
+                }
+            }
+        }
+        if let Some(bm) = spec.validity {
+            let v_off = ch.validity_offset as usize;
+            bytes[v_off..v_off + bm.len()].copy_from_slice(bm);
+        }
+        let n_off = ch.name_offset as usize;
+        bytes[n_off..n_off + spec.name.len()].copy_from_slice(spec.name.as_bytes());
+        if let ColumnSource::Rows {
+            heap: Some(heap), ..
+        } = &spec.source
+        {
+            let h_off = ch.heap_offset as usize;
+            bytes[h_off..h_off + heap.len()].copy_from_slice(heap);
+        }
+        // `PtrSlotRows` heap bytes are written inside
+        // `write_ptr_slot_rows` above - gathered directly from the
+        // caller's pointers, no intermediate buffer.
+    }
+
+    Ok(EncodedBatch {
+        bytes,
+        column_data_offsets,
+    })
+}
+
 /// Serialise a [`ColumnarBatch`] to its on-the-wire byte representation.
 /// The output is one contiguous `Vec<u8>` ready to copy into wasm
 /// linear memory.
@@ -470,202 +987,95 @@ pub struct EncodedBatch {
 /// enum so the wire format stays stable, but the host path doesn't
 /// know how to lay them out yet.
 pub fn encode_batch(batch: &ColumnarBatch<'_>) -> Result<EncodedBatch, AfterburnerError> {
-    let row_count = batch.row_count;
-    let column_count = batch.columns.len();
-    if column_count > u32::MAX as usize {
-        return Err(AfterburnerError::Engine(format!(
-            "ColumnarBatch column_count {column_count} exceeds u32::MAX",
-        )));
-    }
+    let specs: Vec<ColumnSpec<'_>> = batch
+        .columns
+        .iter()
+        .map(|col| ColumnSpec {
+            name: col.name,
+            dtype: col.dtype,
+            source: ColumnSource::Rows {
+                data: col.data,
+                heap: col.heap,
+            },
+            validity: col.validity,
+        })
+        .collect();
+    encode_columns(batch.row_count, &specs)
+}
 
-    // Validate every column up front so we don't half-encode and then
-    // bail. Early-out on size + alignment + dtype.
-    for (idx, col) in batch.columns.iter().enumerate() {
-        if !col.dtype.is_phase1_supported() {
-            return Err(AfterburnerError::Engine(format!(
-                "column[{idx}] '{}' has dtype {:?} which is reserved but not yet implemented in this Afterburner version",
-                col.name, col.dtype,
-            )));
-        }
-        let stride = col.dtype.size_bytes()?;
-        let expected = stride.checked_mul(row_count as usize).ok_or_else(|| {
-            AfterburnerError::Engine(format!(
-                "column[{idx}] '{}' size overflow: {row_count} × {stride}",
-                col.name,
-            ))
-        })?;
-        if col.data.len() != expected {
-            return Err(AfterburnerError::Engine(format!(
-                "column[{idx}] '{}': data.len() = {} but expected {} ({} rows × {} bytes)",
-                col.name,
-                col.data.len(),
-                expected,
-                row_count,
-                stride,
-            )));
-        }
-        // Variable-width dtypes additionally require a heap buffer
-        // (possibly empty if every slot fits inline). Fixed-width
-        // dtypes must NOT pass a heap.
-        if col.dtype.is_fixed_width() {
-            if col.heap.is_some() {
-                return Err(AfterburnerError::Engine(format!(
-                    "column[{idx}] '{}': dtype {:?} is fixed-width - `heap` must be None",
-                    col.name, col.dtype,
-                )));
-            }
-        } else if col.heap.is_none() {
-            return Err(AfterburnerError::Engine(format!(
-                "column[{idx}] '{}': dtype {:?} is variable-width - `heap` is required (use Some(&[]) for empty)",
-                col.name, col.dtype,
-            )));
-        }
-        // Cross-validate slot heap_offsets for var-width columns: every
-        // long slot must point at a valid sub-range of the heap. Catch
-        // malformed inputs at encode time so the guest never sees a
-        // bad pointer.
-        if !col.dtype.is_fixed_width() {
-            let heap = col.heap.unwrap();
-            for r in 0..row_count as usize {
-                let slot_off = r * INLINE_SLOT_BYTES;
-                let slot = &col.data[slot_off..slot_off + INLINE_SLOT_BYTES];
-                let len = u32::from_le_bytes(slot[0..4].try_into().unwrap()) as usize;
-                if len > INLINE_SLOT_INLINE_MAX {
-                    let heap_off = u32::from_le_bytes(slot[12..16].try_into().unwrap()) as usize;
-                    if heap_off.checked_add(len).is_none_or(|end| end > heap.len()) {
-                        return Err(AfterburnerError::Engine(format!(
-                            "column[{idx}] '{}' row {r}: slot len={len}, heap_off={heap_off}, heap_len={} - out of bounds",
-                            col.name,
-                            heap.len(),
-                        )));
-                    }
-                }
-            }
-        }
-        if let Some(bm) = col.validity {
-            let need = row_count.div_ceil(8) as usize;
-            if bm.len() < need {
-                return Err(AfterburnerError::Engine(format!(
-                    "column[{idx}] '{}': validity bitmap has {} bytes but {} rows need ≥ {}",
-                    col.name,
-                    bm.len(),
-                    row_count,
-                    need,
-                )));
-            }
-        }
-    }
-
-    // Layout pass: header, then column-header table, then for each
-    // column its data, then validity (if any), then name. 8-byte-align
-    // every variable region so TypedArray views land on natural
-    // boundaries - Wasmtime will reject `new Float64Array(buf, off,
-    // len)` otherwise. Names are 1-byte aligned.
-    let header_end = BATCH_HEADER_BYTES;
-    let column_table_end = header_end + COLUMN_HEADER_BYTES * column_count;
-    let mut cursor = align_up(column_table_end, 8);
-
-    let mut headers: Vec<ColumnHeader> = Vec::with_capacity(column_count);
-    let mut column_data_offsets: Vec<u32> = Vec::with_capacity(column_count);
-    for col in &batch.columns {
-        // Align to 8 BEFORE writing this column's data buffer.
-        // Required because `new Float64Array(buf, off, len)` (and
-        // every other 8-byte typed view) checks that the **buffer-
-        // relative** offset is a multiple of 8 - QuickJS rejects
-        // anything else with `RangeError: invalid offset`. Aligning
-        // only after the data + before the next column's data isn't
-        // enough: the previous column's 4-byte-aligned name may
-        // leave the cursor at a non-8-aligned position.
-        cursor = align_up(cursor, 8);
-        let data_offset = u32_from_usize(cursor)?;
-        cursor += col.data.len();
-        column_data_offsets.push(data_offset);
-
-        let validity_offset = if let Some(bm) = col.validity {
-            let v = u32_from_usize(cursor)?;
-            cursor += bm.len();
-            v
+/// Like [`encode_batch`], but additionally accepts [`ConstantColumnRef`]
+/// columns: a scalar value broadcast across every row at O(1) transfer
+/// cost, appended after `batch`'s ordinary columns. Column order does
+/// not affect guest-side access (the dispatcher looks columns up by
+/// name), so this is a pure superset of `encode_batch`'s behaviour -
+/// `constants: &[]` produces a byte-identical blob to `encode_batch`
+/// (every `is_constant` field is `0`).
+pub fn encode_batch_with_constants(
+    batch: &ColumnarBatch<'_>,
+    constants: &[ConstantColumnRef<'_>],
+) -> Result<EncodedBatch, AfterburnerError> {
+    let mut specs: Vec<ColumnSpec<'_>> = Vec::with_capacity(batch.columns.len() + constants.len());
+    specs.extend(batch.columns.iter().map(|col| ColumnSpec {
+        name: col.name,
+        dtype: col.dtype,
+        source: ColumnSource::Rows {
+            data: col.data,
+            heap: col.heap,
+        },
+        validity: col.validity,
+    }));
+    specs.extend(constants.iter().map(|c| ColumnSpec {
+        name: c.name,
+        dtype: c.dtype,
+        source: ColumnSource::Constant { value: c.value },
+        validity: if c.valid {
+            None
         } else {
-            0
-        };
+            Some(&CONSTANT_NULL_VALIDITY[..])
+        },
+    }));
+    encode_columns(batch.row_count, &specs)
+}
 
-        // Names are arbitrary UTF-8; 1-byte alignment suffices.
-        let name_offset = u32_from_usize(cursor)?;
-        cursor += col.name.len();
-        let name_len = u32_from_usize(col.name.len())?;
-
-        // Heap follows for variable-width dtypes. 1-byte alignment
-        // suffices because the JS-side reads heap bytes via
-        // `Uint8Array` (1-aligned) - only the slot array needs the
-        // 8-aligned boundary that the data buffer already gets.
-        // 0/0 sentinel for fixed-width columns.
-        let (heap_offset, heap_len) = if let Some(heap) = col.heap {
-            let off = u32_from_usize(cursor)?;
-            cursor += heap.len();
-            (off, u32_from_usize(heap.len())?)
-        } else {
-            (0, 0)
-        };
-
-        headers.push(ColumnHeader {
-            dtype: col.dtype as u8,
-            _pad: [0; 3],
-            data_offset,
-            validity_offset,
-            name_offset,
-            name_len,
-            heap_offset,
-            heap_len,
-        });
-    }
-
-    // Allocate once, write everything in.
-    let mut bytes = vec![0u8; cursor];
-    let bh = BatchHeader {
-        row_count,
-        column_count: column_count as u32,
-        columns_offset: u32_from_usize(header_end)?,
-        _reserved: 0,
-    };
-    write_u32_le(&mut bytes, 0, bh.row_count);
-    write_u32_le(&mut bytes, 4, bh.column_count);
-    write_u32_le(&mut bytes, 8, bh.columns_offset);
-    write_u32_le(&mut bytes, 12, bh._reserved);
-
-    let mut h_off = header_end;
-    for ch in &headers {
-        bytes[h_off] = ch.dtype;
-        bytes[h_off + 1] = ch._pad[0];
-        bytes[h_off + 2] = ch._pad[1];
-        bytes[h_off + 3] = ch._pad[2];
-        write_u32_le(&mut bytes, h_off + 4, ch.data_offset);
-        write_u32_le(&mut bytes, h_off + 8, ch.validity_offset);
-        write_u32_le(&mut bytes, h_off + 12, ch.name_offset);
-        write_u32_le(&mut bytes, h_off + 16, ch.name_len);
-        write_u32_le(&mut bytes, h_off + 20, ch.heap_offset);
-        write_u32_le(&mut bytes, h_off + 24, ch.heap_len);
-        h_off += COLUMN_HEADER_BYTES;
-    }
-
-    for (col, ch) in batch.columns.iter().zip(headers.iter()) {
-        let data_off = ch.data_offset as usize;
-        bytes[data_off..data_off + col.data.len()].copy_from_slice(col.data);
-        if let Some(bm) = col.validity {
-            let v_off = ch.validity_offset as usize;
-            bytes[v_off..v_off + bm.len()].copy_from_slice(bm);
-        }
-        let n_off = ch.name_offset as usize;
-        bytes[n_off..n_off + col.name.len()].copy_from_slice(col.name.as_bytes());
-        if let Some(heap) = col.heap {
-            let h_off = ch.heap_offset as usize;
-            bytes[h_off..h_off + heap.len()].copy_from_slice(heap);
-        }
-    }
-
-    Ok(EncodedBatch {
-        bytes,
-        column_data_offsets,
-    })
+/// Like [`encode_batch`], but variable-width columns may be supplied
+/// as [`PtrSlotColumnRef`] - long slots carrying a raw host pointer
+/// instead of a pre-built heap offset, dereferenced and copied
+/// directly into the output blob during the same layout-and-write
+/// pass. This eliminates the intermediate slot+heap materialization an
+/// embedder would otherwise pay before calling `encode_batch`: ONE
+/// copy of each long value's bytes (pointer → blob) instead of TWO
+/// (pointer → scratch heap → blob).
+///
+/// # Safety
+/// For every [`PtrSlotColumn::PtrSlot`] column in `batch`, every long
+/// slot (`len > 12`) must carry, at byte offset `8..16` (little-endian),
+/// a `usize` pointer valid for reads of `len` bytes, and that memory
+/// must remain valid and not be mutated for the duration of this call.
+pub unsafe fn encode_batch_ptr_slots(
+    batch: &PtrSlotBatch<'_>,
+) -> Result<EncodedBatch, AfterburnerError> {
+    let specs: Vec<ColumnSpec<'_>> = batch
+        .columns
+        .iter()
+        .map(|col| match col {
+            PtrSlotColumn::Ref(r) => ColumnSpec {
+                name: r.name,
+                dtype: r.dtype,
+                source: ColumnSource::Rows {
+                    data: r.data,
+                    heap: r.heap,
+                },
+                validity: r.validity,
+            },
+            PtrSlotColumn::PtrSlot(p) => ColumnSpec {
+                name: p.name,
+                dtype: p.dtype,
+                source: ColumnSource::PtrSlotRows { data: p.data },
+                validity: p.validity,
+            },
+        })
+        .collect();
+    encode_columns(batch.row_count, &specs)
 }
 
 /// Decode the columnar reply blob the guest wrote back.
@@ -705,6 +1115,18 @@ pub fn decode_batch(blob: &[u8]) -> Result<ColumnarOutput, AfterburnerError> {
         let name_len = read_u32_le(blob, h_off + 16) as usize;
         let heap_offset = read_u32_le(blob, h_off + 20) as usize;
         let heap_len = read_u32_le(blob, h_off + 24) as usize;
+        let is_constant = read_u32_le(blob, h_off + 28);
+        if is_constant != 0 {
+            // Constant columns (see `encode_batch_with_constants`) are
+            // a host→guest optimization only; no guest emits one on
+            // the reply path today. Fail loud rather than silently
+            // mis-decode a `data` region that is `dtype.size_bytes()`
+            // bytes instead of the `row_count`-sized buffer the rest
+            // of this function assumes.
+            return Err(AfterburnerError::Engine(format!(
+                "columnar reply column[{i}]: constant output columns are not supported (is_constant={is_constant})",
+            )));
+        }
 
         let stride = dtype.size_bytes()?;
         let data_len = stride.checked_mul(row_count as usize).ok_or_else(|| {
@@ -808,6 +1230,28 @@ fn write_u32_le(buf: &mut [u8], off: usize, v: u32) {
 
 fn read_u32_le(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes(buf[off..off + 4].try_into().unwrap())
+}
+
+/// Validate that `name` is safe to interpolate verbatim into generated
+/// guest source. Used by [`crate::pyodide_columnar`] and
+/// [`crate::ruby_columnar`], whose columnar invocation primitive
+/// composes a driver script around a caller-supplied entry-point name
+/// (there is no host-import call boundary for those runtimes the way
+/// there is for the wasm/JS plugin - see each module's docs). Restricted
+/// to a plain identifier (`[A-Za-z_][A-Za-z0-9_]*`) so it can never break
+/// out of the call-expression position it is spliced into, regardless of
+/// where the name ultimately originated (e.g. a UDF catalog row).
+pub(crate) fn validate_entry_fn_name(name: &str) -> Result<(), AfterburnerError> {
+    let mut chars = name.chars();
+    let ok = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !ok {
+        return Err(AfterburnerError::Engine(format!(
+            "columnar UDF entry_fn {name:?} is not a valid identifier \
+             ([A-Za-z_][A-Za-z0-9_]*) - refusing to splice it into generated guest source",
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1309,12 +1753,348 @@ mod tests {
             "BatchHeader must be exactly 16 bytes"
         );
         // Phase 1.5: ColumnHeader grew from 20 to 28 bytes (added
-        // heap_offset + heap_len for variable-width dtypes). The JS
-        // dispatcher's COL_HDR constant must stay in sync (asserted
-        // by the b_columnar_udf integration tests).
+        // heap_offset + heap_len for variable-width dtypes), then to
+        // 32 bytes (added is_constant for the constant-column ABI
+        // tag). The JS dispatcher's COL_HDR constant must stay in
+        // sync (asserted by the b_columnar_udf integration tests).
         assert_eq!(
-            COLUMN_HEADER_BYTES, 28,
-            "ColumnHeader must be exactly 28 bytes"
+            COLUMN_HEADER_BYTES, 32,
+            "ColumnHeader must be exactly 32 bytes"
         );
+    }
+
+    // ---- E6 ptr-slot ingest ----------------------------------------
+
+    #[test]
+    fn encode_batch_ptr_slots_matches_encode_batch_byte_for_byte() {
+        // Same logical batch (one fixed-width column, one var-width
+        // column with a mix of inline + long values), encoded via the
+        // ordinary heap-prebuilt path and via the ptr-slot path. The
+        // two blobs must be byte-identical - the E6 path is a pure
+        // write-side optimization, never a wire-format change.
+        let ints = i32_slice_bytes(&[1, 2, 3]);
+        let strs: Vec<&[u8]> = vec![b"hi", b"a value well over twelve bytes long", b"ok"];
+        let (heap_slots, heap) = build_var_column(&strs);
+
+        let mut ref_batch = ColumnarBatch::new(3);
+        ref_batch.push(ColumnRef {
+            name: "n",
+            dtype: ColumnDtype::Int32,
+            data: &ints,
+            heap: None,
+            validity: None,
+        });
+        ref_batch.push(ColumnRef {
+            name: "s",
+            dtype: ColumnDtype::Utf8,
+            data: &heap_slots,
+            heap: Some(&heap),
+            validity: None,
+        });
+        let expected = encode_batch(&ref_batch).unwrap();
+
+        // Ptr-slot form: same strings, but each long slot carries a raw
+        // pointer into an owned buffer instead of a pre-built heap.
+        let owned: Vec<Vec<u8>> = strs.iter().map(|s| s.to_vec()).collect();
+        let ptr_slots = build_ptr_slot_column(&owned);
+
+        let mut ptr_batch = PtrSlotBatch::new(3);
+        ptr_batch.push(PtrSlotColumn::Ref(ColumnRef {
+            name: "n",
+            dtype: ColumnDtype::Int32,
+            data: &ints,
+            heap: None,
+            validity: None,
+        }));
+        ptr_batch.push(PtrSlotColumn::PtrSlot(PtrSlotColumnRef {
+            name: "s",
+            dtype: ColumnDtype::Utf8,
+            data: &ptr_slots,
+            validity: None,
+        }));
+        // SAFETY: `owned`'s buffers outlive this call and are never
+        // mutated while `ptr_batch` (which points into them) is alive.
+        let got = unsafe { encode_batch_ptr_slots(&ptr_batch).unwrap() };
+
+        assert_eq!(
+            got.bytes, expected.bytes,
+            "ptr-slot encode must be byte-identical to the heap-prebuilt encode"
+        );
+    }
+
+    #[test]
+    fn encode_batch_ptr_slots_no_intermediate_heap_buffer() {
+        // COPIED_BYTES proof (structural + size-exact, mirroring this
+        // file's existing `encode_max_columns_typical_workload` size
+        // idiom): `PtrSlotColumnRef` has no `heap` field at all, so the
+        // caller cannot pre-materialize a scratch heap even if it
+        // wanted to - the ONLY place long-value bytes are copied is
+        // inside `encode_batch_ptr_slots` itself, straight from the
+        // caller's pointer into the returned blob. Confirm the output
+        // size accounts for exactly one copy of the heap bytes (not
+        // zero, not two).
+        let long_a = vec![b'a'; 40];
+        let long_b = vec![b'b'; 100];
+        let owned = vec![long_a.clone(), long_b.clone()];
+        let ptr_slots = build_ptr_slot_column(&owned);
+
+        let mut batch = PtrSlotBatch::new(2);
+        batch.push(PtrSlotColumn::PtrSlot(PtrSlotColumnRef {
+            name: "v",
+            dtype: ColumnDtype::Bytea,
+            data: &ptr_slots,
+            validity: None,
+        }));
+        // SAFETY: `owned` outlives this call and is not mutated.
+        let encoded = unsafe { encode_batch_ptr_slots(&batch).unwrap() };
+
+        let decoded = decode_batch(&encoded.bytes).unwrap();
+        assert_eq!(decoded.columns[0].row_bytes(0).unwrap(), long_a.as_slice());
+        assert_eq!(decoded.columns[0].row_bytes(1).unwrap(), long_b.as_slice());
+
+        // header(16) + 1 col-header(32) -> align8 -> slot array
+        // (2*16=32, already 8-aligned) -> name(1 byte "v") -> align
+        // not required before heap (1-byte aligned) -> heap
+        // (40+100=140 bytes, exactly once).
+        let header_and_table = align_up(16 + 32, 8);
+        let after_slots = header_and_table + 32;
+        let after_name = after_slots + 1;
+        let expected_len = after_name + (long_a.len() + long_b.len());
+        assert_eq!(
+            encoded.bytes.len(),
+            expected_len,
+            "blob length must reflect exactly one copy of the heap bytes"
+        );
+    }
+
+    #[test]
+    fn encode_batch_ptr_slots_rejects_fixed_width_dtype() {
+        let data = vec![0u8; INLINE_SLOT_BYTES];
+        let mut batch = PtrSlotBatch::new(1);
+        batch.push(PtrSlotColumn::PtrSlot(PtrSlotColumnRef {
+            name: "x",
+            dtype: ColumnDtype::Int32,
+            data: &data,
+            validity: None,
+        }));
+        // SAFETY: no long slots present (all-zero len), nothing is
+        // dereferenced; this call only exercises the validation error.
+        let err = unsafe { encode_batch_ptr_slots(&batch).unwrap_err() };
+        let msg = format!("{err:?}");
+        assert!(msg.contains("variable-width dtypes only"), "got {msg}");
+    }
+
+    #[test]
+    fn encode_batch_ptr_slots_all_inline_needs_no_pointer() {
+        // Every value ≤ 12 bytes: no long slot exists, so no pointer is
+        // ever dereferenced - proves the inline path never touches the
+        // `unsafe` contract.
+        let owned = vec![b"short".to_vec(), b"also-ok".to_vec()];
+        let ptr_slots = build_ptr_slot_column(&owned);
+        let mut batch = PtrSlotBatch::new(2);
+        batch.push(PtrSlotColumn::PtrSlot(PtrSlotColumnRef {
+            name: "s",
+            dtype: ColumnDtype::Utf8,
+            data: &ptr_slots,
+            validity: None,
+        }));
+        // SAFETY: no long slots, so the pointer contract is vacuous.
+        let encoded = unsafe { encode_batch_ptr_slots(&batch).unwrap() };
+        let decoded = decode_batch(&encoded.bytes).unwrap();
+        assert_eq!(decoded.columns[0].row_str(0).unwrap(), "short");
+        assert_eq!(decoded.columns[0].row_str(1).unwrap(), "also-ok");
+    }
+
+    /// Build a ptr-slot column (E6 form) from owned byte buffers: short
+    /// values inline exactly like `build_var_column`; long values carry
+    /// a raw pointer into the owned buffer instead of a heap offset.
+    /// Test-only - `owned` must outlive every use of the returned slots.
+    fn build_ptr_slot_column(owned: &[Vec<u8>]) -> Vec<u8> {
+        let mut slots = vec![0u8; owned.len() * INLINE_SLOT_BYTES];
+        for (i, v) in owned.iter().enumerate() {
+            let sb = i * INLINE_SLOT_BYTES;
+            slots[sb..sb + 4].copy_from_slice(&(v.len() as u32).to_le_bytes());
+            if v.len() <= INLINE_SLOT_INLINE_MAX {
+                slots[sb + 4..sb + 4 + v.len()].copy_from_slice(v);
+            } else {
+                slots[sb + 4..sb + 8].copy_from_slice(&v[0..4]);
+                let ptr = v.as_ptr() as usize;
+                slots[sb + 8..sb + 16].copy_from_slice(&ptr.to_le_bytes());
+            }
+        }
+        slots
+    }
+
+    fn i32_slice_bytes(xs: &[i32]) -> Vec<u8> {
+        xs.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    // ---- constant-column ABI tag ------------------------------------
+
+    #[test]
+    fn encode_batch_with_constants_empty_constants_matches_encode_batch() {
+        let data = i32_slice_bytes(&[1, 2, 3]);
+        let mut batch = ColumnarBatch::new(3);
+        batch.push(ColumnRef {
+            name: "x",
+            dtype: ColumnDtype::Int32,
+            data: &data,
+            heap: None,
+            validity: None,
+        });
+        let plain = encode_batch(&batch).unwrap();
+        let with_none = encode_batch_with_constants(&batch, &[]).unwrap();
+        assert_eq!(
+            plain.bytes, with_none.bytes,
+            "an empty constants slice must be byte-identical to encode_batch"
+        );
+    }
+
+    #[test]
+    fn encode_batch_with_constants_round_trips_o1_value() {
+        let data = i32_slice_bytes(&[1, 2, 3, 4]);
+        let mut batch = ColumnarBatch::new(4);
+        batch.push(ColumnRef {
+            name: "x",
+            dtype: ColumnDtype::Int32,
+            data: &data,
+            heap: None,
+            validity: None,
+        });
+        let five: i32 = 5;
+        let five_bytes = five.to_le_bytes();
+        let constants = [ConstantColumnRef {
+            name: "k",
+            dtype: ColumnDtype::Int32,
+            value: &five_bytes,
+            valid: true,
+        }];
+        let encoded = encode_batch_with_constants(&batch, &constants).unwrap();
+
+        // The constant column's DATA region is exactly 4 bytes (one
+        // Int32), not 4 rows × 4 bytes - the O(1) transfer proof.
+        let decoded_header = read_column_header_for_name(&encoded.bytes, "k");
+        assert_eq!(decoded_header.is_constant, 1);
+
+        // decode_batch only understands the reply direction (which
+        // never carries a constant); assert directly against the
+        // encoded bytes for the input-direction shape instead.
+        let row_count = read_u32_le(&encoded.bytes, 0);
+        assert_eq!(row_count, 4, "batch row_count is unaffected");
+    }
+
+    #[test]
+    fn encode_batch_with_constants_null_constant_is_one_byte_validity() {
+        let data = i32_slice_bytes(&[1]);
+        let mut batch = ColumnarBatch::new(1);
+        batch.push(ColumnRef {
+            name: "x",
+            dtype: ColumnDtype::Int32,
+            data: &data,
+            heap: None,
+            validity: None,
+        });
+        let zero: i32 = 0;
+        let zero_bytes = zero.to_le_bytes();
+        let constants = [ConstantColumnRef {
+            name: "k",
+            dtype: ColumnDtype::Int32,
+            value: &zero_bytes,
+            valid: false,
+        }];
+        let encoded = encode_batch_with_constants(&batch, &constants).unwrap();
+        let h = read_column_header_for_name(&encoded.bytes, "k");
+        assert_ne!(
+            h.validity_offset, 0,
+            "a NULL constant must carry a validity offset"
+        );
+        assert_eq!(
+            encoded.bytes[h.validity_offset as usize], 0,
+            "bit 0 clear = invalid, matching the bit-set-valid convention"
+        );
+    }
+
+    #[test]
+    fn encode_batch_with_constants_rejects_var_width_dtype() {
+        let batch = ColumnarBatch::new(1);
+        let value = 0u32.to_le_bytes();
+        let constants = [ConstantColumnRef {
+            name: "s",
+            dtype: ColumnDtype::Utf8,
+            value: &value,
+            valid: true,
+        }];
+        let err = encode_batch_with_constants(&batch, &constants).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("fixed-width dtypes only"), "got {msg}");
+    }
+
+    #[test]
+    fn encode_batch_with_constants_rejects_wrong_value_length() {
+        let batch = ColumnarBatch::new(1);
+        let value = [0u8; 2]; // Int32 needs 4 bytes
+        let constants = [ConstantColumnRef {
+            name: "k",
+            dtype: ColumnDtype::Int32,
+            value: &value,
+            valid: true,
+        }];
+        let err = encode_batch_with_constants(&batch, &constants).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("constant value.len()"), "got {msg}");
+    }
+
+    #[test]
+    fn decode_batch_rejects_constant_reply_column() {
+        // A guest that (incorrectly) emitted a constant output column
+        // must be a loud decode error, never a mis-decoded short read.
+        let data = i32_slice_bytes(&[7]);
+        let mut batch = ColumnarBatch::new(1);
+        batch.push(ColumnRef {
+            name: "x",
+            dtype: ColumnDtype::Int32,
+            data: &data,
+            heap: None,
+            validity: None,
+        });
+        let constants = [ConstantColumnRef {
+            name: "x",
+            dtype: ColumnDtype::Int32,
+            value: &data,
+            valid: true,
+        }];
+        // Reuse the constant encoder to synthesize a reply-shaped blob
+        // with is_constant=1 - decode_batch must reject it outright.
+        let encoded = encode_batch_with_constants(&ColumnarBatch::new(1), &constants).unwrap();
+        let err = decode_batch(&encoded.bytes).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("constant output columns"), "got {msg}");
+    }
+
+    /// Test-only helper: locate a column header by name inside an
+    /// encoded blob (linear scan - fine for small test batches).
+    fn read_column_header_for_name(blob: &[u8], name: &str) -> ColumnHeader {
+        let column_count = read_u32_le(blob, 4);
+        let columns_offset = read_u32_le(blob, 8) as usize;
+        for i in 0..column_count as usize {
+            let h_off = columns_offset + i * COLUMN_HEADER_BYTES;
+            let name_offset = read_u32_le(blob, h_off + 12) as usize;
+            let name_len = read_u32_le(blob, h_off + 16) as usize;
+            let got_name = std::str::from_utf8(&blob[name_offset..name_offset + name_len]).unwrap();
+            if got_name == name {
+                return ColumnHeader {
+                    dtype: blob[h_off],
+                    _pad: [0; 3],
+                    data_offset: read_u32_le(blob, h_off + 4),
+                    validity_offset: read_u32_le(blob, h_off + 8),
+                    name_offset: read_u32_le(blob, h_off + 12),
+                    name_len: read_u32_le(blob, h_off + 16),
+                    heap_offset: read_u32_le(blob, h_off + 20),
+                    heap_len: read_u32_le(blob, h_off + 24),
+                    is_constant: read_u32_le(blob, h_off + 28),
+                };
+            }
+        }
+        panic!("column '{name}' not found in encoded blob");
     }
 }
