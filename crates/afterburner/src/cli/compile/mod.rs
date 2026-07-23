@@ -891,7 +891,7 @@ fn build_wrapped_source_batch(source_js: &str) -> String {
         "const module = {{ exports: undefined }};\n\
          {source_js}\n\
          const __single = module.exports;\n\
-         if (typeof __single !== \"function\") {{ throw new TypeError(\"burndb: module.exports must be a function for invoke_batch\"); }}\n\
+         if (typeof __single !== \"function\") {{ throw new TypeError(\"batch UDF: module.exports must be a function for invoke_batch\"); }}\n\
          const __chunks = [];\n\
          const __buf = new Uint8Array(65536);\n\
          while (true) {{ const n = Javy.IO.readSync(0, __buf); if (n <= 0) break; __chunks.push(__buf.slice(0, n)); }}\n\
@@ -913,10 +913,13 @@ fn build_wrapped_source_batch(source_js: &str) -> String {
 /// `module.exports(batch)`, encodes the result batch in the same binary format,
 /// and writes it to stdout.
 ///
-/// The binary frame layout (all integers LE):
+/// The binary frame layout (all integers LE), matching
+/// `afterburner-wasi::columnar::{BatchHeader, ColumnHeader}` byte-for-byte
+/// (`COLUMN_HEADER_BYTES` there is the SSOT for the 32-byte stride below):
 ///   BatchHeader (16 bytes): [row_count: u32][column_count: u32][columns_offset: u32][_reserved: u32]
-///   ColumnHeader (28 bytes each): [dtype: u8][_pad: 3 bytes][data_offset: u32][validity_offset: u32]
+///   ColumnHeader (32 bytes each): [dtype: u8][_pad: 3 bytes][data_offset: u32][validity_offset: u32]
 ///                                 [name_offset: u32][name_len: u32][heap_offset: u32][heap_len: u32]
+///                                 [is_constant: u32]
 ///
 /// dtype tags: Bool=1 Int8=2 Int16=3 Int32=4 Int64=5 UInt8=6 UInt16=7 UInt32=8 UInt64=9
 ///             Float32=10 Float64=11 Utf8=12 Date32=13 Timestamp=14
@@ -929,7 +932,7 @@ fn build_wrapped_source_columnar(source_js: &str) -> String {
         "const module = {{ exports: undefined }};\n\
          {source_js}\n\
          const __udf = module.exports;\n\
-         if (typeof __udf !== \"function\") {{ throw new TypeError(\"burndb: module.exports must be a function for invoke_columnar\"); }}\n\
+         if (typeof __udf !== \"function\") {{ throw new TypeError(\"columnar UDF: module.exports must be a function for invoke_columnar\"); }}\n\
          // Read binary frame from stdin.\n\
          const __chunks = [];\n\
          const __buf = new Uint8Array(65536);\n\
@@ -947,10 +950,16 @@ fn build_wrapped_source_columnar(source_js: &str) -> String {
            5:[BigInt64Array,8], 6:[Uint8Array,1], 7:[Uint16Array,2], 8:[Uint32Array,4],\n\
            9:[BigUint64Array,8], 10:[Float32Array,4], 11:[Float64Array,8],\n\
            12:[Uint8Array,1], 13:[Int32Array,4], 14:[BigInt64Array,8] }};\n\
-         // Parse ColumnHeader[] (28 bytes each) and build batch.\n\
+         // Parse ColumnHeader[] (32 bytes each: the 28-byte Phase-1.5 header\n\
+         // plus the constant-column ABI tag `is_constant: u32` at +28) and\n\
+         // build batch. This UDF-invocation path only ever receives ordinary\n\
+         // per-row columns (constants are a host-side encode option the\n\
+         // `burn compile` harness does not expose), so `is_constant` itself\n\
+         // is read only to keep the stride correct for column i+1 - never\n\
+         // branched on.\n\
          const __cols = {{}};\n\
          const __col_meta = [];\n\
-         const COL_HDR = 28;\n\
+         const COL_HDR = 32;\n\
          for (let i = 0; i < __col_count; i++) {{\n\
            const h = __col_tbl + i * COL_HDR;\n\
            const dtype       = __frame[h];\n\
@@ -959,7 +968,7 @@ fn build_wrapped_source_columnar(source_js: &str) -> String {
            const name_len    = __dv.getUint32(h + 16, true);\n\
            const name = new TextDecoder().decode(__frame.slice(name_off, name_off + name_len));\n\
            const info = __DTYPE[dtype];\n\
-           if (!info) {{ throw new Error(\"burndb: unsupported columnar dtype \" + dtype + \" for column '\" + name + \"'\"); }}\n\
+           if (!info) {{ throw new Error(\"columnar UDF: unsupported dtype tag \" + dtype + \" for column '\" + name + \"'\"); }}\n\
            const [TCon, stride] = info;\n\
            const elem_count = __row_count;\n\
            const byte_len = elem_count * stride;\n\
@@ -981,11 +990,12 @@ fn build_wrapped_source_columnar(source_js: &str) -> String {
          ];\n\
          function __dtype_of(arr) {{\n\
            for (const [TCon, tag, stride] of __DTAG) {{ if (arr instanceof TCon) return [tag, stride]; }}\n\
-           throw new Error(\"burndb: unsupported TypedArray type in columnar result: \" + arr.constructor.name);\n\
+           throw new Error(\"columnar UDF: unsupported TypedArray type in columnar result: \" + arr.constructor.name);\n\
          }}\n\
          // Two-pass layout: header, then column-header table, then data+names.\n\
+         // __CH (32) must match the ColumnHeader stride parsed above.\n\
          const __BH = 16;\n\
-         const __CH = 28;\n\
+         const __CH = 32;\n\
          const __align8 = (x) => (x + 7) & ~7;\n\
          // Resolve col info upfront.\n\
          const __rci = __res_cols.map(([name, arr]) => {{\n\
@@ -1021,6 +1031,7 @@ fn build_wrapped_source_columnar(source_js: &str) -> String {
            __out_dv.setUint32(h + 16, ci.name.length, true);\n\
            __out_dv.setUint32(h + 20, 0, true);\n\
            __out_dv.setUint32(h + 24, 0, true);\n\
+           __out_dv.setUint32(h + 28, 0, true); // is_constant: never set on a UDF result\n\
          }}\n\
          // Write column data and names.\n\
          for (let i = 0; i < __rci.length; i++) {{\n\

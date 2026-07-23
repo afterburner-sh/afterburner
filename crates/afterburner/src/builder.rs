@@ -341,7 +341,7 @@ impl Afterburner {
     /// registered via `register_precompiled` with target
     /// `"wasm32-wasip1"`.
     ///
-    /// Used by the batch and columnar precompiled paths in burndb:
+    /// Used by the batch and columnar precompiled paths:
     /// batch sends a JSON array and reads the JSON array reply; columnar
     /// sends the binary columnar frame and reads the binary reply.
     pub fn run_sealed_raw_bytes_with(
