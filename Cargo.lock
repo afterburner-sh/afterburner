@@ -292,6 +292,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "fastrace",
+ "fd-lock",
  "flate2",
  "futures-util",
  "getrandom 0.2.17",

@@ -193,12 +193,16 @@ jobs:
         # Tests skip via eprintln+return when /tmp/pyodide-exnref.wasm is absent.
         # A fetch failure is therefore non-fatal: the tests emit a SKIP message
         # and the shard exits 0.  Prefer the test-level skip over continue-on-error.
+        # `ruby_columnar` rides along here too (not a broader `ruby` match -
+        # ruby_runner's own heavier suite is out of scope for this job's
+        # timeout budget): it needs the same real-runtime network fetch this
+        # job already provisions, and has no dedicated job of its own.
         run: >-
           cargo nextest run
           --archive-file ${{ runner.temp }}/nextest-wasi.tar.zst
           --workspace-remap .
           --run-ignored ignored-only
-          -E 'test(/pyodide|integration/)'
+          -E 'test(/pyodide|integration|ruby_columnar/)'
           --no-fail-fast
 
   test-lib-compat:

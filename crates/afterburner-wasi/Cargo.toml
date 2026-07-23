@@ -135,6 +135,10 @@ flate2.workspace = true
 ureq.workspace = true
 tar.workspace = true
 sha2.workspace = true
+# Serializes concurrent `ensure_populated` callers (same bundle, different
+# processes) on a sibling `.lock` file so they wait for the winner's fetch
+# instead of racing the network and the final `rename` against each other.
+fd-lock.workspace = true
 
 # Genuinely unix-only — no Windows equivalent for the parts we use.
 [target.'cfg(unix)'.dependencies]
@@ -171,3 +175,4 @@ sha2.workspace = true
 ureq.workspace = true
 flate2.workspace = true
 tar.workspace = true
+fd-lock.workspace = true

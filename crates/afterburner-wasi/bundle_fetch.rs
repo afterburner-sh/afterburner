@@ -253,11 +253,45 @@ fn translate_so_bytes(
 
 // ── network fetch (progress-reporting) ──────────────────────────────────────
 
-/// Download `url`, streaming the body so the gradient bar advances against the
-/// content length, and verify the pinned sha256. The progress line is opened
-/// with `label` (a user-facing runtime name) and closed by the caller via
-/// `prog.finish()`. Returns the verified bytes.
+/// Max attempts [`fetch_verified`] makes before giving up on a single URL.
+/// Bounds the retry: a persistently wrong pinned hash or a genuinely offline
+/// box still fails loud after this many tries, never hangs.
+const FETCH_MAX_ATTEMPTS: u32 = 3;
+
+/// Fetch `url`, verify its sha256, retrying up to [`FETCH_MAX_ATTEMPTS`] times
+/// with a short backoff on a transient failure (a dropped connection, a read
+/// timeout, a corrupted-in-transit download that fails the checksum). Only
+/// the last attempt's error is returned; earlier attempts are silent retries,
+/// not failures. See [`fetch_verified_once`] for what one attempt does.
 fn fetch_verified(
+    url: &str,
+    sha256: &str,
+    label: &str,
+    prog: &dyn BundleProgress,
+) -> Result<Vec<u8>, String> {
+    let mut last_err = String::new();
+    for attempt in 1..=FETCH_MAX_ATTEMPTS {
+        match fetch_verified_once(url, sha256, label, prog) {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => {
+                last_err = e;
+                if attempt < FETCH_MAX_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_secs(1 << (attempt - 1)));
+                }
+            }
+        }
+    }
+    Err(format!(
+        "{label}: giving up after {FETCH_MAX_ATTEMPTS} attempts: {last_err}"
+    ))
+}
+
+/// One fetch-and-verify attempt: download `url`, streaming the body so the
+/// gradient bar advances against the content length, and verify the pinned
+/// sha256. The progress line is opened with `label` (a user-facing runtime
+/// name) and closed by the caller via `prog.finish()`. Returns the verified
+/// bytes. See [`fetch_verified`] for the retry wrapper around this.
+fn fetch_verified_once(
     url: &str,
     sha256: &str,
     label: &str,
@@ -308,32 +342,61 @@ fn fetch_verified(
 ///
 /// `manifest_ok` validates a candidate dir against its own `manifest.txt`; it is
 /// the per-bundle completeness check (the resolvers share the identical logic).
+///
+/// Concurrent callers for the SAME `final_dir` (e.g. several `nextest` test
+/// processes each resolving the Python runtime on a cold cache) serialize on
+/// an OS advisory lock (`<final_dir>.lock`, held for the fetch+populate+rename
+/// below) rather than racing the network and the final `rename` against each
+/// other - the previous unlocked version let every racer attempt its own full
+/// download, and every loser's `rename` onto the winner's now-populated
+/// `final_dir` failed with `ENOTEMPTY`, surfacing as a spurious "runtime not
+/// found". The lock is process-crash-safe: it is an OS-level flock
+/// (`LockFileEx` on Windows), released automatically on process exit for any
+/// reason, so there is no stale-lock file to detect or clean up.
 fn ensure_populated(
     final_dir: &Path,
     manifest_ok: &dyn Fn(&Path) -> bool,
     populate: &dyn Fn(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
     if final_dir.join("manifest.txt").exists() && manifest_ok(final_dir) {
-        return Ok(()); // cache hit
-    }
-
-    // A stale, half-populated dir from an interrupted run: remove it so the
-    // rename target is clear and a partial tree never lingers.
-    if final_dir.exists() {
-        let _ = std::fs::remove_dir_all(final_dir);
+        return Ok(()); // fast path: cache hit, no lock needed
     }
     if let Some(parent) = final_dir.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
 
-    let staging = final_dir.with_file_name(format!(
-        "{}.staging-{}",
-        final_dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "bundle".to_string()),
-        std::process::id()
-    ));
+    let dir_name = final_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "bundle".to_string());
+    let lock_path = final_dir.with_file_name(format!("{dir_name}.lock"));
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false) // content is irrelevant - only the fd's flock matters
+        .open(&lock_path)
+        .map_err(|e| format!("open lock {}: {e}", lock_path.display()))?;
+    let mut rw_lock = fd_lock::RwLock::new(lock_file);
+    // Blocks until any other process/thread populating the same bundle
+    // releases the lock (by finishing or by exiting, including a crash).
+    let _guard = rw_lock
+        .write()
+        .map_err(|e| format!("lock {}: {e}", lock_path.display()))?;
+
+    // Re-check now that we hold the lock: a concurrent caller may have
+    // populated `final_dir` while this one was waiting for the lock.
+    if final_dir.join("manifest.txt").exists() && manifest_ok(final_dir) {
+        return Ok(());
+    }
+
+    // A stale, half-populated dir from an interrupted run: remove it so the
+    // rename target is clear and a partial tree never lingers. Safe under the
+    // lock - no other caller can be mid-populate or mid-rename here.
+    if final_dir.exists() {
+        let _ = std::fs::remove_dir_all(final_dir);
+    }
+
+    let staging = final_dir.with_file_name(format!("{dir_name}.staging-{}", std::process::id()));
     // A leftover staging dir from a crashed prior run on the same pid is junk.
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| format!("mkdir {}: {e}", staging.display()))?;
@@ -343,7 +406,8 @@ fn ensure_populated(
             return Err("bundle assembly produced an incomplete tree".to_string());
         }
         fsync_dir(&staging);
-        // The rename target was cleared above; rename is atomic on the same fs.
+        // The rename target was cleared above and no other caller can race
+        // this one in (still under the lock): rename is atomic on the same fs.
         std::fs::rename(&staging, final_dir).map_err(|e| {
             format!(
                 "rename {} -> {}: {e}",
@@ -1313,5 +1377,83 @@ mod home_dir_tests {
         // Empty HOME/USERPROFILE are ignored; with nothing usable -> None.
         assert_eq!(home_from(os(""), os(""), os(""), os("")), None);
         assert_eq!(home_from(None, None, None, None), None);
+    }
+}
+
+#[cfg(test)]
+mod ensure_populated_tests {
+    use super::ensure_populated;
+    use std::path::Path;
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Regression test for the cross-process/cross-thread download race fixed
+    /// by the `fd-lock` guard in `ensure_populated`: before the fix, N
+    /// concurrent callers on a cold cache each ran their own full `populate`,
+    /// and every loser's `rename` onto the winner's now-populated `final_dir`
+    /// failed with `ENOTEMPTY` - the exact shape of the CI flake where
+    /// `ensure_pyodide`/`ensure_ruby` (both funnel through `ensure_populated`)
+    /// surfaced a spurious "runtime not found... no network" under nextest's
+    /// default concurrent test-process scheduling.
+    ///
+    /// `populate` is synthetic (no real network) so the test is fast and
+    /// deterministic: a `Barrier` starts every caller at the same instant, and
+    /// a short sleep inside `populate` holds the vulnerable window open long
+    /// enough that, pre-fix, every other caller's rename collided with it.
+    ///
+    /// Fails before the lock (some callers return `Err`, or `populate` runs
+    /// more than once); passes after it (every caller resolves `Ok`, and
+    /// `populate` runs exactly once - every other caller observes the
+    /// winner's cache hit after waiting on the lock).
+    #[test]
+    fn concurrent_callers_all_succeed_and_populate_runs_once() {
+        const CONCURRENCY: usize = 8;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let final_dir = tmp.path().join("bundle-1.0");
+
+        let manifest_ok = |d: &Path| -> bool {
+            std::fs::read_to_string(d.join("manifest.txt"))
+                .map(|s| s == "payload\n" && d.join("payload.bin").exists())
+                .unwrap_or(false)
+        };
+        let populate_calls = AtomicUsize::new(0);
+        let populate = |staging: &Path| -> Result<(), String> {
+            populate_calls.fetch_add(1, Ordering::SeqCst);
+            // Long enough that every other racer clears the pre-lock cache-miss
+            // check and queues up on the lock before this caller finishes -
+            // reproduces the race window without a flaky real network call.
+            std::thread::sleep(Duration::from_millis(150));
+            std::fs::write(staging.join("payload.bin"), b"data").map_err(|e| e.to_string())?;
+            std::fs::write(staging.join("manifest.txt"), b"payload\n").map_err(|e| e.to_string())
+        };
+
+        let barrier = Barrier::new(CONCURRENCY);
+        let results: Vec<Result<(), String>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..CONCURRENCY)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        ensure_populated(&final_dir, &manifest_ok, &populate)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+
+        for (i, r) in results.iter().enumerate() {
+            assert!(r.is_ok(), "caller {i} must not fail: {r:?}");
+        }
+        assert_eq!(
+            populate_calls.load(Ordering::SeqCst),
+            1,
+            "exactly one caller should populate; the rest must see the cache \
+             hit after waiting on the lock, never a duplicate fetch"
+        );
+        assert!(
+            manifest_ok(&final_dir),
+            "final_dir must be a complete bundle after every caller returns"
+        );
     }
 }
