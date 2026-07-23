@@ -197,7 +197,11 @@ pub fn run_ruby(ruby_source: &str) -> Result<RubyRunOutput> {
 /// Process-unique, monotonic temp dir: `<tmpdir>/<prefix>-<pid>-<n>`. No
 /// wall-clock or RNG (both are unavailable / non-deterministic here); a static
 /// counter plus the pid is unique within and across concurrent runs.
-fn unique_tmp_dir(prefix: &str) -> PathBuf {
+///
+/// `pub(crate)`: also used by [`crate::ruby_columnar`] and
+/// [`crate::pyodide_columnar`] for their own scratch dirs, so the "unique
+/// temp dir" idiom stays ONE implementation across every runner.
+pub(crate) fn unique_tmp_dir(prefix: &str) -> PathBuf {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()))
