@@ -146,7 +146,15 @@ jobs:
     name: test / wasi-pyodide
     needs: build-wasi-tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 30, not the old 15: the pyodide + ruby *columnar* UDF tests now genuinely
+    # execute their real runtimes (~400-500s each on a 2-core runner: network
+    # bundle fetch serialized by the ensure_populated lock, then wasm execution)
+    # where they previously failed fast at ~23s. The full ignored-only set
+    # (pyodide_integration + both columnar suites) needs ~18 min of real
+    # wall-clock; 30 leaves margin for CI network variance. Not a masked failure:
+    # the tests pass, they cost real time. Perf follow-up: cache ~/.burn the way
+    # /tmp/pyodide-exnref.wasm is cached, to drop the per-run bundle download.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
