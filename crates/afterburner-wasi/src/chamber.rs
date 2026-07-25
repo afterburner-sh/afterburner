@@ -45,7 +45,12 @@ pub(crate) fn prepare_store(
     limits: &FuelGauge,
 ) -> Result<Store<HostState>> {
     let mut store = Store::new(engine, state);
-    store.limiter(|s| &mut s.limits);
+    // Mirror the caller's tripped-flag sink (if any) before the limiter
+    // is wired in - this is the one canonical Store-construction choke
+    // point every thrust/columnar/compile path funnels through, so a
+    // single line here covers every one of them.
+    store.data_mut().limiter_tripped = limits.limiter_tripped.clone();
+    store.limiter(|s| s.limiter());
 
     let fuel = limits.fuel.unwrap_or(u64::MAX);
     store

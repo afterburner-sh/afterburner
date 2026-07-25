@@ -16,8 +16,10 @@ pub mod effect;
 pub mod engine;
 pub mod error;
 pub mod frame;
+pub mod governance;
 pub mod host;
 pub mod language;
+pub mod ledger;
 pub mod log;
 pub mod manifold;
 pub mod registry;
@@ -39,8 +41,12 @@ pub use frame::{
     HEADER_LEN, INTERNAL_MOUNT, MAGIC, OutputTag, VERSION as FRAME_VERSION, decode_frame,
     decode_output_value, encode_frame, encode_output_value, is_internal_capture_path,
 };
+pub use governance::{
+    ThreadGovernance, apply_governance, helper_governance, set_helper_governance, spawn_governed,
+};
 pub use host::{HostContext, HostFunction, HttpMethod, HttpResponse, LogLevel, NullHost};
 pub use language::Language;
+pub use ledger::{LedgerClass, LedgerDenied, MemoryLedger};
 pub use manifold::{EnvAccess, FsAccess, ListenAccess, Manifold, NetAccess};
 pub use registry::{BurnCache, BurnCacheBackend, InProcessCacheBackend, RegistryStats, hex32};
 pub use session::Session;

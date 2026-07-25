@@ -24,6 +24,7 @@ pub mod child_process_host;
 pub mod crypto_host;
 pub mod dns_host;
 pub mod fs_host;
+pub mod governance;
 pub mod hash_handles;
 pub mod host_context_active;
 pub mod http_host;
@@ -45,4 +46,5 @@ pub mod zlib_host;
 pub mod shadows;
 
 pub use bundle::PLENUM_BUNDLE;
+pub use governance::spawn_governed;
 pub use native_install::register_native_builtins;

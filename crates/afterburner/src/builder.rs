@@ -10,8 +10,10 @@
 //! for the multi-threaded path. The caller sees one shape; dispatch is
 //! compiled away when only one backend feature is enabled.
 
-#[cfg(any(feature = "flow", feature = "thrust", test))]
+#[cfg(any(feature = "flow", feature = "thrust", not(feature = "native"), test))]
 use afterburner_core::AfterburnerError;
+#[cfg(feature = "thrust")]
+use afterburner_core::governance::ThreadGovernance;
 use afterburner_core::{
     BurnCache, BurnCacheBackend, Combustor, FuelGauge, HostContext, InMemoryStateStore, Manifold,
     OutputValue, Result, ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore,
@@ -339,7 +341,7 @@ impl Afterburner {
     /// registered via `register_precompiled` with target
     /// `"wasm32-wasip1"`.
     ///
-    /// Used by the batch and columnar precompiled paths in burndb:
+    /// Used by the batch and columnar precompiled paths:
     /// batch sends a JSON array and reads the JSON array reply; columnar
     /// sends the binary columnar frame and reads the binary reply.
     pub fn run_sealed_raw_bytes_with(
@@ -416,10 +418,65 @@ impl Afterburner {
         limits: &FuelGauge,
     ) -> Result<afterburner_wasi::ColumnarOutput> {
         let encoded = afterburner_wasi::encode_batch(batch)?;
+        self.dispatch_columnar_bytes(id, encoded.bytes, limits)
+    }
+
+    /// Like [`run_columnar_with`](Self::run_columnar_with), but `constants`
+    /// carries scalar arguments broadcast across every row at O(1) transfer
+    /// cost instead of a fully-materialized [`afterburner_wasi::ColumnRef`]
+    /// column - see [`afterburner_wasi::encode_batch_with_constants`] and
+    /// [`afterburner_wasi::ConstantColumnRef`]. `constants: &[]` behaves
+    /// identically to [`run_columnar_with`](Self::run_columnar_with).
+    #[cfg(feature = "wasm")]
+    pub fn run_columnar_with_constants(
+        &self,
+        id: &ScriptId,
+        batch: &afterburner_wasi::ColumnarBatch<'_>,
+        constants: &[afterburner_wasi::ConstantColumnRef<'_>],
+        limits: &FuelGauge,
+    ) -> Result<afterburner_wasi::ColumnarOutput> {
+        let encoded = afterburner_wasi::encode_batch_with_constants(batch, constants)?;
+        self.dispatch_columnar_bytes(id, encoded.bytes, limits)
+    }
+
+    /// Like [`run_columnar_with`](Self::run_columnar_with), but variable-width
+    /// columns may be supplied as [`afterburner_wasi::PtrSlotColumnRef`] (E6):
+    /// long slots carrying a raw host pointer instead of a pre-built heap,
+    /// dereferenced directly into the wire blob with no intermediate
+    /// materialization. See [`afterburner_wasi::encode_batch_ptr_slots`].
+    ///
+    /// # Safety
+    /// Same contract as [`afterburner_wasi::encode_batch_ptr_slots`]: every
+    /// long slot's embedded pointer must be valid for reads of its `len`
+    /// bytes for the duration of this call.
+    #[cfg(feature = "wasm")]
+    pub unsafe fn run_columnar_ptr_slots(
+        &self,
+        id: &ScriptId,
+        batch: &afterburner_wasi::PtrSlotBatch<'_>,
+        limits: &FuelGauge,
+    ) -> Result<afterburner_wasi::ColumnarOutput> {
+        // SAFETY: forwarded from this function's own safety contract.
+        let encoded = unsafe { afterburner_wasi::encode_batch_ptr_slots(batch)? };
+        self.dispatch_columnar_bytes(id, encoded.bytes, limits)
+    }
+
+    /// Shared dispatch for every `run_columnar*` variant: send the
+    /// already-encoded wire blob through the active engine and decode the
+    /// reply. Keeps the `EngineHolder` match in exactly one place so the
+    /// three encode-side entry points can never drift on how the bytes
+    /// reach the engine.
+    #[cfg(feature = "wasm")]
+    fn dispatch_columnar_bytes(
+        &self,
+        id: &ScriptId,
+        encoded: Vec<u8>,
+        limits: &FuelGauge,
+    ) -> Result<afterburner_wasi::ColumnarOutput> {
         let reply = match &self.engine {
-            EngineHolder::Cache(c) => c.execute_columnar_bytes(id, &encoded.bytes, limits)?,
+            EngineHolder::Cache(c) => c.execute_columnar_bytes(id, &encoded, limits)?,
             #[cfg(feature = "thrust")]
-            EngineHolder::Thrust(t) => t.thrust_columnar_bytes(id, &encoded.bytes, limits)?,
+            EngineHolder::Thrust(t) => t.thrust_columnar_bytes(id, &encoded, limits)?,
         };
         afterburner_wasi::decode_batch(&reply)
     }
@@ -841,6 +898,7 @@ impl AfterburnerBuilder {
             timeout_ms: self.timeout_ms,
             output_bytes: self.output_bytes,
             manifold: manifold.clone(),
+            limiter_tripped: None,
         };
 
         let mode = self.mode.unwrap_or_default();
@@ -929,6 +987,7 @@ fn build_wasm(
         host_context,
         transpile_hook: None,
         compile_cache_dir,
+        ..Default::default()
     };
     Ok(Box::new(afterburner_wasi::WasmCombustor::new(cfg)?))
 }
@@ -944,6 +1003,7 @@ fn build_adaptive(
         host_context,
         transpile_hook: None,
         compile_cache_dir,
+        ..Default::default()
     };
     Ok(Box::new(
         afterburner_adaptive::AdaptiveCombustor::with_wasm_config(cfg)?,
@@ -1032,6 +1092,7 @@ impl ThreadedBuilder {
             timeout_ms: self.parent.timeout_ms,
             output_bytes: self.parent.output_bytes,
             manifold: manifold.clone(),
+            limiter_tripped: None,
         };
 
         let wasm_config = afterburner_wasi::WasmConfig {
@@ -1039,6 +1100,7 @@ impl ThreadedBuilder {
             host_context: self.parent.host_context.clone(),
             transpile_hook: None,
             compile_cache_dir: self.parent.compile_cache_dir.clone(),
+            ..Default::default()
         };
 
         let cfg = afterburner_thrust::ThrustEngineConfig {
@@ -1050,6 +1112,9 @@ impl ThreadedBuilder {
             injector_capacity: self.injector_capacity,
             shutdown_drain_deadline: self.shutdown_drain_deadline,
             wasm_config,
+            governance: ThreadGovernance::default(),
+            numa: afterburner_thrust::NumaMode::default(),
+            memory_ledger: None,
         };
 
         let engine = afterburner_thrust::ThrustEngine::new(cfg)?;

@@ -62,9 +62,10 @@ use crate::host_api::host_columnar_reply;
 const COLUMNAR_DISPATCHER: &str = r#"
 (function() {
     const HEADER = 16;
-    // ColumnHeader: 1+3+4+4+4+4+4+4 = 28 bytes (Phase 1.5 added
-    // heap_offset + heap_len at +20 / +24).
-    const COL_HDR = 28;
+    // ColumnHeader: 1+3+4+4+4+4+4+4+4 = 32 bytes (Phase 1.5 added
+    // heap_offset + heap_len at +20 / +24; the constant-column ABI tag
+    // added is_constant at +28).
+    const COL_HDR = 32;
     const INLINE_SLOT = 16;
     const INLINE_MAX = 12;
     // dtype tags: 12=Utf8, 18=Bytea, 19=Jsonb (Phase 1.5).
@@ -97,6 +98,13 @@ const COLUMNAR_DISPATCHER: &str = r#"
         null,          // 19 Jsonb     - var-width (own path)
     ];
     function fixedTypedToTag(v) {
+        // JS has no native boolean TypedArray, so `Uint8ClampedArray`
+        // is the dedicated signal for a Bool OUTPUT column - the only
+        // ABI dtype tag that shares Uint8's 1-byte width with no
+        // native typed-array counterpart of its own. `Uint8Array`
+        // keeps meaning UInt8 exactly as before (byte-identical
+        // default): this is a pure addition, not a behaviour change.
+        if (v instanceof Uint8ClampedArray) return 1;
         if (v instanceof Int8Array) return 2;
         if (v instanceof Int16Array) return 3;
         if (v instanceof Int32Array) return 4;
@@ -139,7 +147,42 @@ const COLUMNAR_DISPATCHER: &str = r#"
             const name_len = dv.getUint32(off + 16, true);
             const heap_off = dv.getUint32(off + 20, true);
             const heap_len = dv.getUint32(off + 24, true);
+            const is_constant = dv.getUint32(off + 28, true);
             const name = dec.decode(buf.subarray(name_off, name_off + name_len));
+
+            if (is_constant) {
+                // O(1) broadcast column (constant-column ABI tag):
+                // `data_off` holds exactly ONE element's bytes
+                // (fixed-width dtypes only - the host-side encoder
+                // rejects var-width constants). Read it once, then
+                // hand back a Proxy that answers every index
+                // `0..row_count` with that same value - no
+                // row_count-sized materialization on the guest side
+                // either, matching the O(1) transfer cost.
+                const ViewCtor = DTYPE_VIEW[dtype];
+                if (!ViewCtor) {
+                    throw new Error("columnar UDF: unsupported constant dtype tag " + dtype + " for column '" + name + "'");
+                }
+                const constValue = new ViewCtor(buf.buffer, buf.byteOffset + data_off, 1)[0];
+                columns[name] = new Proxy([], {
+                    get(target, prop, receiver) {
+                        if (prop === "length") return row_count;
+                        if (typeof prop === "string") {
+                            const idx = Number(prop);
+                            if (Number.isInteger(idx) && idx >= 0 && idx < row_count) return constValue;
+                        }
+                        return Reflect.get(target, prop, receiver);
+                    },
+                    has(target, prop) {
+                        if (typeof prop === "string") {
+                            const idx = Number(prop);
+                            if (Number.isInteger(idx) && idx >= 0 && idx < row_count) return true;
+                        }
+                        return Reflect.has(target, prop);
+                    },
+                });
+                continue;
+            }
 
             if (isVarWidth(dtype)) {
                 // Parse the slot array + heap into a JS array of

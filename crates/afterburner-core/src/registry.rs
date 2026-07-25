@@ -362,7 +362,7 @@ impl BurnCache {
 
     /// Raw-bytes in / raw-bytes out entry point for sealed precompiled modules.
     /// Feeds `input` to the module's stdin verbatim and returns the raw stdout
-    /// bytes. Used by the batch and columnar precompiled paths in burndb:
+    /// bytes. Used by the batch and columnar precompiled paths:
     /// batch encodes its own JSON array wire; columnar encodes the binary
     /// columnar frame and expects the same shape back.
     #[fastrace::trace(name = "BurnCache::execute_sealed_raw_bytes")]

@@ -3,6 +3,95 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.2.5] - 2026-07-21
+
+Compile-isolation knobs for embedders that run their own thread topology
+alongside `WasmCombustor`.
+
+### Embedder-controlled compilation and background threads
+
+`WasmConfig` gains `parallel_compilation`: `Some(false)` forces every
+Cranelift compile onto the calling thread, so `WasmCombustor` never touches
+the process's global `rayon` pool - useful for an embedder that runs other
+CPU-bound work on that same shared pool and does not want a wasm compile
+fanning out across it. `WasmConfig` also gains `spawn_epoch_ticker`:
+`Some(false)` suppresses `WasmCombustor::new`'s internal
+`afterburner-epoch-ticker` thread entirely, so an embedder that already runs
+a scheduler of its own can drive `Engine::increment_epoch()` from there
+instead (`WasmCombustor::engine()` returns the `Clone`-able handle for this).
+Both default to today's behavior (`None` = unchanged) - existing callers see
+no difference.
+
+### Embedder-owned AOT cache
+
+`WasmCombustor::serialize_module` and the new (`unsafe`)
+`register_precompiled_deserialize` expose wasmtime's compiled-artifact
+serialize/deserialize directly, so an embedder can own its on-disk AOT cache
+for `register_precompiled` / `register_dyn` modules without afterburner
+installing a `wasmtime::Cache` (and its background cache worker) on its
+behalf.
+
+### Pool sizing without environment variables
+
+`WasmConfig::pool_total_instances` and
+`WasmConfig::pool_max_linear_memory_bytes` size the pooling allocator
+programmatically, matching a library embedder's own concurrency ceiling
+instead of the generic 128-instance / `BURN_MAX_LINEAR_MEMORY` defaults -
+mutating process environment variables from a multithreaded program is
+`unsafe` as of Rust 2024, so a library embedder needs a non-environment path.
+
+### Defense in depth
+
+`build_engine` now sets `wasm_threads(false)` unconditionally, matching
+`embedder_vm::deterministic_engine`'s posture: the `threads` proposal is
+refused at compile time for every module `WasmCombustor` ever compiles.
+
+### Thread governance
+
+New `afterburner-core::governance` module: `ThreadGovernance { nice, affinity,
+name_prefix }` plus `apply_governance` and `spawn_governed`, applied to every
+thread this workspace spawns - `ThrustEngineConfig::governance` (compute
+workers and the admission sweep, overriding the NUMA pin when `affinity` is
+set), `AdaptiveCombustor::with_config`'s new `AdaptiveConfig::governance` (the
+background compile worker), `WasmConfig::ticker_governance` (the epoch ticker,
+for embedders that keep it), and node-compat's capability helper threads (the
+DNS resolver's per-call worker, the sqlite3 shadow's per-connection worker) via
+`afterburner_core::governance::set_helper_governance` + the
+`node_compat::spawn_governed` wrapper that reads it. `nice`/`affinity` are
+Linux-only (`setpriority`/`sched_setaffinity`); a governance failure (a
+negative nice without `CAP_SYS_NICE`, an unsupported platform) fails loudly at
+the spawning call - never silently inside a thread whose caller has already
+moved on - and pool construction cleanly unwinds any already-spawned workers
+before propagating. Default (`ThreadGovernance::default()`, every field
+`None`) is a pure no-op: today's ungoverned threads, unchanged names,
+unchanged priority.
+
+### Pluggable memory ledger
+
+New `afterburner-core::ledger` module: the `MemoryLedger` trait
+(`reserve`/`release` over `LedgerClass::{ModuleCache, NativeRuntime,
+QueuedJob}`) lets an embedder route every tier's coarse-grained resident bytes
+through its own accounting. Wired as `WasmConfig::memory_ledger` (charged at
+`bytecode_cache` / `sealed_cache` / `dyn_cache` insert and evict/extinguish),
+`ThrustEngineConfig::memory_ledger` (charged at job enqueue, released at
+execute-or-drop), and `NativeCombustor::with_ledger` (charged at per-thread
+`Runtime` creation and at the per-thread compiled-entry cache insert/evict). A
+denied reservation fails the triggering call loudly with the new
+`AfterburnerError::LedgerDenied`. `WasmCombustor::resident_estimate()` reports
+a measured `ResidentBreakdown` (plugin module, each cache's tracked total, the
+pooling allocator's keep-resident floor) for truing accounting up against
+reality. `None` (the default everywhere) is a pure no-op.
+
+### Reclassifiable memory-cap trap
+
+`FuelGauge::limiter_tripped` is an optional `Arc<AtomicBool>` sink: when set,
+it flips to `true` the instant the wasm tier's `ResourceLimiter` denies a
+`memory.grow` / `table.grow` request during that call, independent of whatever
+trap (if any) the guest runtime's own allocator subsequently produces - an
+embedder can read it after the call returns to reclassify an opaque guest trap
+as a memory-cap error with confidence, rather than guessing from the trap's
+text. `None` (the default) costs nothing.
+
 ## [0.2.4] - 2026-07-01
 
 The recording release. afterburner gains three runtime capabilities for capturing

@@ -36,7 +36,7 @@ default-members = [
 exclude = ["examples"]
 
 [workspace.package]
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 rust-version = "1.90"
 authors = ["Theo Bulut <info@afterburner.sh>"]
@@ -113,6 +113,11 @@ base64 = "0.22"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
 ureq = { version = "2", features = ["json"] }
+# Cross-process advisory lock (flock / LockFileEx) serializing the `~/.burn`
+# bundle-fetch engine (`bundle_fetch.rs`) across concurrent callers - already
+# in the tree transitively via rustyline/system-interface, promoted to a
+# direct dep here rather than hand-rolling flock FFI.
+fd-lock = "4"
 tempfile = "3"
 flate2 = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -33,12 +33,12 @@
 //! worker thread is orphaned and cleans itself up when the resolver
 //! eventually returns.
 
+use afterburner_core::governance::helper_governance;
 use afterburner_core::{AfterburnerError, Manifold, NetAccess, Result};
 use hickory_resolver::Resolver;
 use kovan_channel::flavors::after::after;
 use kovan_channel::{bounded, select};
 use std::net::{IpAddr, ToSocketAddrs};
-use std::thread;
 use std::time::Duration;
 
 /// Default per-call resolver timeout when the Manifold doesn't supply
@@ -64,16 +64,22 @@ fn timeout(m: &Manifold) -> Duration {
 /// Run `f` on a worker thread and `select!` on its result vs. the
 /// configured timeout. Same pattern shared by every entry below -
 /// keeping it factored out drops a hundred lines of boilerplate and
-/// guarantees uniform timeout semantics.
+/// guarantees uniform timeout semantics. The worker is governed (T7):
+/// named and subordinated per whatever
+/// `afterburner_core::governance::set_helper_governance` last installed
+/// for this process, or ungoverned by default. A governance failure
+/// (e.g. a denied affinity) fails this call loudly rather than silently
+/// running the resolver ungoverned.
 fn with_timeout<T, F>(m: &Manifold, label: String, f: F) -> Result<T>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T> + Send + 'static,
 {
     let (tx, rx) = bounded::<Result<T>>(1);
-    thread::spawn(move || {
+    let name = helper_governance().thread_name("afterburner-dns-resolve", "");
+    crate::governance::spawn_governed(name, move || {
         tx.send(f());
-    });
+    })?;
     let timer = after(timeout(m));
     select! {
         got = rx => got,

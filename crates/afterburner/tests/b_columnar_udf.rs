@@ -20,8 +20,10 @@
 #![cfg(feature = "wasm")]
 
 use afterburner::Afterburner;
+use afterburner_core::{AfterburnerError, FuelGauge};
 use afterburner_wasi::{
-    ColumnDtype, ColumnRef, ColumnarBatch, INLINE_SLOT_BYTES, INLINE_SLOT_INLINE_MAX,
+    ColumnDtype, ColumnRef, ColumnarBatch, ConstantColumnRef, INLINE_SLOT_BYTES,
+    INLINE_SLOT_INLINE_MAX, PtrSlotBatch, PtrSlotColumn, PtrSlotColumnRef,
 };
 
 fn ab() -> Afterburner {
@@ -545,4 +547,255 @@ fn run_columnar_typedarray_view_does_not_outlive_call() {
     // The second call sees its own inputs and produces its own
     // outputs - no leakage from the first call.
     assert_eq!(read_i32_col(&out2.columns[0].data), vec![100, 200]);
+}
+
+#[test]
+fn run_columnar_bool_output_via_uint8_clamped_array() {
+    // The Bool output ABI fix: a JS UDF signals "this is a Bool
+    // column" by returning a Uint8ClampedArray (JS has no native
+    // boolean TypedArray). Uint8Array output must stay UInt8 - proven
+    // in the same UDF by also returning a UInt8 column from an
+    // ordinary Uint8Array, so both tags round-trip distinctly in one
+    // call.
+    let burn = ab();
+    let id = burn
+        .register(
+            r#"module.exports = (b) => {
+                const n = b.row_count;
+                const flags = b.columns.flag;
+                const bools = new Uint8ClampedArray(n);
+                const uints = new Uint8Array(n);
+                for (let i = 0; i < n; i++) {
+                    bools[i] = flags[i] > 2 ? 1 : 0;
+                    uints[i] = flags[i];
+                }
+                return { row_count: n, columns: { is_big: bools, echo: uints } };
+            };"#,
+        )
+        .unwrap();
+    let data: Vec<u8> = vec![1, 2, 3, 4, 5];
+    let mut batch = ColumnarBatch::new(5);
+    batch.push(ColumnRef {
+        name: "flag",
+        dtype: ColumnDtype::UInt8,
+        data: &data,
+        heap: None,
+        validity: None,
+    });
+    let out = burn.run_columnar(&id, &batch).unwrap();
+    assert_eq!(out.columns.len(), 2);
+    let is_big = out.columns.iter().find(|c| c.name == "is_big").unwrap();
+    assert_eq!(
+        is_big.dtype,
+        ColumnDtype::Bool,
+        "must decode as Bool, not UInt8"
+    );
+    assert_eq!(is_big.data, vec![0, 0, 1, 1, 1]);
+    let echo = out.columns.iter().find(|c| c.name == "echo").unwrap();
+    assert_eq!(
+        echo.dtype,
+        ColumnDtype::UInt8,
+        "plain Uint8Array must stay UInt8"
+    );
+    assert_eq!(echo.data, data);
+}
+
+#[test]
+fn run_columnar_with_constants_broadcasts_scalar_o1() {
+    // A per-row column plus an O(1) constant scalar argument (the
+    // shape of a UDF call like `my_udf(col, 100)` where the second
+    // argument is a SQL literal, not a materialized column). The UDF
+    // reads the constant at every row through the same indexing
+    // convention as an ordinary column.
+    let burn = ab();
+    let id = burn
+        .register(
+            r#"module.exports = (b) => {
+                const n = b.row_count;
+                const xs = b.columns.x;
+                const k = b.columns.k;
+                const out = new Int32Array(n);
+                for (let i = 0; i < n; i++) out[i] = xs[i] + k[i];
+                return { row_count: n, columns: { sum: out } };
+            };"#,
+        )
+        .unwrap();
+    let xs = i32_le_bytes(&[1, 2, 3, 4]);
+    let mut batch = ColumnarBatch::new(4);
+    batch.push(ColumnRef {
+        name: "x",
+        dtype: ColumnDtype::Int32,
+        data: &xs,
+        heap: None,
+        validity: None,
+    });
+    let hundred: i32 = 100;
+    let hundred_bytes = hundred.to_le_bytes();
+    let constants = [ConstantColumnRef {
+        name: "k",
+        dtype: ColumnDtype::Int32,
+        value: &hundred_bytes,
+        valid: true,
+    }];
+    let out = burn
+        .run_columnar_with_constants(&id, &batch, &constants, &Default::default())
+        .unwrap();
+    assert_eq!(read_i32_col(&out.columns[0].data), vec![101, 102, 103, 104]);
+}
+
+#[test]
+fn run_columnar_with_constants_length_property_and_iteration() {
+    // The guest-side broadcast accessor must behave like a real column
+    // for `.length` and iteration, not just indexed reads - a UDF that
+    // sums via `for (const v of b.columns.k)` must see `row_count`
+    // copies of the same value.
+    let burn = ab();
+    let id = burn
+        .register(
+            r#"module.exports = (b) => {
+                const k = b.columns.k;
+                let total = 0;
+                for (const v of k) total += v;
+                const out = new Int32Array(1);
+                out[0] = total + k.length;
+                return { row_count: 1, columns: { total: out } };
+            };"#,
+        )
+        .unwrap();
+    let batch = ColumnarBatch::new(3);
+    let seven: i32 = 7;
+    let seven_bytes = seven.to_le_bytes();
+    let constants = [ConstantColumnRef {
+        name: "k",
+        dtype: ColumnDtype::Int32,
+        value: &seven_bytes,
+        valid: true,
+    }];
+    let out = burn
+        .run_columnar_with_constants(&id, &batch, &constants, &Default::default())
+        .unwrap();
+    // sum(7,7,7) + length(3) = 21 + 3 = 24.
+    assert_eq!(read_i32_col(&out.columns[0].data), vec![24]);
+}
+
+#[test]
+fn run_columnar_ptr_slots_e2e_matches_prebuilt_heap() {
+    // E6: a var-width column supplied via PtrSlotColumnRef (raw host
+    // pointers, no caller-built heap) must produce the same UDF result
+    // through the REAL plugin as the ordinary heap-prebuilt ColumnRef
+    // path.
+    let burn = ab();
+    let id = burn
+        .register(
+            r#"module.exports = (b) => {
+                const n = b.row_count;
+                const xs = b.columns.name;
+                const out = new Array(n);
+                for (let i = 0; i < n; i++) out[i] = xs[i].toUpperCase();
+                return { row_count: n, columns: { upper: out } };
+            };"#,
+        )
+        .unwrap();
+
+    let owned: Vec<Vec<u8>> = vec![
+        b"hi".to_vec(),
+        b"a value well over twelve bytes long".to_vec(),
+    ];
+    let ptr_slots = build_ptr_slot_column(&owned);
+    let mut batch = PtrSlotBatch::new(2);
+    batch.push(PtrSlotColumn::PtrSlot(PtrSlotColumnRef {
+        name: "name",
+        dtype: ColumnDtype::Utf8,
+        data: &ptr_slots,
+        validity: None,
+    }));
+
+    // SAFETY: `owned`'s buffers outlive this call and are never
+    // mutated while `batch` (which points into them) is alive.
+    let out = unsafe {
+        burn.run_columnar_ptr_slots(&id, &batch, &Default::default())
+            .unwrap()
+    };
+    assert_eq!(out.columns[0].row_str(0).unwrap(), "HI");
+    assert_eq!(
+        out.columns[0].row_str(1).unwrap(),
+        "A VALUE WELL OVER TWELVE BYTES LONG"
+    );
+}
+
+#[test]
+fn run_columnar_fuel_is_per_invocation_settable_and_uncapped() {
+    // The P5.17 scenario, proven directly: a CPU-heavy UDF (a busy loop
+    // scaling with row_count, mirroring "a fuel-hungry guest at a
+    // 2048-row batch") exhausts a low fuel budget and succeeds under a
+    // higher one - same ScriptId, same batch, only `FuelGauge.fuel`
+    // varies per call. Confirms `FuelGauge.fuel` is genuinely
+    // per-invocation (not baked into engine construction) and that
+    // there is no hidden engine-side ceiling below the value an
+    // embedder scales fuel to for its own batch size / guest workload.
+    let burn = ab();
+    let id = burn
+        .register(
+            r#"module.exports = (b) => {
+                const n = b.row_count;
+                const out = new Int32Array(n);
+                for (let i = 0; i < n; i++) {
+                    let acc = 0;
+                    for (let j = 0; j < 200000; j++) acc += j;
+                    out[i] = acc | 0;
+                }
+                return { row_count: n, columns: { busy: out } };
+            };"#,
+        )
+        .unwrap();
+    let xs = i32_le_bytes(&[1, 2, 3, 4]);
+    let mut batch = ColumnarBatch::new(4);
+    batch.push(ColumnRef {
+        name: "x",
+        dtype: ColumnDtype::Int32,
+        data: &xs,
+        heap: None,
+        validity: None,
+    });
+
+    let low = FuelGauge {
+        fuel: Some(1_000),
+        ..Default::default()
+    };
+    let err = burn
+        .run_columnar_with(&id, &batch, &low)
+        .expect_err("a 1,000-fuel budget must not survive an 800k-iteration busy loop");
+    assert!(
+        matches!(err, AfterburnerError::FuelExhausted),
+        "got {err:?}"
+    );
+
+    let high = FuelGauge {
+        fuel: Some(1_000_000_000),
+        ..Default::default()
+    };
+    let out = burn
+        .run_columnar_with(&id, &batch, &high)
+        .expect("the same script + batch must succeed once fuel is scaled up");
+    assert_eq!(out.row_count, 4);
+}
+
+/// Build a ptr-slot column (E6 form): short values inline exactly like
+/// `build_var_column`; long values carry a raw pointer into the owned
+/// buffer instead of a heap offset. `owned` must outlive every use of
+/// the returned slots.
+fn build_ptr_slot_column(owned: &[Vec<u8>]) -> Vec<u8> {
+    let mut slots = vec![0u8; owned.len() * INLINE_SLOT_BYTES];
+    for (i, v) in owned.iter().enumerate() {
+        let sb = i * INLINE_SLOT_BYTES;
+        slots[sb..sb + 4].copy_from_slice(&(v.len() as u32).to_le_bytes());
+        if v.len() <= INLINE_SLOT_INLINE_MAX {
+            slots[sb + 4..sb + 4 + v.len()].copy_from_slice(v);
+        } else {
+            slots[sb + 4..sb + 8].copy_from_slice(&v[0..4]);
+            let ptr = v.as_ptr() as usize;
+            slots[sb + 8..sb + 16].copy_from_slice(&ptr.to_le_bytes());
+        }
+    }
+    slots
 }

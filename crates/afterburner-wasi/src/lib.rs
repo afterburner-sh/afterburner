@@ -69,6 +69,9 @@ pub mod intake;
 pub mod manifold_codec;
 pub mod nozzle;
 pub mod pyodide_bundle;
+/// Columnar-batch invocation primitive for the Python runtime - the
+/// `invoke_columnar` sibling of [`pyodide_runner`]'s `run_source` facade.
+pub mod pyodide_columnar;
 /// The embedded Python core (`include_bytes!`), present only under the
 /// `embed-core` feature; basic Python then runs offline with zero download.
 #[cfg(feature = "embed-core")]
@@ -78,6 +81,9 @@ pub mod pyodide_runner;
 // via an explicit `use`); no `#[macro_use]` needed.
 pub mod pyodide_trace;
 pub mod ruby_bundle;
+/// Columnar-batch invocation primitive for the Ruby runtime - the
+/// `invoke_columnar` sibling of [`ruby_runner`]'s `run_source` facade.
+pub mod ruby_columnar;
 /// The embedded Ruby runtime (`include_bytes!`), present only under the
 /// `embed-ruby` feature; Ruby then runs offline with zero download.
 #[cfg(feature = "embed-ruby")]
@@ -91,8 +97,9 @@ pub mod wasm_engine;
 pub mod wasm_loader;
 
 pub use columnar::{
-    ColumnDtype, ColumnRef, ColumnarBatch, ColumnarOutput, INLINE_SLOT_BYTES,
-    INLINE_SLOT_INLINE_MAX, OwnedColumn, decode_batch, encode_batch,
+    ColumnDtype, ColumnRef, ColumnarBatch, ColumnarOutput, ConstantColumnRef, INLINE_SLOT_BYTES,
+    INLINE_SLOT_INLINE_MAX, OwnedColumn, PtrSlotBatch, PtrSlotColumn, PtrSlotColumnRef,
+    decode_batch, encode_batch, encode_batch_ptr_slots, encode_batch_with_constants,
 };
 #[cfg(feature = "daemon")]
 pub use daemon_dgram::{DaemonDgram, DgramEvent};
@@ -110,7 +117,7 @@ pub use daemon_shard_pool::{DaemonShardPool, ShardPoolConfig};
 pub use daemon_tls::{DaemonTls, TlsEvent};
 pub use daemon_workers::{DaemonWorkers, WorkerConfig, WorkerEvent};
 pub use manifold_codec::manifold_to_cli_args;
-pub use wasm_engine::{WasmCombustor, WasmConfig};
+pub use wasm_engine::{ResidentBreakdown, WasmCombustor, WasmConfig};
 
 /// The Wizer-preinitialized Afterburner Javy plugin binary. Exposed for
 /// build-time tools that need to pass it to `javy build -C plugin=...`

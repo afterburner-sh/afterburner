@@ -12,4 +12,4 @@
 
 pub mod adaptive;
 
-pub use adaptive::{AdaptiveCombustor, make_adaptive_cache};
+pub use adaptive::{AdaptiveCombustor, AdaptiveConfig, make_adaptive_cache};

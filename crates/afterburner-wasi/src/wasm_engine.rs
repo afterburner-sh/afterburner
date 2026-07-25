@@ -15,8 +15,10 @@
 //!
 //! ### Lifecycle
 //!
-//! * `WasmCombustor::new` pre-compiles the plugin module once and
-//!   starts the shared epoch ticker.
+//! * `WasmCombustor::new` pre-compiles the plugin module once and, unless
+//!   [`WasmConfig::spawn_epoch_ticker`] opts out, starts the shared epoch
+//!   ticker. An embedder that opts out drives the wall-clock deadline
+//!   itself via `engine().increment_epoch()` on its own scheduler.
 //! * `ignite(source)` hashes the source and stashes it in-memory - no
 //!   compilation. `ScriptId` is content-addressed so identical sources
 //!   hash identically across backends (`Adaptive` relies on that).
@@ -28,6 +30,8 @@ use crate::chamber::{self, TICK_PERIOD_MS, drain_stdout, format_trap_with_stderr
 use crate::host::{HostState, InputFormat};
 use crate::host_imports;
 use crate::nozzle::parse_output;
+use afterburner_core::governance::{ThreadGovernance, spawn_governed};
+use afterburner_core::ledger::{LedgerClass, MemoryLedger};
 use afterburner_core::log::Level;
 use afterburner_core::{
     AfterburnerError, Combustor, EngineMode, FuelGauge, InMemoryStateStore, Manifold, OutputValue,
@@ -40,7 +44,7 @@ use bytes::Bytes;
 use kovan_map::HopscotchMap;
 use serde_json::Value;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use wasmtime::{
@@ -115,10 +119,14 @@ fn max_linear_memory_bytes() -> usize {
         .min(WASM32_MAX_LINEAR_MEMORY_BYTES)
 }
 
-/// Maximum concurrently-instantiated plugin instances. Pool reserves
+/// Default maximum concurrently-instantiated plugin instances, used when
+/// [`WasmConfig::pool_total_instances`] is `None`. Pool reserves
 /// virtual-only address space; on a 64-bit host this is "free" until a
 /// slot is touched. 128 covers an 8-core box driven at 16x burst, which
-/// is a generous default for commodity hardware.
+/// is a generous default for commodity hardware. An embedder with a
+/// known, fixed concurrency ceiling (a bounded worker pool, for
+/// instance) should size this to that ceiling via
+/// `WasmConfig::pool_total_instances` instead of the generic default.
 const POOL_TOTAL_MEMORIES: u32 = 128;
 
 /// Resident bytes kept warm per freed pool slot - CoW reset back to this
@@ -165,6 +173,75 @@ pub struct WasmConfig {
     /// proceeds without a cache - this knob is purely an optimisation
     /// and never affects correctness.
     pub compile_cache_dir: Option<std::path::PathBuf>,
+    /// `None` (default) keeps today's behaviour: Cranelift compiles
+    /// functions in parallel across wasmtime's process-global `rayon`
+    /// pool (`build_engine`'s `parallel_compilation`). `Some(false)`
+    /// forces every compile - the plugin module and every
+    /// `register_precompiled` / `register_dyn` call - onto the calling
+    /// thread, single-threaded, touching `rayon` never.
+    ///
+    /// An embedder that already runs its own CPU-bound work on the same
+    /// process-global `rayon` pool (a common default in Rust servers)
+    /// should set `Some(false)`: `rayon`'s pool is shared and
+    /// unpartitioned, so a wasm compile fanning out across it competes
+    /// directly with unrelated work, and whichever caller touches
+    /// `rayon` first determines the pool's inherited thread priority and
+    /// affinity for the rest of the process. Single-threaded compilation
+    /// costs cold-start latency (no parallel speedup) in exchange for
+    /// zero interaction with any other `rayon` consumer.
+    pub parallel_compilation: Option<bool>,
+    /// `None` (default) keeps today's behaviour: `WasmCombustor::new`
+    /// spawns a dedicated `afterburner-epoch-ticker` thread that sleeps
+    /// `crate::chamber::TICK_PERIOD_MS` and calls
+    /// `Engine::increment_epoch()` in a loop for the lifetime of the
+    /// combustor (joined on [`Drop`]). `Some(false)` suppresses that
+    /// spawn entirely - `WasmCombustor::new` then owns zero threads on
+    /// this axis.
+    ///
+    /// An embedder that opts out is responsible for calling
+    /// `engine().increment_epoch()` periodically itself (from whatever
+    /// scheduler it already runs - a timer task on an existing async
+    /// runtime, for instance), or every `Store`'s epoch deadline
+    /// (`FuelGauge::timeout_ms`) never fires and only the fuel bound
+    /// remains. [`WasmCombustor::engine`] returns a `Clone`-able handle
+    /// for exactly this purpose; `Engine::increment_epoch(&self)` takes
+    /// a shared reference, so no synchronization is needed to drive it
+    /// from another thread.
+    pub spawn_epoch_ticker: Option<bool>,
+    /// `None` (default) keeps today's hard-coded pool size
+    /// (`POOL_TOTAL_MEMORIES`, 128). `Some(n)` sizes the pooling
+    /// allocator's instance and linear-memory slot counts to `n`
+    /// instead, shrinking (or growing) the pool's virtual address-space
+    /// reservation (`n * max_memory_size`) to match an embedder's own
+    /// concurrency ceiling rather than a generic commodity-hardware
+    /// default.
+    pub pool_total_instances: Option<u32>,
+    /// `None` (default) keeps today's behaviour: the per-instance linear
+    /// memory ceiling comes from the `BURN_MAX_LINEAR_MEMORY`
+    /// environment variable (or the 1 GiB default) via
+    /// `max_linear_memory_bytes`. `Some(bytes)` sets the ceiling
+    /// programmatically instead, taking priority over the environment
+    /// variable - the only reliable option for a library embedder, since
+    /// mutating process environment variables from a multithreaded
+    /// program is `unsafe` as of Rust 2024. Clamped to
+    /// `WASM32_MAX_LINEAR_MEMORY_BYTES` exactly like the
+    /// environment-variable path.
+    pub pool_max_linear_memory_bytes: Option<usize>,
+    /// Governance (nice / affinity / name prefix) applied to the
+    /// internal `afterburner-epoch-ticker` thread IF this embedder
+    /// keeps it (`spawn_epoch_ticker` unset or `Some(true)`) - ignored
+    /// entirely when the ticker is suppressed, which is the intended
+    /// posture for an embedder driving the epoch itself. `Default`
+    /// (every field `None`) is a pure no-op: today's ungoverned ticker,
+    /// byte-identical.
+    pub ticker_governance: ThreadGovernance,
+    /// Optional embedder-owned memory-accounting hook, charged at
+    /// `bytecode_cache` / `sealed_cache` / `dyn_cache` insert (reserve,
+    /// [`LedgerClass::ModuleCache`]) and evict/extinguish (release).
+    /// `None` (the default) is a pure no-op: every charge point is a
+    /// single `is_some()` branch on an already-cold path (registration,
+    /// never per-call).
+    pub memory_ledger: Option<Arc<dyn MemoryLedger>>,
 }
 
 /// Cached payload for a registered script. Built once in `ignite` so
@@ -193,6 +270,17 @@ pub(crate) struct CompiledScript {
     pub columnar_invoke_envelope_bytes: Bytes,
 }
 
+/// Total bytes a [`CompiledScript`] entry charges to
+/// `LedgerClass::ModuleCache` - the one canonical sizing function used
+/// at both `ignite` (charge) and `extinguish` (release) so the two can
+/// never drift on what a `bytecode_cache` entry costs.
+fn compiled_script_bytes(cs: &CompiledScript) -> usize {
+    cs.raw.len()
+        + cs.columnar_raw.len()
+        + cs.invoke_envelope_bytes.len()
+        + cs.columnar_invoke_envelope_bytes.len()
+}
+
 /// A pre-compiled, self-contained (SEALED) WASM module registered via
 /// [`WasmCombustor::register_precompiled`]. The module imports only
 /// `wasi_snapshot_preview1` (no `afterburner:host`); it is instantiated
@@ -200,6 +288,31 @@ pub(crate) struct CompiledScript {
 /// output on stdout. No plugin envelope, no bytecode compile step.
 pub(crate) struct SealedModule {
     pub instance_pre: InstancePre<HostState>,
+}
+
+/// A measured (not proxy) breakdown of a [`WasmCombustor`]'s resident
+/// bytes, so an embedder's R1/R2-style accounting can true up against
+/// reality instead of a size-at-registration-time estimate. Computed on
+/// demand by [`WasmCombustor::resident_estimate`] - never cached, never
+/// itself charged to any ledger (this is a read-only verification
+/// accessor, not another accounting path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResidentBreakdown {
+    /// Serialized size of the compiled plugin module - the one Wizer-
+    /// preinitialized module every tier shares.
+    pub plugin_module: usize,
+    /// Sum of every currently-registered `ignite`d script's bytecode +
+    /// envelope bytes.
+    pub bytecode_cache: usize,
+    /// Sum of every currently-registered sealed-precompiled module's
+    /// original byte length.
+    pub sealed_modules: usize,
+    /// Sum of every currently-registered dynamically-linked module's
+    /// original byte length.
+    pub dyn_modules: usize,
+    /// The pooling allocator's keep-resident floor:
+    /// `pool_total_instances * (LINEAR_MEMORY_KEEP_RESIDENT + TABLE_KEEP_RESIDENT)`.
+    pub pool_keep_resident: usize,
 }
 
 /// A dynamically-linked module registered via
@@ -253,6 +366,28 @@ pub struct WasmCombustor {
     /// and caller's `Manifold`), then instantiate the package module linking
     /// its `afterburner-plugin-v1` imports to the plugin's exports.
     dyn_cache: HopscotchMap<[u8; 32], Arc<DynModule>>,
+    /// Byte length charged per `sealed_cache` entry, keyed the same as
+    /// it. A companion map rather than widening `SealedModule` itself,
+    /// so every existing `sealed_cache` call site is untouched.
+    sealed_bytes: HopscotchMap<[u8; 32], usize>,
+    /// Same role as `sealed_bytes`, for `dyn_cache`.
+    dyn_bytes: HopscotchMap<[u8; 32], usize>,
+    /// Optional embedder-owned memory ledger - charged at cache
+    /// insert/evict (`LedgerClass::ModuleCache`). `None` is the
+    /// default, zero-cost posture.
+    memory_ledger: Option<Arc<dyn MemoryLedger>>,
+    /// Running totals mirroring the ledger charges (tracked regardless
+    /// of whether a ledger is configured), so `resident_estimate`
+    /// reports real numbers without re-walking a cache or
+    /// re-serializing every entry.
+    bytecode_cache_bytes: AtomicUsize,
+    sealed_modules_bytes: AtomicUsize,
+    dyn_modules_bytes: AtomicUsize,
+    /// Resolved pooling-allocator instance count - mirrors
+    /// `build_engine`'s own `pool_total_instances.unwrap_or(POOL_TOTAL_MEMORIES)` -
+    /// kept so `resident_estimate` can report the pool's keep-resident
+    /// floor without re-deriving it from a discarded `Engine::Config`.
+    pool_total_instances: u32,
     /// Counter incremented every time `compile_to_bytecode` actually
     /// invokes the plugin's compile mode. Used by tests to assert the
     /// hot path is genuinely cached (register-once → N thrusts → 1
@@ -271,14 +406,18 @@ pub struct WasmCombustor {
     /// Transpile hook threaded into every Store's HostState so the JS
     /// require resolver can call `__host_ts_transpile` for TS / ESM.
     transpile_hook: Option<crate::host::TranspileFn>,
-    /// Long-lived epoch ticker; one per `WasmCombustor`.
+    /// Shutdown flag for `ticker`, always allocated even when no ticker
+    /// is spawned (`Drop`'s store into it is then a harmless no-op).
     ticker_shutdown: Arc<AtomicBool>,
+    /// Long-lived epoch ticker; one per `WasmCombustor`, unless
+    /// [`WasmConfig::spawn_epoch_ticker`] is `Some(false)`, in which case
+    /// this is `None` and the embedder is driving the epoch itself.
     ticker: Option<JoinHandle<()>>,
 }
 
 impl WasmCombustor {
     pub fn new(config: WasmConfig) -> Result<Self> {
-        let engine = build_engine(config.compile_cache_dir.as_deref())?;
+        let engine = build_engine(&config)?;
         let plugin_module = build_plugin_module(&engine)?;
 
         // Build the linker once with every host import resolved, then
@@ -293,23 +432,30 @@ impl WasmCombustor {
             .map_err(|e| AfterburnerError::Engine(format!("plugin instantiate_pre: {e}")))?;
 
         let ticker_shutdown = Arc::new(AtomicBool::new(false));
-        let ticker = {
-            let engine = engine.clone();
+        let ticker = if config.spawn_epoch_ticker.unwrap_or(true) {
+            let engine_for_ticker = engine.clone();
             let shutdown = ticker_shutdown.clone();
-            thread::Builder::new()
-                .name("afterburner-epoch-ticker".into())
-                .spawn(move || {
+            let ticker_name = config
+                .ticker_governance
+                .thread_name("afterburner-epoch-ticker", "");
+            Some(spawn_governed(
+                ticker_name,
+                config.ticker_governance.clone(),
+                move || {
                     while !shutdown.load(Ordering::Acquire) {
                         thread::sleep(Duration::from_millis(TICK_PERIOD_MS));
-                        engine.increment_epoch();
+                        engine_for_ticker.increment_epoch();
                     }
-                })
-                .map_err(|e| AfterburnerError::Engine(format!("epoch ticker spawn: {e}")))?
+                },
+            )?)
+        } else {
+            None
         };
 
         let state_store = config
             .state_store
             .unwrap_or_else(InMemoryStateStore::shared);
+        let pool_total_instances = config.pool_total_instances.unwrap_or(POOL_TOTAL_MEMORIES);
 
         Ok(Self {
             engine,
@@ -317,14 +463,66 @@ impl WasmCombustor {
             bytecode_cache: HopscotchMap::new(),
             sealed_cache: HopscotchMap::new(),
             dyn_cache: HopscotchMap::new(),
+            sealed_bytes: HopscotchMap::new(),
+            dyn_bytes: HopscotchMap::new(),
+            memory_ledger: config.memory_ledger,
+            bytecode_cache_bytes: AtomicUsize::new(0),
+            sealed_modules_bytes: AtomicUsize::new(0),
+            dyn_modules_bytes: AtomicUsize::new(0),
+            pool_total_instances,
             compile_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             instance_pre: Arc::new(instance_pre),
             state_store,
             host_context: config.host_context,
             transpile_hook: config.transpile_hook,
             ticker_shutdown,
-            ticker: Some(ticker),
+            ticker,
         })
+    }
+
+    /// Reserve `bytes` against the configured ledger (if any) under
+    /// [`LedgerClass::ModuleCache`] and track the running total either
+    /// way (so [`Self::resident_estimate`] stays accurate with or
+    /// without a ledger). Call BEFORE the cache insert that makes the
+    /// bytes resident; on denial the caller must not proceed with the
+    /// insert.
+    fn charge_module_cache(&self, bytes: usize, total: &AtomicUsize) -> Result<()> {
+        if let Some(ledger) = &self.memory_ledger {
+            ledger
+                .reserve(LedgerClass::ModuleCache, bytes)
+                .map_err(|e| AfterburnerError::LedgerDenied(e.0))?;
+        }
+        total.fetch_add(bytes, Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// Release `bytes` previously charged via [`Self::charge_module_cache`].
+    /// Call AFTER the cache remove.
+    fn release_module_cache(&self, bytes: usize, total: &AtomicUsize) {
+        if let Some(ledger) = &self.memory_ledger {
+            ledger.release(LedgerClass::ModuleCache, bytes);
+        }
+        total.fetch_sub(bytes, Ordering::AcqRel);
+    }
+
+    /// Measure this combustor's resident-byte breakdown right now. Not
+    /// free - the plugin module is re-serialized on every call - so
+    /// this is for occasional verification / true-up, never a hot path.
+    pub fn resident_estimate(&self) -> ResidentBreakdown {
+        let plugin_module = self
+            .instance_pre
+            .module()
+            .serialize()
+            .map(|b| b.len())
+            .unwrap_or(0);
+        ResidentBreakdown {
+            plugin_module,
+            bytecode_cache: self.bytecode_cache_bytes.load(Ordering::Acquire),
+            sealed_modules: self.sealed_modules_bytes.load(Ordering::Acquire),
+            dyn_modules: self.dyn_modules_bytes.load(Ordering::Acquire),
+            pool_keep_resident: self.pool_total_instances as usize
+                * (LINEAR_MEMORY_KEEP_RESIDENT + TABLE_KEEP_RESIDENT),
+        }
     }
 
     /// Exposed so the daemon path can thread the same hook into its
@@ -406,6 +604,11 @@ impl WasmCombustor {
     /// `wasm` bytes returns the same `ScriptId` and skips re-compilation of
     /// the module's native code. `wasm` may be a raw `.wasm` binary or a WAT
     /// text module (wasmtime accepts both).
+    ///
+    /// An embedder that owns an on-disk AOT cache keyed by `wasm`'s
+    /// content digest should try [`Self::register_precompiled_deserialize`]
+    /// first and fall back to this method (then [`Self::serialize_module`]
+    /// to populate the cache) only on a miss.
     pub fn register_precompiled(&self, wasm: &[u8], target: &str) -> Result<ScriptId> {
         if target == DYN_TARGET {
             return self.register_dyn(wasm);
@@ -425,7 +628,149 @@ impl WasmCombustor {
         // cache when `compile_cache_dir` is set).
         let module = Module::new(&self.engine, wasm)
             .map_err(|e| AfterburnerError::CompileFailed(format!("sealed module compile: {e}")))?;
+        let built = self.build_sealed_module(module)?;
 
+        let bytes = wasm.len();
+        self.charge_module_cache(bytes, &self.sealed_modules_bytes)?;
+        self.sealed_cache.insert(hash, built);
+        self.sealed_bytes.insert(hash, bytes);
+        ab_event!(
+            Level::Info,
+            "wasm.sealed.registered",
+            "hash" => hex8(&hash),
+            "wasm_bytes" => wasm.len(),
+        );
+
+        Ok(ScriptId {
+            hash,
+            mode: EngineMode::Wasm,
+        })
+    }
+
+    /// Register a precompiled native artifact (a `.cwasm`) previously
+    /// produced by [`Self::serialize_module`] (or wasmtime's own
+    /// `Module::serialize` / `Engine::precompile_module`), skipping
+    /// Cranelift entirely. This is the embedder-owned AOT cache hook:
+    /// afterburner installs no on-disk compile cache of its own for
+    /// user modules ([`WasmConfig::compile_cache_dir`] is a separate,
+    /// wasmtime-managed cache for a different purpose and is not
+    /// required for this path) - the embedder reads its own cache
+    /// directory, and on a hit calls this instead of
+    /// [`Self::register_precompiled`].
+    ///
+    /// `target` selects sealed (`"wasm32-wasip1"`) vs dynamically-linked
+    /// (`"wasm32-wasip1-dyn"`) exactly like [`Self::register_precompiled`].
+    /// Registration is content-addressed by the **`cwasm` bytes**, not
+    /// an original `.wasm` source - calling this twice with identical
+    /// `cwasm` is a cache hit, not a double-deserialize. The resulting
+    /// `ScriptId` is therefore independent of whatever `ScriptId` a cold
+    /// `register_precompiled(wasm, target)` call for the same logical
+    /// module would have produced in another process; callers key their
+    /// own persistent identity (a content digest of the original `wasm`,
+    /// for instance) separately and only use the returned `ScriptId` as
+    /// this process's in-memory dispatch handle.
+    ///
+    /// # Safety
+    ///
+    /// `cwasm` must be exactly the unmodified output of a prior
+    /// [`Self::serialize_module`] call (or wasmtime's own
+    /// `Module::serialize` / `Engine::precompile_module`) against a
+    /// compatible `Engine` - see [`Module::deserialize`]'s safety
+    /// section for the full contract. Deserializing untrusted or
+    /// tampered bytes is a memory-safety violation, not a recoverable
+    /// error, which is why this method is `unsafe`. A version, config,
+    /// or target-triple mismatch in a *legitimately produced* cache
+    /// entry is safe and simply returns `Err` (wasmtime validates a
+    /// compatibility header before trusting anything else in the blob);
+    /// the danger is exclusively bytes from an untrusted origin. Callers
+    /// MUST store cache files under a directory an attacker cannot
+    /// write to (mirror this crate's own `private_cache_dir`: created
+    /// `0700`, owned by the current user).
+    pub unsafe fn register_precompiled_deserialize(
+        &self,
+        cwasm: &[u8],
+        target: &str,
+    ) -> Result<ScriptId> {
+        if target == DYN_TARGET {
+            // Safety: forwarded from this function's own contract.
+            return unsafe { self.register_dyn_deserialize(cwasm) };
+        }
+
+        let hash = sha256(cwasm);
+
+        if self.sealed_cache.get(&hash).is_some() {
+            ab_event!(Level::Debug, "wasm.sealed.cache_hit", "hash" => hex8(&hash));
+            return Ok(ScriptId {
+                hash,
+                mode: EngineMode::Wasm,
+            });
+        }
+
+        // Safety: forwarded from this function's own contract - `cwasm`
+        // must be trusted, unmodified `serialize()` output.
+        let module = unsafe { Module::deserialize(&self.engine, cwasm) }.map_err(|e| {
+            AfterburnerError::CompileFailed(format!("sealed module deserialize: {e}"))
+        })?;
+        let built = self.build_sealed_module(module)?;
+
+        let bytes = cwasm.len();
+        self.charge_module_cache(bytes, &self.sealed_modules_bytes)?;
+        self.sealed_cache.insert(hash, built);
+        self.sealed_bytes.insert(hash, bytes);
+        ab_event!(
+            Level::Info,
+            "wasm.sealed.registered_from_cache",
+            "hash" => hex8(&hash),
+            "cwasm_bytes" => cwasm.len(),
+        );
+
+        Ok(ScriptId {
+            hash,
+            mode: EngineMode::Wasm,
+        })
+    }
+
+    /// Return the native-compiled artifact for a module previously
+    /// registered via [`Self::register_precompiled`] or
+    /// [`Self::register_precompiled_deserialize`], so the embedder can
+    /// persist it as its own AOT cache entry (atomically - write to a
+    /// temp file in the same directory, then rename into place, the
+    /// same pattern this crate uses for its own plugin `.cwasm` cache).
+    ///
+    /// The bytes are wasmtime's `Module::serialize` output: keyed by
+    /// the module contents plus the compiling `Engine`'s exact `Config`
+    /// plus the wasmtime version, so an engine upgrade or a config
+    /// change lands on a fresh cache key and a stale entry is simply
+    /// never accepted by [`Self::register_precompiled_deserialize`]
+    /// (never silently misread).
+    ///
+    /// Returns [`AfterburnerError::ScriptNotFound`] if `id` does not
+    /// name a currently-registered sealed or dynamically-linked module -
+    /// a JS/TS `ScriptId` from [`Combustor::ignite`], for instance, has no
+    /// compiled `Module` to serialize.
+    pub fn serialize_module(&self, id: &ScriptId) -> Result<Vec<u8>> {
+        if let Some(sealed) = self.sealed_cache.get(&id.hash) {
+            return sealed
+                .instance_pre
+                .module()
+                .serialize()
+                .map_err(|e| AfterburnerError::Engine(format!("sealed module serialize: {e}")));
+        }
+        if let Some(dyn_module) = self.dyn_cache.get(&id.hash) {
+            return dyn_module
+                .module
+                .serialize()
+                .map_err(|e| AfterburnerError::Engine(format!("dyn module serialize: {e}")));
+        }
+        Err(AfterburnerError::ScriptNotFound)
+    }
+
+    /// Wire a compiled or deserialized sealed `Module` into a fresh
+    /// WASI-only linker and pre-resolve instantiation. Shared by the
+    /// compile path ([`Self::register_precompiled`]) and the AOT-cache
+    /// deserialize path ([`Self::register_precompiled_deserialize`]) so
+    /// the two can never drift apart.
+    fn build_sealed_module(&self, module: Module) -> Result<Arc<SealedModule>> {
         let mut wasi_linker: Linker<HostState> = Linker::new(&self.engine);
         add_to_linker_sync(&mut wasi_linker, |s: &mut HostState| &mut s.wasi)
             .map_err(|e| AfterburnerError::Engine(format!("sealed wasi linker: {e}")))?;
@@ -442,19 +787,7 @@ impl WasmCombustor {
             .instantiate_pre(&module)
             .map_err(|e| AfterburnerError::Engine(format!("sealed instantiate_pre: {e}")))?;
 
-        self.sealed_cache
-            .insert(hash, Arc::new(SealedModule { instance_pre }));
-        ab_event!(
-            Level::Info,
-            "wasm.sealed.registered",
-            "hash" => hex8(&hash),
-            "wasm_bytes" => wasm.len(),
-        );
-
-        Ok(ScriptId {
-            hash,
-            mode: EngineMode::Wasm,
-        })
+        Ok(Arc::new(SealedModule { instance_pre }))
     }
 
     /// Register a dynamically-linked module (`"wasm32-wasip1-dyn"` target).
@@ -483,12 +816,51 @@ impl WasmCombustor {
         let module = Module::new(&self.engine, wasm)
             .map_err(|e| AfterburnerError::CompileFailed(format!("dyn module compile: {e}")))?;
 
+        let bytes = wasm.len();
+        self.charge_module_cache(bytes, &self.dyn_modules_bytes)?;
         self.dyn_cache.insert(hash, Arc::new(DynModule { module }));
+        self.dyn_bytes.insert(hash, bytes);
         ab_event!(
             Level::Info,
             "wasm.dyn.registered",
             "hash" => hex8(&hash),
             "wasm_bytes" => wasm.len(),
+        );
+
+        Ok(ScriptId {
+            hash,
+            mode: EngineMode::Wasm,
+        })
+    }
+
+    /// Deserialize path for [`Self::register_precompiled_deserialize`]
+    /// when `target == "wasm32-wasip1-dyn"`. See that method's safety
+    /// section - the same contract applies here.
+    unsafe fn register_dyn_deserialize(&self, cwasm: &[u8]) -> Result<ScriptId> {
+        let hash = sha256(cwasm);
+
+        if self.dyn_cache.get(&hash).is_some() {
+            ab_event!(Level::Debug, "wasm.dyn.cache_hit", "hash" => hex8(&hash));
+            return Ok(ScriptId {
+                hash,
+                mode: EngineMode::Wasm,
+            });
+        }
+
+        // Safety: forwarded from this function's own contract - `cwasm`
+        // must be trusted, unmodified `serialize()` output.
+        let module = unsafe { Module::deserialize(&self.engine, cwasm) }
+            .map_err(|e| AfterburnerError::CompileFailed(format!("dyn module deserialize: {e}")))?;
+
+        let bytes = cwasm.len();
+        self.charge_module_cache(bytes, &self.dyn_modules_bytes)?;
+        self.dyn_cache.insert(hash, Arc::new(DynModule { module }));
+        self.dyn_bytes.insert(hash, bytes);
+        ab_event!(
+            Level::Info,
+            "wasm.dyn.registered_from_cache",
+            "hash" => hex8(&hash),
+            "cwasm_bytes" => cwasm.len(),
         );
 
         Ok(ScriptId {
@@ -1064,13 +1436,28 @@ impl Drop for WasmCombustor {
 ///   density is high enough that epoch interruption fires inside guest
 ///   loops including the Javy microtask pump (verified by the
 ///   `wasm_infinite_microtask_chain_is_bounded` regression test).
-/// * `parallel_compilation(true)` - Cranelift uses rayon to compile
-///   functions in parallel; cuts cold-start when the plugin module
-///   first instantiates. Available on every platform.
+/// * `parallel_compilation(..)` - Cranelift uses rayon to compile
+///   functions in parallel when [`WasmConfig::parallel_compilation`] is
+///   `None` or `Some(true)` (today's default); cuts cold-start when the
+///   plugin module first instantiates. `Some(false)` forces every
+///   compile onto the calling thread instead, touching the process's
+///   `rayon` global pool never - see the field doc for why an embedder
+///   would choose that. Available on every platform.
+/// * `wasm_threads(false)` - unconditional, not configurable. The
+///   `threads` proposal (shared memories, `wait`/`notify`) is refused at
+///   compile time for every module this engine ever compiles. Nothing
+///   in this crate's execution model uses it: only `wasi_snapshot_preview1`
+///   is linked (no `wasi-threads` import), so a guest could not spawn a
+///   thread even with `wasm_threads(true)` - this is defense in depth,
+///   matching [`crate::embedder_vm::deterministic_engine`]'s posture,
+///   with no functional cost to any caller.
 /// * `allocation_strategy(Pooling)` - pre-reserved per-instance
-///   linear-memory + table slots. Slot-affine reuse means
-///   re-instantiation skips page zeroing for the first
-///   `LINEAR_MEMORY_KEEP_RESIDENT` bytes. Cross-platform.
+///   linear-memory + table slots, sized by
+///   [`WasmConfig::pool_total_instances`] /
+///   [`WasmConfig::pool_max_linear_memory_bytes`] (defaults:
+///   [`POOL_TOTAL_MEMORIES`] instances, [`max_linear_memory_bytes`] each).
+///   Slot-affine reuse means re-instantiation skips page zeroing for the
+///   first `LINEAR_MEMORY_KEEP_RESIDENT` bytes. Cross-platform.
 ///
 /// Optional sub-features (memory protection keys, etc.) that are
 /// platform-specific would be runtime-probed here and silently fall
@@ -1080,17 +1467,22 @@ impl Drop for WasmCombustor {
 /// `compile_cache_dir` (see [`WasmConfig::compile_cache_dir`]) enables
 /// wasmtime's on-disk compilation cache rooted at the given absolute
 /// path. Cache initialisation failure is downgraded to a warning - the
-/// cache is an optimisation, never a correctness dependency.
-fn build_engine(compile_cache_dir: Option<&std::path::Path>) -> Result<Engine> {
+/// cache is an optimisation, never a correctness dependency. An embedder
+/// that wants to own its AOT cache directly (no background cache
+/// worker at all) leaves this `None` and uses
+/// [`WasmCombustor::serialize_module`] /
+/// [`WasmCombustor::register_precompiled_deserialize`] instead.
+fn build_engine(wasm_config: &WasmConfig) -> Result<Engine> {
     let mut config = Config::new();
     config
         .consume_fuel(true)
         .epoch_interruption(true)
         .memory_init_cow(true)
         .cranelift_opt_level(OptLevel::Speed)
-        .parallel_compilation(true);
+        .parallel_compilation(wasm_config.parallel_compilation.unwrap_or(true))
+        .wasm_threads(false);
 
-    if let Some(dir) = compile_cache_dir {
+    if let Some(dir) = wasm_config.compile_cache_dir.as_deref() {
         let mut cache_config = wasmtime::CacheConfig::new();
         cache_config.with_directory(dir);
         match wasmtime::Cache::new(cache_config) {
@@ -1106,10 +1498,18 @@ fn build_engine(compile_cache_dir: Option<&std::path::Path>) -> Result<Engine> {
         }
     }
 
+    let total_instances = wasm_config
+        .pool_total_instances
+        .unwrap_or(POOL_TOTAL_MEMORIES);
+    let max_memory_size = wasm_config
+        .pool_max_linear_memory_bytes
+        .map(|bytes| bytes.min(WASM32_MAX_LINEAR_MEMORY_BYTES))
+        .unwrap_or_else(max_linear_memory_bytes);
+
     let mut pool = PoolingAllocationConfig::default();
-    pool.total_core_instances(POOL_TOTAL_MEMORIES);
-    pool.total_memories(POOL_TOTAL_MEMORIES);
-    pool.max_memory_size(max_linear_memory_bytes());
+    pool.total_core_instances(total_instances);
+    pool.total_memories(total_instances);
+    pool.max_memory_size(max_memory_size);
     pool.linear_memory_keep_resident(LINEAR_MEMORY_KEEP_RESIDENT);
     pool.table_keep_resident(TABLE_KEEP_RESIDENT);
     pool.table_elements(POOL_TABLE_ELEMENTS);
@@ -1362,16 +1762,15 @@ impl Combustor for WasmCombustor {
             "bytecode_b64": columnar_bytecode_b64,
         });
         let columnar_invoke_envelope_bytes = Bytes::from(serde_json::to_vec(&columnar_envelope)?);
+        let compiled = CompiledScript {
+            raw: bytecode,
+            columnar_raw: columnar_bytecode,
+            invoke_envelope_bytes,
+            columnar_invoke_envelope_bytes,
+        };
+        self.charge_module_cache(compiled_script_bytes(&compiled), &self.bytecode_cache_bytes)?;
         self.source_store.insert(hash, source.to_string());
-        self.bytecode_cache.insert(
-            hash,
-            Arc::new(CompiledScript {
-                raw: bytecode,
-                columnar_raw: columnar_bytecode,
-                invoke_envelope_bytes,
-                columnar_invoke_envelope_bytes,
-            }),
-        );
+        self.bytecode_cache.insert(hash, Arc::new(compiled));
         ab_event!(
             Level::Info,
             "wasm.ignite.compiled",
@@ -1443,12 +1842,20 @@ impl Combustor for WasmCombustor {
 
     fn extinguish(&self, id: &ScriptId) {
         self.source_store.remove(&id.hash);
-        self.bytecode_cache.remove(&id.hash);
+        if let Some(compiled) = self.bytecode_cache.remove(&id.hash) {
+            self.release_module_cache(compiled_script_bytes(&compiled), &self.bytecode_cache_bytes);
+        }
         // Also remove from sealed_cache and dyn_cache in case this id was
         // registered via register_precompiled - extinguish is content-addressed
         // and must cover all paths.
         self.sealed_cache.remove(&id.hash);
+        if let Some(bytes) = self.sealed_bytes.remove(&id.hash) {
+            self.release_module_cache(bytes, &self.sealed_modules_bytes);
+        }
         self.dyn_cache.remove(&id.hash);
+        if let Some(bytes) = self.dyn_bytes.remove(&id.hash) {
+            self.release_module_cache(bytes, &self.dyn_modules_bytes);
+        }
         ab_event!(Level::Info, "wasm.extinguish", "hash" => hex8(&id.hash));
     }
 
@@ -2241,5 +2648,331 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A minimal, real WASI command module: writes the ASCII bytes `"42"`
+    /// to stdout via `fd_write` and exits cleanly. Same hand-rolled-WAT
+    /// technique as `tests/sealed_precompiled.rs`'s HTTP probe (real
+    /// `fd_write` plumbing, no external tool needed to build a fixture).
+    /// Zero imports beyond WASI, so it compiles under any target and
+    /// needs nothing from the `afterburner:host` linker.
+    const SERIALIZE_ROUNDTRIP_WAT: &str = r#"(module
+  (import "wasi_snapshot_preview1" "fd_write"
+    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "proc_exit"
+    (func $proc_exit (param i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "42")
+  (func (export "_start")
+    (i32.store (i32.const 100) (i32.const 0))
+    (i32.store (i32.const 104) (i32.const 2))
+    (drop (call $fd_write (i32.const 1) (i32.const 100) (i32.const 1) (i32.const 200)))
+    (call $proc_exit (i32.const 0))
+  )
+)"#;
+
+    /// A-cache proof: `serialize_module` -> `register_precompiled_deserialize`
+    /// round-trips a compiled module. Covers both directions:
+    ///   1. functional: the module deserialized into a *second, independent*
+    ///      combustor (mimicking a fresh process reading its own on-disk AOT
+    ///      cache) executes and produces the exact same output as the
+    ///      freshly-compiled original;
+    ///   2. byte-exact: re-serializing the deserialized module reproduces the
+    ///      identical bytes wasmtime emitted the first time
+    ///      (serialize -> deserialize -> serialize is the identity).
+    #[test]
+    fn serialize_module_and_register_precompiled_deserialize_round_trip() {
+        let c1 = make_combustor();
+        let id1 = c1
+            .register_precompiled(SERIALIZE_ROUNDTRIP_WAT.as_bytes(), "wasm32-wasip1")
+            .unwrap();
+        let out1 = c1
+            .thrust(&id1, &json!(null), &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(out1, json!(42));
+
+        // The AOT-cache hook an embedder persists to disk.
+        let cwasm = c1.serialize_module(&id1).unwrap();
+        assert!(!cwasm.is_empty(), "serialized module must not be empty");
+
+        // A second, independent engine (mimics a fresh process deserializing
+        // its own on-disk cache entry instead of recompiling).
+        let c2 = make_combustor();
+        // Safety: `cwasm` is exactly `c1.serialize_module`'s output,
+        // unmodified, and `c2`'s engine uses the same `WasmConfig::default()`
+        // (so a compatible compile-config header), satisfying the method's
+        // safety contract.
+        let id2 = unsafe { c2.register_precompiled_deserialize(&cwasm, "wasm32-wasip1") }.unwrap();
+        let out2 = c2
+            .thrust(&id2, &json!(null), &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(
+            out2,
+            json!(42),
+            "module deserialized from the AOT cache must produce identical output"
+        );
+
+        let cwasm_again = c2.serialize_module(&id2).unwrap();
+        assert_eq!(
+            cwasm, cwasm_again,
+            "serialize(deserialize(serialize(module))) must be byte-identical"
+        );
+    }
+
+    /// `serialize_module` on an id the engine has never seen (nor a JS/TS
+    /// `ScriptId` from `ignite`, which has no compiled `Module` at all)
+    /// fails loud with `ScriptNotFound` rather than panicking or silently
+    /// returning empty bytes.
+    #[test]
+    fn serialize_module_unknown_id_returns_script_not_found() {
+        let c = make_combustor();
+        let bogus = ScriptId {
+            hash: [0u8; 32],
+            mode: EngineMode::Wasm,
+        };
+        let err = c.serialize_module(&bogus).unwrap_err();
+        assert!(matches!(err, AfterburnerError::ScriptNotFound));
+
+        // A real, live JS ScriptId (from `ignite`, not `register_precompiled`)
+        // has bytecode, not a compiled `Module` - also ScriptNotFound.
+        let js_id = c.ignite("module.exports = () => 1").unwrap();
+        let err = c.serialize_module(&js_id).unwrap_err();
+        assert!(matches!(err, AfterburnerError::ScriptNotFound));
+    }
+
+    // ── E2/E3 governance + ledger ──────────────────────────────────────
+
+    #[test]
+    fn default_config_ticker_still_spawns_and_engine_still_works() {
+        // Byte-identical-defaults proof: WasmConfig::default() carries
+        // ThreadGovernance::default() (a no-op) for ticker_governance and
+        // None for memory_ledger - the epoch ticker still spawns
+        // ungoverned exactly as before, and ordinary thrust is unaffected.
+        let c = make_combustor();
+        assert!(c.ticker.is_some(), "default config keeps the epoch ticker");
+        let id = c.ignite("module.exports = () => 1 + 1").unwrap();
+        let out = c
+            .thrust(&id, &json!(null), &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(out, json!(2));
+    }
+
+    #[test]
+    fn ticker_governance_is_ignored_when_ticker_suppressed() {
+        // spawn_epoch_ticker(false) must still suppress the ticker even
+        // when a non-default ticker_governance is configured - governance
+        // never resurrects a thread the embedder explicitly opted out of.
+        let cfg = WasmConfig {
+            spawn_epoch_ticker: Some(false),
+            ticker_governance: ThreadGovernance {
+                name_prefix: Some("myapp-ticker".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let c = WasmCombustor::new(cfg).unwrap();
+        assert!(c.ticker.is_none());
+    }
+
+    #[test]
+    fn resident_estimate_reports_zero_caches_on_a_fresh_combustor() {
+        let c = make_combustor();
+        let r = c.resident_estimate();
+        assert!(r.plugin_module > 0, "plugin module must have a real size");
+        assert_eq!(r.bytecode_cache, 0);
+        assert_eq!(r.sealed_modules, 0);
+        assert_eq!(r.dyn_modules, 0);
+        assert!(r.pool_keep_resident > 0);
+    }
+
+    #[test]
+    fn resident_estimate_tracks_ignite_and_extinguish() {
+        let c = make_combustor();
+        let before = c.resident_estimate().bytecode_cache;
+        let id = c.ignite("module.exports = () => 1").unwrap();
+        let after_ignite = c.resident_estimate().bytecode_cache;
+        assert!(
+            after_ignite > before,
+            "ignite must grow the tracked bytecode_cache total"
+        );
+        c.extinguish(&id);
+        let after_extinguish = c.resident_estimate().bytecode_cache;
+        assert_eq!(
+            after_extinguish, before,
+            "extinguish must release exactly what ignite charged"
+        );
+    }
+
+    #[test]
+    fn resident_estimate_tracks_sealed_register_and_extinguish() {
+        let c = make_combustor();
+        let before = c.resident_estimate().sealed_modules;
+        let id = c
+            .register_precompiled(SERIALIZE_ROUNDTRIP_WAT.as_bytes(), "wasm32-wasip1")
+            .unwrap();
+        let after_register = c.resident_estimate().sealed_modules;
+        assert!(after_register > before);
+        c.extinguish(&id);
+        assert_eq!(c.resident_estimate().sealed_modules, before);
+    }
+
+    /// Records every `reserve`/`release` call so tests can assert both
+    /// the class and the byte count charged, and optionally denies every
+    /// reservation to exercise the loud-failure path.
+    #[derive(Default)]
+    struct MockLedger {
+        deny: bool,
+        reserved: std::sync::Mutex<Vec<(afterburner_core::ledger::LedgerClass, usize)>>,
+        released: std::sync::Mutex<Vec<(afterburner_core::ledger::LedgerClass, usize)>>,
+    }
+
+    impl afterburner_core::ledger::MemoryLedger for MockLedger {
+        fn reserve(
+            &self,
+            class: afterburner_core::ledger::LedgerClass,
+            bytes: usize,
+        ) -> std::result::Result<(), afterburner_core::ledger::LedgerDenied> {
+            if self.deny {
+                return Err(afterburner_core::ledger::LedgerDenied(
+                    "mock ledger denies everything".to_string(),
+                ));
+            }
+            self.reserved.lock().unwrap().push((class, bytes));
+            Ok(())
+        }
+
+        fn release(&self, class: afterburner_core::ledger::LedgerClass, bytes: usize) {
+            self.released.lock().unwrap().push((class, bytes));
+        }
+    }
+
+    #[test]
+    fn memory_ledger_reserve_and_release_round_trip_on_ignite_extinguish() {
+        let ledger = Arc::new(MockLedger::default());
+        let cfg = WasmConfig {
+            memory_ledger: Some(ledger.clone() as Arc<dyn MemoryLedger>),
+            ..Default::default()
+        };
+        let c = WasmCombustor::new(cfg).unwrap();
+
+        let id = c.ignite("module.exports = () => 1").unwrap();
+        {
+            let reserved = ledger.reserved.lock().unwrap();
+            assert_eq!(reserved.len(), 1);
+            assert_eq!(reserved[0].0, LedgerClass::ModuleCache);
+            assert!(reserved[0].1 > 0);
+        }
+        assert!(ledger.released.lock().unwrap().is_empty());
+
+        c.extinguish(&id);
+        let reserved_bytes = ledger.reserved.lock().unwrap()[0].1;
+        let released = ledger.released.lock().unwrap();
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0], (LedgerClass::ModuleCache, reserved_bytes));
+    }
+
+    #[test]
+    fn memory_ledger_denial_is_loud_and_never_registers() {
+        let ledger = Arc::new(MockLedger {
+            deny: true,
+            ..Default::default()
+        });
+        let cfg = WasmConfig {
+            memory_ledger: Some(ledger as Arc<dyn MemoryLedger>),
+            ..Default::default()
+        };
+        let c = WasmCombustor::new(cfg).unwrap();
+
+        let err = c.ignite("module.exports = () => 1").unwrap_err();
+        assert!(
+            matches!(err, AfterburnerError::LedgerDenied(_)),
+            "expected LedgerDenied, got {err}"
+        );
+        // A denied registration must not be resolvable.
+        assert_eq!(c.resident_estimate().bytecode_cache, 0);
+    }
+
+    #[test]
+    fn memory_ledger_none_is_free_and_unchanged() {
+        // No ledger configured: registration succeeds exactly as before,
+        // and resident_estimate still tracks totals (that bookkeeping is
+        // independent of ledger presence).
+        let c = make_combustor();
+        let id = c.ignite("module.exports = () => 1").unwrap();
+        let out = c
+            .thrust(&id, &json!(null), &FuelGauge::unlimited())
+            .unwrap();
+        assert_eq!(out, json!(1));
+        assert!(c.resident_estimate().bytecode_cache > 0);
+    }
+
+    // ── limiter_tripped ─────────────────────────────────────────────────
+
+    #[test]
+    fn limiter_tripped_flag_is_set_on_memory_cap_denial() {
+        // Covers the embedder case this flag exists for: a guest
+        // allocation well past FuelGauge::memory_bytes must trip the
+        // flag regardless of whether the resulting failure surfaces as
+        // a typed MemoryLimit or a generic wasm trap (the guest
+        // runtime's own allocator can catch the denial and abort
+        // differently depending on what it was doing).
+        let c = make_combustor();
+        let id = c
+            .ignite(
+                r#"module.exports = () => {
+                    const huge = new Float64Array(8 * 1024 * 1024); // 64MB
+                    huge[0] = 1;
+                    return huge[0];
+                };"#,
+            )
+            .unwrap();
+        let tripped = Arc::new(AtomicBool::new(false));
+        let limits = FuelGauge {
+            memory_bytes: Some(24 * 1024 * 1024),
+            limiter_tripped: Some(tripped.clone()),
+            ..FuelGauge::unlimited()
+        };
+        let result = c.thrust(&id, &json!(null), &limits);
+        assert!(result.is_err(), "an over-budget allocation must fail");
+        assert!(
+            tripped.load(Ordering::Acquire),
+            "the ResourceLimiter denial must set the tripped flag regardless of \
+             how the guest's own runtime surfaced the failure: {result:?}"
+        );
+    }
+
+    #[test]
+    fn limiter_tripped_flag_stays_false_when_never_denied() {
+        let c = make_combustor();
+        let id = c.ignite("module.exports = () => 1 + 1").unwrap();
+        let tripped = Arc::new(AtomicBool::new(false));
+        let limits = FuelGauge {
+            limiter_tripped: Some(tripped.clone()),
+            ..FuelGauge::unlimited()
+        };
+        let out = c.thrust(&id, &json!(null), &limits).unwrap();
+        assert_eq!(out, json!(2));
+        assert!(!tripped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn limiter_tripped_defaults_to_none_and_costs_nothing() {
+        // No sink supplied: HostState::limiter_tripped() reads false and
+        // nothing panics, even under a denial.
+        let c = make_combustor();
+        let id = c
+            .ignite(
+                r#"module.exports = () => {
+                    const huge = new Float64Array(8 * 1024 * 1024);
+                    return huge.length;
+                };"#,
+            )
+            .unwrap();
+        let limits = FuelGauge {
+            memory_bytes: Some(24 * 1024 * 1024),
+            ..FuelGauge::unlimited()
+        };
+        // Must not panic; the caller simply has no sink to consult.
+        let _ = c.thrust(&id, &json!(null), &limits);
     }
 }

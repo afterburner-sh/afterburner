@@ -60,7 +60,6 @@ use rusqlite::{Connection, OpenFlags, params_from_iter, types::Value as SqlValue
 use serde_json::{Value as JsonValue, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::thread;
 
 pub type DbId = i64;
 
@@ -145,9 +144,12 @@ impl SqliteShadow {
         let (tx, rx) = unbounded_channel::<DbCommand>();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let path = path.to_string();
-        thread::Builder::new()
-            .name(format!("sqlite3-shadow-{id}"))
-            .spawn(move || run_worker(path, rx))
+        // Governed (T7): named and subordinated per whatever
+        // `afterburner_core::governance::set_helper_governance` last
+        // installed for this process, or ungoverned by default.
+        let name = afterburner_core::governance::helper_governance()
+            .thread_name("sqlite3-shadow", &format!("-{id}"));
+        crate::governance::spawn_governed(name, move || run_worker(path, rx))
             .map_err(|e| AfterburnerError::Host(format!("sqlite3 worker spawn: {e}")))?;
         self.conns.insert(id, ConnHandle { cmd_tx: tx });
         Ok(id)
@@ -418,6 +420,7 @@ fn row_to_json(row: &rusqlite::Row<'_>, column_names: &[String]) -> Result<JsonV
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     fn open_mem() -> (Arc<SqliteShadow>, DbId) {
         let s = Arc::new(SqliteShadow::new());
