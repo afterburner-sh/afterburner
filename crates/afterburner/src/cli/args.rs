@@ -531,9 +531,19 @@ pub struct ScaffoldArgs {
     /// SPDX license (default `Apache-2.0`).
     #[arg(long, value_name = "LICENSE")]
     pub license: Option<String>,
-    /// Entry-point template: `module` (default) | `udf` | `http` | `llm`.
+    /// Entry-point template: `module` (default) | `udf` | `http` | `llm` |
+    /// `scramdb`.
     #[arg(long, value_name = "TEMPLATE")]
     pub template: Option<String>,
+    /// Scaffold a ScramDB UDF package. Shorthand for `--template scramdb`.
+    ///
+    /// Writes a COLUMNAR batch entry (one batch in, one batch out - ScramDB
+    /// calls a UDF once per chunk, never once per row) and the
+    /// `[[metadata.sql.function]]` block ScramDB reads to register the
+    /// function automatically on install, so `SELECT my_function(...)` works
+    /// with no manual `CREATE FUNCTION`.
+    #[arg(long)]
+    pub scramdb: bool,
     /// Scaffold a TypeScript package (`source/main.ts` + `tsconfig.json`).
     /// `burn package` transpiles TS to JS at pack time.
     /// Shorthand for `--lang typescript`.

@@ -3,6 +3,60 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.2.6] - 2026-08-04
+
+Columnar-UDF wire fixes and a ScramDB scaffold template. The three harness
+bugs below each produced a real failure against a live engine.
+
+### Variable-width columns decode to values
+
+A `Utf8`/`Bytea`/`Jsonb` column is a 16-byte inline-or-pointer slot per row
+(length at `[0..4)`, bytes inline when the length is 12 or under, otherwise a
+heap offset at `[12..16)`), not a `TypedArray` of values. The columnar harness
+read it as a `Uint8Array`, so a package received a number per row and
+`doc[i].toLowerCase()` failed with "not a function". Slots now decode to a JS
+array of strings (or `Uint8Array` for `Bytea`), so a package indexes a
+variable-width column exactly like every other dtype. A heap slice that runs
+past the column's heap length is rejected by name instead of read out of
+bounds.
+
+### Constant columns are read once and broadcast
+
+A constant column carries exactly one value for the whole batch: the host
+encodes a scalar argument once rather than repeating it per row. The harness
+read `row_count` elements from it and handed the package `undefined` for every
+scalar argument. It now reads the single element and broadcasts it across the
+batch, so the package body cannot tell a constant column from a per-row one.
+
+### Large replies are written in full
+
+`Javy.IO.writeSync` may accept only part of the buffer it is given. A single
+call silently truncated a roughly 800KB columnar reply (10k rows of 64-char
+hashes) to 148KB, and the host then rejected the short blob as out of bounds.
+The reply is now drained in a loop, and a stalled write fails loudly with the
+byte counts instead of truncating.
+
+### String result columns
+
+A package returning strings could not reply at all: the result encoder knew
+only `TypedArray`s. A plain `Array` is now encoded as a `Utf8` result column
+(16-byte slots plus a heap, the same shape the input path reads), with the
+payload encoded once up front so the layout pass knows the exact heap size
+and never reallocates. The unsupported-type error now names the actual type
+rather than assuming a constructor exists.
+
+### `burn scaffold --scramdb`
+
+A new `scramdb` entry-point template (also `--template scramdb`) writes a
+columnar batch entry (one batch in, one batch out) plus the
+`[[metadata.sql.function]]` block ScramDB reads to register the function on
+install, so `SELECT my_function(...)` works with no manual `CREATE FUNCTION`.
+The declared argument names are load-bearing: the entry body reads its inputs
+by name out of `batch.columns`, and the scaffold keeps the two in sync. An
+explicit `--template` still wins over the `--scramdb` shorthand, so the two
+can never silently disagree. Every other template's `[metadata]` table is
+untouched.
+
 ## [0.2.5] - 2026-07-21
 
 Compile-isolation knobs for embedders that run their own thread topology

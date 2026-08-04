@@ -1,6 +1,13 @@
 import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { CACHE, HEADERS_SECURITY, passthroughHeaders, planRoute } from "../src/index.js";
+import {
+  CACHE,
+  HEADERS_SECURITY,
+  LINK_AGENT,
+  htmlHeaders,
+  passthroughHeaders,
+  planRoute,
+} from "../src/index.js";
 
 const APEX = "https://afterburner.sh";
 
@@ -460,5 +467,67 @@ describe("e2e via SELF.fetch (assets-first mode in test pool)", () => {
     const res = await SELF.fetch(APEX + "/this-path-does-not-exist-xyzzy");
     expect(res.status).toBeGreaterThanOrEqual(400);
     expect(res.status).toBeLessThan(500);
+  });
+});
+
+describe("agent discovery Link headers (RFC 8288)", () => {
+  // Only IANA-registered relation types may appear. `sitemap` is NOT
+  // registered - the sitemap is advertised via robots.txt instead - so a
+  // regression that reintroduces it must fail here.
+  it("uses only IANA-registered relation types", () => {
+    const rels = [...LINK_AGENT.matchAll(/rel="([^"]+)"/g)].map((m) => m[1]);
+    expect(rels).toEqual(["describedby", "help"]);
+    expect(LINK_AGENT).not.toContain('rel="sitemap"');
+  });
+
+  it("is a well-formed RFC 8288 field value", () => {
+    for (const part of LINK_AGENT.split(", ")) {
+      expect(part).toMatch(/^<\/[^>]*>; rel="[a-z-]+"(; type="[^"]+")?$/);
+    }
+  });
+
+  it("points describedby at /llms.txt and help at /docs", () => {
+    expect(LINK_AGENT).toContain('</llms.txt>; rel="describedby"');
+    expect(LINK_AGENT).toContain('</docs>; rel="help"');
+  });
+
+  it("stamps the apex HTML response", () => {
+    const plan = planRoute(r("/", { ua: UA_BROWSER, accept: "text/html" }));
+    expect(plan.headers["link"]).toBe(LINK_AGENT);
+  });
+
+  it("stamps /docs", () => {
+    expect(planRoute(r("/docs")).headers["link"]).toBe(LINK_AGENT);
+  });
+
+  it("stamps a directly requested .html asset", () => {
+    expect(passthroughHeaders("/index.html")["link"]).toBe(LINK_AGENT);
+  });
+
+  it("does NOT stamp the install script (nothing to describe)", () => {
+    const plan = planRoute(r("/", { ua: UA_CURL }));
+    expect(plan.headers["link"]).toBeUndefined();
+  });
+
+  it("does NOT stamp css/js or image assets", () => {
+    expect(passthroughHeaders("/design-system.css")["link"]).toBeUndefined();
+    expect(passthroughHeaders("/tweaks.js")["link"]).toBeUndefined();
+    expect(passthroughHeaders("/art/og-image.png")["link"]).toBeUndefined();
+  });
+
+  // The three HTML-producing branches must agree; they share htmlHeaders()
+  // precisely so they cannot drift.
+  it("every HTML branch emits an identical header set", () => {
+    const apex = planRoute(r("/", { ua: UA_BROWSER, accept: "text/html" })).headers;
+    const docs = planRoute(r("/docs")).headers;
+    const forced = planRoute(r("/?install=html", { ua: UA_CURL })).headers;
+    expect(apex).toEqual(htmlHeaders());
+    expect(docs).toEqual(htmlHeaders());
+    expect(forced).toEqual(htmlHeaders());
+  });
+
+  it("html headers still carry the security headers", () => {
+    expect(htmlHeaders()).toMatchObject(HEADERS_SECURITY);
+    expect(htmlHeaders()["cache-control"]).toBe(CACHE.HTML);
   });
 });

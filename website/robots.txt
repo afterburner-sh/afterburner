@@ -1,0 +1,11 @@
+# afterburner.sh
+#
+# Cloudflare appends its own managed block below this content when the
+# Managed robots.txt feature is enabled. The `Sitemap:` directive is
+# user-agent independent (sitemaps.org protocol), so it applies no matter
+# where it lands in the merged file.
+
+User-agent: *
+Allow: /
+
+Sitemap: https://afterburner.sh/sitemap.xml

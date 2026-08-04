@@ -1,0 +1,41 @@
+# Afterburner
+
+> One sandboxed, deterministic WebAssembly runtime for every language. Run or compile JavaScript, TypeScript, Python, Ruby, Go, Rust, C and C++ to a self-contained wasm artifact with zero setup.
+
+Afterburner ships as `burn`, a single CLI binary. It runs a script directly
+(`burn run script.py`) or compiles a package to a portable `.afb` artifact
+(`burn compile ./pkg -o demo.afb`). Every guest runs in a capability-sandboxed,
+deterministic wasm environment with fuel-metered execution. It is also usable as
+a Rust library via the `afterburner` crate.
+
+Install: `curl -fsSL https://afterburner.sh | sh` (Linux and macOS), or
+`iwr -useb https://afterburner.sh | iex` (Windows PowerShell).
+
+## Docs
+
+- [Introduction](https://afterburner.sh/docs#introduction): what Afterburner is and the problem it solves
+- [Installation](https://afterburner.sh/docs#installation): install the `burn` CLI on Linux, macOS and Windows
+- [Running scripts](https://afterburner.sh/docs#run): execute a script in the sandbox by file extension
+- [First package](https://afterburner.sh/docs#first-package): scaffold and build a `.afb` package
+- [Compiling](https://afterburner.sh/docs#compile): compile a package to a self-contained wasm artifact
+- [Languages](https://afterburner.sh/docs#languages): the supported guest languages and how each is run
+- [Determinism](https://afterburner.sh/docs#determinism): reproducible execution and the effect log
+- [Sandbox](https://afterburner.sh/docs#sandbox): the capability model and what a guest can reach
+- [Fuel](https://afterburner.sh/docs#fuel): metered execution and resource limits
+- [Programmatic use](https://afterburner.sh/docs#programmatic): embedding Afterburner as a Rust library
+- [CLI reference](https://afterburner.sh/docs#cli): every `burn` subcommand and flag
+
+## Optional
+
+- [REPL](https://afterburner.sh/docs#repl): the interactive shell
+- [Execution tiers](https://afterburner.sh/docs#tiers): interpreter and compiled tier selection
+- [Scheduler](https://afterburner.sh/docs#scheduler): the thrust work-stealing scheduler
+- [State](https://afterburner.sh/docs#state): sharing state across invocations
+- [Packages](https://afterburner.sh/docs#packages): the `.afb` package format and registry
+- [Extending](https://afterburner.sh/docs#extend): host imports and custom capabilities
+- [AI agents](https://afterburner.sh/docs#ai-agents): running agent-generated code safely
+- [Node compatibility](https://afterburner.sh/docs#node-compat): supported Node built-ins and shims
+- [Environment](https://afterburner.sh/docs#env): environment variables and configuration
+- [Crates](https://afterburner.sh/docs#crates): the published Rust crates
+- [Building from source](https://afterburner.sh/docs#build): toolchain requirements and build steps
+- [Source repository](https://github.com/afterburner-sh/afterburner): issues, releases and source

@@ -201,7 +201,12 @@ fn scaffold_opts(cli: &Cli, a: &ScaffoldArgs) -> ScaffoldOpts {
         version: a.pkg_version.clone(),
         description: a.description.clone(),
         license: a.license.clone(),
-        template: a.template.clone(),
+        // `--scramdb` is the shorthand; an explicit `--template` still wins
+        // so the two can never silently disagree.
+        template: a
+            .template
+            .clone()
+            .or_else(|| a.scramdb.then(|| "scramdb".to_string())),
         allow_all: cli.allow_all,
         net: cli.allow_net.as_deref().map(&any_or_list),
         env_keys: cli.allow_env.as_deref().map(split_list),

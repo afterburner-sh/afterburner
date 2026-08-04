@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner"
-version = "0.2.4"
+version = "0.2.6"
 dependencies = [
  "afterburner-core",
  "afterburner-ignite",
@@ -77,11 +77,13 @@ dependencies = [
 
 [[package]]
 name = "afterburner-core"
-version = "0.2.4"
+version = "0.2.6"
 dependencies = [
  "blake3",
  "fastrace",
+ "kovan-channel",
  "kovan-map",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
@@ -90,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-example-express-app"
-version = "0.2.4"
+version = "0.2.6"
 dependencies = [
  "afterburner",
  "anyhow",
@@ -102,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-ignite"
-version = "0.2.4"
+version = "0.2.6"
 dependencies = [
  "afterburner-core",
  "afterburner-node-compat",
@@ -115,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-node-compat"
-version = "0.2.4"
+version = "0.2.6"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -158,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-thrust"
-version = "0.2.4"
+version = "0.2.6"
 dependencies = [
  "afterburner-core",
  "afterburner-wasi",
@@ -171,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-wasi"
-version = "0.2.4"
+version = "0.2.6"
 dependencies = [
  "afterburner-core",
  "afterburner-node-compat",
@@ -180,6 +182,7 @@ dependencies = [
  "base64",
  "bytes",
  "fastrace",
+ "fd-lock",
  "flate2",
  "getrandom 0.2.17",
  "hex",
