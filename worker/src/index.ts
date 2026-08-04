@@ -33,6 +33,16 @@ export const HEADERS_SECURITY = {
   "referrer-policy": "strict-origin-when-cross-origin",
 } as const;
 
+// RFC 8288 agent discovery, stamped on HTML responses only (a shell script
+// has nothing to describe). Both relation types are IANA-registered:
+// `describedby` (POWDER) and `help` (HTML). There is deliberately no
+// `rel="sitemap"` here - no such relation is registered, and the sitemap is
+// advertised the standard way, via the `Sitemap:` directive in robots.txt.
+export const LINK_AGENT = [
+  '</llms.txt>; rel="describedby"; type="text/plain"',
+  '</docs>; rel="help"; type="text/html"',
+].join(", ");
+
 export const CACHE = {
   HTML: "public, max-age=300",
   INSTALL: "public, max-age=60",
@@ -42,6 +52,19 @@ export const CACHE = {
 
 const RE_IMMUTABLE = /\.(?:png|jpg|jpeg|webp|svg|mp4|webm|woff2?)$/i;
 const RE_CSS_JS = /\.(?:css|js|mjs)$/i;
+
+/**
+ * The header set for every HTML response, from whichever branch produced it.
+ * Single definition so the apex, /docs and the escape hatch can never drift.
+ */
+export function htmlHeaders(): Record<string, string> {
+  return {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": CACHE.HTML,
+    link: LINK_AGENT,
+    ...HEADERS_SECURITY,
+  };
+}
 
 export type RoutePlan =
   // Fetch a different asset from ASSETS and stamp these response headers.
@@ -85,11 +108,7 @@ export function planRoute(req: Request): RoutePlan {
     return {
       kind: "rewrite",
       assetPath: "/docs.html",
-      headers: {
-        "content-type": "text/html; charset=utf-8",
-        "cache-control": CACHE.HTML,
-        ...HEADERS_SECURITY,
-      },
+      headers: htmlHeaders(),
     };
   }
 
@@ -119,11 +138,7 @@ function planScripted(
     return {
       kind: "rewrite",
       assetPath: htmlAsset,
-      headers: {
-        "content-type": "text/html; charset=utf-8",
-        "cache-control": CACHE.HTML,
-        ...HEADERS_SECURITY,
-      },
+      headers: htmlHeaders(),
     };
   }
 
@@ -154,11 +169,7 @@ function planScripted(
   return {
     kind: "rewrite",
     assetPath: htmlAsset,
-    headers: {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": CACHE.HTML,
-      ...HEADERS_SECURITY,
-    },
+    headers: htmlHeaders(),
   };
 }
 
@@ -180,6 +191,7 @@ export function passthroughHeaders(path: string): Record<string, string> {
     out["content-type"] = "text/plain; charset=utf-8";
   } else if (path.endsWith(".html")) {
     out["cache-control"] = CACHE.HTML;
+    out["link"] = LINK_AGENT;
   }
   return out;
 }
