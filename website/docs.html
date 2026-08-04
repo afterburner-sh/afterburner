@@ -660,6 +660,15 @@
     color: var(--color-vibrant-orange);
   }
 
+  /* a brand mark beside a section heading. The artwork is already
+     transparent, so it sits directly on the page with no plate behind it. */
+  /* Flex-centre the mark against the heading text. vertical-align guesses
+     wrong here because it keys off font metrics, not the rendered cap height. */
+  .h-branded { display: flex; align-items: center; gap: 0.4em; }
+  .h-glyph { width: 22px; height: 22px; flex-shrink: 0; }
+  /* inside a sidebar link .sb-link's own flex gap supplies the spacing */
+  .sb-link .h-glyph { width: 17px; height: 17px; }
+
   /* a language label always carries its mark: devicon glyph, muted inline */
   .lang-i {
     display: inline-block;
@@ -1220,7 +1229,7 @@
         <a class="sb-link" href="#packages-afb">The .afb format</a>
         <a class="sb-link" href="#packages-registry">Registry</a>
         <a class="sb-link" href="#packages-precompiled">Precompiled WASM</a>
-        <a class="sb-link" href="#packages-scramdb">ScramDB packages</a>
+        <a class="sb-link" href="#packages-scramdb"><img class="h-glyph" src="art/scramdb.svg" alt="" width="17" height="17" loading="lazy" decoding="async" />ScramDB packages</a>
       </div>
     </div>
 
@@ -2188,7 +2197,7 @@ $ <span class="tok-mod">burn</span> compile -o ./dist/        <span class="tok-c
       </div>
       <p>The precompiled module respects the package's Manifold: a sealed package produces a self-contained module; a capability-bearing one keeps the host-import boundary so every grant stays enforced at runtime.</p>
 
-      <h3 id="packages-scramdb">Building packages for ScramDB</h3>
+      <h3 id="packages-scramdb" class="h-branded"><img class="h-glyph" src="art/scramdb.svg" alt="" width="22" height="22" loading="lazy" decoding="async" />Building packages for ScramDB</h3>
       <p><a href="https://scramdb.com">ScramDB</a> embeds Afterburner to run SQL user-defined functions. A package written for it follows two extra conventions on top of the ordinary package shape - both live inside features Afterburner already has, so a ScramDB package is a perfectly ordinary <code>.afb</code>.</p>
       <p>Scaffold one with <code>--scramdb</code> (shorthand for <code>--template scramdb</code>), which writes both conventions for you:</p>
       <div class="codeblock">
