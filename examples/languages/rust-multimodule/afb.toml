@@ -4,7 +4,7 @@ version = "1.0"
 [package]
 name = "rust-multimodule"
 namespace = "examples"
-version = "0.2.4"
+version = "0.2.6"
 language = "rust"
 entry = "source/main.rs"
 
