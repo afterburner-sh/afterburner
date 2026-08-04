@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 pub const PLACEHOLDER_NAMESPACE: &str = "your-namespace";
 
 /// The four entry-point templates.
-pub const TEMPLATES: [&str; 4] = ["module", "udf", "http", "llm"];
+pub const TEMPLATES: [&str; 5] = ["module", "udf", "http", "llm", "scramdb"];
 
 /// Inputs to a scaffold, filled from the CLI flags.
 #[derive(Debug, Default, Clone)]
@@ -149,11 +149,70 @@ pub fn summarize(m: &Manifold) -> Vec<String> {
     out
 }
 
+/// The `[metadata.sql]` table a ScramDB package declares, or empty for every
+/// other template.
+///
+/// `[metadata]` is afterburner's own free-form, never-interpreted table;
+/// `[metadata.sql]` is ScramDB's use of it. ScramDB registers each declared
+/// function on install (`CREATE FUNCTION <name>(<args>) RETURNS <returns>`),
+/// which is what makes a package directly callable from SQL. The argument
+/// NAMES are load-bearing: the package body reads its inputs by name out of
+/// the columnar batch, so they must match the entry source.
+fn scramdb_metadata(o: &ScaffoldOpts) -> toml::value::Table {
+    if o.template.as_deref() != Some("scramdb") {
+        return Default::default();
+    }
+    let name = o
+        .name
+        .as_deref()
+        .and_then(|n| n.rsplit('/').next())
+        .unwrap_or("my_function")
+        .to_string();
+    let mut function = toml::value::Table::new();
+    function.insert("name".into(), toml::Value::String(name));
+    function.insert(
+        "args".into(),
+        toml::Value::String("a DOUBLE PRECISION, b DOUBLE PRECISION".into()),
+    );
+    function.insert(
+        "returns".into(),
+        toml::Value::String("DOUBLE PRECISION".into()),
+    );
+    let mut sql = toml::value::Table::new();
+    sql.insert(
+        "function".into(),
+        toml::Value::Array(vec![toml::Value::Table(function)]),
+    );
+    let mut metadata = toml::value::Table::new();
+    metadata.insert("sql".into(), toml::Value::Table(sql));
+    metadata
+}
+
 fn main_js(template: &str, namespace: &str, name: &str) -> String {
     let header = format!("// {namespace}/{name}: an Afterburner package.\n\"use strict\";\n\n");
     let body = match template {
         "udf" => {
             "// A UDF: one record in, the transformed record out.\nmodule.exports = function (record) {\n  // transform `record` and return the result\n  return record;\n};\n"
+        }
+        // ScramDB calls a UDF once per BATCH, not once per row: the argument
+        // is a columnar batch and the return value is a columnar batch, so a
+        // package crosses the sandbox boundary once for the whole chunk
+        // instead of once per row. Argument NAMES are load-bearing - the body
+        // reads its inputs by name out of `batch.columns`, and those names
+        // must match the `args` declared in `[[metadata.sql.function]]`.
+        "scramdb" => {
+            "// A ScramDB UDF: one COLUMNAR BATCH in, one columnar batch out.\n\
+// `batch.columns.<arg>` is keyed by the argument names declared in afb.toml's\n\
+// [[metadata.sql.function]] `args` - they must match. ScramDB registers that\n\
+// signature on install, so `SELECT my_function(...)` needs no CREATE FUNCTION.\n\
+module.exports = function (batch) {\n\
+\x20\x20const a = batch.columns.a;\n\
+\x20\x20const b = batch.columns.b;\n\
+\x20\x20const n = batch.row_count;\n\
+\x20\x20const out = new Float64Array(n);\n\
+\x20\x20for (let i = 0; i < n; i++) out[i] = a[i] + b[i];\n\
+\x20\x20return { row_count: n, columns: { result: out } };\n\
+};\n"
         }
         "http" => {
             "// Fetches a URL. Needs net access (see manifold.json).\nmodule.exports = async function (input) {\n  const res = await fetch((input && input.url) || \"https://example.com\");\n  return { status: res.status, body: await res.text() };\n};\n"
@@ -435,7 +494,11 @@ fn scaffold(
         pip: Default::default(),
         gem: Default::default(),
         signature: None,
-        metadata: Default::default(),
+        // ScramDB reads its SQL signature out of afterburner's free-form
+        // [metadata] table. Without it a package installs but binds no
+        // callable function, so a `--template scramdb` scaffold writes the
+        // section up front rather than leaving the author to discover it.
+        metadata: scramdb_metadata(o),
         extra: Default::default(),
     };
     let afb_toml = manifest.to_toml_string()?;
@@ -710,5 +773,70 @@ mod tests {
         let (ns2, _, ph2) = resolve_coords(Some("widget"), &o, None, None).unwrap();
         assert_eq!(ns2, PLACEHOLDER_NAMESPACE);
         assert!(ph2);
+    }
+}
+
+#[cfg(test)]
+mod scramdb_template_tests {
+    use super::*;
+
+    fn opts(template: &str, name: &str) -> ScaffoldOpts {
+        ScaffoldOpts {
+            name: Some(name.into()),
+            template: Some(template.into()),
+            ..Default::default()
+        }
+    }
+
+    /// A ScramDB package is unusable without a declared SQL signature: it
+    /// installs and catalogs, but binds no callable function. The scaffold
+    /// writes the section so an author never has to discover that.
+    #[test]
+    fn the_scramdb_template_declares_a_sql_signature() {
+        let meta = scramdb_metadata(&opts("scramdb", "my_function"));
+        let sql = meta.get("sql").expect("[metadata.sql] present");
+        let functions = sql
+            .get("function")
+            .and_then(|f| f.as_array())
+            .expect("[[metadata.sql.function]] is an array of tables");
+        assert_eq!(functions.len(), 1);
+        let f = &functions[0];
+        // The declared name must be the package's own, not a placeholder:
+        // ScramDB registers exactly this name.
+        assert_eq!(f.get("name").and_then(|v| v.as_str()), Some("my_function"));
+        assert!(f.get("args").and_then(|v| v.as_str()).is_some());
+        assert!(f.get("returns").and_then(|v| v.as_str()).is_some());
+    }
+
+    /// A `ns/name` argument still yields the bare function name - a SQL
+    /// function is never called `ns/name`.
+    #[test]
+    fn a_qualified_name_yields_the_bare_function_name() {
+        let meta = scramdb_metadata(&opts("scramdb", "acme/my_function"));
+        let f = &meta["sql"]["function"].as_array().unwrap()[0];
+        assert_eq!(f.get("name").and_then(|v| v.as_str()), Some("my_function"));
+    }
+
+    /// Every other template stays untouched: `[metadata]` is afterburner's
+    /// free-form table and must not carry a ScramDB section unasked.
+    #[test]
+    fn other_templates_carry_no_sql_metadata() {
+        for t in ["module", "udf", "http", "llm"] {
+            assert!(
+                scramdb_metadata(&opts(t, "x")).is_empty(),
+                "{t} must not emit [metadata.sql]"
+            );
+        }
+    }
+
+    /// The entry body takes a COLUMNAR BATCH, not a row: ScramDB calls a UDF
+    /// once per chunk, and a row-shaped body would be wrong in a way that
+    /// only shows up at runtime.
+    #[test]
+    fn the_scramdb_entry_takes_a_columnar_batch() {
+        let src = main_js("scramdb", "acme", "my_function");
+        assert!(src.contains("batch.columns."), "reads columns by name");
+        assert!(src.contains("batch.row_count"), "uses the batch row count");
+        assert!(src.contains("row_count:"), "returns a batch, not a scalar");
     }
 }

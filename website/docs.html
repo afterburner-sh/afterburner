@@ -1220,6 +1220,7 @@
         <a class="sb-link" href="#packages-afb">The .afb format</a>
         <a class="sb-link" href="#packages-registry">Registry</a>
         <a class="sb-link" href="#packages-precompiled">Precompiled WASM</a>
+        <a class="sb-link" href="#packages-scramdb">ScramDB packages</a>
       </div>
     </div>
 
@@ -2186,6 +2187,40 @@ $ <span class="tok-mod">burn</span> compile                  <span class="tok-co
 $ <span class="tok-mod">burn</span> compile -o ./dist/        <span class="tok-com"># write the .afb to a specific output path</span></pre>
       </div>
       <p>The precompiled module respects the package's Manifold: a sealed package produces a self-contained module; a capability-bearing one keeps the host-import boundary so every grant stays enforced at runtime.</p>
+
+      <h3 id="packages-scramdb">Building packages for ScramDB</h3>
+      <p><a href="https://scramdb.com">ScramDB</a> embeds Afterburner to run SQL user-defined functions. A package written for it follows two extra conventions on top of the ordinary package shape - both live inside features Afterburner already has, so a ScramDB package is a perfectly ordinary <code>.afb</code>.</p>
+      <p>Scaffold one with <code>--scramdb</code> (shorthand for <code>--template scramdb</code>), which writes both conventions for you:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> init ./my-udf --namespace acme --name my_function <span class="tok-kw">--scramdb</span></pre>
+      </div>
+      <p><strong>1. Declare the SQL signature.</strong> <code>[metadata]</code> is Afterburner's free-form table, never interpreted by the reader; ScramDB reads a <code>[metadata.sql]</code> table out of it and registers each declared function on install. Without this section a package installs and catalogs fine but binds <em>no callable function</em>, so declare one entry per function:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">afb.toml</span><button class="copy-btn">Copy</button></div>
+<pre>[[metadata.sql.function]]
+name    = <span class="tok-str">"fts_term_frequency"</span>
+args    = <span class="tok-str">"doc TEXT, term TEXT"</span>
+returns = <span class="tok-str">"INT"</span></pre>
+      </div>
+      <p>The argument <strong>names</strong> are load-bearing: the body reads its inputs by name out of the batch (<code>batch.columns.doc</code>), so they must match the entry source exactly. With the section present, <code>SELECT fts_term_frequency(doc, 'needle') FROM docs</code> works immediately after install - no manual <code>CREATE FUNCTION</code>.</p>
+      <p><strong>2. Take a columnar batch, not a row.</strong> ScramDB is a columnar engine and calls a UDF <em>once per batch</em>, so a package crosses the sandbox boundary once per chunk instead of once per row. The argument is <code>{ row_count, columns }</code> and the return value has the same shape:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">source/main.js</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-com">// One batch in, one batch out - never one row at a time.</span>
+module.exports = <span class="tok-kw">function</span> (batch) {
+  <span class="tok-kw">const</span> doc = batch.columns.doc;      <span class="tok-com">// keyed by the declared arg names</span>
+  <span class="tok-kw">const</span> term = batch.columns.term;
+  <span class="tok-kw">const</span> n = batch.row_count;
+  <span class="tok-kw">const</span> out = <span class="tok-kw">new</span> Int32Array(n);
+  <span class="tok-kw">for</span> (<span class="tok-kw">let</span> i = 0; i &lt; n; i++) out[i] = count(doc[i], term[i]);
+  <span class="tok-kw">return</span> { row_count: n, columns: { frequency: out } };
+};</pre>
+      </div>
+      <p>Types map to the SQL types declared in <code>args</code>/<code>returns</code>: numeric and temporal columns arrive as TypedArrays, and <code>TEXT</code> columns as strings. A scalar (constant) argument is transferred once for the whole batch rather than repeated per row.</p>
+      <div class="callout callout--info">
+        <p><strong>Compile before you ship a per-row UDF.</strong> A source-only package is interpreted at call time, and a UDF pays that cost on every row: a SHA-256 package over 20k rows can exhaust a default fuel budget before it finishes. <code>burn compile</code> emits the precompiled members alongside the source; ship those for anything CPU-heavy.</p>
+      </div>
 
       <h2 id="programmatic"><span class="anchor">#</span>Programmatic API (embed in Rust)</h2>
       <p>Afterburner is also a Rust library: embed the engine to run untrusted code inside your own application. Add the crate and you have a sandboxed runtime in a handful of lines - register a script, hand it JSON, get JSON back. The default mode is <strong>adaptive</strong> (fast cold start, then the sandboxed path); the default Manifold is <strong>sealed</strong>.</p>

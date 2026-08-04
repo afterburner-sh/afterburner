@@ -967,14 +967,53 @@ fn build_wrapped_source_columnar(source_js: &str) -> String {
            const name_off    = __dv.getUint32(h + 12, true);\n\
            const name_len    = __dv.getUint32(h + 16, true);\n\
            const name = new TextDecoder().decode(__frame.slice(name_off, name_off + name_len));\n\
+           // A CONSTANT column carries exactly ONE value for the whole batch\n\
+           // (the host encodes a scalar argument once instead of repeating it\n\
+           // per row). Reading `row_count` elements from it walks off the end\n\
+           // and hands the package `undefined`.\n\
+           const is_const = __dv.getUint32(h + 28, true) !== 0;\n\
+           const n_elems = is_const ? 1 : __row_count;\n\
+           // Variable-width (Utf8=12, Bytea=18, Jsonb=19): a 16-byte\n\
+           // inline-or-pointer slot per row, NOT a TypedArray of values.\n\
+           // len at [0..4); bytes inline at [4..4+len) when len <= 12, else\n\
+           // heap_offset at [12..16) into the column's own heap buffer.\n\
+           // Decoded to a JS array so a package indexes it as a value\n\
+           // (`doc[i].toLowerCase()`), matching every other dtype.\n\
+           if (dtype === 12 || dtype === 18 || dtype === 19) {{\n\
+             const heap_off = __dv.getUint32(h + 20, true);\n\
+             const heap_len = __dv.getUint32(h + 24, true);\n\
+             const dec = new TextDecoder();\n\
+             const vals = new Array(n_elems);\n\
+             for (let r = 0; r < n_elems; r++) {{\n\
+               const so = data_off + r * 16;\n\
+               const slen = __dv.getUint32(so, true);\n\
+               let bytes;\n\
+               if (slen <= 12) {{\n\
+                 bytes = __frame.subarray(so + 4, so + 4 + slen);\n\
+               }} else {{\n\
+                 const ho = __dv.getUint32(so + 12, true);\n\
+                 if (ho + slen > heap_len) {{ throw new Error(\"columnar UDF: heap slice out of bounds for column '\" + name + \"'\"); }}\n\
+                 bytes = __frame.subarray(heap_off + ho, heap_off + ho + slen);\n\
+               }}\n\
+               vals[r] = dtype === 18 ? bytes.slice() : dec.decode(bytes);\n\
+             }}\n\
+             // Broadcast a constant so the package indexes it per row like\n\
+             // any other column - the body must not know the difference.\n\
+             __cols[name] = is_const ? new Array(__row_count).fill(vals[0]) : vals;\n\
+             __col_meta.push({{ name, dtype, stride: 16 }});\n\
+             continue;\n\
+           }}\n\
            const info = __DTYPE[dtype];\n\
            if (!info) {{ throw new Error(\"columnar UDF: unsupported dtype tag \" + dtype + \" for column '\" + name + \"'\"); }}\n\
            const [TCon, stride] = info;\n\
-           const elem_count = __row_count;\n\
+           const elem_count = n_elems;\n\
            const byte_len = elem_count * stride;\n\
-           // Construct a TypedArray view directly into the frame buffer.\n\
+           // Construct a TypedArray view directly into the frame buffer - the\n\
+           // zero-copy path for an ordinary per-row column.\n\
            const col_view = new TCon(__frame.buffer, data_off, elem_count);\n\
-           __cols[name] = col_view;\n\
+           __cols[name] = is_const\n\
+             ? new TCon(__row_count).fill(col_view[0])\n\
+             : col_view;\n\
            __col_meta.push({{ name, dtype, stride }});\n\
          }}\n\
          const __result = __udf({{ row_count: __row_count, columns: __cols }});\n\
@@ -989,8 +1028,12 @@ fn build_wrapped_source_columnar(source_js: &str) -> String {
            [Float64Array,11, 8]\n\
          ];\n\
          function __dtype_of(arr) {{\n\
+           // A plain Array of strings is a Utf8 result column: 16-byte\n\
+           // inline-or-pointer slots plus a heap, the same shape the input\n\
+           // decode above reads.\n\
+           if (Array.isArray(arr)) return [12, 16];\n\
            for (const [TCon, tag, stride] of __DTAG) {{ if (arr instanceof TCon) return [tag, stride]; }}\n\
-           throw new Error(\"columnar UDF: unsupported TypedArray type in columnar result: \" + arr.constructor.name);\n\
+           throw new Error(\"columnar UDF: unsupported result column type: \" + (arr && arr.constructor ? arr.constructor.name : typeof arr));\n\
          }}\n\
          // Two-pass layout: header, then column-header table, then data+names.\n\
          // __CH (32) must match the ColumnHeader stride parsed above.\n\
@@ -1002,15 +1045,28 @@ fn build_wrapped_source_columnar(source_js: &str) -> String {
            const [tag, stride] = __dtype_of(arr);\n\
            return {{ name, arr, tag, stride }};\n\
          }});\n\
+         // A Utf8 column's payload is encoded up front: every value's bytes,\n\
+         // plus which of them spill past the 12-byte inline limit into the\n\
+         // column's heap. Done once here so the layout pass below knows the\n\
+         // exact heap size (no second encode, no realloc).\n\
+         const __enc = new TextEncoder();\n\
+         for (const ci of __rci) {{\n\
+           if (ci.tag !== 12) continue;\n\
+           ci.bytes = ci.arr.map((v) => __enc.encode(v === null || v === undefined ? \"\" : String(v)));\n\
+           ci.heap_len = 0;\n\
+           for (const b of ci.bytes) {{ if (b.length > 12) ci.heap_len += b.length; }}\n\
+         }}\n\
          let __cursor = __align8(__BH + __rci.length * __CH);\n\
          const __offsets = [];\n\
          for (const ci of __rci) {{\n\
            __cursor = __align8(__cursor);\n\
            const data_off = __cursor;\n\
            __cursor += ci.arr.length * ci.stride;\n\
+           let heap_off = 0;\n\
+           if (ci.tag === 12) {{ __cursor = __align8(__cursor); heap_off = __cursor; __cursor += ci.heap_len; }}\n\
            const name_off = __cursor;\n\
            __cursor += ci.name.length;\n\
-           __offsets.push({{ data_off, name_off }});\n\
+           __offsets.push({{ data_off, name_off, heap_off }});\n\
          }}\n\
          const __out_buf = new Uint8Array(__cursor);\n\
          const __out_dv = new DataView(__out_buf.buffer);\n\
@@ -1029,20 +1085,48 @@ fn build_wrapped_source_columnar(source_js: &str) -> String {
            __out_dv.setUint32(h + 8, 0, true);\n\
            __out_dv.setUint32(h + 12, off.name_off, true);\n\
            __out_dv.setUint32(h + 16, ci.name.length, true);\n\
-           __out_dv.setUint32(h + 20, 0, true);\n\
-           __out_dv.setUint32(h + 24, 0, true);\n\
+           __out_dv.setUint32(h + 20, ci.tag === 12 ? off.heap_off : 0, true);\n\
+           __out_dv.setUint32(h + 24, ci.tag === 12 ? ci.heap_len : 0, true);\n\
            __out_dv.setUint32(h + 28, 0, true); // is_constant: never set on a UDF result\n\
          }}\n\
          // Write column data and names.\n\
          for (let i = 0; i < __rci.length; i++) {{\n\
            const ci = __rci[i];\n\
            const off = __offsets[i];\n\
-           const raw = new Uint8Array(ci.arr.buffer, ci.arr.byteOffset, ci.arr.byteLength);\n\
-           __out_buf.set(raw, off.data_off);\n\
+           if (ci.tag === 12) {{\n\
+             // Slot per row: [len u32][inline 12 bytes] or [len u32][pad 8][heap_off u32].\n\
+             let __hcur = 0;\n\
+             for (let r = 0; r < ci.bytes.length; r++) {{\n\
+               const b = ci.bytes[r];\n\
+               const so = off.data_off + r * 16;\n\
+               __out_dv.setUint32(so, b.length, true);\n\
+               if (b.length <= 12) {{\n\
+                 __out_buf.set(b, so + 4);\n\
+               }} else {{\n\
+                 __out_buf.set(b, off.heap_off + __hcur);\n\
+                 __out_dv.setUint32(so + 12, __hcur, true);\n\
+                 __hcur += b.length;\n\
+               }}\n\
+             }}\n\
+           }} else {{\n\
+             const raw = new Uint8Array(ci.arr.buffer, ci.arr.byteOffset, ci.arr.byteLength);\n\
+             __out_buf.set(raw, off.data_off);\n\
+           }}\n\
            const name_bytes = new TextEncoder().encode(ci.name);\n\
            __out_buf.set(name_bytes, off.name_off);\n\
          }}\n\
-         Javy.IO.writeSync(1, __out_buf);\n",
+         // writeSync may accept only PART of a large buffer, so drain it in a\n\
+         // loop. A columnar reply is easily hundreds of KB (10k rows of\n\
+         // 64-char hashes is ~800KB); a single call silently truncated it and\n\
+         // the host then read a short blob and rejected it as out of bounds.\n\
+         {{ let __w = 0, __wo = 0;\n\
+           while (__wo < __out_buf.length) {{\n\
+             const __n = Javy.IO.writeSync(1, __out_buf.subarray(__wo));\n\
+             if (!(__n > 0)) {{ throw new Error(\"columnar UDF: short write encoding result (\" + __wo + \" of \" + __out_buf.length + \" bytes)\"); }}\n\
+             __wo += __n;\n\
+           }}\n\
+           void __w;\n\
+         }}\n",
         source_js = source_js,
     )
 }
@@ -1110,5 +1194,85 @@ fn javy_not_found_or(javy: &str, e: std::io::Error) -> anyhow::Error {
         )
     } else {
         anyhow::anyhow!("spawning `{javy}`: {e}")
+    }
+}
+
+#[cfg(test)]
+mod columnar_harness_tests {
+    use super::*;
+
+    /// The columnar harness is what a ScramDB-style host talks to, so its
+    /// wire handling is a contract, not an implementation detail. These
+    /// assert on the GENERATED SOURCE rather than a compiled module so they
+    /// run without javy on PATH, and they pin the three properties that each
+    /// produced a real, debugged failure against a live engine.
+    fn harness() -> String {
+        build_wrapped_source_columnar("module.exports = (b) => b;")
+    }
+
+    /// A variable-width column is a 16-byte inline-or-pointer slot per row,
+    /// not a TypedArray of values. Reading it as `Uint8Array` handed the
+    /// package a NUMBER per row, so `doc[i].toLowerCase()` failed with
+    /// "not a function".
+    #[test]
+    fn var_width_columns_decode_to_values_not_raw_bytes() {
+        let h = harness();
+        assert!(
+            h.contains("dtype === 12 || dtype === 18 || dtype === 19"),
+            "Utf8/Bytea/Jsonb must take the slot-decoding path"
+        );
+        assert!(
+            h.contains("TextDecoder"),
+            "Utf8 slots must decode to strings"
+        );
+        // len at [0..4), inline when <= 12, else heap_offset at [12..16).
+        assert!(
+            h.contains("slen <= 12"),
+            "inline-vs-heap split must be at 12 bytes"
+        );
+    }
+
+    /// A CONSTANT column carries exactly ONE value for the whole batch. The
+    /// harness previously read `row_count` elements from it and handed the
+    /// package `undefined` for every scalar argument.
+    #[test]
+    fn constant_columns_are_read_once_and_broadcast() {
+        let h = harness();
+        assert!(
+            h.contains("is_const"),
+            "the harness must branch on the is_constant header field"
+        );
+        assert!(
+            h.contains("n_elems = is_const ? 1 : __row_count"),
+            "a constant column holds exactly one element"
+        );
+    }
+
+    /// A large reply must be written in full. `writeSync` may accept only
+    /// part of the buffer; a single call silently truncated a ~800KB columnar
+    /// reply to 148KB and the host rejected it as out of bounds.
+    #[test]
+    fn a_large_reply_is_written_in_full_not_truncated() {
+        let h = harness();
+        assert!(
+            h.contains("while (__wo < __out_buf.length)"),
+            "the reply write must loop until the whole buffer is drained"
+        );
+        assert!(
+            h.contains("short write"),
+            "a stalled write must fail loudly, never silently truncate"
+        );
+    }
+
+    /// A package returning strings must be encodable: the result path needs a
+    /// Utf8 tag and a heap, or a text-returning UDF cannot reply at all.
+    #[test]
+    fn a_string_result_column_encodes_as_utf8_slots_plus_heap() {
+        let h = harness();
+        assert!(
+            h.contains("if (Array.isArray(arr)) return [12, 16]"),
+            "an Array of strings is a Utf8 result column"
+        );
+        assert!(h.contains("heap_off"), "long values must spill to a heap");
     }
 }
