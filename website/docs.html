@@ -2231,6 +2231,14 @@ module.exports = <span class="tok-kw">function</span> (batch) {
         <p><strong>Compile before you ship a per-row UDF.</strong> A source-only package is interpreted at call time, and a UDF pays that cost on every row: a SHA-256 package over 20k rows can exhaust a default fuel budget before it finishes. <code>burn compile</code> emits the precompiled members alongside the source; ship those for anything CPU-heavy.</p>
       </div>
 
+      <p><strong>3. Daemon packages: long-running servers the database starts for you.</strong> A package whose job is to <em>listen</em> rather than answer per-batch calls - ScramDB&#8217;s own <code>scramdb/semantics</code> Semantic AI MCP server (port 9191) is the first - declares itself a daemon and grants its port in the manifold:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">afb.toml</span><button class="copy-btn" data-copy='[metadata.daemon]&#10;autostart = true'>Copy</button></div>
+<pre><span class="tok-kw">[metadata.daemon]</span>
+<span class="tok-mod">autostart</span> = <span class="tok-kw">true</span></pre>
+      </div>
+      <p>On install ScramDB accepts a daemon package with <em>zero</em> <code>[metadata.sql]</code> entries (a package declaring neither is still refused loudly). After its boot preinstall sweep, ScramDB starts every daemon-declaring installed package <em>in-process</em> on the embedded engine: <code>DaemonHttp::with_runtime</code> binds the listeners onto the database&#8217;s own reactor and a <code>DaemonShardPool</code> owns init and dispatch - the same machinery <code>burn server.js</code> uses, driven by the embedder. Each daemon is supervised (bounded restart backoff) and visible in the <code>scram_daemons</code> catalog view; env reaches it through the operator&#8217;s <code>[udf.daemon] env_allowlist</code>, and the package&#8217;s own manifold still gates everything it touches.</p>
+
       <h2 id="programmatic"><span class="anchor">#</span>Programmatic API (embed in Rust)</h2>
       <p>Afterburner is also a Rust library: embed the engine to run untrusted code inside your own application. Add the crate and you have a sandboxed runtime in a handful of lines - register a script, hand it JSON, get JSON back. The default mode is <strong>adaptive</strong> (fast cold start, then the sandboxed path); the default Manifold is <strong>sealed</strong>.</p>
       <div class="codeblock">
