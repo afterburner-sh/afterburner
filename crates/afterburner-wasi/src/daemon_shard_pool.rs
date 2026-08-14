@@ -793,8 +793,9 @@ fn shard_event_loop(
             };
             did_work = true;
             let (envelope, reap_id) = net_event_to_envelope(&evt);
-            shard_fatal |=
-                dispatch_with_panic_isolation(shard_idx, daemon, envelope, "net", stdout_hw, stderr_hw);
+            shard_fatal |= dispatch_with_panic_isolation(
+                shard_idx, daemon, envelope, "net", stdout_hw, stderr_hw,
+            );
             let _ = flush_streams(daemon, stdout_hw, stderr_hw);
             if let Some(id) = reap_id {
                 daemon.mark_net_closed(id);
@@ -843,8 +844,9 @@ fn shard_event_loop(
             };
             did_work = true;
             let (envelope, reap_id) = tls_event_to_envelope(&evt);
-            shard_fatal |=
-                dispatch_with_panic_isolation(shard_idx, daemon, envelope, "tls", stdout_hw, stderr_hw);
+            shard_fatal |= dispatch_with_panic_isolation(
+                shard_idx, daemon, envelope, "tls", stdout_hw, stderr_hw,
+            );
             let _ = flush_streams(daemon, stdout_hw, stderr_hw);
             if let Some(id) = reap_id {
                 daemon.mark_tls_closed(id);
