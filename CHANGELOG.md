@@ -3,6 +3,47 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.2.7] - 2026-08-15
+
+An embedded-host safety fix: a guest's `process.exit()` can no longer take the
+host process down with it.
+
+### Embedded guest-exit policy
+
+`process.exit(code)` inside a daemon shard called `std::process::exit` on the
+host. That is correct for the `burn` CLI, where the guest IS the program, and
+wrong for an embedder: one daemon package's failed bootstrap could terminate
+the entire host process, with no error line.
+
+`set_exit_process_on_guest_exit(false)` selects the embedded policy. Node's
+semantics still hold inside the guest (after `process.exit()` no further event
+runs there), but the exit now stops THAT SHARD rather than the host: captured
+stdout and stderr are flushed first, the pending reply slot is cancelled so a
+caller sees a failure instead of hanging, a line naming the shard and the exit
+code goes to stderr, and `shards_alive()` drops. Every drain in the shard loop
+(http, timers, workers, net, outbound responses, tls, dgram) now checks the
+dispatch outcome, so no already-queued event is delivered to a guest that has
+exited. The CLI default is unchanged.
+
+`crates/afterburner-wasi/tests/daemon_embedded_exit.rs` pins both halves, and
+is deliberately its own test binary: the policy is process-global, and under
+the default policy the guest's exit would terminate the test harness itself,
+which is precisely the difference being tested.
+
+### Dependencies
+
+`kovan-map`, `kovan-channel` and `kovan-queue` 0.1.16 -> 0.1.19.
+
+### Website and worker
+
+The docs now cover daemon packages: `[metadata.daemon]` autostart and starting
+a daemon in-process via `DaemonHttp` / `DaemonShardPool`. The site serves
+`llms.txt`, `robots.txt` (with the `Sitemap:` directive), `sitemap.xml`, a
+favicon and an apple-touch icon. HTML responses carry RFC 8288 `Link` headers
+pointing at `llms.txt` (`rel="describedby"`) and `/docs` (`rel="help"`), built
+by a single `htmlHeaders()` function so the apex, `/docs` and the escape hatch
+cannot drift apart.
+
 ## [0.2.6] - 2026-08-04
 
 Columnar-UDF wire fixes and a ScramDB scaffold template. The three harness

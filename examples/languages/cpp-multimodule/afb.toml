@@ -4,7 +4,7 @@ version = "1.0"
 [package]
 name = "cpp-multimodule"
 namespace = "examples"
-version = "0.2.6"
+version = "0.2.7"
 language = "cpp"
 entry = "source/main.cpp"
 

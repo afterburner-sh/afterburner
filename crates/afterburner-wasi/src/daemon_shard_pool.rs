@@ -709,6 +709,10 @@ fn shard_event_loop(
         has_refs.store(true, Ordering::Release);
 
         let mut did_work = false;
+        // An embedded guest `process.exit()` stops THIS SHARD (never the
+        // host): set by any dispatch below, checked between drains, breaks
+        // the shard loop - which clears `alive` on the way out.
+        let mut shard_fatal = false;
 
         // ---- HTTP events from this shard's mailbox ----
         // Drain a bounded batch per loop tick so a chatty mailbox
@@ -719,10 +723,13 @@ fn shard_event_loop(
                     did_work = true;
                     requests_handled.fetch_add(1, Ordering::Relaxed);
                     let envelope = http_event_to_envelope(&event);
-                    dispatch_with_panic_isolation(
+                    shard_fatal |= dispatch_with_panic_isolation(
                         shard_idx, daemon, envelope, "http", stdout_hw, stderr_hw,
                     );
                     let _ = flush_streams(daemon, stdout_hw, stderr_hw);
+                    if shard_fatal {
+                        break;
+                    }
                 }
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -735,6 +742,9 @@ fn shard_event_loop(
         }
 
         // ---- Timers ----
+        if shard_fatal {
+            break;
+        }
         let fired = daemon.drain_expired_timers();
         for timer_id in fired {
             did_work = true;
@@ -742,39 +752,56 @@ fn shard_event_loop(
                 "kind": "timer-fire",
                 "timer_id": timer_id,
             });
-            dispatch_with_panic_isolation(
+            shard_fatal |= dispatch_with_panic_isolation(
                 shard_idx, daemon, envelope, "timer", stdout_hw, stderr_hw,
             );
             let _ = flush_streams(daemon, stdout_hw, stderr_hw);
+            if shard_fatal {
+                break;
+            }
         }
 
         // ---- Worker events ----
+        if shard_fatal {
+            break;
+        }
         for _ in 0..256 {
             let Some(evt) = daemon.try_recv_worker_event() else {
                 break;
             };
             did_work = true;
             let (envelope, reap_id) = worker_event_to_envelope(&evt);
-            dispatch_with_panic_isolation(
+            shard_fatal |= dispatch_with_panic_isolation(
                 shard_idx, daemon, envelope, "worker", stdout_hw, stderr_hw,
             );
             let _ = flush_streams(daemon, stdout_hw, stderr_hw);
             if let Some(id) = reap_id {
                 daemon.reap_worker(id);
             }
+            if shard_fatal {
+                break;
+            }
         }
 
         // ---- Net events ----
+        if shard_fatal {
+            break;
+        }
         for _ in 0..256 {
             let Some(evt) = daemon.try_recv_net_event() else {
                 break;
             };
             did_work = true;
             let (envelope, reap_id) = net_event_to_envelope(&evt);
-            dispatch_with_panic_isolation(shard_idx, daemon, envelope, "net", stdout_hw, stderr_hw);
+            shard_fatal |= dispatch_with_panic_isolation(
+                shard_idx, daemon, envelope, "net", stdout_hw, stderr_hw,
+            );
             let _ = flush_streams(daemon, stdout_hw, stderr_hw);
             if let Some(id) = reap_id {
                 daemon.mark_net_closed(id);
+            }
+            if shard_fatal {
+                break;
             }
         }
 
@@ -784,13 +811,16 @@ fn shard_event_loop(
         // batch per tick - npm install fans out 50+ concurrent
         // requests during dependency resolution, and stalling on
         // queue drain stretches install wall time.
+        if shard_fatal {
+            break;
+        }
         for _ in 0..256 {
             let Some(evt) = daemon.try_recv_http_outbound_response() else {
                 break;
             };
             did_work = true;
             let envelope = crate::daemon_envelopes::http_outbound_response_to_envelope(&evt);
-            dispatch_with_panic_isolation(
+            shard_fatal |= dispatch_with_panic_isolation(
                 shard_idx,
                 daemon,
                 envelope,
@@ -799,44 +829,64 @@ fn shard_event_loop(
                 stderr_hw,
             );
             let _ = flush_streams(daemon, stdout_hw, stderr_hw);
+            if shard_fatal {
+                break;
+            }
         }
 
         // ---- TLS events ----
+        if shard_fatal {
+            break;
+        }
         for _ in 0..256 {
             let Some(evt) = daemon.try_recv_tls_event() else {
                 break;
             };
             did_work = true;
             let (envelope, reap_id) = tls_event_to_envelope(&evt);
-            dispatch_with_panic_isolation(shard_idx, daemon, envelope, "tls", stdout_hw, stderr_hw);
+            shard_fatal |= dispatch_with_panic_isolation(
+                shard_idx, daemon, envelope, "tls", stdout_hw, stderr_hw,
+            );
             let _ = flush_streams(daemon, stdout_hw, stderr_hw);
             if let Some(id) = reap_id {
                 daemon.mark_tls_closed(id);
             }
+            if shard_fatal {
+                break;
+            }
         }
 
         // ---- dgram events ----
+        if shard_fatal {
+            break;
+        }
         for _ in 0..256 {
             let Some(evt) = daemon.try_recv_dgram_event() else {
                 break;
             };
             did_work = true;
             let envelope = dgram_event_to_envelope(&evt);
-            dispatch_with_panic_isolation(
+            shard_fatal |= dispatch_with_panic_isolation(
                 shard_idx, daemon, envelope, "dgram", stdout_hw, stderr_hw,
             );
             let _ = flush_streams(daemon, stdout_hw, stderr_hw);
+            if shard_fatal {
+                break;
+            }
         }
 
         // ---- unix events ----
         #[cfg(unix)]
         for _ in 0..256 {
+            if shard_fatal {
+                break;
+            }
             let Some(evt) = daemon.try_recv_unix_event() else {
                 break;
             };
             did_work = true;
             let (envelope, reap_id) = unix_event_to_envelope(&evt);
-            dispatch_with_panic_isolation(
+            shard_fatal |= dispatch_with_panic_isolation(
                 shard_idx, daemon, envelope, "unix", stdout_hw, stderr_hw,
             );
             let _ = flush_streams(daemon, stdout_hw, stderr_hw);
@@ -846,13 +896,16 @@ fn shard_event_loop(
         }
 
         // ---- inspector / CDP events ----
+        if shard_fatal {
+            break;
+        }
         for _ in 0..256 {
             let Some(evt) = daemon.try_recv_inspector_event() else {
                 break;
             };
             did_work = true;
             if let Some(envelope) = crate::daemon_envelopes::inspector_event_to_envelope(&evt) {
-                dispatch_with_panic_isolation(
+                shard_fatal |= dispatch_with_panic_isolation(
                     shard_idx,
                     daemon,
                     envelope,
@@ -861,7 +914,13 @@ fn shard_event_loop(
                     stderr_hw,
                 );
                 let _ = flush_streams(daemon, stdout_hw, stderr_hw);
+                if shard_fatal {
+                    break;
+                }
             }
+        }
+        if shard_fatal {
+            break;
         }
 
         if !did_work {
@@ -898,6 +957,26 @@ fn shard_event_loop(
 /// calling `std::process::exit(code)` - otherwise the user's
 /// `console.log` immediately preceding `process.exit()` gets lost
 /// in the shard's MemoryOutputPipe.
+/// Process-wide policy for a guest `process.exit(code)` reaching a daemon
+/// shard's dispatch. `true` (the default, the CLI's contract): the daemon IS
+/// the process - flush the shard's streams and `std::process::exit(code)`.
+/// `false` (embedders - a database engine hosting daemon packages in its own
+/// process): the exit becomes a FATAL SHARD outcome - streams flush, the
+/// shard's event loop ends, `shards_alive()` drops - and the HOST process
+/// keeps running; the embedder's supervisor decides what restarts or parks.
+/// A guest must never be able to take down a host that is not its own.
+static EXIT_PROCESS_ON_GUEST_EXIT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Set the guest-exit policy for every daemon shard in this process. Call
+/// once at embedder startup, before spawning pools. See
+/// [`EXIT_PROCESS_ON_GUEST_EXIT`].
+pub fn set_exit_process_on_guest_exit(exit_process: bool) {
+    EXIT_PROCESS_ON_GUEST_EXIT.store(exit_process, Ordering::Release);
+}
+
+/// Returns `true` when the shard must STOP (embedded guest exit): the
+/// caller breaks its event loop, which clears the shard's alive flag.
 fn dispatch_with_panic_isolation(
     shard_idx: usize,
     daemon: &mut DaemonRuntime,
@@ -905,7 +984,7 @@ fn dispatch_with_panic_isolation(
     kind: &'static str,
     stdout_hw: &mut usize,
     stderr_hw: &mut usize,
-) {
+) -> bool {
     // Pull req_id out of the envelope BEFORE handing it off, so we
     // can cancel the pending reply slot if dispatch traps. (HTTP-
     // event envelopes carry req_id at the top level.)
@@ -920,27 +999,42 @@ fn dispatch_with_panic_isolation(
         daemon.dispatch_event(envelope)
     }));
     match result {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => false,
         Ok(Err(e)) => {
             // Dispatch returned an error (Trap, fuel exhaust, exit).
             // For ProcessExit, flush captured stdout/stderr from
             // this shard so the user's `console.log` immediately
             // before `process.exit()` reaches the host pipe before
-            // we tear down the process.
+            // anything tears down.
             if let AfterburnerError::ProcessExit(code) = &e {
                 let _ = flush_streams(daemon, stdout_hw, stderr_hw);
-                std::process::exit(*code);
+                if EXIT_PROCESS_ON_GUEST_EXIT.load(Ordering::Acquire) {
+                    std::process::exit(*code);
+                }
+                // Embedded: Node semantics still hold - after
+                // `process.exit()` no further events may run in this
+                // guest - but the HOST is not the guest's to kill.
+                eprintln!(
+                    "burn: shard {shard_idx} guest called process.exit({code}); embedded \
+                     exit policy: stopping this shard, host process continues"
+                );
+                if let Some(rid) = req_id_for_cancel {
+                    cancel_pending_reply(&coord, rid);
+                }
+                return true;
             }
             eprintln!("burn: shard {shard_idx} {kind} dispatch error: {e}");
             if let Some(rid) = req_id_for_cancel {
                 cancel_pending_reply(&coord, rid);
             }
+            false
         }
         Err(panic) => {
             eprintln!("burn: shard {shard_idx} {kind} dispatch panicked: {panic:?}");
             if let Some(rid) = req_id_for_cancel {
                 cancel_pending_reply(&coord, rid);
             }
+            false
         }
     }
 }
@@ -979,7 +1073,9 @@ fn emit_lifecycle(
         "kind": "lifecycle",
         "event_name": event_name,
     });
-    dispatch_with_panic_isolation(
+    // Shutdown path: a ProcessExit here follows the same policy inside the
+    // dispatch; the shard is ending either way, so the outcome is dropped.
+    let _ = dispatch_with_panic_isolation(
         shard_idx,
         daemon,
         envelope,
