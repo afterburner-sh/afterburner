@@ -6,10 +6,9 @@
 //! Embedded guest-exit policy: a guest `process.exit(code)` reaching a
 //! daemon shard's dispatch must, under
 //! [`set_exit_process_on_guest_exit(false)`], stop that SHARD - streams
-//! flushed, `shards_alive()` drops - and NEVER the host process. Found by a
-//! database engine embedding the shard pool: one daemon package's failed
-//! bootstrap called `process.exit(1)` and took the whole engine down with
-//! it, no error line (ScramDB F-134).
+//! flushed, `shards_alive()` drops - and NEVER the host process. Found by an
+//! embedder of the shard pool: one daemon package's failed bootstrap called
+//! `process.exit(1)` and took the whole host down with it, no error line.
 //!
 //! This file is deliberately its own test binary: the policy is
 //! process-global, and under the DEFAULT (CLI) policy the guest's exit
