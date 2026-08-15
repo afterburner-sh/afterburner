@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "afterburner-core",
  "afterburner-flow",
@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-core"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "blake3",
  "fastrace",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-example-flow-data-chain"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "afterburner",
  "anyhow",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-flow"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "afterburner-core",
  "afterburner-wasi",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-ignite"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "afterburner-core",
  "afterburner-node-compat",
@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-node-compat"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-thrust"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "afterburner-core",
  "afterburner-wasi",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-wasi"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "afterburner-core",
  "afterburner-node-compat",
@@ -1701,13 +1701,12 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.98"
+version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67df7112613f8bfd9150013a0314e196f4800d3201ae742489d999db2f979f08"
+checksum = "53b44bfcdb3f8d5837a46dae1ca9660a837176eee74a28b229bc626816589102"
 dependencies = [
  "cfg-if",
  "futures-util",
- "once_cell",
  "wasm-bindgen",
 ]
 
@@ -1722,9 +1721,9 @@ dependencies = [
 
 [[package]]
 name = "kovan"
-version = "0.1.16"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ad9bf0503f14a798663bb5a2c7792f11470dcddc6f995d97189444d2bffea11"
+checksum = "6c140456f1fc2406f9218629ba654ae2f036a3e203eede77ef7ecd5342faecdc"
 dependencies = [
  "once_cell",
  "portable-atomic",
@@ -1732,9 +1731,9 @@ dependencies = [
 
 [[package]]
 name = "kovan-channel"
-version = "0.1.16"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d018a8525d90a47aaa8898e3db26ecd4340a0aafa49cb88a8bee041ada451a9"
+checksum = "7680bd3185bff7523acb534cd228db7072025510e56fc8917b453da00c0fd083"
 dependencies = [
  "crossbeam-utils",
  "kovan",
@@ -1743,9 +1742,9 @@ dependencies = [
 
 [[package]]
 name = "kovan-map"
-version = "0.1.16"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0242b26e489aff22f81abaf9f1a6951c4aa66d230262eb8472c34c607966843"
+checksum = "9b60bb6145728c18ed9e1f8aa87941d634a52ce4d30106f906ef33280e304d10"
 dependencies = [
  "foldhash 0.2.0",
  "kovan",
@@ -1753,9 +1752,9 @@ dependencies = [
 
 [[package]]
 name = "kovan-queue"
-version = "0.1.16"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44fcdd45b43f192dc4cf772748a4599465ab31a7055e4ae6d1acee9fb3c63841"
+checksum = "f65d628b7fbb4bc0b6b82f3915c21f586f87bd4cbde9960fe69e21f07a52b089"
 dependencies = [
  "crossbeam-utils",
  "kovan",
@@ -1806,9 +1805,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libredox"
-version = "0.1.16"
+version = "0.1.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e02f3bb43d335493c96bf3fd3a321600bf6bd07ed34bc64118e9293bdffea46c"
+checksum = "f02ab6bace2054fb888a3c16f990117b579d14a3088e472d63c6011fa185c9d3"
 dependencies = [
  "libc",
 ]
@@ -3349,9 +3348,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.121"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49ace1d07c165b0864824eee619580c4689389afa9dc9ed3a4c75040d82e6790"
+checksum = "4b067c0c11094aef6b7a801c1e34a26affafdf3d051dba08456b868789aaf9a4"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -3362,9 +3361,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.121"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e68e6f4afd367a562002c05637acb8578ff2dea1943df76afb9e83d177c8578"
+checksum = "167ce5e579f6bcf889c4f7175a8a5a585de84e8ff93976ce393efa5f2837aab1"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -3372,9 +3371,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.121"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d95a9ec35c64b2a7cb35d3fead40c4238d0940c86d107136999567a4703259f2"
+checksum = "f3997c7839262f4ef12cf90b818d6340c18e80f263f1a94bf157d0ec4420380e"
 dependencies = [
  "bumpalo",
  "proc-macro2",
@@ -3385,9 +3384,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.121"
+version = "0.2.126"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4e0100b01e9f0d03189a92b96772a1fb998639d981193d7dbab487302513441"
+checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
 ]
