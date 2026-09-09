@@ -44,7 +44,7 @@ use wasmtime::{
     Config, Engine, InstancePre, Linker, Module, OptLevel, Store, Trap, WasmBacktraceDetails,
 };
 use wasmtime_wasi::p1::{WasiP1Ctx, add_to_linker_sync};
-use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 
 // ---- deterministic engine config -----------------------------------------
@@ -90,6 +90,19 @@ pub struct WasiCommandOpts {
     pub preopens_rw: Vec<(PathBuf, String)>,
     /// Environment variables forwarded as `(key, value)` pairs.
     pub env_vars: Vec<(String, String)>,
+    /// Bytes available to the module on stdin (fd 0). `None` (the default)
+    /// leaves stdin closed, exactly as before this field existed. Callers
+    /// that pipe a request into a WASI command (a one-shot frame protocol
+    /// over stdin/stdout, e.g. gents-cloud's gent fiber) set this instead
+    /// of relying on a preopen, which would grant filesystem access this
+    /// module's own manifold may not.
+    pub stdin: Option<Vec<u8>>,
+    /// Linear-memory cap in bytes. `None` (the default) applies no cap,
+    /// exactly as before this field existed. `Some(limit)` fails a
+    /// `memory.grow` past `limit` inside the guest (an ordinary allocation
+    /// failure the guest's own allocator observes), never a trap of the
+    /// whole store.
+    pub max_memory_bytes: Option<usize>,
 }
 
 impl WasiCommandOpts {
@@ -141,6 +154,21 @@ impl WasiCommandOpts {
     /// Repeatable; each call appends one `(key, value)` pair.
     pub fn env_var(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env_vars.push((key.into(), value.into()));
+        self
+    }
+
+    /// Make `bytes` available on the module's stdin (fd 0). The module
+    /// sees EOF after the last byte; a module that never reads stdin is
+    /// unaffected.
+    pub fn stdin(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        self.stdin = Some(bytes.into());
+        self
+    }
+
+    /// Cap the module's linear memory at `bytes`. See
+    /// [`WasiCommandOpts::max_memory_bytes`]'s own doc for the failure mode.
+    pub fn max_memory_bytes(mut self, bytes: usize) -> Self {
+        self.max_memory_bytes = Some(bytes);
         self
     }
 }
@@ -464,6 +492,16 @@ pub struct EmbedderState {
     /// Set by the [`crate::pyodide_runner`] session/record path, never by the
     /// sealed run core.
     pub host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+    /// Per-call linear-memory cap, enforced by wasmtime on every
+    /// `memory.grow` (a growth past the limit fails inside the guest,
+    /// exactly like a real allocator refusing an allocation, rather than
+    /// trapping the whole store). `StoreLimits::default()` (the value
+    /// [`WasiCommandOpts::max_memory_bytes`] being `None` produces) applies
+    /// no cap, unchanged from before this field existed. Wired via
+    /// `Store::limiter` in `EmbedderVm`'s own (private) `run_command_impl`
+    /// only; the typed-export path ([`EmbedderVm::run`]) does not take a
+    /// memory budget and leaves this at its default.
+    pub limits: wasmtime::StoreLimits,
 }
 
 impl EmbedderState {
@@ -508,6 +546,7 @@ impl EmbedderState {
             fs_preopens: Vec::new(),
             entropy: EntropySource::Deterministic,
             host_context: None,
+            limits: wasmtime::StoreLimits::default(),
         }
     }
 
@@ -564,6 +603,7 @@ impl EmbedderState {
             fs_preopens: Vec::new(),
             entropy: EntropySource::Deterministic,
             host_context: None,
+            limits: wasmtime::StoreLimits::default(),
         }
     }
 
@@ -614,6 +654,7 @@ impl EmbedderState {
             fs_preopens: Vec::new(),
             entropy: EntropySource::Deterministic,
             host_context: None,
+            limits: wasmtime::StoreLimits::default(),
         }
     }
 
@@ -742,6 +783,11 @@ pub struct EmbedderRunOutput {
     /// diagnostics are not silently dropped); empty for [`run`][EmbedderVm::run]
     /// and for non-WASI modules.
     pub stderr: Vec<u8>,
+    /// Wasmtime fuel actually consumed (the budget passed to `run`/
+    /// `run_command` minus what `Store::get_fuel` reports remaining right
+    /// after the call returns) -- host-side only, since a guest has no way
+    /// to read its own Store's fuel meter.
+    pub fuel_consumed: u64,
 }
 
 // ---- VM ----------------------------------------------------------------------
@@ -912,6 +958,7 @@ impl EmbedderVm {
                 daemon_unix: None,
                 entropy: EntropySource::Deterministic,
                 host_context: None,
+                limits: wasmtime::StoreLimits::default(),
             }
         } else {
             EmbedderState {
@@ -952,12 +999,14 @@ impl EmbedderVm {
                 daemon_unix: None,
                 entropy: EntropySource::Deterministic,
                 host_context: None,
+                limits: wasmtime::StoreLimits::default(),
             }
         };
 
+        let initial_fuel = fuel.unwrap_or(DEFAULT_FUEL);
         let mut store = Store::new(&module.engine, state);
         store
-            .set_fuel(fuel.unwrap_or(DEFAULT_FUEL))
+            .set_fuel(initial_fuel)
             .map_err(|e| AfterburnerError::Engine(format!("embedder set_fuel: {e}")))?;
 
         let instance = module
@@ -985,6 +1034,11 @@ impl EmbedderVm {
             AfterburnerError::WasmTrap(format!("embedder trap: {trap}"))
         })?;
 
+        // Read before `store.into_data()` below consumes the store; see
+        // `run_command_impl`'s identical comment for why `unwrap_or(0)` is
+        // the right fallback rather than a hard error.
+        let fuel_consumed = initial_fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+
         let stdout = match store.into_data().wasi {
             Some(w) => w.stdout.contents().to_vec(),
             None => Vec::new(),
@@ -997,6 +1051,7 @@ impl EmbedderVm {
             result,
             stdout,
             stderr: Vec::new(),
+            fuel_consumed,
         })
     }
 
@@ -1008,10 +1063,10 @@ impl EmbedderVm {
     /// * Calls `_start` (no typed result - the module exits via `proc_exit`).
     /// * Threads argv and preopened directories from `opts` into the WASI
     ///   context so the module can read its arguments and access its stdlib.
-    /// * Returns `Ok(EmbedderRunOutput { result: exit_code, stdout, stderr })`
-    ///   on a clean exit (exit code 0 is success; non-zero is surfaced in
-    ///   `result` rather than as an error, matching POSIX convention). Both
-    ///   fd 1 (`stdout`) and fd 2 (`stderr`) are captured.
+    /// * Returns `Ok(EmbedderRunOutput { result: exit_code, stdout, stderr,
+    ///   fuel_consumed })` on a clean exit (exit code 0 is success; non-zero
+    ///   is surfaced in `result` rather than as an error, matching POSIX
+    ///   convention). Both fd 1 (`stdout`) and fd 2 (`stderr`) are captured.
     /// * Returns `Err(AfterburnerError::FuelExhausted)` if the module runs out
     ///   of fuel, and `Err(AfterburnerError::WasmTrap(_))` for any other trap.
     ///
@@ -1090,6 +1145,9 @@ impl EmbedderVm {
 
         let mut builder = WasiCtxBuilder::new();
         builder.stdout(pipe.clone()).stderr(err_pipe.clone());
+        if let Some(bytes) = &opts.stdin {
+            builder.stdin(MemoryInputPipe::new(bytes.clone()));
+        }
 
         if !opts.args.is_empty() {
             builder.args(&opts.args);
@@ -1233,12 +1291,20 @@ impl EmbedderVm {
             // R4: the per-run recording/replaying host consulted by the
             // effect-wrapped preview1 shims (see `crate::effect_wasi`).
             host_context,
+            limits: opts
+                .max_memory_bytes
+                .map(|max| wasmtime::StoreLimitsBuilder::new().memory_size(max).build())
+                .unwrap_or_default(),
         };
 
+        let initial_fuel = fuel.unwrap_or(DEFAULT_FUEL);
         let mut store = Store::new(&module.engine, state);
         store
-            .set_fuel(fuel.unwrap_or(DEFAULT_FUEL))
+            .set_fuel(initial_fuel)
             .map_err(|e| AfterburnerError::Engine(format!("embedder set_fuel: {e}")))?;
+        if opts.max_memory_bytes.is_some() {
+            store.limiter(|state: &mut EmbedderState| &mut state.limits);
+        }
 
         let instance = module
             .instance_pre
@@ -1256,6 +1322,14 @@ impl EmbedderVm {
         // surfaces as WasmTrap. We extract the stdout before returning in all
         // paths so captures are never lost.
         let call_result = start_fn.call(&mut store, &[], &mut []);
+
+        // Read before `store.into_data()` below consumes the store: fuel
+        // consumption is always enabled on `deterministic_engine`'s config
+        // (the whole budget-enforcement premise depends on it), so
+        // `get_fuel` erroring here would mean that invariant broke, not a
+        // real "unmeasured" case -- `unwrap_or` a decode-neutral `0` rather
+        // than fail an otherwise-successful run over the metric.
+        let fuel_consumed = initial_fuel.saturating_sub(store.get_fuel().unwrap_or(0));
 
         // Stdout capture is a single namespace. The fs-wired capture variant
         // routes fd 1/2 writes into `wasi_stdout`; the stock variant routes them
@@ -1303,6 +1377,7 @@ impl EmbedderVm {
             result: exit_code,
             stdout,
             stderr: err_pipe.contents().to_vec(),
+            fuel_consumed,
         })
     }
 }
