@@ -468,6 +468,34 @@ fn ruby_source_refuses_and_names_every_missing_bound_at_once() {
 // source path is an argument, not evidence, and the compiled bundle is the
 // shape a published Python plugin actually takes, so it gets its own test.
 
+/// A caller's default budget has to be raised for a guest that spends
+/// something before its own code runs, and left alone for one that does
+/// not.
+///
+/// Both halves matter. Reporting a floor where there is none would inflate
+/// every ordinary plugin's ceiling for no reason; reporting none where
+/// there is one hands a Pyodide guest a budget it cannot start under, and
+/// the run fails during startup with the ceiling never bounding anything.
+#[test]
+fn startup_floor_is_reported_only_where_there_is_one() {
+    let compiled = build_compiled_afb("rust", wat::parse_str("(module)").expect("wat"));
+    let compiled = Afb::from_bytes(&compiled).expect("readable .afb");
+    assert_eq!(
+        startup_floor(&compiled),
+        None,
+        "an ordinary WASI command reaches _start in almost no instructions"
+    );
+
+    let python = build_source_afb("python", "source/main.py", "print(1)\n");
+    let python = Afb::from_bytes(&python).expect("readable .afb");
+    assert_eq!(startup_floor(&python), Some(PYTHON_STARTUP_FLOOR));
+    let floor = PYTHON_STARTUP_FLOOR;
+    assert!(
+        floor.memory_bytes > 64 * 1024 * 1024 && floor.fuel > 100_000_000,
+        "the floor has to exceed an ordinary default budget, or naming it changes nothing"
+    );
+}
+
 /// Compiles a real Python package to an `emscripten-pyodide` bundle through
 /// the same path `burn compile` takes, and returns the bytes.
 ///
