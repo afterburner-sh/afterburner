@@ -798,17 +798,32 @@ fn python_source_refuses_a_readonly_fs_grant() {
     assert!(msg.contains("read-only"), "message was {msg:?}");
 }
 
+/// A wall clock is enforced for Python source, not refused: the deadline is
+/// set on the store before CPython boots and covers the guest's own code
+/// too, so a program that cannot finish is preempted and reported as
+/// `Timeout`.
+///
+/// The guest is an infinite loop rather than a slow one, so the assertion
+/// holds on any machine: it can never complete, and the default fuel budget
+/// (500 billion instructions) is far too large to be what stops it inside
+/// the deadline.
 #[test]
-fn python_source_refuses_a_requested_timeout() {
-    let afb = build_source_afb("python", "source/main.py", "print('unreachable')\n");
+#[ignore = "boots the bundled Pyodide/CPython WASI interpreter (real runtime); cargo test --ignored"]
+fn python_source_wall_clock_is_enforced_not_refused() {
+    if !python_runtime_available() {
+        eprintln!("skipping python_source_wall_clock_is_enforced_not_refused: no runtime");
+        return;
+    }
+    let afb = build_source_afb("python", "source/main.py", "while True:\n pass\n");
     let request = AfbRunRequest {
-        timeout: Some(Duration::from_secs(1)),
+        timeout: Some(Duration::from_secs(20)),
         ..Default::default()
     };
 
-    let err = run_afb_bytes(&afb, request).expect_err("expected a refusal, not a run");
-    let msg = err.to_string();
-
-    assert!(msg.contains("Python (source)"), "message was {msg:?}");
-    assert!(msg.contains("timeout"), "message was {msg:?}");
+    let out = run_afb_bytes(&afb, request).expect("a timeout is a bound, not a refusal");
+    assert_eq!(
+        out.outcome,
+        AfbRunOutcome::Timeout,
+        "a guest that never returns must report the wall clock"
+    );
 }
