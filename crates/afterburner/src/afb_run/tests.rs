@@ -183,6 +183,76 @@ fn compiled_family_fuel_bound_fires() {
     assert_eq!(out.fuel_used, 50_000);
 }
 
+/// Number of threads in the current process, via `/proc/self/task` (one
+/// entry per thread). `None` on a non-Linux host - callers treat that as
+/// "cannot check here", not as zero.
+fn thread_count() -> Option<usize> {
+    std::fs::read_dir("/proc/self/task")
+        .ok()
+        .map(Iterator::count)
+}
+
+#[test]
+#[ignore = "compiles a real C fixture via wasi-sdk clang and runs it through wasmtime; cargo test --ignored"]
+fn compiled_family_timeout_actually_stops_the_guest_and_leaks_no_thread() {
+    let Some(clang) = find_wasi_sdk_clang() else {
+        eprintln!(
+            "skipping compiled_family_timeout_actually_stops_the_guest_and_leaks_no_thread: \
+             no wasi-sdk found (set WASI_SDK_PATH or install one under ~/.burn)"
+        );
+        return;
+    };
+    let wasm = compile_c(&clang, "int main(void) { while (1) {} return 0; }\n");
+    let afb = build_compiled_afb("c", wasm);
+
+    // Warm the shared epoch VM (and its one-time ticker thread) before
+    // measuring, so the thread-count check below reflects THIS call, not
+    // the one-time lazy-init cost of the shared VM.
+    let warm = AfbRunRequest {
+        fuel: Some(1),
+        ..Default::default()
+    };
+    let _ = run_afb_bytes(&afb, warm);
+
+    let before = thread_count();
+    let start = std::time::Instant::now();
+    // A huge fuel budget: the timeout, not fuel exhaustion, must be what
+    // stops this run. Without real preemption a `while (1) {}` at
+    // `fuel: u64::MAX` does not return on its own inside this test's
+    // lifetime, let alone within a few seconds.
+    let request = AfbRunRequest {
+        fuel: Some(u64::MAX),
+        timeout: Some(Duration::from_millis(300)),
+        ..Default::default()
+    };
+    let out = run_afb_bytes(&afb, request).expect("run_afb_bytes");
+    let elapsed = start.elapsed();
+    let after = thread_count();
+
+    assert_eq!(out.outcome, AfbRunOutcome::Timeout);
+    // Generous margin over the 300ms deadline (compile + instantiate
+    // overhead, a loaded CI box), but nowhere near "ran until fuel
+    // exhaustion" territory - proves the guest was actually interrupted,
+    // not merely that the call returned while something kept running.
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "run_afb_bytes took {elapsed:?} to return from a 300ms timeout; \
+         the guest was not actually stopped"
+    );
+    if let (Some(before), Some(after)) = (before, after) {
+        assert_eq!(
+            before, after,
+            "thread count changed across the timed-out call (before={before}, after={after}); \
+             a thread was spawned and left behind"
+        );
+    } else {
+        eprintln!(
+            "note: /proc/self/task unavailable (non-Linux host) - skipping the \
+             no-leaked-thread assertion; timeout + elapsed-time checks above still ran"
+        );
+    }
+}
+
 // ---- JS family (javy) -------------------------------------------------------
 
 /// Whether a `javy` binary is on `PATH` and runnable. `None` (not `Err`) on
@@ -333,28 +403,254 @@ fn ruby_family_normal_run_captures_stdout_and_exit_code() {
     );
 }
 
+/// Ruby-source was never wired with bounds this round (see the module doc's
+/// "known gaps"): every axis is refused outright rather than silently
+/// ignored. This does not need the Ruby runtime at all - the refusal fires
+/// before `resolve_ruby_runtime` is ever called - so, unlike its siblings,
+/// this test is not `#[ignore]`d.
 #[test]
-#[ignore = "boots the bundled CRuby WASI interpreter and lets it spin (bounded by a 15s timeout); cargo test --ignored"]
-fn ruby_family_timeout_bound_fires() {
-    if afterburner_wasi::ruby_runner::resolve_ruby_runtime().is_err() {
+fn ruby_source_refuses_a_requested_timeout() {
+    let afb = build_source_afb("ruby", "source/main.rb", "puts 'unreachable'\n");
+    let request = AfbRunRequest {
+        timeout: Some(Duration::from_secs(1)),
+        ..Default::default()
+    };
+
+    let err = run_afb_bytes(&afb, request).expect_err("expected a refusal, not a run");
+    let msg = err.to_string();
+
+    assert!(msg.contains("Ruby (source)"), "message was {msg:?}");
+    assert!(msg.contains("timeout"), "message was {msg:?}");
+}
+
+#[test]
+fn ruby_source_refuses_a_requested_fuel_override() {
+    let afb = build_source_afb("ruby", "source/main.rb", "puts 'unreachable'\n");
+    let request = AfbRunRequest {
+        fuel: Some(1_000),
+        ..Default::default()
+    };
+
+    let err = run_afb_bytes(&afb, request).expect_err("expected a refusal, not a run");
+    let msg = err.to_string();
+
+    assert!(msg.contains("Ruby (source)"), "message was {msg:?}");
+    assert!(msg.contains("fuel"), "message was {msg:?}");
+}
+
+/// One request naming several unsupported bounds at once: the refusal names
+/// all of them, not just the first.
+#[test]
+fn ruby_source_refuses_and_names_every_missing_bound_at_once() {
+    let afb = build_source_afb("ruby", "source/main.rb", "puts 'unreachable'\n");
+    let request = AfbRunRequest {
+        stdin: b"hello".to_vec(),
+        memory_bytes: Some(1 << 20),
+        ..Default::default()
+    };
+
+    let err = run_afb_bytes(&afb, request).expect_err("expected a refusal, not a run");
+    let msg = err.to_string();
+
+    assert!(msg.contains("Ruby (source)"), "message was {msg:?}");
+    assert!(msg.contains("stdin"), "message was {msg:?}");
+    assert!(msg.contains("memory_bytes"), "message was {msg:?}");
+}
+
+// ---- Python (source) family: fully bounded, unlike Ruby-source -------------
+//
+// Python-source and Python-compiled share `python_bounds` / `finish_pyodide`
+// (see afb_run.rs), so these tests exercise that shared logic. The
+// compiled-bundle shape (`run_python_wasm`) additionally needs
+// `reconstruct_runtime_from_afb` and a real `burn compile`-produced bundle
+// fixture, which this test file does not build (that pipeline needs
+// wasm-opt's exnref translation plus wheel resolution - substantially more
+// machinery than a source fixture); it is not covered by a dedicated test
+// here. `refuse_unsupported`/`python_bounds` reaching `run_python_wasm` is
+// exercised via the shared code path these tests do cover, and the compiled
+// path's own reconstruct-and-run wiring exists in `afterburner-wasi`'s own
+// test suite for `reconstruct_runtime_from_afb`.
+
+fn python_runtime_available() -> bool {
+    afterburner_wasi::pyodide_runner::resolve_runtime().is_ok()
+}
+
+#[test]
+#[ignore = "boots the bundled Pyodide/CPython WASI interpreter (real runtime); cargo test --ignored"]
+fn python_source_normal_run_captures_stdout() {
+    if !python_runtime_available() {
         eprintln!(
-            "skipping ruby_family_timeout_bound_fires: \
-             no Ruby runtime available (neither the bundled ~/.burn cache nor BURN_RUBY_RUNTIME)"
+            "skipping python_source_normal_run_captures_stdout: \
+             no Python runtime available (neither the bundled ~/.burn cache nor BURN_PYTHON_RUNTIME)"
         );
         return;
     }
-    // Ruby-source's fuel budget is a fixed multi-trillion-instruction
-    // constant (RUBY_FUEL) that this API cannot currently tighten (see the
-    // module doc's "known gaps"), so `timeout` - not `fuel` - is the bound
-    // this family's test exercises. The infinite loop keeps running in the
-    // background after this returns; see `AfbRunRequest::timeout`'s doc.
-    let afb = build_source_afb("ruby", "source/main.rb", "loop {}\n");
+    let afb = build_source_afb("python", "source/main.py", "print('hello from python')\n");
+
+    let out = run_afb_bytes(&afb, AfbRunRequest::default()).expect("run_afb_bytes");
+
+    assert_eq!(out.outcome, AfbRunOutcome::Exited(0));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("hello from python"),
+        "stdout was {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// An uncaught exception is the way a cold-boot Python run signals abnormal
+/// termination (unlike the warm-interpreter path, which catches it and
+/// reports exit code 0 - see `pyodide_runner::WarmPyInterpreter`'s own doc).
+/// `sys.exit(N)` was tried first and traps instead of returning a clean
+/// `Exited(N)` in this harness; an uncaught exception is the reliable way to
+/// get a real non-zero `Exited` out of the cold path.
+#[test]
+#[ignore = "boots the bundled Pyodide/CPython WASI interpreter (real runtime); cargo test --ignored"]
+fn python_source_uncaught_exception_exits_nonzero() {
+    if !python_runtime_available() {
+        eprintln!(
+            "skipping python_source_uncaught_exception_exits_nonzero: no Python runtime available"
+        );
+        return;
+    }
+    let afb = build_source_afb(
+        "python",
+        "source/main.py",
+        "print('about to raise')\nraise ValueError('boom')\n",
+    );
+
+    let out = run_afb_bytes(&afb, AfbRunRequest::default()).expect("run_afb_bytes");
+
+    assert!(
+        matches!(out.outcome, AfbRunOutcome::Exited(code) if code != 0),
+        "expected a non-zero exit, got {:?}",
+        out.outcome
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("about to raise"),
+        "stdout was {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+#[ignore = "boots the bundled Pyodide/CPython WASI interpreter (real runtime); cargo test --ignored"]
+fn python_source_fuel_bound_fires() {
+    if !python_runtime_available() {
+        eprintln!("skipping python_source_fuel_bound_fires: no Python runtime available");
+        return;
+    }
+    let afb = build_source_afb("python", "source/main.py", "while True:\n pass\n");
 
     let request = AfbRunRequest {
-        timeout: Some(Duration::from_secs(15)),
+        fuel: Some(2_000_000),
         ..Default::default()
     };
     let out = run_afb_bytes(&afb, request).expect("run_afb_bytes");
 
-    assert_eq!(out.outcome, AfbRunOutcome::Timeout);
+    // Neither the outcome kind nor the message text distinguishes "fuel
+    // exhausted" from any other trap here: `pyodide_runner`'s trap handling
+    // formats the error with `{e}` (anyhow's top-level message only, not the
+    // `Trap::OutOfFuel` cause `.chain()` would surface), and `fuel_used`
+    // stays `0` rather than the budget - both are the known, documented gap
+    // (see the module doc's "known gaps"), not asserted as more than they
+    // are. What this test proves: an infinite loop given a 2,000,000-fuel
+    // budget stops (`python_source_normal_run_captures_stdout` shows the
+    // same runtime completes cleanly under the much larger default budget),
+    // so fuel exhaustion - not a coincidental unrelated trap - is what
+    // stopped it.
+    match &out.outcome {
+        AfbRunOutcome::Trapped(_) => {}
+        other => panic!("expected Trapped (fuel exhaustion), got {other:?}"),
+    }
+}
+
+#[test]
+#[ignore = "boots the bundled Pyodide/CPython WASI interpreter (real runtime); cargo test --ignored"]
+fn python_source_memory_bound_fires() {
+    if !python_runtime_available() {
+        eprintln!("skipping python_source_memory_bound_fires: no Python runtime available");
+        return;
+    }
+    let afb = build_source_afb(
+        "python",
+        "source/main.py",
+        // Grow a bytearray in a loop past the cap below; the fuel budget
+        // (engine default) is generous enough that the memory cap, not
+        // fuel, is what stops this.
+        "buf = bytearray()\nwhile True:\n buf += bytes(1 << 20)\n",
+    );
+
+    // The Pyodide/CPython wasm module itself declares a minimum linear
+    // memory around 67 MiB (1047 pages) - a cap below that fails at
+    // instantiation, before any guest code runs, which is a different
+    // (and differently classified) failure than a runtime `memory.grow`
+    // denial. 200 MiB clears that floor with headroom for interpreter
+    // bringup, while the runaway loop above still grows well past it.
+    let request = AfbRunRequest {
+        memory_bytes: Some(200 << 20),
+        ..Default::default()
+    };
+    let out = run_afb_bytes(&afb, request).expect("run_afb_bytes");
+
+    assert_eq!(out.outcome, AfbRunOutcome::OutOfMemory);
+}
+
+#[test]
+#[ignore = "boots the bundled Pyodide/CPython WASI interpreter (real runtime); cargo test --ignored"]
+fn python_source_stdin_is_delivered() {
+    if !python_runtime_available() {
+        eprintln!("skipping python_source_stdin_is_delivered: no Python runtime available");
+        return;
+    }
+    let afb = build_source_afb(
+        "python",
+        "source/main.py",
+        "import sys\nprint('got: ' + sys.stdin.read())\n",
+    );
+
+    let request = AfbRunRequest {
+        stdin: b"hello from the caller".to_vec(),
+        ..Default::default()
+    };
+    let out = run_afb_bytes(&afb, request).expect("run_afb_bytes");
+
+    assert_eq!(out.outcome, AfbRunOutcome::Exited(0));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("got: hello from the caller"),
+        "stdout was {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn python_source_refuses_a_readonly_fs_grant() {
+    let afb = build_source_afb("python", "source/main.py", "print('unreachable')\n");
+    let request = AfbRunRequest {
+        manifold: Manifold {
+            fs: FsAccess::ReadOnly(vec![std::env::temp_dir()]),
+            ..Manifold::sealed()
+        },
+        ..Default::default()
+    };
+
+    let err = run_afb_bytes(&afb, request).expect_err("expected a refusal, not a run");
+    let msg = err.to_string();
+
+    assert!(msg.contains("Python (source)"), "message was {msg:?}");
+    assert!(msg.contains("read-only"), "message was {msg:?}");
+}
+
+#[test]
+fn python_source_refuses_a_requested_timeout() {
+    let afb = build_source_afb("python", "source/main.py", "print('unreachable')\n");
+    let request = AfbRunRequest {
+        timeout: Some(Duration::from_secs(1)),
+        ..Default::default()
+    };
+
+    let err = run_afb_bytes(&afb, request).expect_err("expected a refusal, not a run");
+    let msg = err.to_string();
+
+    assert!(msg.contains("Python (source)"), "message was {msg:?}");
+    assert!(msg.contains("timeout"), "message was {msg:?}");
 }

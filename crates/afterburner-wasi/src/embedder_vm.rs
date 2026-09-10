@@ -23,8 +23,13 @@
 //!   `FnOnce(&mut EmbedderLinker) -> Result<()>`. [`EmbedderLinker`] is a
 //!   public newtype over the internal `Linker<EmbedderState>` so callers
 //!   define imports without knowing the store data type.
-//! * Fuel (not epoch) bounds execution: deterministic instruction budget,
-//!   no background ticker thread, no epoch increment races.
+//! * Fuel bounds every run's instruction budget, deterministically. A
+//!   caller that also needs a wall-clock bound (a real preemption, not just
+//!   an instruction count) uses [`shared_epoch_vm`]: one process-wide engine
+//!   with wasmtime epoch interruption enabled, paired with exactly one
+//!   ticker thread for the process's lifetime - never a thread per call.
+//!   The plain [`deterministic_engine`] (used by every other call site in
+//!   this crate) has epoch interruption off, unchanged.
 //! * Returns the i64 result of a named export plus any bytes the module
 //!   wrote to stdout via WASI (optional WASI must be opted in per compile).
 //!
@@ -39,7 +44,8 @@ use crate::emscripten_sidemodule::SideModuleRegistry;
 use afterburner_core::log::Level;
 use afterburner_core::{AfterburnerError, Result, ab_event};
 use std::path::PathBuf; // also used by WasiCommandOpts and EmbedderState::rw_preopens
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use wasmtime::{
     Config, Engine, InstancePre, Linker, Module, OptLevel, Store, Trap, WasmBacktraceDetails,
 };
@@ -189,10 +195,13 @@ impl WasiCommandOpts {
 /// * `consume_fuel(true)` - every run is bounded by an instruction budget
 ///   supplied by the caller. An infinite loop surfaces as
 ///   `AfterburnerError::FuelExhausted` rather than a hung thread.
-/// * Epoch interruption and pooling are intentionally omitted: the generic
-///   path hosts short-lived modules with embedder-supplied imports, not the
-///   long-lived plugin. Fuel is sufficient and simpler; pooling is worth the
-///   configuration cost only for the plugin's large linear-memory image.
+/// * Pooling is intentionally omitted: the generic path hosts short-lived
+///   modules with embedder-supplied imports, not the long-lived plugin, and
+///   pooling is worth the configuration cost only for the plugin's large
+///   linear-memory image. Epoch interruption is a separate opt-in - see
+///   [`deterministic_engine_with_epoch`] and [`shared_epoch_vm`] - not part
+///   of this profile, so every existing caller of this function keeps
+///   exactly the fuel-only bound it has always had.
 ///
 /// ## On-disk compile cache (determinism-neutral)
 ///
@@ -216,6 +225,40 @@ impl WasiCommandOpts {
 /// runs without it - the cache is an optimisation, never a correctness
 /// dependency, and never a determinism one.
 pub fn deterministic_engine() -> Result<Engine> {
+    let mut cfg = deterministic_config();
+    // On-disk compile cache (see the doc above). Added strictly after the
+    // deterministic flags so they are part of the cache key, never altered by
+    // it. Mirrors `wasm_engine::build_engine`'s wiring; failure is a warning,
+    // the engine runs cache-less rather than failing the run.
+    install_compile_cache(&mut cfg);
+    Engine::new(&cfg).map_err(|e| AfterburnerError::Engine(format!("embedder engine: {e}")))
+}
+
+/// Like [`deterministic_engine`], but with wasmtime epoch interruption
+/// enabled (`Config::epoch_interruption(true)`) so a `Store` built against
+/// this engine can be given a real wall-clock deadline via
+/// `Store::set_epoch_deadline`, checked and enforced by whatever thread
+/// calls [`Engine::increment_epoch`] on it - a genuine preemption bound, not
+/// just an instruction-count one. Nothing on this engine increments its own
+/// epoch; pair it with a ticker (see [`shared_epoch_vm`], which does exactly
+/// that once for the whole process rather than per call).
+///
+/// Identical to [`deterministic_engine`] in every other respect - same
+/// determinism profile, same fuel metering, same compile cache (keyed
+/// separately, since the flag difference changes the cache key, exactly as
+/// the doc above describes for any deterministic-flag change).
+pub fn deterministic_engine_with_epoch() -> Result<Engine> {
+    let mut cfg = deterministic_config();
+    cfg.epoch_interruption(true);
+    install_compile_cache(&mut cfg);
+    Engine::new(&cfg).map_err(|e| AfterburnerError::Engine(format!("embedder engine (epoch): {e}")))
+}
+
+/// The deterministic profile shared by [`deterministic_engine`] and
+/// [`deterministic_engine_with_epoch`], so the two configs can only ever
+/// differ on the one flag (`epoch_interruption`) that the epoch variant
+/// adds - never drift apart on anything else.
+fn deterministic_config() -> Config {
     let mut cfg = Config::new();
     cfg.cranelift_opt_level(OptLevel::Speed)
         .cranelift_nan_canonicalization(true)
@@ -231,8 +274,7 @@ pub fn deterministic_engine() -> Result<Engine> {
         .wasm_threads(false)
         // Fuel metering: every Wasm instruction decrements a per-Store
         // counter. When the counter reaches zero the next instruction traps
-        // with `OutOfFuel`. This is the only bound we need for short-lived
-        // modules; no epoch ticker, no background thread.
+        // with `OutOfFuel`.
         .consume_fuel(true)
         // Enable the new (exnref/try_table) exceptions proposal plus the
         // function-references and GC proposals that it depends on. This lets
@@ -243,14 +285,56 @@ pub fn deterministic_engine() -> Result<Engine> {
         .wasm_exceptions(true)
         // Always capture Wasm backtraces so the probe can print trap frames.
         .wasm_backtrace_details(WasmBacktraceDetails::Enable);
+    cfg
+}
 
-    // On-disk compile cache (see the doc above). Added strictly after the
-    // deterministic flags so they are part of the cache key, never altered by
-    // it. Mirrors `wasm_engine::build_engine`'s wiring; failure is a warning,
-    // the engine runs cache-less rather than failing the run.
-    install_compile_cache(&mut cfg);
+/// Tick period for [`shared_epoch_vm`]'s ticker thread, in milliseconds -
+/// the minimum granularity a `timeout` can be honored at (a shorter request
+/// rounds up to one tick). Reuses `crate::chamber::TICK_PERIOD_MS` so every
+/// epoch-driven bound in this crate (the plugin combustor's per-call
+/// timeout, and this one) shares one constant instead of two that could
+/// silently drift apart.
+pub const EPOCH_TICK_PERIOD_MS: u64 = crate::chamber::TICK_PERIOD_MS;
 
-    Engine::new(&cfg).map_err(|e| AfterburnerError::Engine(format!("embedder engine: {e}")))
+/// A process-wide [`EmbedderVm`] whose engine has epoch interruption
+/// enabled ([`deterministic_engine_with_epoch`]), paired with exactly one
+/// background ticker thread that calls `Engine::increment_epoch()` every
+/// [`EPOCH_TICK_PERIOD_MS`] for as long as the process runs.
+///
+/// Built and the ticker spawned lazily, the first time any caller needs a
+/// wall-clock bound (a `timeout`) on a run - never per call. A fresh
+/// `Engine` per call would mean a fresh compile-cache key and, if a ticker
+/// were spawned alongside it, a fresh thread per call: exactly the
+/// per-call cost a caller-facing timeout must not impose. One engine, one
+/// ticker, shared by every timeout-bearing call for the rest of the
+/// process's life.
+///
+/// # Errors
+///
+/// `Err` only if building the epoch-enabled engine or spawning the ticker
+/// thread fails. That failure is cached (a `OnceLock` cannot store `Err`
+/// and retry, so the first outcome - success or failure - is reused by
+/// every later caller): `Engine::new` and `thread::spawn` failing are not
+/// transient conditions in practice, so caching the failure never turns a
+/// one-time hiccup into a permanent outage that a retry would have cleared.
+pub fn shared_epoch_vm() -> Result<&'static EmbedderVm> {
+    static SHARED: OnceLock<std::result::Result<EmbedderVm, String>> = OnceLock::new();
+    let once = SHARED.get_or_init(|| {
+        let engine = deterministic_engine_with_epoch().map_err(|e| e.to_string())?;
+        let ticker_engine = engine.clone();
+        std::thread::Builder::new()
+            .name("afterburner-embedder-epoch-ticker".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(EPOCH_TICK_PERIOD_MS));
+                    ticker_engine.increment_epoch();
+                }
+            })
+            .map_err(|e| format!("spawning epoch ticker: {e}"))?;
+        Ok(EmbedderVm { engine })
+    });
+    once.as_ref()
+        .map_err(|msg| AfterburnerError::Engine(msg.clone()))
 }
 
 /// Install wasmtime's on-disk compilation cache on `cfg`, rooted at the
@@ -522,7 +606,11 @@ pub struct TrackedLimits {
 }
 
 impl TrackedLimits {
-    fn with_memory_size(limit: usize) -> Self {
+    /// `pub(crate)`: also used by [`crate::pyodide_runner`] to wire the same
+    /// memory-limit mechanism onto its Emscripten store - one implementation
+    /// of "cap linear memory and remember whether the cap was hit," shared
+    /// across both guest ABIs this crate hosts.
+    pub(crate) fn with_memory_size(limit: usize) -> Self {
         Self {
             inner: wasmtime::StoreLimitsBuilder::new()
                 .memory_size(limit)
@@ -1223,12 +1311,6 @@ impl EmbedderVm {
         self.run_command_impl(module, opts, fuel, host_context)
     }
 
-    /// Shared body of [`run_command`][Self::run_command] and
-    /// [`run_command_with_host`][Self::run_command_with_host]: the one canonical
-    /// WASI-command run path (DRY - the two public entry points differ only in
-    /// whether a recording host is supplied). The host, when present, is placed
-    /// in [`EmbedderState::host_context`] so the effect-wrapped preview1 shims
-    /// can consult it.
     /// Shared setup + `_start` call, factored out of [`run_command_impl`]
     /// and [`run_command_bounded`] so the two differ only in how they turn
     /// `call_result` into their own return shape - never in how the store,
@@ -1241,6 +1323,7 @@ impl EmbedderVm {
         opts: WasiCommandOpts,
         fuel: Option<u64>,
         host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+        timeout: Option<Duration>,
     ) -> Result<RawCommandOutput> {
         if !module.wasi {
             return Err(AfterburnerError::Engine(
@@ -1418,6 +1501,23 @@ impl EmbedderVm {
         if opts.max_memory_bytes.is_some() {
             store.limiter(|state: &mut EmbedderState| &mut state.limits);
         }
+        // Always set a deadline, even when `timeout` is `None`: a store's
+        // default deadline is 0 (already "elapsed"), so on an engine that
+        // does have epoch interruption enabled (`shared_epoch_vm`'s), an
+        // unset deadline would trap on the very first check. Harmless on
+        // `module.engine`s without epoch interruption - `Store::
+        // set_epoch_deadline`'s own doc: the value is only ever consulted
+        // when the compiled guest carries epoch-check instrumentation,
+        // which only `deterministic_engine_with_epoch` turns on. `ticks / 2`
+        // of `u64::MAX` at `EPOCH_TICK_PERIOD_MS` per tick outlives any run.
+        let ticks = match timeout {
+            Some(d) => {
+                let ms = d.as_millis().max(1);
+                ms.div_ceil(EPOCH_TICK_PERIOD_MS as u128).max(1) as u64
+            }
+            None => u64::MAX / 2,
+        };
+        store.set_epoch_deadline(ticks);
 
         let instance = module
             .instance_pre
@@ -1482,7 +1582,7 @@ impl EmbedderVm {
         fuel: Option<u64>,
         host_context: Option<Arc<dyn afterburner_core::HostContext>>,
     ) -> Result<EmbedderRunOutput> {
-        let raw = self.run_command_raw(module, opts, fuel, host_context)?;
+        let raw = self.run_command_raw(module, opts, fuel, host_context, None)?;
         let exit_code = match raw.call_result {
             Ok(_) => 0i64,
             Err(ref e) => {
@@ -1535,14 +1635,24 @@ impl EmbedderVm {
     /// bounded, with everything captured" API needs: a bound firing must not
     /// be indistinguishable from a setup failure, and partial output must
     /// survive it.
+    ///
+    /// `timeout`, when `Some`, is only a real wall-clock bound if `self`
+    /// wraps an engine built with epoch interruption enabled - i.e. `self`
+    /// is [`shared_epoch_vm`], not a plain [`EmbedderVm::new`]. On a plain
+    /// engine the deadline is still set (harmless) but never checked, since
+    /// the compiled guest carries no epoch-check instrumentation to check
+    /// it against, so the run is unbounded in wall-clock time regardless of
+    /// what `timeout` says. Granularity is one [`EPOCH_TICK_PERIOD_MS`]
+    /// tick: a shorter request rounds up to it.
     pub fn run_command_bounded(
         &self,
         module: &EmbedderModule,
         opts: WasiCommandOpts,
         fuel: Option<u64>,
         host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+        timeout: Option<Duration>,
     ) -> Result<BoundedCommandOutput> {
-        let raw = self.run_command_raw(module, opts, fuel, host_context)?;
+        let raw = self.run_command_raw(module, opts, fuel, host_context, timeout)?;
         let outcome = match raw.call_result {
             Ok(_) => CommandOutcome::Exited(0),
             Err(ref e) => {

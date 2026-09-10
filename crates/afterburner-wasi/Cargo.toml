@@ -74,6 +74,11 @@ shadow-sharp = ["afterburner-node-compat/shadow-sharp"]
 
 [dependencies]
 afterburner-core.workspace = true
+# `.afb` pack/unpack, for `pyodide_runner::reconstruct_runtime_from_afb`
+# (reading a self-contained compiled-Python `.afb` bundle back into a
+# `PyRuntime`). Lean: no registry client, no network, no `anyhow` - see
+# `afterburner-afb`'s own Cargo.toml.
+afterburner-afb.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi = { workspace = true, features = ["p1"] }
 serde.workspace = true
