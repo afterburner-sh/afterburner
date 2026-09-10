@@ -495,13 +495,65 @@ pub struct EmbedderState {
     /// Per-call linear-memory cap, enforced by wasmtime on every
     /// `memory.grow` (a growth past the limit fails inside the guest,
     /// exactly like a real allocator refusing an allocation, rather than
-    /// trapping the whole store). `StoreLimits::default()` (the value
+    /// trapping the whole store). `TrackedLimits::default()` (the value
     /// [`WasiCommandOpts::max_memory_bytes`] being `None` produces) applies
     /// no cap, unchanged from before this field existed. Wired via
-    /// `Store::limiter` in `EmbedderVm`'s own (private) `run_command_impl`
+    /// `Store::limiter` in `EmbedderVm`'s own (private) `run_command_raw`
     /// only; the typed-export path ([`EmbedderVm::run`]) does not take a
     /// memory budget and leaves this at its default.
-    pub limits: wasmtime::StoreLimits,
+    pub limits: TrackedLimits,
+}
+
+/// Wraps `wasmtime::StoreLimits`, additionally recording whether any
+/// `memory_growing` request was DENIED during the run - i.e. whether the
+/// guest actually hit [`WasiCommandOpts::max_memory_bytes`].
+///
+/// `wasmtime::StoreLimits` itself denies the grow (the guest's own allocator
+/// observes an ordinary allocation failure - see the field doc on
+/// [`EmbedderState::limits`]) but keeps no history of having done so. This
+/// flag is the ground-truth signal callers that need to tell "hit the memory
+/// ceiling" apart from "trapped for an unrelated reason" (a genuine guest
+/// bug) require, instead of guessing from the guest's own reaction to the
+/// denial.
+#[derive(Debug, Default)]
+pub struct TrackedLimits {
+    inner: wasmtime::StoreLimits,
+    pub memory_limit_hit: bool,
+}
+
+impl TrackedLimits {
+    fn with_memory_size(limit: usize) -> Self {
+        Self {
+            inner: wasmtime::StoreLimitsBuilder::new()
+                .memory_size(limit)
+                .build(),
+            memory_limit_hit: false,
+        }
+    }
+}
+
+impl wasmtime::ResourceLimiter for TrackedLimits {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        let allowed = self.inner.memory_growing(current, desired, maximum)?;
+        if !allowed {
+            self.memory_limit_hit = true;
+        }
+        Ok(allowed)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.inner.table_growing(current, desired, maximum)
+    }
 }
 
 impl EmbedderState {
@@ -546,7 +598,7 @@ impl EmbedderState {
             fs_preopens: Vec::new(),
             entropy: EntropySource::Deterministic,
             host_context: None,
-            limits: wasmtime::StoreLimits::default(),
+            limits: TrackedLimits::default(),
         }
     }
 
@@ -603,7 +655,7 @@ impl EmbedderState {
             fs_preopens: Vec::new(),
             entropy: EntropySource::Deterministic,
             host_context: None,
-            limits: wasmtime::StoreLimits::default(),
+            limits: TrackedLimits::default(),
         }
     }
 
@@ -654,7 +706,7 @@ impl EmbedderState {
             fs_preopens: Vec::new(),
             entropy: EntropySource::Deterministic,
             host_context: None,
-            limits: wasmtime::StoreLimits::default(),
+            limits: TrackedLimits::default(),
         }
     }
 
@@ -788,6 +840,60 @@ pub struct EmbedderRunOutput {
     /// after the call returns) -- host-side only, since a guest has no way
     /// to read its own Store's fuel meter.
     pub fuel_consumed: u64,
+    /// Whether [`WasiCommandOpts::max_memory_bytes`] denied at least one
+    /// `memory.grow` during the run (see [`TrackedLimits`]). Always `false`
+    /// when no memory cap was configured, and always `false` for
+    /// [`EmbedderVm::run`] (the typed-export path takes no memory budget).
+    pub memory_limit_hit: bool,
+}
+
+/// Internal, unclassified result of [`EmbedderVm::run_command_raw`]: the
+/// guest ran to completion or a trap, and everything it produced along the
+/// way was captured, but nothing here has decided what `call_result` MEANS
+/// yet. Shared by [`EmbedderVm::run_command`] / `run_command_with_host`
+/// (which classify it into today's `Result<EmbedderRunOutput>`) and
+/// [`EmbedderVm::run_command_bounded`] (which classifies it into
+/// [`BoundedCommandOutput`] instead, keeping captured output on every path).
+struct RawCommandOutput {
+    call_result: wasmtime::Result<()>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    fuel_consumed: u64,
+    memory_limit_hit: bool,
+}
+
+/// Classification of one [`EmbedderVm::run_command_bounded`] run. Unlike the
+/// `Result<EmbedderRunOutput>` a plain [`EmbedderVm::run_command`] returns,
+/// every case here is `Ok` - a bound firing is data, not a failure to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandOutcome {
+    /// The guest ran to completion. `_start` returning normally is exit 0;
+    /// `proc_exit(N)` (including `N = 0`) carries its own code.
+    Exited(i32),
+    /// The fuel budget passed to `run_command_bounded` was exhausted.
+    OutOfFuel,
+    /// The store's epoch deadline elapsed. `EmbedderVm`'s engine does not
+    /// enable epoch interruption today (see [`deterministic_engine`]'s own
+    /// doc comment), so this arm is currently unreachable from
+    /// `run_command_bounded`; wired for when a caller-supplied host drives
+    /// the epoch directly.
+    Timeout,
+    /// The guest trapped for any other reason (division by zero,
+    /// unreachable, an indirect-call mismatch, memory-limit-triggered abort,
+    /// ...). The string is wasmtime's trap message.
+    Trapped(String),
+}
+
+/// Output of [`EmbedderVm::run_command_bounded`]: never discards captured
+/// output on a bound, unlike `Result<EmbedderRunOutput>`'s `Err` channel.
+#[derive(Debug, Clone)]
+pub struct BoundedCommandOutput {
+    pub outcome: CommandOutcome,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub fuel_consumed: u64,
+    /// See [`EmbedderRunOutput::memory_limit_hit`].
+    pub memory_limit_hit: bool,
 }
 
 // ---- VM ----------------------------------------------------------------------
@@ -958,7 +1064,7 @@ impl EmbedderVm {
                 daemon_unix: None,
                 entropy: EntropySource::Deterministic,
                 host_context: None,
-                limits: wasmtime::StoreLimits::default(),
+                limits: TrackedLimits::default(),
             }
         } else {
             EmbedderState {
@@ -999,7 +1105,7 @@ impl EmbedderVm {
                 daemon_unix: None,
                 entropy: EntropySource::Deterministic,
                 host_context: None,
-                limits: wasmtime::StoreLimits::default(),
+                limits: TrackedLimits::default(),
             }
         };
 
@@ -1052,6 +1158,7 @@ impl EmbedderVm {
             stdout,
             stderr: Vec::new(),
             fuel_consumed,
+            memory_limit_hit: false,
         })
     }
 
@@ -1122,13 +1229,19 @@ impl EmbedderVm {
     /// whether a recording host is supplied). The host, when present, is placed
     /// in [`EmbedderState::host_context`] so the effect-wrapped preview1 shims
     /// can consult it.
-    fn run_command_impl(
+    /// Shared setup + `_start` call, factored out of [`run_command_impl`]
+    /// and [`run_command_bounded`] so the two differ only in how they turn
+    /// `call_result` into their own return shape - never in how the store,
+    /// preopens, or capture pipes are built. Nothing here decides what a
+    /// trap MEANS; it just runs the guest to completion (or a trap) and
+    /// hands back everything captured along the way.
+    fn run_command_raw(
         &self,
         module: &EmbedderModule,
         opts: WasiCommandOpts,
         fuel: Option<u64>,
         host_context: Option<Arc<dyn afterburner_core::HostContext>>,
-    ) -> Result<EmbedderRunOutput> {
+    ) -> Result<RawCommandOutput> {
         if !module.wasi {
             return Err(AfterburnerError::Engine(
                 "run_command requires a module compiled with wasi: true".into(),
@@ -1293,7 +1406,7 @@ impl EmbedderVm {
             host_context,
             limits: opts
                 .max_memory_bytes
-                .map(|max| wasmtime::StoreLimitsBuilder::new().memory_size(max).build())
+                .map(TrackedLimits::with_memory_size)
                 .unwrap_or_default(),
         };
 
@@ -1336,6 +1449,7 @@ impl EmbedderVm {
         // into the wasmtime-wasi pipe. Prefer `wasi_stdout` when it holds bytes
         // (the recording path), else read the pipe - one path, no second branch.
         let data = store.into_data();
+        let memory_limit_hit = data.limits.memory_limit_hit;
         let pipe_stdout = data
             .wasi
             .map(|w| w.stdout.contents().to_vec())
@@ -1346,7 +1460,30 @@ impl EmbedderVm {
             data.wasi_stdout
         };
 
-        let exit_code = match call_result {
+        Ok(RawCommandOutput {
+            call_result,
+            stdout,
+            stderr: err_pipe.contents().to_vec(),
+            fuel_consumed,
+            memory_limit_hit,
+        })
+    }
+
+    /// Shared body of [`run_command`][Self::run_command] and
+    /// [`run_command_with_host`][Self::run_command_with_host]: turns the raw
+    /// `_start` outcome into today's `Result<EmbedderRunOutput>` contract -
+    /// `Ok` on a clean exit or `proc_exit(N)`, `Err` on any bound (fuel,
+    /// timeout) or trap. Unchanged in observable behaviour from before
+    /// [`run_command_raw`] was factored out.
+    fn run_command_impl(
+        &self,
+        module: &EmbedderModule,
+        opts: WasiCommandOpts,
+        fuel: Option<u64>,
+        host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+    ) -> Result<EmbedderRunOutput> {
+        let raw = self.run_command_raw(module, opts, fuel, host_context)?;
+        let exit_code = match raw.call_result {
             Ok(_) => 0i64,
             Err(ref e) => {
                 // proc_exit(N) produces I32Exit(N). Depending on the wasmtime
@@ -1375,9 +1512,63 @@ impl EmbedderVm {
 
         Ok(EmbedderRunOutput {
             result: exit_code,
-            stdout,
-            stderr: err_pipe.contents().to_vec(),
-            fuel_consumed,
+            stdout: raw.stdout,
+            stderr: raw.stderr,
+            fuel_consumed: raw.fuel_consumed,
+            memory_limit_hit: raw.memory_limit_hit,
+        })
+    }
+
+    /// Like [`run_command`][Self::run_command] /
+    /// [`run_command_with_host`][Self::run_command_with_host], but never
+    /// discards a captured partial run on a bound: fuel exhaustion, a
+    /// wall-clock interrupt, or any other trap all come back as
+    /// `Ok(BoundedCommandOutput)` carrying whatever
+    /// stdout/stderr/fuel the guest produced before the bound fired, with the
+    /// classification in `outcome` instead of the `Result` error channel.
+    /// `Err` is reserved for a failure that happens before the guest ever
+    /// runs (a bad preopen path, a module that is not a WASI command) -
+    /// exactly the same failures [`run_command`][Self::run_command] surfaces
+    /// as `Err` today.
+    ///
+    /// This is the seam a caller-facing "run one guest to completion,
+    /// bounded, with everything captured" API needs: a bound firing must not
+    /// be indistinguishable from a setup failure, and partial output must
+    /// survive it.
+    pub fn run_command_bounded(
+        &self,
+        module: &EmbedderModule,
+        opts: WasiCommandOpts,
+        fuel: Option<u64>,
+        host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+    ) -> Result<BoundedCommandOutput> {
+        let raw = self.run_command_raw(module, opts, fuel, host_context)?;
+        let outcome = match raw.call_result {
+            Ok(_) => CommandOutcome::Exited(0),
+            Err(ref e) => {
+                let i32_exit = e
+                    .downcast_ref::<I32Exit>()
+                    .or_else(|| e.chain().find_map(|cause| cause.downcast_ref::<I32Exit>()));
+                if let Some(exit) = i32_exit {
+                    CommandOutcome::Exited(exit.0)
+                } else if let Some(t) = e.downcast_ref::<Trap>() {
+                    match t {
+                        Trap::OutOfFuel => CommandOutcome::OutOfFuel,
+                        Trap::Interrupt => CommandOutcome::Timeout,
+                        other => CommandOutcome::Trapped(format!("embedder command trap: {other}")),
+                    }
+                } else {
+                    CommandOutcome::Trapped(format!("embedder command trap: {e}"))
+                }
+            }
+        };
+
+        Ok(BoundedCommandOutput {
+            outcome,
+            stdout: raw.stdout,
+            stderr: raw.stderr,
+            fuel_consumed: raw.fuel_consumed,
+            memory_limit_hit: raw.memory_limit_hit,
         })
     }
 }

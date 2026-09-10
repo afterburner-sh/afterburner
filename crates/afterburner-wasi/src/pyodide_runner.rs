@@ -390,6 +390,9 @@ pub struct PyodideRunOutput {
     /// The program's typed return value (via `__afb_emit__`), or
     /// `Json(Null)` when none was surfaced.
     pub output: OutputValue,
+    /// Wasmtime fuel actually consumed by the run (`PYODIDE_FUEL` minus what
+    /// `Store::get_fuel` reports remaining right after the run returns).
+    pub fuel_consumed: u64,
 }
 
 // ---- private boot helper ---------------------------------------------------
@@ -1164,11 +1167,13 @@ fn run_booted_pyodide(
         _ => -99,
     };
     if main_exitcode != 0 {
+        let fuel_consumed = PYODIDE_FUEL.saturating_sub(store.get_fuel().unwrap_or(0));
         return Ok(PyodideRunOutput {
             stdout: captured_stdout(store),
             stderr: captured_stderr(store),
             exit_code: main_exitcode,
             output: captured_output(store)?,
+            fuel_consumed,
         });
     }
 
@@ -1198,13 +1203,13 @@ fn run_booted_pyodide(
         _ => -99,
     };
 
-    // Determinism probe: print fuel consumed (set budget minus remaining) when
-    // BURN_FUEL_REPORT is set. The engine runs with consume_fuel(true), so this
-    // is an exact, reproducible instruction count for a deterministic run.
-    if std::env::var_os("BURN_FUEL_REPORT").is_some()
-        && let Ok(remaining) = store.get_fuel()
-    {
-        eprintln!("[fuel] consumed={}", PYODIDE_FUEL.saturating_sub(remaining));
+    // Fuel actually consumed (budget minus remaining). The engine runs with
+    // consume_fuel(true), so this is an exact, reproducible instruction count
+    // for a deterministic run; also printed under BURN_FUEL_REPORT (a
+    // determinism probe predating this field).
+    let fuel_consumed = PYODIDE_FUEL.saturating_sub(store.get_fuel().unwrap_or(0));
+    if std::env::var_os("BURN_FUEL_REPORT").is_some() {
+        eprintln!("[fuel] consumed={fuel_consumed}");
     }
 
     Ok(PyodideRunOutput {
@@ -1212,6 +1217,7 @@ fn run_booted_pyodide(
         stderr: captured_stderr(store),
         exit_code,
         output: captured_output(store)?,
+        fuel_consumed,
     })
 }
 
@@ -1388,11 +1394,13 @@ impl WarmPyInterpreter {
             wasmtime::Val::I32(v) => v,
             _ => -99,
         };
+        let fuel_consumed = PYODIDE_FUEL.saturating_sub(store.get_fuel().unwrap_or(0));
         Ok(PyodideRunOutput {
             stdout: captured_stdout(store),
             stderr: captured_stderr(store),
             exit_code,
             output: captured_output(store)?,
+            fuel_consumed,
         })
     }
 }

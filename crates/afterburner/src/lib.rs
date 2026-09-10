@@ -54,6 +54,8 @@
 
 #![warn(missing_debug_implementations)]
 
+#[cfg(feature = "afb-run")]
+pub mod afb_run;
 mod builder;
 #[cfg(feature = "bin")]
 pub mod cli;
@@ -156,5 +158,8 @@ pub use builder::{Afterburner, AfterburnerBuilder, Mode};
 
 #[cfg(feature = "thrust")]
 pub use builder::ThreadedBuilder;
+
+#[cfg(feature = "afb-run")]
+pub use afb_run::{AfbRunOutcome, AfbRunOutput, AfbRunRequest, run_afb_bytes};
 
 pub use polyglot::{Language, Outcome};

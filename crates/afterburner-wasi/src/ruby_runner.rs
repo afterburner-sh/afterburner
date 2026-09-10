@@ -125,6 +125,9 @@ pub struct RubyRunOutput {
     /// file-frame (R2/R3), or `OutputValue::Json(Value::Null)` when the script
     /// wrote no frame. See `run_ruby_pkg` for the read/decode path.
     pub output: OutputValue,
+    /// Wasmtime fuel actually consumed by the run (see
+    /// `EmbedderRunOutput::fuel_consumed`).
+    pub fuel_consumed: u64,
 }
 
 /// Resolve the Ruby runtime to run, honoring (in order):
@@ -393,6 +396,7 @@ fn run_ruby_pkg(
         stderr: out.stderr,
         exit_code: out.result as i32,
         output,
+        fuel_consumed: out.fuel_consumed,
     })
 }
 
