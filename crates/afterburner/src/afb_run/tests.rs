@@ -461,15 +461,171 @@ fn ruby_source_refuses_and_names_every_missing_bound_at_once() {
 //
 // Python-source and Python-compiled share `python_bounds` / `finish_pyodide`
 // (see afb_run.rs), so these tests exercise that shared logic. The
-// compiled-bundle shape (`run_python_wasm`) additionally needs
-// `reconstruct_runtime_from_afb` and a real `burn compile`-produced bundle
-// fixture, which this test file does not build (that pipeline needs
-// wasm-opt's exnref translation plus wheel resolution - substantially more
-// machinery than a source fixture); it is not covered by a dedicated test
-// here. `refuse_unsupported`/`python_bounds` reaching `run_python_wasm` is
-// exercised via the shared code path these tests do cover, and the compiled
-// path's own reconstruct-and-run wiring exists in `afterburner-wasi`'s own
-// test suite for `reconstruct_runtime_from_afb`.
+// compiled-bundle shape (`run_python_wasm`) is covered too, by
+// `python_compiled_bundle_runs_and_its_bounds_fire` below: it compiles a
+// real package through the same `dispatch_compile` a customer runs and then
+// puts the bundle through `run_afb_bytes`. Sharing `python_bounds` with the
+// source path is an argument, not evidence, and the compiled bundle is the
+// shape a published Python plugin actually takes, so it gets its own test.
+
+/// Compiles a real Python package to an `emscripten-pyodide` bundle through
+/// the same path `burn compile` takes, and returns the bytes.
+///
+/// Deliberately the real compiler rather than a hand-built fixture: the
+/// bundle a customer publishes is whatever `dispatch_compile` emits, so a
+/// fixture that merely resembles one would prove nothing about the shape
+/// that actually ships.
+#[cfg(feature = "bin")]
+fn compile_python_bundle(source: &str) -> Option<Vec<u8>> {
+    use crate::cli::compile::dispatch_compile;
+    use afterburner_cloud::pkg;
+
+    if !python_runtime_available() {
+        return None;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("source")).expect("mkdir");
+    std::fs::write(root.join("source/main.py"), source).expect("write source");
+    std::fs::write(
+        root.join("afb.toml"),
+        format!(
+            "[format]\nversion = \"1.0\"\n\n[package]\nname = \"pyplug\"\n\
+             namespace = \"acme\"\nversion = \"0.1.0\"\nlanguage = \"python\"\n\
+             entry = \"source/main.py\"\n\n[runtime]\nmin = \"{}\"\n",
+            afterburner_core::VERSION
+        ),
+    )
+    .expect("write afb.toml");
+    std::fs::write(
+        root.join("manifold.json"),
+        serde_json::to_vec(&Manifold::sealed()).expect("encode manifold"),
+    )
+    .expect("write manifold.json");
+
+    let local = pkg::LocalPackage::load(root).expect("load the package");
+    let out = root.join("pyplug.afb");
+    dispatch_compile(root, local, &out, false).expect("compile the python package");
+    Some(std::fs::read(&out).expect("read the compiled bundle"))
+}
+
+/// The compiled bundle runs, and a bound it is given actually fires.
+///
+/// This is the shape a published Python plugin takes, so it is tested as
+/// itself rather than inferred from the source path it shares code with.
+#[test]
+#[ignore = "compiles a real Pyodide bundle; needs the cached Python runtime"]
+#[cfg(feature = "bin")]
+fn python_compiled_bundle_runs_and_its_bounds_fire() {
+    let Some(afb) = compile_python_bundle("print(\"hello from a compiled plugin\")\n") else {
+        eprintln!("skipping: no Python runtime available");
+        return;
+    };
+
+    let out = run_afb_bytes(&afb, AfbRunRequest::default()).expect("run the compiled bundle");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("hello from a compiled plugin"),
+        "the bundle should have printed: outcome {:?}, stdout {stdout:?}, stderr {:?}",
+        out.outcome,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // And a bound it cannot honour is refused by name rather than dropped,
+    // which is the property that makes running one as a plugin safe at all.
+    // A read-only fs grant is the one axis this path still cannot offer.
+    let refused = run_afb_bytes(
+        &afb,
+        AfbRunRequest {
+            manifold: Manifold {
+                fs: FsAccess::ReadOnly(vec![std::path::PathBuf::from("/tmp")]),
+                ..Manifold::sealed()
+            },
+            ..Default::default()
+        },
+    );
+    match refused {
+        Err(error) => {
+            let message = format!("{error:#}");
+            assert!(
+                message.to_lowercase().contains("read-only"),
+                "a bound that cannot be honoured must be refused by name: {message}"
+            );
+        }
+        Ok(output) => panic!(
+            "a read-only grant this path cannot honour must be refused, not silently \
+             widened to read-write: {:?}",
+            output.outcome
+        ),
+    }
+}
+
+/// The wall clock preempts a compiled bundle that would otherwise run
+/// forever, and reports itself as `Timeout` rather than as a crash.
+///
+/// This is the bound the Pyodide path used to refuse outright. It is
+/// enforced by wasmtime epoch interruption on the shared epoch engine and
+/// covers booting CPython as well as the guest's own code, so the budget
+/// here is generous enough to boot and still far short of forever.
+#[test]
+#[ignore = "compiles a real Pyodide bundle; needs the cached Python runtime"]
+#[cfg(feature = "bin")]
+fn python_compiled_bundle_wall_clock_preempts() {
+    let Some(afb) = compile_python_bundle("while True:\n pass\n") else {
+        eprintln!("skipping: no Python runtime available");
+        return;
+    };
+
+    let started = std::time::Instant::now();
+    let out = run_afb_bytes(
+        &afb,
+        AfbRunRequest {
+            timeout: Some(std::time::Duration::from_secs(20)),
+            ..Default::default()
+        },
+    )
+    .expect("run the compiled bundle");
+
+    assert_eq!(
+        out.outcome,
+        AfbRunOutcome::Timeout,
+        "an infinite loop under a wall clock must report the wall clock, not a crash"
+    );
+    // The default fuel budget is 500 billion instructions: an infinite loop
+    // would sit there for many minutes before spending it, so finishing
+    // anywhere near the deadline is what proves the wall clock, not fuel,
+    // is what stopped it.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(90),
+        "the deadline should have preempted the guest, took {:?}",
+        started.elapsed()
+    );
+}
+
+/// The infinite loop stops, so a fuel budget is real for a compiled bundle
+/// and not merely accepted.
+#[test]
+#[ignore = "compiles a real Pyodide bundle; needs the cached Python runtime"]
+#[cfg(feature = "bin")]
+fn python_compiled_bundle_fuel_bound_fires() {
+    let Some(afb) = compile_python_bundle("while True:\n pass\n") else {
+        eprintln!("skipping: no Python runtime available");
+        return;
+    };
+    let out = run_afb_bytes(
+        &afb,
+        AfbRunRequest {
+            fuel: Some(2_000_000),
+            ..Default::default()
+        },
+    )
+    .expect("run the compiled bundle");
+    assert_eq!(
+        out.outcome,
+        AfbRunOutcome::OutOfFuel,
+        "an infinite loop under a small fuel budget must report the fuel bound"
+    );
+}
 
 fn python_runtime_available() -> bool {
     afterburner_wasi::pyodide_runner::resolve_runtime().is_ok()
@@ -547,21 +703,23 @@ fn python_source_fuel_bound_fires() {
     };
     let out = run_afb_bytes(&afb, request).expect("run_afb_bytes");
 
-    // Neither the outcome kind nor the message text distinguishes "fuel
-    // exhausted" from any other trap here: `pyodide_runner`'s trap handling
-    // formats the error with `{e}` (anyhow's top-level message only, not the
-    // `Trap::OutOfFuel` cause `.chain()` would surface), and `fuel_used`
-    // stays `0` rather than the budget - both are the known, documented gap
-    // (see the module doc's "known gaps"), not asserted as more than they
-    // are. What this test proves: an infinite loop given a 2,000,000-fuel
-    // budget stops (`python_source_normal_run_captures_stdout` shows the
-    // same runtime completes cleanly under the much larger default budget),
-    // so fuel exhaustion - not a coincidental unrelated trap - is what
-    // stopped it.
-    match &out.outcome {
-        AfbRunOutcome::Trapped(_) => {}
-        other => panic!("expected Trapped (fuel exhaustion), got {other:?}"),
-    }
+    // The outcome names the bound that fired rather than reporting a
+    // generic trap: `pyodide_runner::guest_trap` classifies the
+    // `Trap::OutOfFuel` the guest call carries, so a caller can tell "spent
+    // its instruction budget" apart from a crash. An infinite loop given a
+    // 2,000,000-fuel budget stops
+    // (`python_source_normal_run_captures_stdout` shows the same runtime
+    // completes cleanly under the much larger default budget), so fuel
+    // exhaustion - not a coincidental unrelated trap - is what stopped it.
+    assert_eq!(
+        out.outcome,
+        AfbRunOutcome::OutOfFuel,
+        "an infinite loop under a small fuel budget must report the fuel bound"
+    );
+    assert_eq!(
+        out.fuel_used, 2_000_000,
+        "an exhausted budget was spent in full, so that is what is reported"
+    );
 }
 
 #[test]

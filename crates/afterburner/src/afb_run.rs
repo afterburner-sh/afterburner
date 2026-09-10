@@ -9,8 +9,9 @@
 //! hence plain text rather than a doc link here) is the CLI's
 //! entry point: it takes a `&Cli`, writes to the process's real stdout, and
 //! calls `std::process::exit` on a non-zero guest exit. None of that is
-//! usable from inside a host process that embeds Afterburner (gents' pack-tool
-//! executor is the motivating case): a library caller needs to hand over
+//! usable from inside a host process that embeds Afterburner (a host that
+//! runs admitted plugins in-process is the motivating case): a library
+//! caller needs to hand over
 //! bytes, get bytes back, and be told *which* bound was hit, without its own
 //! stdout getting the guest's output spliced into it and without its own
 //! process getting killed by a guest that happened to exit non-zero.
@@ -71,8 +72,8 @@
 //!
 //! `AfbRunRequest`'s bounds are fully enforced for the compiled-WASM,
 //! compiled-Ruby, Python-source, and Python-compiled families - every field:
-//! `stdin`, `fuel`, `memory_bytes`, the manifold's `env`, and (compiled-WASM
-//! / compiled-Ruby only) `timeout` and the manifold's read-only `fs`. A
+//! `stdin`, `fuel`, `memory_bytes`, `timeout`, and the manifold's `env`,
+//! plus (every family but Python) the manifold's read-only `fs`. A
 //! request for a bound a path does not enforce is refused outright
 //! ([`AfterburnerError::Engine`], naming the language and the missing
 //! bound(s)) rather than silently running with less containment than asked
@@ -85,23 +86,14 @@
 //!   all (Ruby-source): granting read-write when the caller asked for
 //!   read-only would widen the ceiling, which is never acceptable, so the
 //!   narrower grant is refused rather than silently broadened.
-//! - Python (both shapes) refuses `timeout`: `pyodide_runner`'s engine does
-//!   not run with wasmtime epoch interruption enabled, so there is no
-//!   mechanism to enforce a wall-clock deadline there today - see
-//!   `pyodide_runner`'s own module doc for why threading that through is a
-//!   separate, larger change than the fuel/memory/stdin/env wiring this
-//!   round did.
-//! - Python (both shapes): `fuel` and `memory_bytes` ARE enforced - the
-//!   guest genuinely cannot exceed either - but the *outcome* does not
-//!   always say which one fired. `memory_bytes` does: a denied
-//!   `memory.grow` sets `PyodideRunOutput::memory_limit_hit`, which
-//!   [`finish_pyodide`] reads and reports as `OutOfMemory`. `fuel` does
-//!   not: `pyodide_runner`'s trap handling formats the underlying error
-//!   with `{e}` (anyhow's top-level message only; the `Trap::OutOfFuel`
-//!   cause needs `.chain()`, which nothing here calls), so a fuel-exhausted
-//!   run comes back as `Trapped` with a message that does not name fuel,
-//!   and `fuel_used` stays `0` rather than the budget spent. Real
-//!   containment, imprecise reporting - not a safety gap, a diagnostics one.
+//! - Python (both shapes) enforces `timeout` as a real preemption:
+//!   `pyodide_runner` boots on
+//!   [`shared_epoch_vm`][afterburner_wasi::embedder_vm::shared_epoch_vm]'s
+//!   epoch-enabled engine and sets a store deadline that covers booting
+//!   CPython as well as the guest's own code. Booting is time the caller
+//!   waited, so it counts against the wall clock the caller asked for; a
+//!   Python `timeout` therefore has to be generous enough to boot the
+//!   interpreter (order of a second warm) or every run reports `Timeout`.
 //! - Ruby-source refuses `stdin`, `fuel`, `memory_bytes`, and any non-sealed
 //!   `manifold.fs`/`manifold.env`: `ruby_runner`'s package runner was not
 //!   extended with the equivalent of `pyodide_runner::PyodideRunBounds` this
@@ -156,8 +148,8 @@ pub struct AfbRunRequest {
     /// Bytes delivered to the guest on stdin (fd 0). Always wired as an open
     /// pipe (even when empty, which reads as immediate EOF, not a closed
     /// fd) - see [`WasiCommandOpts::stdin`][afterburner_wasi::embedder_vm::WasiCommandOpts::stdin].
-    /// Not delivered to a Ruby- or Python-source guest; see the module doc's
-    /// "known gaps".
+    /// Not delivered to a Ruby-source guest, which refuses it rather than
+    /// dropping it; see the module doc's "known gaps".
     pub stdin: Vec<u8>,
     /// Extra argv entries appended after the synthetic program name
     /// (the package's `namespace/name`). Not honored by the Ruby- or
@@ -169,16 +161,15 @@ pub struct AfbRunRequest {
     /// preview-1 equivalent (see the module doc). Never widened beyond what
     /// is passed here.
     pub manifold: Manifold,
-    /// Instruction budget. `None` uses the engine's own default for the
-    /// compiled-WASM and compiled-Ruby families. For Ruby-source and
-    /// Python-source, this can only ever come out *smaller than or equal to*
-    /// each runner's fixed internal budget today (see the module doc's
-    /// "known gaps") - it is read as an informational hint there, not
-    /// enforced as a ceiling, because neither runner exposes an override.
+    /// Instruction budget. `None` uses each family's own default. Enforced
+    /// everywhere but Ruby-source, whose runner exposes no override and so
+    /// refuses a `fuel` request rather than accepting one it cannot apply
+    /// (see the module doc's "known gaps").
     pub fuel: Option<u64>,
-    /// Linear-memory cap in bytes for a WASI command guest (compiled
-    /// languages, compiled Ruby only - see the module doc). `None` applies
-    /// no cap.
+    /// Linear-memory cap in bytes, enforced on every `memory.grow` by the
+    /// same `TrackedLimits` bookkeeping for a WASI command guest (compiled
+    /// languages, compiled Ruby) and for Python (both shapes). Ruby-source
+    /// refuses it. `None` applies no cap.
     pub memory_bytes: Option<u64>,
     /// Wall-clock deadline for the whole run, enforced by wasmtime epoch
     /// interruption (see
@@ -198,12 +189,13 @@ pub struct AfbRunRequest {
     /// not on every instruction) - this is not millisecond-precise, only
     /// millisecond-bounded.
     ///
-    /// Only enforced for the compiled-WASM and compiled-Ruby families
-    /// (both run through [`EmbedderVm`][afterburner_wasi::embedder_vm::EmbedderVm]).
-    /// Ruby-source, Python-source, and compiled Python cannot honor a
-    /// timeout today (their runners build their own engine without epoch
-    /// interruption) and refuse rather than silently ignore it - see the
-    /// module doc's "known gaps".
+    /// Enforced for every family but Ruby-source: the compiled-WASM and
+    /// compiled-Ruby families run through
+    /// [`EmbedderVm`][afterburner_wasi::embedder_vm::EmbedderVm], and both
+    /// Python shapes boot on the same shared epoch engine (where the
+    /// deadline also covers booting CPython, which is time the caller
+    /// waited). Ruby-source refuses a timeout rather than silently ignoring
+    /// it - see the module doc's "known gaps".
     pub timeout: Option<Duration>,
 }
 
@@ -436,22 +428,86 @@ fn run_ruby_wasm(afb: &Afb, request: AfbRunRequest) -> Result<AfbRunOutput> {
     Ok(finish(raw))
 }
 
-/// Which of `AfbRunRequest`'s bound axes a dispatch path actually enforces.
-/// `args` is not a bound (no security/resource meaning) and is never
+/// Which of [`AfbRunRequest`]'s bound axes a given artifact's dispatch path
+/// actually enforces.
+///
+/// `args` is not a bound (no security or resource meaning) and is never
 /// checked. `manifold_fs_ro` and `manifold_fs_rw` are separate: granting
 /// read-write when the caller asked for read-only would widen the ceiling,
 /// so a path that can only offer read-write must refuse a
 /// `FsAccess::ReadOnly` request even when it can honor `FsAccess::ReadWrite`.
-#[derive(Default)]
-struct SupportedBounds {
-    stdin: bool,
-    fuel: bool,
-    memory_bytes: bool,
-    manifold_fs_ro: bool,
-    manifold_fs_rw: bool,
-    manifold_env: bool,
-    timeout: bool,
+///
+/// Public because a caller that admits artifacts (a host deciding whether to
+/// accept a plugin, for instance) has to decide *before* running whether this
+/// artifact can be
+/// contained, and the only alternative is re-deriving this table by hand
+/// from the language and runtime target. That copy drifts: it already did
+/// once, refusing Python after Python's bounds had been wired. One table,
+/// asked rather than reproduced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SupportedBounds {
+    pub stdin: bool,
+    pub fuel: bool,
+    pub memory_bytes: bool,
+    pub manifold_fs_ro: bool,
+    pub manifold_fs_rw: bool,
+    pub manifold_env: bool,
+    pub timeout: bool,
 }
+
+/// What the dispatch path for these `.afb` bytes can enforce.
+///
+/// The same decision `run_afb_bytes` makes internally, exposed so an
+/// admitting caller reaches the identical answer instead of guessing from
+/// the manifest.
+pub fn supported_bounds(afb: &[u8]) -> Result<SupportedBounds> {
+    let parsed = Afb::from_bytes(afb)
+        .map_err(|error| AfterburnerError::Engine(format!("reading the .afb: {error}")))?;
+    Ok(bounds_for(&parsed))
+}
+
+/// [`supported_bounds`] for an already-parsed package.
+pub fn bounds_for(afb: &Afb) -> SupportedBounds {
+    let target = afb.manifest.runtime.target.as_deref().unwrap_or("");
+    if target == afterburner_wasi::pyodide_runner::RUNTIME_TARGET {
+        return PYTHON_BOUNDS;
+    }
+    match afb.manifest.package.language.to_ascii_lowercase().as_str() {
+        "python" | "py" => PYTHON_BOUNDS,
+        // Ruby source runs on the bundled interpreter, which wires none of
+        // these; compiled Ruby is an ordinary WASI command and gets all of
+        // them.
+        "ruby" | "rb" if target != RUBY_WASM_RUNTIME_TARGET => SupportedBounds::default(),
+        _ => WASM_BOUNDS,
+    }
+}
+
+/// What the Pyodide path enforces: everything except `manifold_fs_ro`, and
+/// that one only because a read-only grant cannot be honoured there without
+/// silently widening it to read-write. `timeout` is real: that path boots on
+/// [`shared_epoch_vm`][afterburner_wasi::embedder_vm::shared_epoch_vm]'s
+/// epoch-enabled engine and sets a store deadline covering boot and guest
+/// code alike.
+const PYTHON_BOUNDS: SupportedBounds = SupportedBounds {
+    stdin: true,
+    fuel: true,
+    memory_bytes: true,
+    manifold_fs_ro: false,
+    manifold_fs_rw: true,
+    manifold_env: true,
+    timeout: true,
+};
+
+/// What an ordinary WASI command enforces: everything.
+const WASM_BOUNDS: SupportedBounds = SupportedBounds {
+    stdin: true,
+    fuel: true,
+    memory_bytes: true,
+    manifold_fs_ro: true,
+    manifold_fs_rw: true,
+    manifold_env: true,
+    timeout: true,
+};
 
 /// Refuse `request` outright if it asks for a bound `language`'s dispatch
 /// path does not enforce, rather than silently running with less
@@ -589,19 +645,7 @@ fn python_bounds(
     language: &str,
     request: AfbRunRequest,
 ) -> Result<afterburner_wasi::pyodide_runner::PyodideRunBounds> {
-    refuse_unsupported(
-        language,
-        &request,
-        SupportedBounds {
-            stdin: true,
-            fuel: true,
-            memory_bytes: true,
-            manifold_fs_ro: false,
-            manifold_fs_rw: true,
-            manifold_env: true,
-            timeout: false,
-        },
-    )?;
+    refuse_unsupported(language, &request, PYTHON_BOUNDS)?;
 
     let AfbRunRequest {
         stdin,
@@ -609,7 +653,7 @@ fn python_bounds(
         manifold,
         fuel,
         memory_bytes,
-        timeout: _,
+        timeout,
     } = request;
 
     let rw_preopens = match manifold.fs {
@@ -637,7 +681,33 @@ fn python_bounds(
         max_memory_bytes: memory_bytes.map(|b| b as usize),
         env,
         rw_preopens,
+        timeout,
     })
+}
+
+/// Classify a failed Python run. A bound that fired is its own outcome, not
+/// a trap: `pyodide_runner` names fuel exhaustion and the epoch deadline
+/// specifically (see its `guest_trap`), so this reports them as such and
+/// keeps `Trapped` for what is genuinely a crash. Shared by both Python
+/// entry points rather than written twice.
+fn finish_pyodide_error(error: AfterburnerError, fuel: Option<u64>) -> AfbRunOutput {
+    let outcome = match &error {
+        AfterburnerError::FuelExhausted => AfbRunOutcome::OutOfFuel,
+        AfterburnerError::Timeout => AfbRunOutcome::Timeout,
+        _ => AfbRunOutcome::Trapped(error.to_string()),
+    };
+    AfbRunOutput {
+        outcome,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        // Fuel spent is unknowable once the store is gone; report the budget
+        // for an exhausted one (all of it was spent, by definition) and 0
+        // otherwise rather than inventing a number.
+        fuel_used: match &error {
+            AfterburnerError::FuelExhausted => fuel.unwrap_or(0),
+            _ => 0,
+        },
+    }
 }
 
 /// Classify a [`PyodideRunOutput`][afterburner_wasi::pyodide_runner::PyodideRunOutput]
@@ -662,10 +732,9 @@ fn finish_pyodide(out: afterburner_wasi::pyodide_runner::PyodideRunOutput) -> Af
 
 /// Python, source: run on the bundled CPython/Pyodide interpreter via
 /// [`afterburner_wasi::pyodide_runner::run_pyodide_package_bounded`], the
-/// bounded sibling of the function `cli::run::run_python_afb` calls. A trap
-/// (including hitting a caller-supplied `fuel` ceiling) always classifies as
-/// `Trapped` rather than `OutOfFuel` - see the module doc's "known gaps" for
-/// why.
+/// bounded sibling of the function `cli::run::run_python_afb` calls. A bound
+/// that fires is reported as itself ([`finish_pyodide_error`]); `Trapped` is
+/// kept for a genuine crash.
 fn run_python_source(afb: &Afb, request: AfbRunRequest) -> Result<AfbRunOutput> {
     use afterburner_wasi::pyodide_runner::{
         PyPackage, resolve_runtime, run_pyodide_package_bounded,
@@ -698,14 +767,10 @@ fn run_python_source(afb: &Afb, request: AfbRunRequest) -> Result<AfbRunOutput> 
 
     let rt = resolve_runtime()?;
 
+    let fuel = bounds.fuel;
     match run_pyodide_package_bounded(&rt, entry_source, &pkg, bounds) {
         Ok(out) => Ok(finish_pyodide(out)),
-        Err(e) => Ok(AfbRunOutput {
-            outcome: AfbRunOutcome::Trapped(e.to_string()),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            fuel_used: 0,
-        }),
+        Err(e) => Ok(finish_pyodide_error(e, fuel)),
     }
 }
 
@@ -742,17 +807,13 @@ fn run_python_wasm(afb: &Afb, request: AfbRunRequest) -> Result<AfbRunOutput> {
         vendor_pip_wheels: pip_wheel_bytes,
     };
 
+    let fuel = bounds.fuel;
     let run_result = run_pyodide_package_bounded(&rt, entry_source, &pkg, bounds);
     let _ = std::fs::remove_dir_all(&tmp_root);
 
     match run_result {
         Ok(out) => Ok(finish_pyodide(out)),
-        Err(e) => Ok(AfbRunOutput {
-            outcome: AfbRunOutcome::Trapped(e.to_string()),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            fuel_used: 0,
-        }),
+        Err(e) => Ok(finish_pyodide_error(e, fuel)),
     }
 }
 

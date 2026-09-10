@@ -142,8 +142,8 @@ flow = ["dep:afterburner-flow", "wasm"]
 daemon = ["wasm", "afterburner-wasi/daemon"]
 # `run_afb_bytes` - run one `.afb` to completion as a bounded, captured
 # one-shot (fuel/memory/timeout, stdin/stdout/stderr, no manifold widening).
-# For EMBEDDERS (gents' pack-tool executor is the motivating case) that need
-# to run a package without the `bin` CLI deps. Pulls in the lean
+# For EMBEDDERS (a host that runs admitted plugins in-process is the
+# motivating case) that need to run a package without the `bin` CLI deps. Pulls in the lean
 # `afterburner-afb` pack/unpack crate (not `afterburner-cloud`, which `bin`
 # pulls in for the registry client) alongside `wasm`.
 afb-run = ["wasm", "dep:afterburner-afb"]
