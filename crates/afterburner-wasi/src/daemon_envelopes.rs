@@ -14,7 +14,8 @@
 //! pool's per-shard event loops can use the same converters without
 //! a `cli`-crate dependency. cli/daemon.rs re-uses these from here.
 
-use crate::daemon_http::DaemonEvent;
+use crate::daemon_http::{DaemonEvent, ReplyEnvelope};
+use crate::daemon_runtime_native::NativeListenSpec;
 use crate::daemon_workers::WorkerEvent;
 use std::collections::BTreeMap;
 
@@ -454,6 +455,80 @@ pub fn unix_event_to_envelope(
         // the JS path doesn't use unix SOCK_DGRAM.
         _ => (serde_json::json!({"kind": "unix-unknown"}), None),
     }
+}
+
+/// Parse an `afterburner_daemon_init` response
+/// (`{"listen":[{"port":N},...]}` or `{"error":"message"}`) into the ports
+/// a native daemon guest wants the host to bind. See
+/// `docs/wasi-daemon-abi.md`'s "How the guest asks the host to listen" -
+/// there is no `.listen()` host import in the native ABI; the guest
+/// declares intent here instead. An absent or empty `listen` array is not
+/// an error: it mirrors a JS script with no `.listen()` call, and the CLI
+/// exits cleanly after init rather than entering the daemon loop.
+pub fn parse_native_init_response(bytes: &[u8]) -> Result<Vec<NativeListenSpec>, String> {
+    let v: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| format!("daemon-init response: invalid JSON: {e}"))?;
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        return Err(err.to_string());
+    }
+    let listen = v
+        .get("listen")
+        .and_then(|l| l.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut specs = Vec::with_capacity(listen.len());
+    for entry in &listen {
+        let port = entry.get("port").and_then(|p| p.as_u64()).ok_or_else(|| {
+            format!("daemon-init response: listen entry missing numeric \"port\": {entry}")
+        })?;
+        let port: u16 = port
+            .try_into()
+            .map_err(|_| format!("daemon-init response: port {port} is out of range (0-65535)"))?;
+        specs.push(NativeListenSpec { port });
+    }
+    Ok(specs)
+}
+
+/// Parse an `afterburner_daemon_dispatch` response
+/// (`{"status":N,"headers":{...},"body_b64":"..."}`) into the same
+/// [`ReplyEnvelope`] the JS path's `__host_http_reply` deserializes into -
+/// one response type for both daemon flavors. `status` defaults to 200 and
+/// `body_b64` to empty when absent, so a minimal `{}` response is a valid
+/// empty 200. `body_b64` (not JS's dual `body`/`body_b64` pair) is the
+/// single binary-safe encoding every target language's standard library
+/// can produce; see `docs/wasi-daemon-abi.md`.
+pub fn parse_native_dispatch_response(bytes: &[u8]) -> Result<ReplyEnvelope, String> {
+    use base64::Engine as _;
+
+    let v: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| format!("daemon-dispatch response: invalid JSON: {e}"))?;
+    let status: u16 = v
+        .get("status")
+        .and_then(|s| s.as_u64())
+        .unwrap_or(200)
+        .try_into()
+        .map_err(|_| {
+            "daemon-dispatch response: \"status\" is out of range (0-65535)".to_string()
+        })?;
+    let mut headers = Vec::new();
+    if let Some(obj) = v.get("headers").and_then(|h| h.as_object()) {
+        for (k, val) in obj {
+            if let Some(s) = val.as_str() {
+                headers.push((k.clone(), s.to_string()));
+            }
+        }
+    }
+    let body = match v.get("body_b64").and_then(|b| b.as_str()) {
+        Some(b64) => base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("daemon-dispatch response: invalid body_b64: {e}"))?,
+        None => Vec::new(),
+    };
+    Ok(ReplyEnvelope {
+        status,
+        headers,
+        body,
+    })
 }
 
 /// Format an `Option<SocketAddr>` as the JSON object the `net.Socket`

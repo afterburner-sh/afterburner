@@ -283,14 +283,24 @@ fn run_wasm_afb(
             )
         })?;
 
+    let mut args = vec![afb_path.to_string_lossy().into_owned()];
+    args.extend_from_slice(user_args);
+    let opts = WasiCommandOpts::new().args(args);
+
+    // Daemon-shaped native guest (see docs/wasi-daemon-abi.md): a module
+    // exporting the full `afterburner_daemon_*` ABI runs through the
+    // native daemon driver instead of one-shot `run_command`. A plain
+    // command module (the overwhelming majority - including every
+    // precompiled JS/TS `.afb`, which never exports this ABI) is
+    // classified `OneShot` and falls straight through, unchanged.
+    if try_run_native_daemon(wasm_bytes, &opts)? {
+        return Ok(());
+    }
+
     let vm = EmbedderVm::new().context("creating EmbedderVm")?;
     let module = vm
         .compile(wasm_bytes, true, |_| Ok(()))
         .context("compiling WASM module")?;
-
-    let mut args = vec![afb_path.to_string_lossy().into_owned()];
-    args.extend_from_slice(user_args);
-    let opts = WasiCommandOpts::new().args(args);
 
     let output = vm
         .run_command(&module, opts, None)
@@ -908,15 +918,22 @@ fn run_ruby_source(path: &Path, _user_args: &[String]) -> Result<()> {
 fn run_wasm_bytes(cli: &Cli, path: &Path, wasm_bytes: &[u8], user_args: &[String]) -> Result<()> {
     use afterburner_wasi::embedder_vm::EmbedderVm;
 
-    let vm = EmbedderVm::new().context("creating EmbedderVm")?;
-    let module = vm
-        .compile(wasm_bytes, true, |_| Ok(()))
-        .context("compiling WASM module")?;
-
     let mut argv = vec![path.to_string_lossy().into_owned()];
     argv.extend_from_slice(user_args);
 
     let opts = wasi_opts_from_cli(cli, WasiCommandOpts::new().args(argv));
+
+    // Daemon-shaped native guest (see docs/wasi-daemon-abi.md) - see the
+    // identical branch in `run_wasm_afb` for why this is a probe-then-branch
+    // rather than a manifest field or CLI flag.
+    if try_run_native_daemon(wasm_bytes, &opts)? {
+        return Ok(());
+    }
+
+    let vm = EmbedderVm::new().context("creating EmbedderVm")?;
+    let module = vm
+        .compile(wasm_bytes, true, |_| Ok(()))
+        .context("compiling WASM module")?;
 
     let output = vm
         .run_command(&module, opts, None)
@@ -934,6 +951,31 @@ fn run_wasm_bytes(cli: &Cli, path: &Path, wasm_bytes: &[u8], user_args: &[String
         std::process::exit(exit_code);
     }
     Ok(())
+}
+
+/// Probe `wasm_bytes` for the native daemon ABI (`docs/wasi-daemon-abi.md`)
+/// and, if it is daemon-shaped, run it to completion via
+/// `daemon_native::execute` - `opts` is passed through unchanged, so a
+/// daemon guest gets exactly the same capability grants a one-shot run of
+/// the same module would. Returns `Ok(true)` when the module was a daemon
+/// (the caller should return immediately) or `Ok(false)` when it is a
+/// plain one-shot WASI command (the caller continues to
+/// `EmbedderVm::run_command` unchanged). A partially-shaped module (some
+/// but not all four required exports) is a hard error naming exactly
+/// what's wrong - never a silent one-shot fallback that would leave an
+/// author wondering why their "server" printed nothing and exited.
+#[cfg(feature = "wasm")]
+fn try_run_native_daemon(wasm_bytes: &[u8], opts: &WasiCommandOpts) -> Result<bool> {
+    use afterburner_wasi::daemon_runtime_native::{NativeDaemonShape, probe};
+
+    match probe(wasm_bytes).context("probing native module for the daemon ABI")? {
+        NativeDaemonShape::OneShot => Ok(false),
+        NativeDaemonShape::Malformed(reason) => anyhow::bail!(reason),
+        NativeDaemonShape::Daemon => {
+            super::daemon_native::execute(wasm_bytes, opts.clone())?;
+            Ok(true)
+        }
+    }
 }
 
 /// Build `WasiCommandOpts` capability grants from the CLI sandbox flags.

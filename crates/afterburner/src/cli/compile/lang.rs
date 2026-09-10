@@ -27,7 +27,7 @@
 
 use super::cc;
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 /// Source language declared in `[package] language`.
@@ -193,7 +193,15 @@ fn preflight_rust() -> Result<()> {
 
 /// Preflight the Go toolchain before a compile: `go` must run and be >= 1.21
 /// (the first release with the `wasip1` port). Actionable error up front.
-fn preflight_go() -> Result<()> {
+///
+/// `wants_wasmexport` additionally raises the floor to Go >= 1.24: that is
+/// the first release supporting `//go:wasmexport` (see
+/// `docs/wasi-daemon-abi.md`), the only way Go has to export a
+/// repeatedly-callable function to a wasip1 host, so a daemon-shaped Go
+/// package on an older Go otherwise fails with whatever cryptic error the
+/// compiler gives for an unrecognized directive comment - this check turns
+/// that into a precise, actionable message naming the real requirement.
+fn preflight_go(wants_wasmexport: bool) -> Result<()> {
     let go = std::env::var("GO").unwrap_or_else(|_| "go".into());
     let out = std::process::Command::new(&go)
         .arg("version")
@@ -214,7 +222,8 @@ fn preflight_go() -> Result<()> {
         );
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    if let Some((major, minor)) = parse_go_minor(&text)
+    let parsed = parse_go_minor(&text);
+    if let Some((major, minor)) = parsed
         && (major, minor) < (1, 21)
     {
         anyhow::bail!(
@@ -222,7 +231,52 @@ fn preflight_go() -> Result<()> {
              in Go 1.21). Upgrade to Go 1.21 or newer: https://go.dev/dl"
         );
     }
+    if wants_wasmexport
+        && let Some((major, minor)) = parsed
+        && (major, minor) < (1, 24)
+    {
+        anyhow::bail!(
+            "this package uses //go:wasmexport (required for burn's daemon mode - see \
+             docs/wasi-daemon-abi.md), which needs Go 1.24 or newer; you have Go \
+             {major}.{minor}. Upgrade to Go 1.24 or newer: https://go.dev/dl"
+        );
+    }
     Ok(())
+}
+
+/// Whether any `.go` file among `paths` contains a `//go:wasmexport`
+/// directive comment - the signal that this Go source targets burn's
+/// native daemon ABI and needs the stricter Go >= 1.24 floor. A plain
+/// substring scan (not a real Go parser) is deliberately enough: the
+/// directive is only meaningful as its own comment line to the Go
+/// compiler, so a false positive here would only ever over-strengthen the
+/// version floor, never under-strengthen it.
+fn go_wants_wasmexport(paths: &[PathBuf]) -> bool {
+    paths
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "go"))
+        .any(|p| std::fs::read_to_string(p).is_ok_and(|text| text.contains("//go:wasmexport")))
+}
+
+/// Recursively collect every `.go` file under `dir` (best-effort; read
+/// errors are skipped rather than failing the scan - `preflight_go`'s
+/// wasmexport check is advisory and a missing scan result just means the
+/// stricter floor isn't applied, leaving the normal compile error as the
+/// fallback).
+fn collect_go_sources(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(collect_go_sources(&path));
+        } else if path.extension().is_some_and(|e| e == "go") {
+            out.push(path);
+        }
+    }
+    out
 }
 
 /// Parse the `go1.NN.P` token from `go version` output into `(major, minor)`.
@@ -463,20 +517,25 @@ fn read_cargo_package_name(dir: &Path) -> Option<String> {
 /// `entry` from `afb.toml` is treated as the go source file if it has a
 /// `.go` extension, otherwise the `pkg_dir` itself is passed (whole package).
 fn compile_go(pkg_dir: &Path, entry: &str) -> Result<Vec<u8>> {
-    preflight_go()?;
+    // If the entry file is a single .go file, pass it directly; otherwise
+    // build the whole package directory.
+    let source_path = pkg_dir.join(entry);
+    let is_single_file = source_path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("go"))
+        && source_path.exists();
+    let scan_paths = if is_single_file {
+        vec![source_path.clone()]
+    } else {
+        collect_go_sources(pkg_dir)
+    };
+    preflight_go(go_wants_wasmexport(&scan_paths))?;
     let go = std::env::var("GO").unwrap_or_else(|_| "go".into());
 
     // Output to a temp file in the package dir so relative imports work.
     let wasm_out = std::env::temp_dir().join(format!("burn-go-{}.wasm", std::process::id()));
 
-    // If the entry file is a single .go file, pass it directly; otherwise
-    // build the whole package directory.
-    let source_path = pkg_dir.join(entry);
-    let build_target: String = if source_path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("go"))
-        && source_path.exists()
-    {
+    let build_target: String = if is_single_file {
         source_path.to_string_lossy().into_owned()
     } else {
         // Build the module/package directory.

@@ -22,6 +22,7 @@ mod bundle_progress;
 mod check;
 pub mod compile;
 mod daemon;
+mod daemon_native;
 mod manifold;
 mod passthrough;
 pub mod registry;

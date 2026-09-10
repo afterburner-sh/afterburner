@@ -19,10 +19,12 @@ worker/dist/
 worker/.wrangler/
 # docs/ is generated/working notes — gitignored. We carve out only
 # the WIT manifest tree (consumed by the abi_parity drift gate test
-# in CI). Everything else under docs/ stays out of git.
+# in CI) and specific design docs worth keeping in-tree. Everything
+# else under docs/ stays out of git.
 docs/**
 !docs/wit/
 !docs/wit/**
+!docs/wasi-daemon-abi.md
 
 # process.report.writeReport() artifacts dropped in cwd by tests.
 report.*.json
