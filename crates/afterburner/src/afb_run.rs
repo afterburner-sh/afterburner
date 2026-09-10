@@ -498,6 +498,54 @@ const PYTHON_BOUNDS: SupportedBounds = SupportedBounds {
     timeout: true,
 };
 
+/// What a guest spends before a line of its own code runs.
+///
+/// A bound below one of these is not a bound at all: the run fails during
+/// startup, the guest's own code never executes, and the ceiling never
+/// bounds the thing it was meant to bound. A caller that hands an artifact
+/// a default budget needs these to decide whether that default can host it,
+/// rather than discovering it as a trap on the first call, after admission
+/// has already said yes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupFloor {
+    /// Linear memory the runtime declares before it can instantiate.
+    pub memory_bytes: u64,
+    /// Instructions the runtime spends getting to the guest's entry point.
+    pub fuel: u64,
+}
+
+/// What a Pyodide-backed artifact spends on startup.
+///
+/// CPython's linear memory declares a minimum of 1047 pages (about 68 MiB)
+/// before it can instantiate, and it allocates its heap on top of that;
+/// 256 MiB is the working figure. The fuel is
+/// [`PYODIDE_FUEL`][afterburner_wasi::pyodide_runner::PYODIDE_FUEL], the
+/// same budget this module's own Python paths apply when a caller names
+/// none, because that is what booting the interpreter actually costs.
+/// Measured against the bundle `burn compile` emits, not guessed.
+pub const PYTHON_STARTUP_FLOOR: StartupFloor = StartupFloor {
+    memory_bytes: 256 * 1024 * 1024,
+    fuel: afterburner_wasi::pyodide_runner::PYODIDE_FUEL,
+};
+
+/// What this artifact spends on startup, or `None` when there is no floor
+/// worth naming: an ordinary WASI command declares whatever its own module
+/// declares, usually a page or two, and reaches `_start` in almost no
+/// instructions.
+///
+/// Public for the same reason [`bounds_for`] is: one table, asked rather
+/// than reproduced.
+pub fn startup_floor(afb: &Afb) -> Option<StartupFloor> {
+    let target = afb.manifest.runtime.target.as_deref().unwrap_or("");
+    let language = afb.manifest.package.language.to_ascii_lowercase();
+    if target == afterburner_wasi::pyodide_runner::RUNTIME_TARGET
+        || matches!(language.as_str(), "python" | "py")
+    {
+        return Some(PYTHON_STARTUP_FLOOR);
+    }
+    None
+}
+
 /// What an ordinary WASI command enforces: everything.
 const WASM_BOUNDS: SupportedBounds = SupportedBounds {
     stdin: true,

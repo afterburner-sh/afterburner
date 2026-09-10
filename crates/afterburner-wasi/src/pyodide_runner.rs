@@ -52,7 +52,7 @@ use crate::{
 ///
 /// vertexia: global fuel budget; per-phase sub-budgets would let us measure
 /// which init phase consumes the most instructions.
-const PYODIDE_FUEL: u64 = 500_000_000_000;
+pub const PYODIDE_FUEL: u64 = 500_000_000_000;
 
 /// Guest-FS path [`PyodideRunBounds::stdin`] bytes are staged at before the
 /// guest runs; [`run_booted_pyodide`]'s preamble opens this and assigns it

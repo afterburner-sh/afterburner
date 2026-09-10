@@ -1011,6 +1011,11 @@ pub struct BoundedCommandOutput {
 /// let out = vm.run(&module, "run", None).unwrap();
 /// assert_eq!(out.result, 43);
 /// ```
+/// Cheap to clone: an `Engine` is itself a handle, so a clone shares the
+/// same engine (and therefore the same epoch ticker and the same compile
+/// cache) rather than building a second one. That is what lets a caller
+/// take [`shared_epoch_vm`]'s process-wide VM by value.
+#[derive(Clone)]
 pub struct EmbedderVm {
     engine: Engine,
 }
