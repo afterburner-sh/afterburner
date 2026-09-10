@@ -99,7 +99,7 @@ pub struct WasiCommandOpts {
     /// Bytes available to the module on stdin (fd 0). `None` (the default)
     /// leaves stdin closed, exactly as before this field existed. Callers
     /// that pipe a request into a WASI command (a one-shot frame protocol
-    /// over stdin/stdout, e.g. gents-cloud's gent fiber) set this instead
+    /// over stdin/stdout) set this instead
     /// of relying on a preopen, which would grant filesystem access this
     /// module's own manifold may not.
     pub stdin: Option<Vec<u8>>,
@@ -1025,6 +1025,17 @@ impl EmbedderVm {
         Ok(Self {
             engine: deterministic_engine()?,
         })
+    }
+
+    /// The wasmtime engine this VM compiles and runs on.
+    ///
+    /// Exposed so another runner in this crate can share one engine instead
+    /// of building a second: `pyodide_runner` boots CPython on
+    /// [`shared_epoch_vm`]'s engine, which is what gives the Python path a
+    /// real wall-clock bound without a second ticker thread and without a
+    /// second on-disk compile-cache key.
+    pub fn engine(&self) -> &Engine {
+        &self.engine
     }
 
     /// Compile `wasm` (raw `.wasm` bytes or WAT text) into a reusable

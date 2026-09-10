@@ -31,7 +31,7 @@ use wasmtime::{
 };
 
 use crate::{
-    embedder_vm::{EmbedderState, deterministic_engine},
+    embedder_vm::{EPOCH_TICK_PERIOD_MS, EmbedderState, shared_epoch_vm},
     emscripten_dylink::{
         fill_got_table_slots, parse_got_name_to_slot, resolve_self_provided_got_func,
         wire_got_func_stubs_from_module,
@@ -501,6 +501,24 @@ pub struct PyodideRunOutput {
 /// wheels this is the plain stdlib-only boot (byte-identical to the original
 /// basic-Python path).
 ///
+/// Name the bound that actually fired instead of reporting every guest-call
+/// failure as a generic engine error.
+///
+/// Fuel exhaustion and an epoch deadline both reach the host as a
+/// `wasmtime::Trap` carried on the returned error. Collapsing them into
+/// `Engine(..)` would leave a caller unable to tell "the guest spent its
+/// instruction budget" or "the guest outlived its wall clock" apart from a
+/// genuine crash, which is exactly the distinction an embedder running
+/// untrusted code has to report. Every guest call in this module maps
+/// through here, so the two can never answer differently.
+fn guest_trap(context: &str, error: wasmtime::Error) -> AfterburnerError {
+    match error.downcast_ref::<wasmtime::Trap>() {
+        Some(wasmtime::Trap::OutOfFuel) => AfterburnerError::FuelExhausted,
+        Some(wasmtime::Trap::Interrupt) => AfterburnerError::Timeout,
+        _ => AfterburnerError::Engine(format!("{context}: {error}")),
+    }
+}
+
 /// `extra_wheel_bytes` are vendored wheels from a package's `vendor/pip/`
 /// archive members (already loaded into memory by the unpack path). They are
 /// appended to the runtime wheel set and mounted into the same
@@ -513,6 +531,7 @@ fn boot_pyodide_instance(
     extra_wheel_bytes: &[Vec<u8>],
     fuel: u64,
     max_memory_bytes: Option<usize>,
+    timeout: Option<std::time::Duration>,
 ) -> Result<(
     Store<EmbedderState>,
     Instance,
@@ -543,7 +562,13 @@ fn boot_pyodide_instance(
     let name_to_slot = parse_got_name_to_slot(&wasm_bytes, 1);
     let layout = MainModuleLayout::from_main_wasm(&wasm_bytes);
 
-    let engine = deterministic_engine()?;
+    // The process-wide epoch-enabled engine, not a fresh `deterministic_engine`:
+    // identical determinism profile plus `epoch_interruption`, which is what
+    // makes `timeout` a real preemption here rather than a bound this path has
+    // to refuse. One engine for the whole process means one ticker thread and
+    // one compile-cache key, so the expensive CPython compile below is still
+    // done exactly once.
+    let engine = shared_epoch_vm()?.engine().clone();
     // #56/#62: Cranelift-compiling the ~25-34 MiB CPython runtime dominates cold
     // start. Compile it once, persist the artifact as a cwasm next to the wasm,
     // and mmap-deserialize it on every subsequent boot.
@@ -593,6 +618,18 @@ fn boot_pyodide_instance(
         store.data_mut().limits = crate::embedder_vm::TrackedLimits::with_memory_size(max);
         store.limiter(|state: &mut EmbedderState| &mut state.limits);
     }
+    // A deadline is always set, even with no `timeout`: on an epoch-enabled
+    // engine a store's default deadline is 0, already elapsed, so an unset one
+    // would trap on the first check. `u64::MAX / 2` ticks outlives any run.
+    // The deadline covers boot as well as the guest's own code, which is the
+    // honest reading of a wall clock for the call: booting CPython is time the
+    // caller waited.
+    store.set_epoch_deadline(match timeout {
+        Some(d) => (d.as_millis().max(1))
+            .div_ceil(EPOCH_TICK_PERIOD_MS as u128)
+            .max(1) as u64,
+        None => u64::MAX / 2,
+    });
 
     // True for Emscripten 5.0.3 (Pyodide 314+): the module defines and exports
     // its own memory, table, stack pointer, and EH tags, so the host must not
@@ -737,12 +774,12 @@ fn boot_pyodide_instance(
     // Left out of the stdlib-only path to keep it byte-identical to before.
     if any_wheels && let Some(f) = instance.get_func(&mut store, "emscripten_stack_init") {
         f.call(&mut store, &[], &mut [])
-            .map_err(|e| AfterburnerError::Engine(format!("emscripten_stack_init: {e}")))?;
+            .map_err(|e| guest_trap("emscripten_stack_init", e))?;
     }
 
     if let Some(f) = instance.get_func(&mut store, "__wasm_apply_data_relocs") {
         f.call(&mut store, &[], &mut [])
-            .map_err(|e| AfterburnerError::Engine(format!("__wasm_apply_data_relocs: {e}")))?;
+            .map_err(|e| guest_trap("__wasm_apply_data_relocs", e))?;
     }
 
     // Pre-load numpy's core SIDE_MODULE before ctors (CPython's import machinery
@@ -760,7 +797,7 @@ fn boot_pyodide_instance(
 
     if let Some(f) = instance.get_func(&mut store, "__wasm_call_ctors") {
         f.call(&mut store, &[], &mut [])
-            .map_err(|e| AfterburnerError::Engine(format!("__wasm_call_ctors: {e}")))?;
+            .map_err(|e| guest_trap("__wasm_call_ctors", e))?;
     }
 
     Ok((store, instance, got_globals))
@@ -830,7 +867,8 @@ pub fn boot_pyodide(wasm_path: &str, stdlib_zip_path: &str) -> Result<PyodideBoo
         wheels: Vec::new(),
         python_xy: std::env::var("BURN_PYTHON_STDLIB_VER").unwrap_or_else(|_| "3.13".to_owned()),
     };
-    let (store, _instance, _got_globals) = boot_pyodide_instance(&rt, &[], PYODIDE_FUEL, None)?;
+    let (store, _instance, _got_globals) =
+        boot_pyodide_instance(&rt, &[], PYODIDE_FUEL, None, None)?;
     let stdout = store.data().wasi_stdout.clone();
     Ok(PyodideBootOutput { stdout })
 }
@@ -1079,6 +1117,16 @@ pub struct PyodideRunBounds {
     /// identical semantics to [`run_pyodide_with_preopens`]'s own parameter.
     /// Empty = no durable FS access beyond the in-memory FS.
     pub rw_preopens: Vec<(PathBuf, String)>,
+    /// Wall-clock ceiling for the whole session, boot included, enforced by
+    /// wasmtime epoch interruption on the shared epoch engine
+    /// ([`shared_epoch_vm`][crate::embedder_vm::shared_epoch_vm]): a guest
+    /// that runs past it is preempted and the run returns
+    /// [`AfterburnerError::Timeout`], not a partial result. Rounded up to
+    /// the ticker's granularity
+    /// ([`EPOCH_TICK_PERIOD_MS`][crate::embedder_vm::EPOCH_TICK_PERIOD_MS]).
+    /// `None` applies no wall clock; fuel remains the instruction bound
+    /// either way.
+    pub timeout: Option<std::time::Duration>,
 }
 
 /// Boot a resolved [`PyRuntime`], run `python -c <source>`, return stdout + exit
@@ -1198,8 +1246,13 @@ fn run_pyodide_core(
         .map(|p| p.vendor_pip_wheels.as_slice())
         .unwrap_or_default();
     let initial_fuel = bounds.fuel.unwrap_or(PYODIDE_FUEL);
-    let (mut store, instance, _got_globals) =
-        boot_pyodide_instance(rt, vendor_wheels, initial_fuel, bounds.max_memory_bytes)?;
+    let (mut store, instance, _got_globals) = boot_pyodide_instance(
+        rt,
+        vendor_wheels,
+        initial_fuel,
+        bounds.max_memory_bytes,
+        bounds.timeout,
+    )?;
     // Clear any stdout emitted during boot before running user code.
     store.data_mut().wasi_stdout.clear();
     // Install host-FS preopens into the store so the Emscripten FS syscall
@@ -1409,7 +1462,7 @@ fn run_booted_pyodide(
             &[wasmtime::Val::I32(3), wasmtime::Val::I32(argv_ptr)],
             &mut main_ret,
         )
-        .map_err(|e| AfterburnerError::Engine(format!("__main_argc_argv trapped: {e}")))?;
+        .map_err(|e| guest_trap("__main_argc_argv trapped", e))?;
 
     let main_exitcode = match main_ret[0] {
         wasmtime::Val::I32(v) => v,
@@ -1447,7 +1500,7 @@ fn run_booted_pyodide(
     let mut run_ret = [wasmtime::Val::I32(-99)];
     run_fn
         .call(&mut *store, &[], &mut run_ret)
-        .map_err(|e| AfterburnerError::Engine(format!("run_main trapped: {e}")))?;
+        .map_err(|e| guest_trap("run_main trapped", e))?;
 
     let exit_code = match run_ret[0] {
         wasmtime::Val::I32(v) => v,
@@ -1560,7 +1613,7 @@ pub struct WarmPyInterpreter {
 impl WarmPyInterpreter {
     /// Boot + warm an interpreter on `rt`. Pays the full boot + bringup once.
     pub fn boot(rt: &PyRuntime) -> Result<Self> {
-        let (mut store, instance, _got) = boot_pyodide_instance(rt, &[], PYODIDE_FUEL, None)?;
+        let (mut store, instance, _got) = boot_pyodide_instance(rt, &[], PYODIDE_FUEL, None, None)?;
         // Warm once: Py_Initialize + site/stdlib import + install the capture
         // machinery (which then persists for every run below). The `pass`
         // program's own (empty) output is discarded.
@@ -1625,7 +1678,7 @@ impl WarmPyInterpreter {
                 &[wasmtime::Val::I32(self.driver_reset as i32)],
                 &mut ret,
             )
-            .map_err(|e| AfterburnerError::Engine(format!("warm reset trapped: {e}")))?;
+            .map_err(|e| guest_trap("warm reset trapped", e))?;
         Ok(())
     }
 
@@ -1648,9 +1701,7 @@ impl WarmPyInterpreter {
                 &[wasmtime::Val::I32(driver_ptr as i32)],
                 &mut ret,
             )
-            .map_err(|e| {
-                AfterburnerError::Engine(format!("warm PyRun_SimpleString trapped: {e}"))
-            })?;
+            .map_err(|e| guest_trap("warm PyRun_SimpleString trapped", e))?;
         let exit_code = match ret[0] {
             wasmtime::Val::I32(v) => v,
             _ => -99,
@@ -1701,7 +1752,8 @@ fn run_pyodide_with_daemon(
     daemon_dgram_py: std::sync::Arc<crate::daemon_dgram::DaemonDgram>,
     #[cfg(unix)] daemon_unix: std::sync::Arc<crate::daemon_unix::DaemonUnix>,
 ) -> Result<PyodideRunOutput> {
-    let (mut store, instance, _got_globals) = boot_pyodide_instance(rt, &[], PYODIDE_FUEL, None)?;
+    let (mut store, instance, _got_globals) =
+        boot_pyodide_instance(rt, &[], PYODIDE_FUEL, None, None)?;
     store.data_mut().wasi_stdout.clear();
     // Wire the daemon coordinators so socket and pthread shims reach the OS.
     store.data_mut().daemon_net = Some(daemon_net);
