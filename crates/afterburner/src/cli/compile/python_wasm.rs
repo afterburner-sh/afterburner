@@ -52,13 +52,18 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Runtime-target sentinel written into `[runtime] target` so `burn run` can
-/// dispatch to the Pyodide embedder without re-fetching anything.
-pub const RUNTIME_TARGET: &str = "emscripten-pyodide";
-
-/// Archive paths for the bundled interpreter artefacts.
-pub const PYODIDE_WASM_MEMBER: &str = "precompiled/emscripten-pyodide/pyodide.wasm";
-pub const STDLIB_MEMBER: &str = "precompiled/emscripten-pyodide/python_stdlib.zip";
+/// Runtime-target sentinel, the compiled `.afb`'s archive member paths, and
+/// the reader that reconstitutes a `PyRuntime` from them: all live in
+/// `afterburner_wasi::pyodide_runner` now, alongside `PyRuntime` itself and
+/// [`reconstruct_runtime_from_afb`], so a library caller under the `afb-run`
+/// feature (`afterburner::afb_run`) can reach them without the `bin` feature
+/// this module is gated behind. Re-exported here so this module's own
+/// writer code (`bundle_python_afb`, below) and `cli::run`'s existing
+/// `crate::cli::compile::python_wasm::RUNTIME_TARGET` reference keep working
+/// unchanged - one implementation, reached two ways.
+pub use afterburner_wasi::pyodide_runner::{
+    PYODIDE_WASM_MEMBER, RUNTIME_TARGET, STDLIB_MEMBER, reconstruct_runtime_from_afb,
+};
 
 /// Compile a Python package to a self-contained `.afb` bundle.
 ///
@@ -292,92 +297,14 @@ fn bundle_python_afb(
     Ok(())
 }
 
-/// Reconstruct a [`PyRuntime`] from the bundled members of an
-/// `emscripten-pyodide` `.afb`, materializing the wasm and stdlib to a temp
-/// directory so the runner can read them by path.
-///
-/// The caller (run.rs) owns the temp dir lifetime and cleans it up after the
-/// run finishes.
-///
-/// Returns `(PyRuntime, temp_dir_path)` on success. The `PyRuntime.wheels`
-/// field is empty; vendored wheels are returned separately in `pip_wheel_bytes`
-/// because the pyodide runner receives them as in-memory slices, not paths.
-pub fn reconstruct_runtime_from_afb(
-    afb: &Afb,
-    tmp_root: &Path,
-) -> Result<(PyRuntime, Vec<Vec<u8>>)> {
-    // Extract pyodide.wasm.
-    let wasm_bytes = afb.precompiled.get(PYODIDE_WASM_MEMBER).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Python compiled .afb is missing {}; re-run `burn compile`",
-            PYODIDE_WASM_MEMBER
-        )
-    })?;
-
-    let stdlib_bytes = afb.precompiled.get(STDLIB_MEMBER).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Python compiled .afb is missing {}; re-run `burn compile`",
-            STDLIB_MEMBER
-        )
-    })?;
-
-    // Materialize to tmp so PyRuntime (which holds PathBuf) can work.
-    std::fs::create_dir_all(tmp_root)
-        .with_context(|| format!("creating temp dir {}", tmp_root.display()))?;
-    let wasm_path = tmp_root.join("pyodide.wasm");
-    let stdlib_path = tmp_root.join("python_stdlib.zip");
-    std::fs::write(&wasm_path, wasm_bytes)
-        .with_context(|| format!("writing {}", wasm_path.display()))?;
-    std::fs::write(&stdlib_path, stdlib_bytes)
-        .with_context(|| format!("writing {}", stdlib_path.display()))?;
-
-    // Recover python_xy from the embedded metadata field (see bundle_python_afb).
-    let python_xy = afb
-        .manifest
-        .metadata
-        .get("python_xy")
-        .and_then(|v| v.as_str())
-        .unwrap_or("3.13")
-        .to_owned();
-
-    let rt = PyRuntime {
-        wasm_path,
-        stdlib_path,
-        wheels: Vec::new(), // bundled wheels come from vendor/pip/ below
-        python_xy,
-    };
-
-    // Collect vendor/pip/*.whl bytes for the caller to pass as extra wheels.
-    let pip_wheel_bytes: Vec<Vec<u8>> = afb
-        .vendor
-        .iter()
-        .filter(|(k, _)| k.starts_with("vendor/pip/") && k.ends_with(".whl"))
-        .map(|(_, v)| v.clone())
-        .collect();
-
-    Ok((rt, pip_wheel_bytes))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn runtime_target_constant() {
-        assert_eq!(RUNTIME_TARGET, "emscripten-pyodide");
-    }
-
-    #[test]
-    fn pyodide_wasm_member_path() {
-        assert!(PYODIDE_WASM_MEMBER.starts_with("precompiled/"));
-        assert!(PYODIDE_WASM_MEMBER.ends_with(".wasm"));
-    }
-
-    #[test]
-    fn stdlib_member_path() {
-        assert!(STDLIB_MEMBER.starts_with("precompiled/"));
-        assert!(STDLIB_MEMBER.ends_with(".zip"));
-    }
+    // `runtime_target_constant` / `pyodide_wasm_member_path` /
+    // `stdlib_member_path` moved to `afterburner_wasi::pyodide_runner`'s own
+    // test module along with the constants and `reconstruct_runtime_from_afb`
+    // they cover - this module only re-exports them now.
 
     #[test]
     fn pack_files_as_wheel_roundtrips_via_mount_wheel() {

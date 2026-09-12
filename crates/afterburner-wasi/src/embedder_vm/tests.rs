@@ -286,6 +286,134 @@ fn run_command_captures_stderr() {
     assert!(out.stdout.is_empty(), "nothing was written to fd 1");
 }
 
+/// `WasiCommandOpts::stdin` makes bytes available on fd 0: a module that
+/// reads fd 0 and echoes it to fd 1 gets back exactly what was supplied.
+#[test]
+fn run_command_stdin_is_readable_and_echoed() {
+    let vm = EmbedderVm::new().unwrap();
+    let module = vm
+        .compile(
+            &wat(r#"
+              (module
+                (import "wasi_snapshot_preview1" "fd_read"
+                  (func $fd_read (param i32 i32 i32 i32) (result i32)))
+                (import "wasi_snapshot_preview1" "fd_write"
+                  (func $fd_write (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (func (export "_start")
+                  ;; iovec at offset 8: buf=0, buf_len=16
+                  i32.const 8   i32.const 0   i32.store
+                  i32.const 12  i32.const 16  i32.store
+                  ;; fd_read(fd=0, iovs_ptr=8, iovs_len=1, nread_ptr=20)
+                  i32.const 0
+                  i32.const 8
+                  i32.const 1
+                  i32.const 20
+                  call $fd_read
+                  drop
+                  ;; reuse the iovec, buf_len = bytes actually read
+                  i32.const 12  i32.const 20 i32.load  i32.store
+                  ;; fd_write(fd=1, iovs_ptr=8, iovs_len=1, nwritten_ptr=24)
+                  i32.const 1
+                  i32.const 8
+                  i32.const 1
+                  i32.const 24
+                  call $fd_write
+                  drop))
+            "#),
+            true,
+            |_| Ok(()),
+        )
+        .unwrap();
+    let opts = WasiCommandOpts::new().stdin(b"hi".to_vec());
+    let out = vm.run_command(&module, opts, None).unwrap();
+    assert_eq!(out.result, 0, "clean exit");
+    assert_eq!(out.stdout, b"hi", "stdin bytes must round-trip to stdout");
+}
+
+/// The default (`stdin: None`) leaves fd 0 closed: a read returns 0 bytes
+/// (EOF) immediately, exactly as before this field existed.
+#[test]
+fn run_command_without_stdin_reads_as_immediate_eof() {
+    let vm = EmbedderVm::new().unwrap();
+    let module = vm
+        .compile(
+            &wat(r#"
+              (module
+                (import "wasi_snapshot_preview1" "fd_read"
+                  (func $fd_read (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (func (export "_start")
+                  i32.const 8   i32.const 0   i32.store
+                  i32.const 12  i32.const 16  i32.store
+                  i32.const 0
+                  i32.const 8
+                  i32.const 1
+                  i32.const 20
+                  call $fd_read
+                  drop))
+            "#),
+            true,
+            |_| Ok(()),
+        )
+        .unwrap();
+    let out = vm
+        .run_command(&module, WasiCommandOpts::new(), None)
+        .unwrap();
+    assert_eq!(out.result, 0, "clean exit even with no stdin supplied");
+}
+
+/// `WasiCommandOpts::max_memory_bytes` caps linear memory: a `memory.grow`
+/// past the cap is denied (returns `-1`, wasmtime's own convention) instead
+/// of succeeding, and the same module is uncapped by default.
+#[test]
+fn run_command_max_memory_bytes_denies_growth_past_the_cap() {
+    // Attempts to grow by 10 pages (640 KiB) and writes the i32 grow result
+    // (page count on success, -1 on denial) to stdout as 4 little-endian
+    // bytes, so the test can tell success from denial without a typed
+    // export (`run_command`'s `_start` has none).
+    let grow_and_report_wat = wat(r#"
+        (module
+          (import "wasi_snapshot_preview1" "fd_write"
+            (func $fd_write (param i32 i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (func (export "_start")
+            i32.const 0
+            i32.const 10
+            memory.grow
+            i32.store
+            i32.const 8   i32.const 0  i32.store
+            i32.const 12  i32.const 4  i32.store
+            i32.const 1
+            i32.const 8
+            i32.const 1
+            i32.const 16
+            call $fd_write
+            drop))
+    "#);
+    let vm = EmbedderVm::new().unwrap();
+    let module = vm.compile(&grow_and_report_wat, true, |_| Ok(())).unwrap();
+
+    let capped = vm
+        .run_command(
+            &module,
+            WasiCommandOpts::new().max_memory_bytes(64 * 1024),
+            None,
+        )
+        .unwrap();
+    let capped_grow = i32::from_le_bytes(capped.stdout[..4].try_into().unwrap());
+    assert_eq!(capped_grow, -1, "growth past a 1-page cap must be denied");
+
+    let uncapped = vm
+        .run_command(&module, WasiCommandOpts::new(), None)
+        .unwrap();
+    let uncapped_grow = i32::from_le_bytes(uncapped.stdout[..4].try_into().unwrap());
+    assert_eq!(
+        uncapped_grow, 1,
+        "uncapped growth succeeds, returning the previous page count"
+    );
+}
+
 // ---- determinism: same module + fuel -----------------------------------
 
 /// Two calls with value_doubler_wat and host.value=21 must both return 43.

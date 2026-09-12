@@ -33,6 +33,7 @@ pub mod daemon_net_gate;
 #[cfg(feature = "daemon")]
 pub mod daemon_port_claims;
 pub mod daemon_runtime;
+pub mod daemon_runtime_native;
 pub mod daemon_sab;
 #[cfg(feature = "daemon")]
 pub mod daemon_shard_pool;

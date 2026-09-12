@@ -31,7 +31,7 @@ use wasmtime::{
 };
 
 use crate::{
-    embedder_vm::{EmbedderState, deterministic_engine},
+    embedder_vm::{EPOCH_TICK_PERIOD_MS, EmbedderState, shared_epoch_vm},
     emscripten_dylink::{
         fill_got_table_slots, parse_got_name_to_slot, resolve_self_provided_got_func,
         wire_got_func_stubs_from_module,
@@ -52,7 +52,12 @@ use crate::{
 ///
 /// vertexia: global fuel budget; per-phase sub-budgets would let us measure
 /// which init phase consumes the most instructions.
-const PYODIDE_FUEL: u64 = 500_000_000_000;
+pub const PYODIDE_FUEL: u64 = 500_000_000_000;
+
+/// Guest-FS path [`PyodideRunBounds::stdin`] bytes are staged at before the
+/// guest runs; [`run_booted_pyodide`]'s preamble opens this and assigns it
+/// to `sys.stdin` when stdin was requested.
+const STDIN_GUEST_PATH: &str = "/.afb/stdin.bin";
 
 /// Guest mount paths for the Python stdlib, derived from the interpreter's
 /// `X.Y` version (e.g. `"3.14"` -> `/lib/python314.zip` + `/lib/python3.14`).
@@ -152,6 +157,87 @@ pub fn resolve_runtime() -> Result<PyRuntime> {
          Binaryen and re-run with network access."
             .to_owned(),
     ))
+}
+
+/// Runtime-target sentinel `burn compile` writes into `[runtime] target` for
+/// a self-contained compiled Python `.afb`, so `burn run` (and any library
+/// caller) can dispatch to the Pyodide embedder without re-fetching
+/// anything - see [`reconstruct_runtime_from_afb`].
+pub const RUNTIME_TARGET: &str = "emscripten-pyodide";
+
+/// Archive paths of the bundled interpreter artefacts inside a compiled
+/// Python `.afb`'s `precompiled/` member map.
+pub const PYODIDE_WASM_MEMBER: &str = "precompiled/emscripten-pyodide/pyodide.wasm";
+pub const STDLIB_MEMBER: &str = "precompiled/emscripten-pyodide/python_stdlib.zip";
+
+/// Reconstruct a [`PyRuntime`] from the bundled members of an
+/// `emscripten-pyodide` `.afb`, materializing the wasm and stdlib to a temp
+/// directory so the runner can read them by path.
+///
+/// The caller owns the temp dir's lifetime and is responsible for cleaning
+/// it up after the run finishes.
+///
+/// Returns `(PyRuntime, pip_wheel_bytes)` on success. The `PyRuntime.wheels`
+/// field is empty; vendored wheels are returned separately in
+/// `pip_wheel_bytes` because the pyodide runner receives them as in-memory
+/// slices, not paths.
+///
+/// The one implementation: `burn compile`'s writer (`cli::compile::python_wasm`,
+/// behind the `bin` feature) and any library caller (`afb_run`, behind
+/// `afb-run`) both call this - neither re-implements reading the bundle back.
+pub fn reconstruct_runtime_from_afb(
+    afb: &afterburner_afb::Afb,
+    tmp_root: &Path,
+) -> Result<(PyRuntime, Vec<Vec<u8>>)> {
+    let wasm_bytes = afb.precompiled.get(PYODIDE_WASM_MEMBER).ok_or_else(|| {
+        AfterburnerError::Engine(format!(
+            "Python compiled .afb is missing {PYODIDE_WASM_MEMBER}; re-run `burn compile`"
+        ))
+    })?;
+
+    let stdlib_bytes = afb.precompiled.get(STDLIB_MEMBER).ok_or_else(|| {
+        AfterburnerError::Engine(format!(
+            "Python compiled .afb is missing {STDLIB_MEMBER}; re-run `burn compile`"
+        ))
+    })?;
+
+    // Materialize to tmp so PyRuntime (which holds PathBuf) can work.
+    std::fs::create_dir_all(tmp_root).map_err(|e| {
+        AfterburnerError::Engine(format!("creating temp dir {}: {e}", tmp_root.display()))
+    })?;
+    let wasm_path = tmp_root.join("pyodide.wasm");
+    let stdlib_path = tmp_root.join("python_stdlib.zip");
+    std::fs::write(&wasm_path, wasm_bytes)
+        .map_err(|e| AfterburnerError::Engine(format!("writing {}: {e}", wasm_path.display())))?;
+    std::fs::write(&stdlib_path, stdlib_bytes)
+        .map_err(|e| AfterburnerError::Engine(format!("writing {}: {e}", stdlib_path.display())))?;
+
+    // Recover python_xy from the embedded metadata field (see
+    // `cli::compile::python_wasm::bundle_python_afb`).
+    let python_xy = afb
+        .manifest
+        .metadata
+        .get("python_xy")
+        .and_then(|v| v.as_str())
+        .unwrap_or("3.13")
+        .to_owned();
+
+    let rt = PyRuntime {
+        wasm_path,
+        stdlib_path,
+        wheels: Vec::new(), // bundled wheels come from vendor/pip/ below
+        python_xy,
+    };
+
+    // Collect vendor/pip/*.whl bytes for the caller to pass as extra wheels.
+    let pip_wheel_bytes: Vec<Vec<u8>> = afb
+        .vendor
+        .iter()
+        .filter(|(k, _)| k.starts_with("vendor/pip/") && k.ends_with(".whl"))
+        .map(|(_, v)| v.clone())
+        .collect();
+
+    Ok((rt, pip_wheel_bytes))
 }
 
 // ---- wheel + side-module mounting ------------------------------------------
@@ -390,6 +476,14 @@ pub struct PyodideRunOutput {
     /// The program's typed return value (via `__afb_emit__`), or
     /// `Json(Null)` when none was surfaced.
     pub output: OutputValue,
+    /// Wasmtime fuel actually consumed by the run (`PYODIDE_FUEL` minus what
+    /// `Store::get_fuel` reports remaining right after the run returns).
+    pub fuel_consumed: u64,
+    /// Whether [`PyodideRunBounds::max_memory_bytes`] denied at least one
+    /// `memory.grow` during the run (see
+    /// `embedder_vm::TrackedLimits::memory_limit_hit`, the same mechanism).
+    /// Always `false` when no memory cap was configured.
+    pub memory_limit_hit: bool,
 }
 
 // ---- private boot helper ---------------------------------------------------
@@ -407,6 +501,24 @@ pub struct PyodideRunOutput {
 /// wheels this is the plain stdlib-only boot (byte-identical to the original
 /// basic-Python path).
 ///
+/// Name the bound that actually fired instead of reporting every guest-call
+/// failure as a generic engine error.
+///
+/// Fuel exhaustion and an epoch deadline both reach the host as a
+/// `wasmtime::Trap` carried on the returned error. Collapsing them into
+/// `Engine(..)` would leave a caller unable to tell "the guest spent its
+/// instruction budget" or "the guest outlived its wall clock" apart from a
+/// genuine crash, which is exactly the distinction an embedder running
+/// untrusted code has to report. Every guest call in this module maps
+/// through here, so the two can never answer differently.
+fn guest_trap(context: &str, error: wasmtime::Error) -> AfterburnerError {
+    match error.downcast_ref::<wasmtime::Trap>() {
+        Some(wasmtime::Trap::OutOfFuel) => AfterburnerError::FuelExhausted,
+        Some(wasmtime::Trap::Interrupt) => AfterburnerError::Timeout,
+        _ => AfterburnerError::Engine(format!("{context}: {error}")),
+    }
+}
+
 /// `extra_wheel_bytes` are vendored wheels from a package's `vendor/pip/`
 /// archive members (already loaded into memory by the unpack path). They are
 /// appended to the runtime wheel set and mounted into the same
@@ -417,6 +529,9 @@ pub struct PyodideRunOutput {
 fn boot_pyodide_instance(
     rt: &PyRuntime,
     extra_wheel_bytes: &[Vec<u8>],
+    fuel: u64,
+    max_memory_bytes: Option<usize>,
+    timeout: Option<std::time::Duration>,
 ) -> Result<(
     Store<EmbedderState>,
     Instance,
@@ -447,7 +562,13 @@ fn boot_pyodide_instance(
     let name_to_slot = parse_got_name_to_slot(&wasm_bytes, 1);
     let layout = MainModuleLayout::from_main_wasm(&wasm_bytes);
 
-    let engine = deterministic_engine()?;
+    // The process-wide epoch-enabled engine, not a fresh `deterministic_engine`:
+    // identical determinism profile plus `epoch_interruption`, which is what
+    // makes `timeout` a real preemption here rather than a bound this path has
+    // to refuse. One engine for the whole process means one ticker thread and
+    // one compile-cache key, so the expensive CPython compile below is still
+    // done exactly once.
+    let engine = shared_epoch_vm()?.engine().clone();
     // #56/#62: Cranelift-compiling the ~25-34 MiB CPython runtime dominates cold
     // start. Compile it once, persist the artifact as a cwasm next to the wasm,
     // and mmap-deserialize it on every subsequent boot.
@@ -486,8 +607,29 @@ fn boot_pyodide_instance(
 
     let mut store = Store::new(&engine, EmbedderState::for_emscripten());
     store
-        .set_fuel(PYODIDE_FUEL)
+        .set_fuel(fuel)
         .map_err(|e| AfterburnerError::Engine(format!("set_fuel: {e}")))?;
+    // Mirrors the WASI-command path's `EmbedderVm::run_command_raw`: only
+    // wire the limiter when a cap was actually requested, and reuse
+    // `TrackedLimits` (the same "was a memory.grow denied" bookkeeping) so
+    // a caller can tell "the guest hit the memory ceiling" apart from any
+    // other trap, exactly as it can for a WASI command guest.
+    if let Some(max) = max_memory_bytes {
+        store.data_mut().limits = crate::embedder_vm::TrackedLimits::with_memory_size(max);
+        store.limiter(|state: &mut EmbedderState| &mut state.limits);
+    }
+    // A deadline is always set, even with no `timeout`: on an epoch-enabled
+    // engine a store's default deadline is 0, already elapsed, so an unset one
+    // would trap on the first check. `u64::MAX / 2` ticks outlives any run.
+    // The deadline covers boot as well as the guest's own code, which is the
+    // honest reading of a wall clock for the call: booting CPython is time the
+    // caller waited.
+    store.set_epoch_deadline(match timeout {
+        Some(d) => (d.as_millis().max(1))
+            .div_ceil(EPOCH_TICK_PERIOD_MS as u128)
+            .max(1) as u64,
+        None => u64::MAX / 2,
+    });
 
     // True for Emscripten 5.0.3 (Pyodide 314+): the module defines and exports
     // its own memory, table, stack pointer, and EH tags, so the host must not
@@ -632,12 +774,12 @@ fn boot_pyodide_instance(
     // Left out of the stdlib-only path to keep it byte-identical to before.
     if any_wheels && let Some(f) = instance.get_func(&mut store, "emscripten_stack_init") {
         f.call(&mut store, &[], &mut [])
-            .map_err(|e| AfterburnerError::Engine(format!("emscripten_stack_init: {e}")))?;
+            .map_err(|e| guest_trap("emscripten_stack_init", e))?;
     }
 
     if let Some(f) = instance.get_func(&mut store, "__wasm_apply_data_relocs") {
         f.call(&mut store, &[], &mut [])
-            .map_err(|e| AfterburnerError::Engine(format!("__wasm_apply_data_relocs: {e}")))?;
+            .map_err(|e| guest_trap("__wasm_apply_data_relocs", e))?;
     }
 
     // Pre-load numpy's core SIDE_MODULE before ctors (CPython's import machinery
@@ -655,7 +797,7 @@ fn boot_pyodide_instance(
 
     if let Some(f) = instance.get_func(&mut store, "__wasm_call_ctors") {
         f.call(&mut store, &[], &mut [])
-            .map_err(|e| AfterburnerError::Engine(format!("__wasm_call_ctors: {e}")))?;
+            .map_err(|e| guest_trap("__wasm_call_ctors", e))?;
     }
 
     Ok((store, instance, got_globals))
@@ -725,7 +867,8 @@ pub fn boot_pyodide(wasm_path: &str, stdlib_zip_path: &str) -> Result<PyodideBoo
         wheels: Vec::new(),
         python_xy: std::env::var("BURN_PYTHON_STDLIB_VER").unwrap_or_else(|_| "3.13".to_owned()),
     };
-    let (store, _instance, _got_globals) = boot_pyodide_instance(&rt, &[])?;
+    let (store, _instance, _got_globals) =
+        boot_pyodide_instance(&rt, &[], PYODIDE_FUEL, None, None)?;
     let stdout = store.data().wasi_stdout.clone();
     Ok(PyodideBootOutput { stdout })
 }
@@ -942,10 +1085,61 @@ pub struct PyPackage {
     pub vendor_pip_wheels: Vec<Vec<u8>>,
 }
 
+/// Bounds beyond the fixed defaults every other Pyodide entry point in this
+/// file applies: a caller-supplied stdin stream, a caller-supplied fuel
+/// ceiling (replacing the fixed [`PYODIDE_FUEL`] default when set), and a
+/// linear-memory cap enforced the same way the WASI-command path enforces
+/// one (`embedder_vm::TrackedLimits`, via `Store::limiter`).
+///
+/// `Default` is exactly today's existing behaviour: no stdin, `PYODIDE_FUEL`,
+/// no memory cap - every existing call site in this file passes
+/// `PyodideRunBounds::default()` and is unaffected by this type's existence.
+#[derive(Default)]
+pub struct PyodideRunBounds {
+    /// Bytes made available on `sys.stdin` (via a UTF-8 `TextIOWrapper` over
+    /// a file the bytes are staged into before the guest runs - the same
+    /// technique [`run_booted_pyodide`]'s `STDOUT_REDIRECT` already uses for
+    /// `sys.stdout`/`sys.stderr`, applied in the read direction). `None`
+    /// leaves `sys.stdin` exactly as the interpreter boots it - unchanged
+    /// from before this field existed.
+    pub stdin: Option<Vec<u8>>,
+    /// Fuel budget for the whole session (boot + user code), replacing
+    /// [`PYODIDE_FUEL`] when set.
+    pub fuel: Option<u64>,
+    /// Linear-memory cap in bytes. `None` applies no cap.
+    pub max_memory_bytes: Option<usize>,
+    /// Environment variables written into `os.environ` before the guest's
+    /// source runs (`os.environ[key] = value` for each pair, generated as
+    /// Python source - see [`python_str_literal`]). Empty leaves
+    /// `os.environ` exactly as the interpreter boots it.
+    pub env: Vec<(String, String)>,
+    /// Read-write host-filesystem preopens: `(host_path, guest_path)` pairs,
+    /// identical semantics to [`run_pyodide_with_preopens`]'s own parameter.
+    /// Empty = no durable FS access beyond the in-memory FS.
+    pub rw_preopens: Vec<(PathBuf, String)>,
+    /// Wall-clock ceiling for the whole session, boot included, enforced by
+    /// wasmtime epoch interruption on the shared epoch engine
+    /// ([`shared_epoch_vm`][crate::embedder_vm::shared_epoch_vm]): a guest
+    /// that runs past it is preempted and the run returns
+    /// [`AfterburnerError::Timeout`], not a partial result. Rounded up to
+    /// the ticker's granularity
+    /// ([`EPOCH_TICK_PERIOD_MS`][crate::embedder_vm::EPOCH_TICK_PERIOD_MS]).
+    /// `None` applies no wall clock; fuel remains the instruction bound
+    /// either way.
+    pub timeout: Option<std::time::Duration>,
+}
+
 /// Boot a resolved [`PyRuntime`], run `python -c <source>`, return stdout + exit
 /// code. The one canonical run path; the public entry points are thin shims.
 pub fn run_pyodide_with(rt: &PyRuntime, python_source: &str) -> Result<PyodideRunOutput> {
-    run_pyodide_core(rt, python_source, None, &[], None)
+    run_pyodide_core(
+        rt,
+        python_source,
+        None,
+        &[],
+        None,
+        PyodideRunBounds::default(),
+    )
 }
 
 /// Boot a resolved [`PyRuntime`] and run `python -c <source>` with a record/replay
@@ -956,7 +1150,14 @@ pub fn run_pyodide_with_host(
     python_source: &str,
     host_context: std::sync::Arc<dyn afterburner_core::HostContext>,
 ) -> Result<PyodideRunOutput> {
-    run_pyodide_core(rt, python_source, None, &[], Some(host_context))
+    run_pyodide_core(
+        rt,
+        python_source,
+        None,
+        &[],
+        Some(host_context),
+        PyodideRunBounds::default(),
+    )
 }
 
 /// Boot a resolved [`PyRuntime`], run `python -c <source>` with host-filesystem
@@ -975,7 +1176,14 @@ pub fn run_pyodide_with_preopens(
     python_source: &str,
     rw_preopens: &[(std::path::PathBuf, String)],
 ) -> Result<PyodideRunOutput> {
-    run_pyodide_core(rt, python_source, None, rw_preopens, None)
+    run_pyodide_core(
+        rt,
+        python_source,
+        None,
+        rw_preopens,
+        None,
+        PyodideRunBounds::default(),
+    )
 }
 
 /// Run a Python *package* on a resolved [`PyRuntime`]: mount the package's
@@ -992,13 +1200,37 @@ pub fn run_pyodide_package_with(
     entry_source: &str,
     pkg: &PyPackage,
 ) -> Result<PyodideRunOutput> {
-    run_pyodide_core(rt, entry_source, Some(pkg), &[], None)
+    run_pyodide_core(
+        rt,
+        entry_source,
+        Some(pkg),
+        &[],
+        None,
+        PyodideRunBounds::default(),
+    )
+}
+
+/// Like [`run_pyodide_package_with`], but with [`PyodideRunBounds`] applied:
+/// a caller-supplied stdin stream, fuel ceiling, memory cap, and/or
+/// environment variables instead of the fixed defaults every other entry
+/// point in this file uses. The one canonical package-run core
+/// ([`run_pyodide_core`]) is shared, not duplicated - `run_pyodide_package_with`
+/// is now a thin call to this with `PyodideRunBounds::default()`.
+pub fn run_pyodide_package_bounded(
+    rt: &PyRuntime,
+    entry_source: &str,
+    pkg: &PyPackage,
+    bounds: PyodideRunBounds,
+) -> Result<PyodideRunOutput> {
+    let rw_preopens = bounds.rw_preopens.clone();
+    run_pyodide_core(rt, entry_source, Some(pkg), &rw_preopens, None, bounds)
 }
 
 /// Shared boot + run core for [`run_pyodide_with`], [`run_pyodide_with_preopens`],
-/// and [`run_pyodide_package_with`]. Boots the interpreter, optionally mounts a
-/// package's sibling modules into the guest filesystem and prepends its directory
-/// to `sys.path`, installs any rw-preopens into the store state, then runs
+/// [`run_pyodide_package_with`], and [`run_pyodide_package_bounded`]. Boots the
+/// interpreter, optionally mounts a package's sibling modules into the guest
+/// filesystem and prepends its directory to `sys.path`, installs any
+/// rw-preopens into the store state, applies `bounds`, then runs
 /// `python_source` via `-c`.
 fn run_pyodide_core(
     rt: &PyRuntime,
@@ -1006,13 +1238,21 @@ fn run_pyodide_core(
     pkg: Option<&PyPackage>,
     rw_preopens: &[(std::path::PathBuf, String)],
     host_context: Option<std::sync::Arc<dyn afterburner_core::HostContext>>,
+    bounds: PyodideRunBounds,
 ) -> Result<PyodideRunOutput> {
     // Collect vendored wheels from the package (if any) so they are mounted into
     // site-packages during boot, before CPython's import machinery is active.
     let vendor_wheels: &[Vec<u8>] = pkg
         .map(|p| p.vendor_pip_wheels.as_slice())
         .unwrap_or_default();
-    let (mut store, instance, _got_globals) = boot_pyodide_instance(rt, vendor_wheels)?;
+    let initial_fuel = bounds.fuel.unwrap_or(PYODIDE_FUEL);
+    let (mut store, instance, _got_globals) = boot_pyodide_instance(
+        rt,
+        vendor_wheels,
+        initial_fuel,
+        bounds.max_memory_bytes,
+        bounds.timeout,
+    )?;
     // Clear any stdout emitted during boot before running user code.
     store.data_mut().wasi_stdout.clear();
     // Install host-FS preopens into the store so the Emscripten FS syscall
@@ -1038,7 +1278,39 @@ fn run_pyodide_core(
         }
     }
 
-    run_booted_pyodide(python_source, pkg, &mut store, &instance)
+    // Stage the caller's stdin bytes into the guest FS at a fixed path
+    // BEFORE running: `run_booted_pyodide`'s preamble reassigns `sys.stdin`
+    // to a `TextIOWrapper` over this file only when `stdin` is `Some`, so a
+    // run that did not ask for stdin sees the interpreter's own default
+    // (unchanged from before this field existed).
+    if let Some(bytes) = &bounds.stdin {
+        store
+            .data_mut()
+            .fs
+            .insert_file(STDIN_GUEST_PATH, bytes.clone());
+    }
+
+    run_booted_pyodide(
+        python_source,
+        pkg,
+        &mut store,
+        &instance,
+        initial_fuel,
+        bounds.stdin.is_some(),
+        &bounds.env,
+    )
+}
+
+/// Encode `s` as a double-quoted Python string literal. Python and JSON
+/// string-literal escaping agree on every basic escape this needs (`\\`,
+/// `\"`, `\n`, `\r`, `\t`, `\u{XXXX}` for other control bytes), so this is
+/// literally `serde_json`'s string encoder with the surrounding quotes kept -
+/// one implementation, not a hand-rolled Python-specific escaper for what is
+/// the same problem `cli::run::json_string` (JS) already solves, just typed
+/// for this crate's dependency graph (`serde_json` is already a dependency
+/// here; that CLI helper is behind the `bin` feature and unreachable).
+fn python_str_literal(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_owned())
 }
 
 /// Execute `python_source` on a already-booted (post-ctors) interpreter
@@ -1047,11 +1319,22 @@ fn run_pyodide_core(
 ///
 /// Caller is responsible for having already cleared `wasi_stdout`, installed
 /// rw-preopens, and wired any daemon coordinators into `store` before calling.
+///
+/// `initial_fuel` is the fuel budget the caller actually armed the store
+/// with (boot + this run share one budget, set once) - used only to compute
+/// `fuel_consumed` correctly when it differs from the fixed [`PYODIDE_FUEL`]
+/// default. `stdin_present` toggles the `sys.stdin` redirect preamble (the
+/// bytes themselves are staged into the guest FS by the caller, at
+/// [`STDIN_GUEST_PATH`], before this runs). `env` is written into
+/// `os.environ` before `python_source` runs.
 fn run_booted_pyodide(
     python_source: &str,
     pkg: Option<&PyPackage>,
     store: &mut Store<EmbedderState>,
     instance: &Instance,
+    initial_fuel: u64,
+    stdin_present: bool,
+    env: &[(String, String)],
 ) -> Result<PyodideRunOutput> {
     // In Pyodide's native (non-JS) build, `sys.stdout`/`sys.stderr` go through a
     // JS-backed IO layer that emits NOTHING to WASI - so `print()` output never
@@ -1133,6 +1416,28 @@ fn run_booted_pyodide(
         let sys_path_line = format!("_sys.path.insert(0, '{}')\n", pkg.sys_path_dir);
         source_bytes.extend_from_slice(sys_path_line.as_bytes());
     }
+    // `sys.stdin` redirect: only when the caller staged bytes at
+    // `STDIN_GUEST_PATH` (see `run_pyodide_core`). Mirrors the stdout/stderr
+    // redirect above, in the read direction - a UTF-8 `TextIOWrapper` over
+    // the staged file, opened here rather than in `STDOUT_REDIRECT` since
+    // that const applies unconditionally to every run and this must not.
+    if stdin_present {
+        let stdin_line = format!(
+            "_afb_i = open({}, 'rb')\n_sys.stdin = _io.TextIOWrapper(_afb_i, encoding='utf-8')\n",
+            python_str_literal(STDIN_GUEST_PATH),
+        );
+        source_bytes.extend_from_slice(stdin_line.as_bytes());
+    }
+    // Environment variables: written directly into `os.environ` (already
+    // imported as `_os` by `STDOUT_REDIRECT`) before the user's source runs.
+    for (key, val) in env {
+        let env_line = format!(
+            "_os.environ[{}] = {}\n",
+            python_str_literal(key),
+            python_str_literal(val),
+        );
+        source_bytes.extend_from_slice(env_line.as_bytes());
+    }
     source_bytes.extend_from_slice(python_source.as_bytes());
     source_bytes.extend_from_slice(OUTPUT_POSTAMBLE);
     source_bytes.push(0);
@@ -1157,18 +1462,22 @@ fn run_booted_pyodide(
             &[wasmtime::Val::I32(3), wasmtime::Val::I32(argv_ptr)],
             &mut main_ret,
         )
-        .map_err(|e| AfterburnerError::Engine(format!("__main_argc_argv trapped: {e}")))?;
+        .map_err(|e| guest_trap("__main_argc_argv trapped", e))?;
 
     let main_exitcode = match main_ret[0] {
         wasmtime::Val::I32(v) => v,
         _ => -99,
     };
     if main_exitcode != 0 {
+        let fuel_consumed = initial_fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+        let memory_limit_hit = store.data().limits.memory_limit_hit;
         return Ok(PyodideRunOutput {
             stdout: captured_stdout(store),
             stderr: captured_stderr(store),
             exit_code: main_exitcode,
             output: captured_output(store)?,
+            fuel_consumed,
+            memory_limit_hit,
         });
     }
 
@@ -1191,27 +1500,30 @@ fn run_booted_pyodide(
     let mut run_ret = [wasmtime::Val::I32(-99)];
     run_fn
         .call(&mut *store, &[], &mut run_ret)
-        .map_err(|e| AfterburnerError::Engine(format!("run_main trapped: {e}")))?;
+        .map_err(|e| guest_trap("run_main trapped", e))?;
 
     let exit_code = match run_ret[0] {
         wasmtime::Val::I32(v) => v,
         _ => -99,
     };
 
-    // Determinism probe: print fuel consumed (set budget minus remaining) when
-    // BURN_FUEL_REPORT is set. The engine runs with consume_fuel(true), so this
-    // is an exact, reproducible instruction count for a deterministic run.
-    if std::env::var_os("BURN_FUEL_REPORT").is_some()
-        && let Ok(remaining) = store.get_fuel()
-    {
-        eprintln!("[fuel] consumed={}", PYODIDE_FUEL.saturating_sub(remaining));
+    // Fuel actually consumed (budget minus remaining). The engine runs with
+    // consume_fuel(true), so this is an exact, reproducible instruction count
+    // for a deterministic run; also printed under BURN_FUEL_REPORT (a
+    // determinism probe predating this field).
+    let fuel_consumed = initial_fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+    if std::env::var_os("BURN_FUEL_REPORT").is_some() {
+        eprintln!("[fuel] consumed={fuel_consumed}");
     }
+    let memory_limit_hit = store.data().limits.memory_limit_hit;
 
     Ok(PyodideRunOutput {
         stdout: captured_stdout(store),
         stderr: captured_stderr(store),
         exit_code,
         output: captured_output(store)?,
+        fuel_consumed,
+        memory_limit_hit,
     })
 }
 
@@ -1301,11 +1613,19 @@ pub struct WarmPyInterpreter {
 impl WarmPyInterpreter {
     /// Boot + warm an interpreter on `rt`. Pays the full boot + bringup once.
     pub fn boot(rt: &PyRuntime) -> Result<Self> {
-        let (mut store, instance, _got) = boot_pyodide_instance(rt, &[])?;
+        let (mut store, instance, _got) = boot_pyodide_instance(rt, &[], PYODIDE_FUEL, None, None)?;
         // Warm once: Py_Initialize + site/stdlib import + install the capture
         // machinery (which then persists for every run below). The `pass`
         // program's own (empty) output is discarded.
-        let _ = run_booted_pyodide("pass", None, &mut store, &instance)?;
+        let _ = run_booted_pyodide(
+            "pass",
+            None,
+            &mut store,
+            &instance,
+            PYODIDE_FUEL,
+            false,
+            &[],
+        )?;
 
         let pyrun = instance
             .get_func(&mut store, "PyRun_SimpleString")
@@ -1358,7 +1678,7 @@ impl WarmPyInterpreter {
                 &[wasmtime::Val::I32(self.driver_reset as i32)],
                 &mut ret,
             )
-            .map_err(|e| AfterburnerError::Engine(format!("warm reset trapped: {e}")))?;
+            .map_err(|e| guest_trap("warm reset trapped", e))?;
         Ok(())
     }
 
@@ -1381,18 +1701,20 @@ impl WarmPyInterpreter {
                 &[wasmtime::Val::I32(driver_ptr as i32)],
                 &mut ret,
             )
-            .map_err(|e| {
-                AfterburnerError::Engine(format!("warm PyRun_SimpleString trapped: {e}"))
-            })?;
+            .map_err(|e| guest_trap("warm PyRun_SimpleString trapped", e))?;
         let exit_code = match ret[0] {
             wasmtime::Val::I32(v) => v,
             _ => -99,
         };
+        let fuel_consumed = PYODIDE_FUEL.saturating_sub(store.get_fuel().unwrap_or(0));
         Ok(PyodideRunOutput {
             stdout: captured_stdout(store),
             stderr: captured_stderr(store),
             exit_code,
             output: captured_output(store)?,
+            fuel_consumed,
+            // The warm-interpreter path never wires a memory cap.
+            memory_limit_hit: false,
         })
     }
 }
@@ -1430,7 +1752,8 @@ fn run_pyodide_with_daemon(
     daemon_dgram_py: std::sync::Arc<crate::daemon_dgram::DaemonDgram>,
     #[cfg(unix)] daemon_unix: std::sync::Arc<crate::daemon_unix::DaemonUnix>,
 ) -> Result<PyodideRunOutput> {
-    let (mut store, instance, _got_globals) = boot_pyodide_instance(rt, &[])?;
+    let (mut store, instance, _got_globals) =
+        boot_pyodide_instance(rt, &[], PYODIDE_FUEL, None, None)?;
     store.data_mut().wasi_stdout.clear();
     // Wire the daemon coordinators so socket and pthread shims reach the OS.
     store.data_mut().daemon_net = Some(daemon_net);
@@ -1537,7 +1860,15 @@ fn run_pyodide_with_daemon(
         " pass\n",
     );
     let combined_source = format!("{SSL_SHIM}{python_source}");
-    run_booted_pyodide(&combined_source, None, &mut store, &instance)
+    run_booted_pyodide(
+        &combined_source,
+        None,
+        &mut store,
+        &instance,
+        PYODIDE_FUEL,
+        false,
+        &[],
+    )
 }
 
 /// The program's captured stdout: the BINARY sink `/.afb/stdout.bin` the
@@ -1727,6 +2058,23 @@ mod tests {
 
     const TEST_WASM_PATH: &str = "/tmp/pyodide-exnref.wasm";
     const TEST_STDLIB_PATH: &str = "/tmp/python_stdlib.zip";
+
+    #[test]
+    fn runtime_target_constant() {
+        assert_eq!(RUNTIME_TARGET, "emscripten-pyodide");
+    }
+
+    #[test]
+    fn pyodide_wasm_member_path() {
+        assert!(PYODIDE_WASM_MEMBER.starts_with("precompiled/"));
+        assert!(PYODIDE_WASM_MEMBER.ends_with(".wasm"));
+    }
+
+    #[test]
+    fn stdlib_member_path() {
+        assert!(STDLIB_MEMBER.starts_with("precompiled/"));
+        assert!(STDLIB_MEMBER.ends_with(".zip"));
+    }
 
     #[test]
     #[ignore = "requires /tmp/pyodide-exnref.wasm and /tmp/python_stdlib.zip"]

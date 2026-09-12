@@ -23,8 +23,13 @@
 //!   `FnOnce(&mut EmbedderLinker) -> Result<()>`. [`EmbedderLinker`] is a
 //!   public newtype over the internal `Linker<EmbedderState>` so callers
 //!   define imports without knowing the store data type.
-//! * Fuel (not epoch) bounds execution: deterministic instruction budget,
-//!   no background ticker thread, no epoch increment races.
+//! * Fuel bounds every run's instruction budget, deterministically. A
+//!   caller that also needs a wall-clock bound (a real preemption, not just
+//!   an instruction count) uses [`shared_epoch_vm`]: one process-wide engine
+//!   with wasmtime epoch interruption enabled, paired with exactly one
+//!   ticker thread for the process's lifetime - never a thread per call.
+//!   The plain [`deterministic_engine`] (used by every other call site in
+//!   this crate) has epoch interruption off, unchanged.
 //! * Returns the i64 result of a named export plus any bytes the module
 //!   wrote to stdout via WASI (optional WASI must be opted in per compile).
 //!
@@ -39,12 +44,13 @@ use crate::emscripten_sidemodule::SideModuleRegistry;
 use afterburner_core::log::Level;
 use afterburner_core::{AfterburnerError, Result, ab_event};
 use std::path::PathBuf; // also used by WasiCommandOpts and EmbedderState::rw_preopens
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use wasmtime::{
     Config, Engine, InstancePre, Linker, Module, OptLevel, Store, Trap, WasmBacktraceDetails,
 };
 use wasmtime_wasi::p1::{WasiP1Ctx, add_to_linker_sync};
-use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
 
 // ---- deterministic engine config -----------------------------------------
@@ -90,6 +96,19 @@ pub struct WasiCommandOpts {
     pub preopens_rw: Vec<(PathBuf, String)>,
     /// Environment variables forwarded as `(key, value)` pairs.
     pub env_vars: Vec<(String, String)>,
+    /// Bytes available to the module on stdin (fd 0). `None` (the default)
+    /// leaves stdin closed, exactly as before this field existed. Callers
+    /// that pipe a request into a WASI command (a one-shot frame protocol
+    /// over stdin/stdout) set this instead
+    /// of relying on a preopen, which would grant filesystem access this
+    /// module's own manifold may not.
+    pub stdin: Option<Vec<u8>>,
+    /// Linear-memory cap in bytes. `None` (the default) applies no cap,
+    /// exactly as before this field existed. `Some(limit)` fails a
+    /// `memory.grow` past `limit` inside the guest (an ordinary allocation
+    /// failure the guest's own allocator observes), never a trap of the
+    /// whole store.
+    pub max_memory_bytes: Option<usize>,
 }
 
 impl WasiCommandOpts {
@@ -143,6 +162,21 @@ impl WasiCommandOpts {
         self.env_vars.push((key.into(), value.into()));
         self
     }
+
+    /// Make `bytes` available on the module's stdin (fd 0). The module
+    /// sees EOF after the last byte; a module that never reads stdin is
+    /// unaffected.
+    pub fn stdin(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        self.stdin = Some(bytes.into());
+        self
+    }
+
+    /// Cap the module's linear memory at `bytes`. See
+    /// [`WasiCommandOpts::max_memory_bytes`]'s own doc for the failure mode.
+    pub fn max_memory_bytes(mut self, bytes: usize) -> Self {
+        self.max_memory_bytes = Some(bytes);
+        self
+    }
 }
 
 /// Build a Wasmtime `Engine` configured for determinism and fuel metering.
@@ -161,10 +195,13 @@ impl WasiCommandOpts {
 /// * `consume_fuel(true)` - every run is bounded by an instruction budget
 ///   supplied by the caller. An infinite loop surfaces as
 ///   `AfterburnerError::FuelExhausted` rather than a hung thread.
-/// * Epoch interruption and pooling are intentionally omitted: the generic
-///   path hosts short-lived modules with embedder-supplied imports, not the
-///   long-lived plugin. Fuel is sufficient and simpler; pooling is worth the
-///   configuration cost only for the plugin's large linear-memory image.
+/// * Pooling is intentionally omitted: the generic path hosts short-lived
+///   modules with embedder-supplied imports, not the long-lived plugin, and
+///   pooling is worth the configuration cost only for the plugin's large
+///   linear-memory image. Epoch interruption is a separate opt-in - see
+///   [`deterministic_engine_with_epoch`] and [`shared_epoch_vm`] - not part
+///   of this profile, so every existing caller of this function keeps
+///   exactly the fuel-only bound it has always had.
 ///
 /// ## On-disk compile cache (determinism-neutral)
 ///
@@ -188,6 +225,40 @@ impl WasiCommandOpts {
 /// runs without it - the cache is an optimisation, never a correctness
 /// dependency, and never a determinism one.
 pub fn deterministic_engine() -> Result<Engine> {
+    let mut cfg = deterministic_config();
+    // On-disk compile cache (see the doc above). Added strictly after the
+    // deterministic flags so they are part of the cache key, never altered by
+    // it. Mirrors `wasm_engine::build_engine`'s wiring; failure is a warning,
+    // the engine runs cache-less rather than failing the run.
+    install_compile_cache(&mut cfg);
+    Engine::new(&cfg).map_err(|e| AfterburnerError::Engine(format!("embedder engine: {e}")))
+}
+
+/// Like [`deterministic_engine`], but with wasmtime epoch interruption
+/// enabled (`Config::epoch_interruption(true)`) so a `Store` built against
+/// this engine can be given a real wall-clock deadline via
+/// `Store::set_epoch_deadline`, checked and enforced by whatever thread
+/// calls [`Engine::increment_epoch`] on it - a genuine preemption bound, not
+/// just an instruction-count one. Nothing on this engine increments its own
+/// epoch; pair it with a ticker (see [`shared_epoch_vm`], which does exactly
+/// that once for the whole process rather than per call).
+///
+/// Identical to [`deterministic_engine`] in every other respect - same
+/// determinism profile, same fuel metering, same compile cache (keyed
+/// separately, since the flag difference changes the cache key, exactly as
+/// the doc above describes for any deterministic-flag change).
+pub fn deterministic_engine_with_epoch() -> Result<Engine> {
+    let mut cfg = deterministic_config();
+    cfg.epoch_interruption(true);
+    install_compile_cache(&mut cfg);
+    Engine::new(&cfg).map_err(|e| AfterburnerError::Engine(format!("embedder engine (epoch): {e}")))
+}
+
+/// The deterministic profile shared by [`deterministic_engine`] and
+/// [`deterministic_engine_with_epoch`], so the two configs can only ever
+/// differ on the one flag (`epoch_interruption`) that the epoch variant
+/// adds - never drift apart on anything else.
+fn deterministic_config() -> Config {
     let mut cfg = Config::new();
     cfg.cranelift_opt_level(OptLevel::Speed)
         .cranelift_nan_canonicalization(true)
@@ -203,8 +274,7 @@ pub fn deterministic_engine() -> Result<Engine> {
         .wasm_threads(false)
         // Fuel metering: every Wasm instruction decrements a per-Store
         // counter. When the counter reaches zero the next instruction traps
-        // with `OutOfFuel`. This is the only bound we need for short-lived
-        // modules; no epoch ticker, no background thread.
+        // with `OutOfFuel`.
         .consume_fuel(true)
         // Enable the new (exnref/try_table) exceptions proposal plus the
         // function-references and GC proposals that it depends on. This lets
@@ -215,14 +285,56 @@ pub fn deterministic_engine() -> Result<Engine> {
         .wasm_exceptions(true)
         // Always capture Wasm backtraces so the probe can print trap frames.
         .wasm_backtrace_details(WasmBacktraceDetails::Enable);
+    cfg
+}
 
-    // On-disk compile cache (see the doc above). Added strictly after the
-    // deterministic flags so they are part of the cache key, never altered by
-    // it. Mirrors `wasm_engine::build_engine`'s wiring; failure is a warning,
-    // the engine runs cache-less rather than failing the run.
-    install_compile_cache(&mut cfg);
+/// Tick period for [`shared_epoch_vm`]'s ticker thread, in milliseconds -
+/// the minimum granularity a `timeout` can be honored at (a shorter request
+/// rounds up to one tick). Reuses `crate::chamber::TICK_PERIOD_MS` so every
+/// epoch-driven bound in this crate (the plugin combustor's per-call
+/// timeout, and this one) shares one constant instead of two that could
+/// silently drift apart.
+pub const EPOCH_TICK_PERIOD_MS: u64 = crate::chamber::TICK_PERIOD_MS;
 
-    Engine::new(&cfg).map_err(|e| AfterburnerError::Engine(format!("embedder engine: {e}")))
+/// A process-wide [`EmbedderVm`] whose engine has epoch interruption
+/// enabled ([`deterministic_engine_with_epoch`]), paired with exactly one
+/// background ticker thread that calls `Engine::increment_epoch()` every
+/// [`EPOCH_TICK_PERIOD_MS`] for as long as the process runs.
+///
+/// Built and the ticker spawned lazily, the first time any caller needs a
+/// wall-clock bound (a `timeout`) on a run - never per call. A fresh
+/// `Engine` per call would mean a fresh compile-cache key and, if a ticker
+/// were spawned alongside it, a fresh thread per call: exactly the
+/// per-call cost a caller-facing timeout must not impose. One engine, one
+/// ticker, shared by every timeout-bearing call for the rest of the
+/// process's life.
+///
+/// # Errors
+///
+/// `Err` only if building the epoch-enabled engine or spawning the ticker
+/// thread fails. That failure is cached (a `OnceLock` cannot store `Err`
+/// and retry, so the first outcome - success or failure - is reused by
+/// every later caller): `Engine::new` and `thread::spawn` failing are not
+/// transient conditions in practice, so caching the failure never turns a
+/// one-time hiccup into a permanent outage that a retry would have cleared.
+pub fn shared_epoch_vm() -> Result<&'static EmbedderVm> {
+    static SHARED: OnceLock<std::result::Result<EmbedderVm, String>> = OnceLock::new();
+    let once = SHARED.get_or_init(|| {
+        let engine = deterministic_engine_with_epoch().map_err(|e| e.to_string())?;
+        let ticker_engine = engine.clone();
+        std::thread::Builder::new()
+            .name("afterburner-embedder-epoch-ticker".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_millis(EPOCH_TICK_PERIOD_MS));
+                    ticker_engine.increment_epoch();
+                }
+            })
+            .map_err(|e| format!("spawning epoch ticker: {e}"))?;
+        Ok(EmbedderVm { engine })
+    });
+    once.as_ref()
+        .map_err(|msg| AfterburnerError::Engine(msg.clone()))
 }
 
 /// Install wasmtime's on-disk compilation cache on `cfg`, rooted at the
@@ -464,6 +576,72 @@ pub struct EmbedderState {
     /// Set by the [`crate::pyodide_runner`] session/record path, never by the
     /// sealed run core.
     pub host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+    /// Per-call linear-memory cap, enforced by wasmtime on every
+    /// `memory.grow` (a growth past the limit fails inside the guest,
+    /// exactly like a real allocator refusing an allocation, rather than
+    /// trapping the whole store). `TrackedLimits::default()` (the value
+    /// [`WasiCommandOpts::max_memory_bytes`] being `None` produces) applies
+    /// no cap, unchanged from before this field existed. Wired via
+    /// `Store::limiter` in `EmbedderVm`'s own (private) `run_command_raw`
+    /// only; the typed-export path ([`EmbedderVm::run`]) does not take a
+    /// memory budget and leaves this at its default.
+    pub limits: TrackedLimits,
+}
+
+/// Wraps `wasmtime::StoreLimits`, additionally recording whether any
+/// `memory_growing` request was DENIED during the run - i.e. whether the
+/// guest actually hit [`WasiCommandOpts::max_memory_bytes`].
+///
+/// `wasmtime::StoreLimits` itself denies the grow (the guest's own allocator
+/// observes an ordinary allocation failure - see the field doc on
+/// [`EmbedderState::limits`]) but keeps no history of having done so. This
+/// flag is the ground-truth signal callers that need to tell "hit the memory
+/// ceiling" apart from "trapped for an unrelated reason" (a genuine guest
+/// bug) require, instead of guessing from the guest's own reaction to the
+/// denial.
+#[derive(Debug, Default)]
+pub struct TrackedLimits {
+    inner: wasmtime::StoreLimits,
+    pub memory_limit_hit: bool,
+}
+
+impl TrackedLimits {
+    /// `pub(crate)`: also used by [`crate::pyodide_runner`] to wire the same
+    /// memory-limit mechanism onto its Emscripten store - one implementation
+    /// of "cap linear memory and remember whether the cap was hit," shared
+    /// across both guest ABIs this crate hosts.
+    pub(crate) fn with_memory_size(limit: usize) -> Self {
+        Self {
+            inner: wasmtime::StoreLimitsBuilder::new()
+                .memory_size(limit)
+                .build(),
+            memory_limit_hit: false,
+        }
+    }
+}
+
+impl wasmtime::ResourceLimiter for TrackedLimits {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        let allowed = self.inner.memory_growing(current, desired, maximum)?;
+        if !allowed {
+            self.memory_limit_hit = true;
+        }
+        Ok(allowed)
+    }
+
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.inner.table_growing(current, desired, maximum)
+    }
 }
 
 impl EmbedderState {
@@ -508,6 +686,7 @@ impl EmbedderState {
             fs_preopens: Vec::new(),
             entropy: EntropySource::Deterministic,
             host_context: None,
+            limits: TrackedLimits::default(),
         }
     }
 
@@ -564,6 +743,7 @@ impl EmbedderState {
             fs_preopens: Vec::new(),
             entropy: EntropySource::Deterministic,
             host_context: None,
+            limits: TrackedLimits::default(),
         }
     }
 
@@ -614,6 +794,7 @@ impl EmbedderState {
             fs_preopens: Vec::new(),
             entropy: EntropySource::Deterministic,
             host_context: None,
+            limits: TrackedLimits::default(),
         }
     }
 
@@ -742,6 +923,65 @@ pub struct EmbedderRunOutput {
     /// diagnostics are not silently dropped); empty for [`run`][EmbedderVm::run]
     /// and for non-WASI modules.
     pub stderr: Vec<u8>,
+    /// Wasmtime fuel actually consumed (the budget passed to `run`/
+    /// `run_command` minus what `Store::get_fuel` reports remaining right
+    /// after the call returns) -- host-side only, since a guest has no way
+    /// to read its own Store's fuel meter.
+    pub fuel_consumed: u64,
+    /// Whether [`WasiCommandOpts::max_memory_bytes`] denied at least one
+    /// `memory.grow` during the run (see [`TrackedLimits`]). Always `false`
+    /// when no memory cap was configured, and always `false` for
+    /// [`EmbedderVm::run`] (the typed-export path takes no memory budget).
+    pub memory_limit_hit: bool,
+}
+
+/// Internal, unclassified result of [`EmbedderVm::run_command_raw`]: the
+/// guest ran to completion or a trap, and everything it produced along the
+/// way was captured, but nothing here has decided what `call_result` MEANS
+/// yet. Shared by [`EmbedderVm::run_command`] / `run_command_with_host`
+/// (which classify it into today's `Result<EmbedderRunOutput>`) and
+/// [`EmbedderVm::run_command_bounded`] (which classifies it into
+/// [`BoundedCommandOutput`] instead, keeping captured output on every path).
+struct RawCommandOutput {
+    call_result: wasmtime::Result<()>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    fuel_consumed: u64,
+    memory_limit_hit: bool,
+}
+
+/// Classification of one [`EmbedderVm::run_command_bounded`] run. Unlike the
+/// `Result<EmbedderRunOutput>` a plain [`EmbedderVm::run_command`] returns,
+/// every case here is `Ok` - a bound firing is data, not a failure to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandOutcome {
+    /// The guest ran to completion. `_start` returning normally is exit 0;
+    /// `proc_exit(N)` (including `N = 0`) carries its own code.
+    Exited(i32),
+    /// The fuel budget passed to `run_command_bounded` was exhausted.
+    OutOfFuel,
+    /// The store's epoch deadline elapsed. `EmbedderVm`'s engine does not
+    /// enable epoch interruption today (see [`deterministic_engine`]'s own
+    /// doc comment), so this arm is currently unreachable from
+    /// `run_command_bounded`; wired for when a caller-supplied host drives
+    /// the epoch directly.
+    Timeout,
+    /// The guest trapped for any other reason (division by zero,
+    /// unreachable, an indirect-call mismatch, memory-limit-triggered abort,
+    /// ...). The string is wasmtime's trap message.
+    Trapped(String),
+}
+
+/// Output of [`EmbedderVm::run_command_bounded`]: never discards captured
+/// output on a bound, unlike `Result<EmbedderRunOutput>`'s `Err` channel.
+#[derive(Debug, Clone)]
+pub struct BoundedCommandOutput {
+    pub outcome: CommandOutcome,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub fuel_consumed: u64,
+    /// See [`EmbedderRunOutput::memory_limit_hit`].
+    pub memory_limit_hit: bool,
 }
 
 // ---- VM ----------------------------------------------------------------------
@@ -771,6 +1011,11 @@ pub struct EmbedderRunOutput {
 /// let out = vm.run(&module, "run", None).unwrap();
 /// assert_eq!(out.result, 43);
 /// ```
+/// Cheap to clone: an `Engine` is itself a handle, so a clone shares the
+/// same engine (and therefore the same epoch ticker and the same compile
+/// cache) rather than building a second one. That is what lets a caller
+/// take [`shared_epoch_vm`]'s process-wide VM by value.
+#[derive(Clone)]
 pub struct EmbedderVm {
     engine: Engine,
 }
@@ -785,6 +1030,17 @@ impl EmbedderVm {
         Ok(Self {
             engine: deterministic_engine()?,
         })
+    }
+
+    /// The wasmtime engine this VM compiles and runs on.
+    ///
+    /// Exposed so another runner in this crate can share one engine instead
+    /// of building a second: `pyodide_runner` boots CPython on
+    /// [`shared_epoch_vm`]'s engine, which is what gives the Python path a
+    /// real wall-clock bound without a second ticker thread and without a
+    /// second on-disk compile-cache key.
+    pub fn engine(&self) -> &Engine {
+        &self.engine
     }
 
     /// Compile `wasm` (raw `.wasm` bytes or WAT text) into a reusable
@@ -912,6 +1168,7 @@ impl EmbedderVm {
                 daemon_unix: None,
                 entropy: EntropySource::Deterministic,
                 host_context: None,
+                limits: TrackedLimits::default(),
             }
         } else {
             EmbedderState {
@@ -952,12 +1209,14 @@ impl EmbedderVm {
                 daemon_unix: None,
                 entropy: EntropySource::Deterministic,
                 host_context: None,
+                limits: TrackedLimits::default(),
             }
         };
 
+        let initial_fuel = fuel.unwrap_or(DEFAULT_FUEL);
         let mut store = Store::new(&module.engine, state);
         store
-            .set_fuel(fuel.unwrap_or(DEFAULT_FUEL))
+            .set_fuel(initial_fuel)
             .map_err(|e| AfterburnerError::Engine(format!("embedder set_fuel: {e}")))?;
 
         let instance = module
@@ -985,6 +1244,11 @@ impl EmbedderVm {
             AfterburnerError::WasmTrap(format!("embedder trap: {trap}"))
         })?;
 
+        // Read before `store.into_data()` below consumes the store; see
+        // `run_command_impl`'s identical comment for why `unwrap_or(0)` is
+        // the right fallback rather than a hard error.
+        let fuel_consumed = initial_fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+
         let stdout = match store.into_data().wasi {
             Some(w) => w.stdout.contents().to_vec(),
             None => Vec::new(),
@@ -997,6 +1261,8 @@ impl EmbedderVm {
             result,
             stdout,
             stderr: Vec::new(),
+            fuel_consumed,
+            memory_limit_hit: false,
         })
     }
 
@@ -1008,10 +1274,10 @@ impl EmbedderVm {
     /// * Calls `_start` (no typed result - the module exits via `proc_exit`).
     /// * Threads argv and preopened directories from `opts` into the WASI
     ///   context so the module can read its arguments and access its stdlib.
-    /// * Returns `Ok(EmbedderRunOutput { result: exit_code, stdout, stderr })`
-    ///   on a clean exit (exit code 0 is success; non-zero is surfaced in
-    ///   `result` rather than as an error, matching POSIX convention). Both
-    ///   fd 1 (`stdout`) and fd 2 (`stderr`) are captured.
+    /// * Returns `Ok(EmbedderRunOutput { result: exit_code, stdout, stderr,
+    ///   fuel_consumed })` on a clean exit (exit code 0 is success; non-zero
+    ///   is surfaced in `result` rather than as an error, matching POSIX
+    ///   convention). Both fd 1 (`stdout`) and fd 2 (`stderr`) are captured.
     /// * Returns `Err(AfterburnerError::FuelExhausted)` if the module runs out
     ///   of fuel, and `Err(AfterburnerError::WasmTrap(_))` for any other trap.
     ///
@@ -1061,19 +1327,20 @@ impl EmbedderVm {
         self.run_command_impl(module, opts, fuel, host_context)
     }
 
-    /// Shared body of [`run_command`][Self::run_command] and
-    /// [`run_command_with_host`][Self::run_command_with_host]: the one canonical
-    /// WASI-command run path (DRY - the two public entry points differ only in
-    /// whether a recording host is supplied). The host, when present, is placed
-    /// in [`EmbedderState::host_context`] so the effect-wrapped preview1 shims
-    /// can consult it.
-    fn run_command_impl(
+    /// Shared setup + `_start` call, factored out of [`run_command_impl`]
+    /// and [`run_command_bounded`] so the two differ only in how they turn
+    /// `call_result` into their own return shape - never in how the store,
+    /// preopens, or capture pipes are built. Nothing here decides what a
+    /// trap MEANS; it just runs the guest to completion (or a trap) and
+    /// hands back everything captured along the way.
+    fn run_command_raw(
         &self,
         module: &EmbedderModule,
         opts: WasiCommandOpts,
         fuel: Option<u64>,
         host_context: Option<Arc<dyn afterburner_core::HostContext>>,
-    ) -> Result<EmbedderRunOutput> {
+        timeout: Option<Duration>,
+    ) -> Result<RawCommandOutput> {
         if !module.wasi {
             return Err(AfterburnerError::Engine(
                 "run_command requires a module compiled with wasi: true".into(),
@@ -1090,6 +1357,9 @@ impl EmbedderVm {
 
         let mut builder = WasiCtxBuilder::new();
         builder.stdout(pipe.clone()).stderr(err_pipe.clone());
+        if let Some(bytes) = &opts.stdin {
+            builder.stdin(MemoryInputPipe::new(bytes.clone()));
+        }
 
         if !opts.args.is_empty() {
             builder.args(&opts.args);
@@ -1233,12 +1503,37 @@ impl EmbedderVm {
             // R4: the per-run recording/replaying host consulted by the
             // effect-wrapped preview1 shims (see `crate::effect_wasi`).
             host_context,
+            limits: opts
+                .max_memory_bytes
+                .map(TrackedLimits::with_memory_size)
+                .unwrap_or_default(),
         };
 
+        let initial_fuel = fuel.unwrap_or(DEFAULT_FUEL);
         let mut store = Store::new(&module.engine, state);
         store
-            .set_fuel(fuel.unwrap_or(DEFAULT_FUEL))
+            .set_fuel(initial_fuel)
             .map_err(|e| AfterburnerError::Engine(format!("embedder set_fuel: {e}")))?;
+        if opts.max_memory_bytes.is_some() {
+            store.limiter(|state: &mut EmbedderState| &mut state.limits);
+        }
+        // Always set a deadline, even when `timeout` is `None`: a store's
+        // default deadline is 0 (already "elapsed"), so on an engine that
+        // does have epoch interruption enabled (`shared_epoch_vm`'s), an
+        // unset deadline would trap on the very first check. Harmless on
+        // `module.engine`s without epoch interruption - `Store::
+        // set_epoch_deadline`'s own doc: the value is only ever consulted
+        // when the compiled guest carries epoch-check instrumentation,
+        // which only `deterministic_engine_with_epoch` turns on. `ticks / 2`
+        // of `u64::MAX` at `EPOCH_TICK_PERIOD_MS` per tick outlives any run.
+        let ticks = match timeout {
+            Some(d) => {
+                let ms = d.as_millis().max(1);
+                ms.div_ceil(EPOCH_TICK_PERIOD_MS as u128).max(1) as u64
+            }
+            None => u64::MAX / 2,
+        };
+        store.set_epoch_deadline(ticks);
 
         let instance = module
             .instance_pre
@@ -1257,11 +1552,20 @@ impl EmbedderVm {
         // paths so captures are never lost.
         let call_result = start_fn.call(&mut store, &[], &mut []);
 
+        // Read before `store.into_data()` below consumes the store: fuel
+        // consumption is always enabled on `deterministic_engine`'s config
+        // (the whole budget-enforcement premise depends on it), so
+        // `get_fuel` erroring here would mean that invariant broke, not a
+        // real "unmeasured" case -- `unwrap_or` a decode-neutral `0` rather
+        // than fail an otherwise-successful run over the metric.
+        let fuel_consumed = initial_fuel.saturating_sub(store.get_fuel().unwrap_or(0));
+
         // Stdout capture is a single namespace. The fs-wired capture variant
         // routes fd 1/2 writes into `wasi_stdout`; the stock variant routes them
         // into the wasmtime-wasi pipe. Prefer `wasi_stdout` when it holds bytes
         // (the recording path), else read the pipe - one path, no second branch.
         let data = store.into_data();
+        let memory_limit_hit = data.limits.memory_limit_hit;
         let pipe_stdout = data
             .wasi
             .map(|w| w.stdout.contents().to_vec())
@@ -1272,7 +1576,30 @@ impl EmbedderVm {
             data.wasi_stdout
         };
 
-        let exit_code = match call_result {
+        Ok(RawCommandOutput {
+            call_result,
+            stdout,
+            stderr: err_pipe.contents().to_vec(),
+            fuel_consumed,
+            memory_limit_hit,
+        })
+    }
+
+    /// Shared body of [`run_command`][Self::run_command] and
+    /// [`run_command_with_host`][Self::run_command_with_host]: turns the raw
+    /// `_start` outcome into today's `Result<EmbedderRunOutput>` contract -
+    /// `Ok` on a clean exit or `proc_exit(N)`, `Err` on any bound (fuel,
+    /// timeout) or trap. Unchanged in observable behaviour from before
+    /// [`run_command_raw`] was factored out.
+    fn run_command_impl(
+        &self,
+        module: &EmbedderModule,
+        opts: WasiCommandOpts,
+        fuel: Option<u64>,
+        host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+    ) -> Result<EmbedderRunOutput> {
+        let raw = self.run_command_raw(module, opts, fuel, host_context, None)?;
+        let exit_code = match raw.call_result {
             Ok(_) => 0i64,
             Err(ref e) => {
                 // proc_exit(N) produces I32Exit(N). Depending on the wasmtime
@@ -1301,8 +1628,73 @@ impl EmbedderVm {
 
         Ok(EmbedderRunOutput {
             result: exit_code,
-            stdout,
-            stderr: err_pipe.contents().to_vec(),
+            stdout: raw.stdout,
+            stderr: raw.stderr,
+            fuel_consumed: raw.fuel_consumed,
+            memory_limit_hit: raw.memory_limit_hit,
+        })
+    }
+
+    /// Like [`run_command`][Self::run_command] /
+    /// [`run_command_with_host`][Self::run_command_with_host], but never
+    /// discards a captured partial run on a bound: fuel exhaustion, a
+    /// wall-clock interrupt, or any other trap all come back as
+    /// `Ok(BoundedCommandOutput)` carrying whatever
+    /// stdout/stderr/fuel the guest produced before the bound fired, with the
+    /// classification in `outcome` instead of the `Result` error channel.
+    /// `Err` is reserved for a failure that happens before the guest ever
+    /// runs (a bad preopen path, a module that is not a WASI command) -
+    /// exactly the same failures [`run_command`][Self::run_command] surfaces
+    /// as `Err` today.
+    ///
+    /// This is the seam a caller-facing "run one guest to completion,
+    /// bounded, with everything captured" API needs: a bound firing must not
+    /// be indistinguishable from a setup failure, and partial output must
+    /// survive it.
+    ///
+    /// `timeout`, when `Some`, is only a real wall-clock bound if `self`
+    /// wraps an engine built with epoch interruption enabled - i.e. `self`
+    /// is [`shared_epoch_vm`], not a plain [`EmbedderVm::new`]. On a plain
+    /// engine the deadline is still set (harmless) but never checked, since
+    /// the compiled guest carries no epoch-check instrumentation to check
+    /// it against, so the run is unbounded in wall-clock time regardless of
+    /// what `timeout` says. Granularity is one [`EPOCH_TICK_PERIOD_MS`]
+    /// tick: a shorter request rounds up to it.
+    pub fn run_command_bounded(
+        &self,
+        module: &EmbedderModule,
+        opts: WasiCommandOpts,
+        fuel: Option<u64>,
+        host_context: Option<Arc<dyn afterburner_core::HostContext>>,
+        timeout: Option<Duration>,
+    ) -> Result<BoundedCommandOutput> {
+        let raw = self.run_command_raw(module, opts, fuel, host_context, timeout)?;
+        let outcome = match raw.call_result {
+            Ok(_) => CommandOutcome::Exited(0),
+            Err(ref e) => {
+                let i32_exit = e
+                    .downcast_ref::<I32Exit>()
+                    .or_else(|| e.chain().find_map(|cause| cause.downcast_ref::<I32Exit>()));
+                if let Some(exit) = i32_exit {
+                    CommandOutcome::Exited(exit.0)
+                } else if let Some(t) = e.downcast_ref::<Trap>() {
+                    match t {
+                        Trap::OutOfFuel => CommandOutcome::OutOfFuel,
+                        Trap::Interrupt => CommandOutcome::Timeout,
+                        other => CommandOutcome::Trapped(format!("embedder command trap: {other}")),
+                    }
+                } else {
+                    CommandOutcome::Trapped(format!("embedder command trap: {e}"))
+                }
+            }
+        };
+
+        Ok(BoundedCommandOutput {
+            outcome,
+            stdout: raw.stdout,
+            stderr: raw.stderr,
+            fuel_consumed: raw.fuel_consumed,
+            memory_limit_hit: raw.memory_limit_hit,
         })
     }
 }

@@ -32,6 +32,13 @@ afterburner-thrust = { workspace = true, optional = true }
 # Registry + package management (`burn login/publish/install/new/…`). Optional;
 # pulled in only by the `bin` feature (the CLI), never by library consumers.
 afterburner-cloud = { workspace = true, optional = true }
+# The lean `.afb` pack/unpack crate (no registry, no network, no anyhow) -
+# pulled in by `afb-run` so an embedder can parse and run one `.afb` without
+# the CLI's `afterburner-cloud` dependency. `bin` already gets `.afb` parsing
+# through `afterburner-cloud` (which re-exports this same crate), so `afb-run`
+# depending on it too is not a second copy of the format, just a lighter door
+# into it for embedders that don't want the registry client.
+afterburner-afb = { workspace = true, optional = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 # bin-only — gated behind `bin` feature so library consumers don't pull them.
@@ -133,6 +140,13 @@ flow = ["dep:afterburner-flow", "wasm"]
 # without the `bin` CLI deps. Forwards the wasi `daemon` feature (axum + tokio +
 # rustls); `bin` already implies it.
 daemon = ["wasm", "afterburner-wasi/daemon"]
+# `run_afb_bytes` - run one `.afb` to completion as a bounded, captured
+# one-shot (fuel/memory/timeout, stdin/stdout/stderr, no manifold widening).
+# For EMBEDDERS (a host that runs admitted plugins in-process is the
+# motivating case) that need to run a package without the `bin` CLI deps. Pulls in the lean
+# `afterburner-afb` pack/unpack crate (not `afterburner-cloud`, which `bin`
+# pulls in for the registry client) alongside `wasm`.
+afb-run = ["wasm", "dep:afterburner-afb"]
 # host-http propagates to afterburner-wasi only today; node-compat compiles
 # all host backends unconditionally (no feature block there).
 host-http = ["afterburner-wasi?/host-http"]
