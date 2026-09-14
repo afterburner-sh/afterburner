@@ -3,6 +3,94 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.2.8] - 2026-09-14
+
+Daemons are no longer JavaScript-only, and embedders get a bounded, captured
+way to run a single `.afb` to completion.
+
+### Daemon guests in Rust, Go, C and C++
+
+A compiled Rust, Go, C or C++ module used to be one-shot by construction: the
+host called `_start`, it ran, it exited. A module can now stay up and serve
+HTTP by exporting four `i32`-only functions: `afterburner_alloc`,
+`afterburner_dealloc`, `afterburner_daemon_init` and
+`afterburner_daemon_dispatch`. The host owns the socket, the accept loop and
+the HTTP stack (the same `DaemonHttp` the JavaScript path uses); the guest
+turns a JSON request envelope into a JSON response with a base64 body. Data
+crosses as byte buffers in the guest's own linear memory, and the host frees
+every buffer it read, so guest memory stays bounded over the daemon's life.
+
+There is no manifest field and no flag: `burn run` classifies the compiled
+module by its exports. None of the four keeps today's one-shot behavior
+unchanged; all four with the exact signatures runs as a daemon; some but not
+all is refused, naming each missing or mismatched export, instead of silently
+running a broken server once. The guest asks for ports in its init response
+(`{"listen":[{"port":8080}]}`); an empty list exits 0 like a script with no
+`.listen()`, and `{"error":"..."}` exits 1.
+
+Fuel is reset to 100,000,000 instructions before init and before every
+request, so a long-running daemon never drains a one-time budget; a runaway
+handler traps on its own call. Memory is capped for the instance's whole
+lifetime, since it is the state a daemon keeps. A trap during a request is
+fatal to the instance: the in-flight request gets a 500 and `burn` exits
+non-zero rather than serving from a store whose invariants it can no longer
+vouch for. A native daemon runs as a single instance.
+
+Go needs 1.24 for `//go:wasmexport`; a Go package that uses the directive is
+checked for it up front with a message naming the requirement, while plain Go
+packages still need only 1.21. Python and Ruby are not covered: their packages
+run on a bundled interpreter that user source cannot add exports to.
+
+Known gap: ports a native daemon asks for are not yet checked against the
+manifold's `listen` grant, so `--sandbox` / `--allow-listen` do not restrict
+them. JavaScript daemons are gated as before.
+
+The design and its rationale are in `docs/wasi-daemon-abi.md`.
+
+### `run_afb_bytes`: bounded one-shot `.afb` runs for embedders
+
+The new `afb-run` feature adds `run_afb_bytes(afb, AfbRunRequest)`, which runs
+one `.afb` to completion and hands back `AfbRunOutput` (outcome, captured
+stdout and stderr, fuel used). It never writes to the host's own stdout or
+stderr and never calls `std::process::exit`, so a guest that exits non-zero or
+traps is reported to the caller instead of taking the host down. It depends on
+the lean `afterburner-afb` crate, not the CLI or the registry client.
+
+`AfbRunRequest` carries `stdin`, `args`, a `manifold`, `fuel`, `memory_bytes`
+and `timeout`. `AfbRunOutcome` names what ended the run: `Exited(code)`,
+`OutOfFuel`, `OutOfMemory`, `Timeout` or `Trapped(reason)`. A trap is never
+reported as an invented exit code.
+
+The wall clock is a real preemption: wasmtime epoch interruption on one shared
+engine with a single process-wide ticker thread (10 ms granularity), not a
+thread per call and not a run abandoned in the background. Compiled Python now
+honors `stdin`, `fuel`, `memory_bytes`, the manifold and `timeout`; the timeout
+covers booting the interpreter. A bound a dispatch path cannot enforce is
+refused outright, naming the language and the bound, rather than run with less
+containment than requested: Python refuses a read-only `fs` grant (it could
+only offer read-write), and Ruby source refuses every bound.
+
+`supported_bounds` / `bounds_for` expose that table so an admitting host
+reaches the same answer before running anything, and `startup_floor` names
+what an artifact spends before its own code runs (`PYTHON_STARTUP_FLOOR`:
+256 MiB and the interpreter's boot fuel), so a budget below it is caught at
+admission instead of as a trap on the first call.
+
+### Embedder VM
+
+`WasiCommandOpts` gains `stdin` and `max_memory_bytes` (a denied
+`memory.grow` is an ordinary allocation failure inside the guest, not a trap of
+the store). Command guests get deterministic `random_get` and fuel
+accounting, and `EmbedderVm` is now `Clone`. `reconstruct_runtime_from_afb`
+moved from behind the `bin` feature into `afterburner-wasi`, so compiled
+Python is reachable under `afb-run` alone.
+
+### Website
+
+The docs gain a Daemon API section (JavaScript daemons, and hosting daemons
+in-process from Rust) and a full reference for the native daemon ABI, with
+guest examples in Rust, Go, C and C++.
+
 ## [0.2.7] - 2026-08-15
 
 An embedded-host safety fix: a guest's `process.exit()` can no longer take the
