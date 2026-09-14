@@ -1256,6 +1256,40 @@
       </div>
     </div>
 
+    <!-- L1: Daemons -->
+    <div class="sb-group sb-section">
+      <button class="sb-group-header" type="button" aria-expanded="true">
+        Daemons
+        <i class="sb-chevron" aria-hidden="true">&#9660;</i>
+      </button>
+      <div class="sb-group-body">
+        <a class="sb-link" href="#daemon-api">Daemon API</a>
+        <a class="sb-link" href="#daemon-api-js">JavaScript daemons</a>
+        <a class="sb-link" href="#daemon-api-embed">Embedding daemons</a>
+        <!-- L2 sub-group: Native daemon ABI -->
+        <div class="sb-sub-group">
+          <button class="sb-sub-header" type="button" aria-expanded="true">
+            Native daemon ABI
+            <i class="sb-chevron" aria-hidden="true">&#9660;</i>
+          </button>
+          <div class="sb-sub-body">
+            <a class="sb-link" href="#daemon-abi">Overview</a>
+            <a class="sb-link" href="#daemon-abi-exports">Exported functions</a>
+            <a class="sb-link" href="#daemon-abi-buffers">Calling convention</a>
+            <a class="sb-link" href="#daemon-abi-detection">Detection</a>
+            <a class="sb-link" href="#daemon-abi-listen">Listening</a>
+            <a class="sb-link" href="#daemon-abi-envelopes">Envelopes</a>
+            <a class="sb-link" href="#daemon-abi-lifecycle">Instance lifecycle</a>
+            <a class="sb-link" href="#daemon-abi-traps">Traps</a>
+            <a class="sb-link" href="#daemon-abi-bounds">Fuel &amp; memory</a>
+            <a class="sb-link" href="#daemon-abi-guests">Writing a guest</a>
+            <a class="sb-link" href="#daemon-abi-languages">Language support</a>
+            <a class="sb-link" href="#daemon-abi-scope">Current limits</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- L1: Reference -->
     <div class="sb-group sb-section">
       <button class="sb-group-header" type="button" aria-expanded="true">
@@ -2336,6 +2370,470 @@ module.exports = <span class="tok-kw">function</span> (batch) {
           <p>Covered in <a href="#state" style="color: var(--action);">Cross-invocation state</a>. The default <code>InMemoryStateStore</code> is lock-free with atomic counters; swap your own to back <code>require('afterburner:state')</code> with Redis, SQLite, or anything else.</p>
         </div>
       </div>
+
+      <h2 id="daemon-api"><span class="anchor">#</span>Daemon API</h2>
+      <p>A <strong>daemon</strong> is a program that stays up and serves requests instead of running once and exiting. <code>burn</code> has two daemon flavors that share one host: <strong>JavaScript / TypeScript</strong> daemons (a script that calls <code>.listen()</code>) and <strong>native</strong> daemons (a Rust, Go, C or C++ module that exports the <a href="#daemon-abi" style="color: var(--action);">native daemon ABI</a>). In both, the host owns the socket, the accept loop and the HTTP plumbing; the guest only handles requests. Python and Ruby do not use this API (see <a href="#daemon-abi-languages" style="color: var(--action);">language support</a>).</p>
+
+      <h3 id="daemon-api-js">JavaScript daemons</h3>
+      <p>Every script <code>burn</code> runs goes through daemon mode. The script body runs once as <em>init</em>, then <code>burn</code> looks at what it left behind:</p>
+      <ul>
+        <li><strong>Nothing holding the process open</strong> (no listener, no ref'd timer): a plain one-shot. Output is flushed and <code>burn</code> exits 0.</li>
+        <li><strong>At least one ref</strong> (an HTTP listener from <code>.listen()</code>, or a <code>setInterval</code> / non-zero <code>setTimeout</code>): <code>burn</code> enters the event loop, dispatching requests and firing timers until SIGINT / SIGTERM or until every ref is cleared. Timers are ref'd by default; <code>.unref()</code> releases one.</li>
+      </ul>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">server.js</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-kw">const</span> http = <span class="tok-fn">require</span>(<span class="tok-str">'http'</span>);
+<span class="tok-kw">const</span> state = <span class="tok-fn">require</span>(<span class="tok-str">'afterburner:state'</span>);
+
+http.<span class="tok-fn">createServer</span>((req, res) =&gt; {
+  <span class="tok-kw">const</span> hits = state.<span class="tok-fn">increment</span>(<span class="tok-str">'hits'</span>);         <span class="tok-com">// shared across every worker</span>
+  res.<span class="tok-fn">writeHead</span>(200, { <span class="tok-str">'content-type'</span>: <span class="tok-str">'text/plain'</span> });
+  res.<span class="tok-fn">end</span>(<span class="tok-str">`hit ${hits} ${req.url}\n`</span>);
+}).<span class="tok-fn">listen</span>(8080);</pre>
+      </div>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> run server.js                                   <span class="tok-com"># open posture</span>
+$ <span class="tok-mod">burn</span> --sandbox --allow-listen 8080 run server.js    <span class="tok-com"># sealed, one port granted</span>
+$ BURN_SHARDS=1 <span class="tok-mod">burn</span> run server.js                    <span class="tok-com"># force a single worker</span></pre>
+      </div>
+      <ul>
+        <li><strong>Listen errors are Node-shaped.</strong> A port already in use fails with <code>EADDRINUSE</code>; a port the manifold's <code>listen</code> grant does not cover fails with <code>EACCES</code>.</li>
+        <li><strong>Workers.</strong> An HTTP daemon runs one worker per available CPU (<code>BURN_SHARDS</code> overrides, 1 to 128), each with its own JS state, and requests are spread across them. A daemon whose init binds no HTTP listener (timers only, raw <code>net</code> / <code>tls</code> / <code>dgram</code>) stays on one worker, so init-time side effects never run N times. Use <code>afterburner:state</code> for state every worker must see.</li>
+        <li><strong>Exit codes.</strong> <code>process.exit(n)</code> exits with <code>n</code>; an exception during init exits 1; a clean signal shutdown exits 0.</li>
+        <li><strong>Library calls stay one-shot.</strong> <code>Afterburner::run</code> never enters daemon mode. To host a long-lived daemon inside your own process, use the embedder API below.</li>
+      </ul>
+
+      <h3 id="daemon-api-embed">Embedding daemons in Rust</h3>
+      <p>Enable the <code>daemon</code> feature to host daemons in-process without the CLI dependencies. The types live under <code>afterburner::wasm</code> (a re-export of <code>afterburner-wasi</code>). This is the machinery <code>burn run</code> itself uses, and what ScramDB drives for <a href="#packages-scramdb" style="color: var(--action);">daemon packages</a>.</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">Cargo.toml</span><button class="copy-btn" data-copy='afterburner = { version = "0.2", features = ["wasm", "daemon"] }'>Copy</button></div>
+<pre>[dependencies]
+<span class="tok-mod">afterburner</span> = { version = <span class="tok-str">"0.2"</span>, features = [<span class="tok-str">"wasm"</span>, <span class="tok-str">"daemon"</span>] }</pre>
+      </div>
+      <div class="table-scroll"><table class="doc-table">
+        <thead><tr><th>Type</th><th>Role</th><th>Key methods</th></tr></thead>
+        <tbody>
+          <tr><td><code>DaemonHttp</code></td><td>The HTTP coordinator: binds listeners on your tokio runtime, turns each inbound request into a <code>DaemonEvent</code> on a bounded channel, and matches replies back to requests by <code>req_id</code>.</td><td><code>with_runtime(handle, event_queue_cap)</code> · <code>bind_listener(port) -&gt; i32</code> · <code>recv_async_event()</code> · <code>deliver_reply(req_id, ReplyEnvelope)</code> · <code>listener_count()</code> · <code>close_listener(id)</code></td></tr>
+          <tr><td><code>DaemonEvent</code></td><td>One inbound HTTP request.</td><td>Fields <code>server_id</code>, <code>req_id</code>, <code>method</code>, <code>url</code>, <code>headers</code>, <code>body</code></td></tr>
+          <tr><td><code>ReplyEnvelope</code></td><td>One HTTP response, the same type for both daemon flavors.</td><td>Fields <code>status: u16</code>, <code>headers: Vec&lt;(String, String)&gt;</code>, <code>body: Vec&lt;u8&gt;</code></td></tr>
+          <tr><td><code>DaemonShardPool</code></td><td>N JavaScript daemon workers, each on its own thread with its own store, fed round-robin from one <code>DaemonHttp</code>. Init runs on every shard before <code>spawn</code> returns; any init failure tears the pool down and is returned.</td><td><code>spawn(ShardPoolConfig)</code> · <code>shard_count()</code> · <code>shards_alive()</code> · <code>any_has_refs()</code> · <code>init_results()</code> · <code>request_counts()</code> · <code>join_all()</code></td></tr>
+          <tr><td><code>ShardPoolConfig</code></td><td>Pool settings.</td><td><code>shard_count</code> (1 to <code>MAX_SHARDS</code> = 128) · <code>expand_only_for_http_listener</code> · <code>engine</code> · <code>instance_pre</code> · <code>init_bytecode</code> · <code>manifold</code> · <code>state_store</code> · <code>host_context</code> · <code>daemon_http</code> · <code>tokio_handle</code> · <code>invocation</code> · <code>shutdown</code> · <code>queue_depth_per_shard</code> (default <code>DEFAULT_SHARD_QUEUE_DEPTH</code> = 256)</td></tr>
+          <tr><td><code>DaemonRuntime</code></td><td>A single long-lived JavaScript daemon store, for when you drive dispatch yourself.</td><td><code>run_init</code> · <code>run_init_with_bytecode</code> · <code>dispatch_event</code> · <code>has_listeners()</code> · <code>has_refs()</code> · <code>drain_stdout_from(mark)</code> · <code>drain_stderr_from(mark)</code></td></tr>
+          <tr><td><code>daemon_runtime_native::NativeDaemonRuntime</code></td><td>A single long-lived native (Rust / Go / C / C++) daemon instance. See the <a href="#daemon-abi" style="color: var(--action);">native daemon ABI</a>.</td><td><code>instantiate(wasm, WasiCommandOpts)</code> · <code>call_init(envelope)</code> · <code>call_dispatch(envelope)</code> · <code>drain_stdout_from(mark)</code> · <code>drain_stderr_from(mark)</code></td></tr>
+          <tr><td><code>daemon_runtime_native::probe</code> · <code>daemon_shape</code></td><td>Classify a module without instantiating it.</td><td>Returns <code>NativeDaemonShape::OneShot</code>, <code>Daemon</code>, or <code>Malformed(reason)</code></td></tr>
+          <tr><td><code>daemon_envelopes</code></td><td>The wire shapes, shared by the CLI and the pool.</td><td><code>http_event_to_envelope(&amp;DaemonEvent)</code> · <code>parse_native_init_response(bytes)</code> · <code>parse_native_dispatch_response(bytes)</code></td></tr>
+        </tbody>
+      </table></div>
+      <p>A positive <code>bind_listener</code> return is the new <code>server_id</code>; a negative value is an error: <code>LISTEN_ERR_NO_DAEMON</code> (-1, no runtime attached), <code>LISTEN_ERR_ADDR_IN_USE</code> (-2), <code>LISTEN_ERR_IO</code> (-3), <code>LISTEN_ERR_PERMISSION</code> (-4, the manifold does not grant the port). Listeners bind on <code>127.0.0.1</code>. The event channel is bounded by <code>event_queue_cap</code>: when it is full, new requests wait instead of queueing without limit.</p>
+      <p>A complete native daemon host loop, the same shape <code>burn run</code> uses:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">rust</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-kw">use</span> afterburner::wasm::daemon_envelopes::{
+    http_event_to_envelope, parse_native_dispatch_response, parse_native_init_response,
+};
+<span class="tok-kw">use</span> afterburner::wasm::daemon_http::{DaemonHttp, ReplyEnvelope};
+<span class="tok-kw">use</span> afterburner::wasm::daemon_runtime_native::{NativeDaemonRuntime, NativeDaemonShape, probe};
+<span class="tok-kw">use</span> afterburner::wasm::embedder_vm::WasiCommandOpts;
+<span class="tok-kw">use</span> anyhow::{anyhow, bail};
+
+<span class="tok-kw">fn</span> <span class="tok-fn">serve</span>(wasm: &amp;[<span class="tok-mod">u8</span>], rt: &amp;tokio::runtime::Runtime) -&gt; anyhow::Result&lt;()&gt; {
+    <span class="tok-kw">match</span> <span class="tok-fn">probe</span>(wasm)? {
+        NativeDaemonShape::Daemon =&gt; {}
+        NativeDaemonShape::OneShot =&gt; <span class="tok-fn">bail!</span>(<span class="tok-str">"not a daemon; run it as a one-shot"</span>),
+        NativeDaemonShape::Malformed(why) =&gt; <span class="tok-fn">bail!</span>(why),
+    }
+
+    <span class="tok-kw">let</span> opts = WasiCommandOpts::<span class="tok-fn">new</span>().<span class="tok-fn">args</span>([<span class="tok-str">"server"</span>]).<span class="tok-fn">max_memory_bytes</span>(256 &lt;&lt; 20);
+    <span class="tok-kw">let</span> <span class="tok-kw">mut</span> guest = NativeDaemonRuntime::<span class="tok-fn">instantiate</span>(wasm, opts)?;
+
+    <span class="tok-kw">let</span> init = guest.<span class="tok-fn">call_init</span>(<span class="tok-kw">br</span><span class="tok-str">#"{"mode":"daemon-init"}"#</span>)?;
+    <span class="tok-kw">let</span> listen = <span class="tok-fn">parse_native_init_response</span>(&amp;init).<span class="tok-fn">map_err</span>(|e| <span class="tok-fn">anyhow!</span>(e))?;
+    <span class="tok-kw">if</span> listen.<span class="tok-fn">is_empty</span>() {
+        <span class="tok-kw">return</span> Ok(());                                <span class="tok-com">// guest chose not to serve</span>
+    }
+
+    <span class="tok-kw">let</span> http = DaemonHttp::<span class="tok-fn">with_runtime</span>(rt.<span class="tok-fn">handle</span>().<span class="tok-fn">clone</span>(), 1024);
+    <span class="tok-kw">for</span> spec <span class="tok-kw">in</span> &amp;listen {
+        <span class="tok-kw">if</span> http.<span class="tok-fn">bind_listener</span>(spec.port) &lt; 0 {
+            <span class="tok-fn">bail!</span>(<span class="tok-str">"could not bind port {}"</span>, spec.port);
+        }
+    }
+
+    rt.<span class="tok-fn">block_on</span>(<span class="tok-kw">async</span> {
+        <span class="tok-kw">while</span> <span class="tok-kw">let</span> Some(event) = http.<span class="tok-fn">recv_async_event</span>().<span class="tok-kw">await</span> {
+            <span class="tok-kw">let</span> request = serde_json::<span class="tok-fn">to_vec</span>(&amp;<span class="tok-fn">http_event_to_envelope</span>(&amp;event))?;
+            <span class="tok-kw">match</span> guest.<span class="tok-fn">call_dispatch</span>(&amp;request) {
+                Ok(bytes) =&gt; {
+                    <span class="tok-kw">let</span> reply = <span class="tok-fn">parse_native_dispatch_response</span>(&amp;bytes).<span class="tok-fn">unwrap_or_else</span>(|e| ReplyEnvelope {
+                        status: 500, headers: Vec::<span class="tok-fn">new</span>(), body: e.<span class="tok-fn">into_bytes</span>(),
+                    });
+                    http.<span class="tok-fn">deliver_reply</span>(event.req_id, reply);
+                }
+                Err(trap) =&gt; {
+                    <span class="tok-com">// A trap is fatal to the instance: answer this request, then stop.</span>
+                    http.<span class="tok-fn">deliver_reply</span>(event.req_id, ReplyEnvelope {
+                        status: 500, headers: Vec::<span class="tok-fn">new</span>(), body: b<span class="tok-str">"daemon crashed"</span>.<span class="tok-fn">to_vec</span>(),
+                    });
+                    <span class="tok-kw">return</span> Err(trap.<span class="tok-fn">into</span>());
+                }
+            }
+        }
+        Ok::&lt;(), anyhow::Error&gt;(())
+    })
+}</pre>
+      </div>
+      <p>For JavaScript, <code>DaemonShardPool::spawn</code> replaces the manual loop: build a <code>WasmCombustor</code>, compile the script once with <code>compile_daemon_init_bytecode</code>, and pass its <code>engine()</code>, <code>instance_pre()</code> and the bytecode in a <code>ShardPoolConfig</code> together with a <code>DaemonHttp::with_runtime</code> coordinator. The pool runs init on every shard, owns dispatch, and reports refs through <code>any_has_refs()</code> so you know whether to keep it alive. Set the shared <code>shutdown</code> flag and call <code>join_all()</code> to drain.</p>
+
+      <h2 id="daemon-abi"><span class="anchor">#</span>Native daemon ABI (Rust, Go, C, C++)</h2>
+      <p>A Rust, Go, C or C++ program compiles to a WASI <em>command</em> module: the host calls <code>_start</code> once, it runs to completion, and it exits. That entry point cannot keep a server running. The native daemon ABI gives the module a <strong>second set of entry points</strong> the host can call as many times as it wants, after <code>_start</code> has run, against the same instance. The host keeps the socket, the accept loop and the HTTP stack; the guest turns a request into a response.</p>
+      <p>A plain <code>fn main()</code> / <code>int main(void)</code> program that does not export the ABI is unaffected: it still runs once, and its exit code still propagates.</p>
+
+      <h3 id="daemon-abi-exports">Exported functions</h3>
+      <p>A daemon guest exports four functions, all <code>i32</code>-only, plus the <code>memory</code> export every <code>wasm32-wasip1</code> module already has:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">wasm exports</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-fn">afterburner_alloc</span>(len: <span class="tok-mod">i32</span>) -&gt; <span class="tok-mod">i32</span>
+<span class="tok-fn">afterburner_dealloc</span>(ptr: <span class="tok-mod">i32</span>, len: <span class="tok-mod">i32</span>)
+<span class="tok-fn">afterburner_daemon_init</span>(ptr: <span class="tok-mod">i32</span>, len: <span class="tok-mod">i32</span>) -&gt; <span class="tok-mod">i32</span>
+<span class="tok-fn">afterburner_daemon_dispatch</span>(ptr: <span class="tok-mod">i32</span>, len: <span class="tok-mod">i32</span>) -&gt; <span class="tok-mod">i32</span></pre>
+      </div>
+      <p>The signatures are <code>i32</code>-only on purpose. Go's <code>//go:wasmexport</code> only lowers plain scalars, so the ABI sticks to what every target toolchain produces natively, with no extra codegen flags: no multi-value returns, no fat pointers.</p>
+
+      <h3 id="daemon-abi-buffers">Byte-buffer calling convention</h3>
+      <p>The host and the guest share no address space, so every call passes a byte buffer that lives in the <strong>guest's</strong> linear memory:</p>
+      <ul>
+        <li><strong>Host to guest.</strong> The host calls <code>afterburner_alloc(len)</code>, writes <code>len</code> bytes at the returned pointer, then calls <code>afterburner_daemon_init</code> or <code>afterburner_daemon_dispatch</code> with <code>(ptr, len)</code>.</li>
+        <li><strong>Guest to host.</strong> The guest allocates a buffer for its response, writes the bytes, and returns a pointer to an 8-byte <strong>response header</strong> it also allocated: <code>[result_ptr: u32 LE][result_len: u32 LE]</code>. The host reads the header, then <code>result_len</code> bytes at <code>result_ptr</code>.</li>
+        <li><strong>The host frees everything.</strong> Once it has read them, the host calls <code>afterburner_dealloc(ptr, len)</code> on the request buffer it wrote, the response buffer, and the 8-byte header. Nothing else frees these buffers, which is what keeps guest memory bounded over the daemon's lifetime. Returning a pointer that is not a live allocation, or freeing a buffer yourself, is a guest bug.</li>
+      </ul>
+      <p>A separate header (rather than a length prefix inside the payload) keeps the payload a plain byte string that <code>serde_json</code>, <code>encoding/json</code> or <code>cJSON</code> can read directly.</p>
+
+      <h3 id="daemon-abi-detection">Detection: the exports decide</h3>
+      <p>There is no manifest field and no CLI flag. <code>burn run</code> inspects the compiled module before running it:</p>
+      <div class="table-scroll"><table class="doc-table">
+        <thead><tr><th>Module exports</th><th>What <code>burn</code> does</th></tr></thead>
+        <tbody>
+          <tr><td>None of the four</td><td>One-shot run, exactly as before.</td></tr>
+          <tr><td>All four, with the exact <code>i32</code> signatures</td><td>Runs it as a daemon.</td></tr>
+          <tr><td>Some but not all, or one with a wrong signature</td><td>Refuses to run, naming each missing or mismatched export. It never falls back to a one-shot run of a module that looks like a broken server.</td></tr>
+        </tbody>
+      </table></div>
+      <p>This mirrors the JavaScript rule: a script that calls <code>.listen()</code> becomes a daemon, and one that doesn't stays a script. It works for a single source file (<code>burn run main.rs</code>) and for a compiled package (<code>burn run app.afb</code>).</p>
+
+      <h3 id="daemon-abi-listen">Asking the host to listen</h3>
+      <p>WASI preview 1 has no socket calls, so there is no <code>listen</code> import. The guest declares which ports it wants in its <strong><code>afterburner_daemon_init</code> response</strong>:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">init response</span><button class="copy-btn">Copy</button></div>
+<pre>{<span class="tok-str">"listen"</span>: [{<span class="tok-str">"port"</span>: 8080}]}          <span class="tok-com">// bind 8080 and serve</span>
+{<span class="tok-str">"listen"</span>: []}                        <span class="tok-com">// decided not to serve: burn exits 0</span>
+{<span class="tok-str">"error"</span>: <span class="tok-str">"missing DATABASE_URL"</span>}      <span class="tok-com">// init failed: message on stderr, exit 1</span></pre>
+      </div>
+      <p>An empty or absent <code>listen</code> array behaves like a JavaScript script with no <code>.listen()</code> call. Each port must be a number from 0 to 65535. On success <code>burn</code> prints <code>listening on port(s) ...</code> to stderr (silenced by <code>BURN_QUIET=1</code>) and serves until SIGINT or SIGTERM, then exits 0.</p>
+      <div class="callout callout--pending">
+        <div class="callout__icon">!</div>
+        <div>
+          <strong>Native daemon ports are not checked against <code>--allow-listen</code> yet.</strong>
+          <p>For JavaScript daemons, the manifold's <code>listen</code> grant gates every port. For native daemons, <code>burn</code> binds whatever ports the init response names, on <code>127.0.0.1</code>, regardless of <code>--sandbox</code> / <code>--allow-listen</code>. Every other WASI grant (args, env, preopens, memory cap) matches a one-shot run of the same module.</p>
+        </div>
+      </div>
+
+      <h3 id="daemon-abi-envelopes">Request and response envelopes</h3>
+      <p><strong>Init input</strong> is <code>{"mode":"daemon-init"}</code>. It carries no argv, env or cwd: a native guest is a real WASI module and already receives those through <code>std::env::args()</code>, <code>os.Args</code> or <code>main(argc, argv)</code>, and its preopens already scope the filesystem it can see.</p>
+      <p><strong>Each request</strong> is the same JSON the JavaScript path receives:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">dispatch input</span><button class="copy-btn">Copy</button></div>
+<pre>{
+  <span class="tok-str">"kind"</span>: <span class="tok-str">"http-request"</span>,
+  <span class="tok-str">"server_id"</span>: 1,
+  <span class="tok-str">"req_id"</span>: 7,
+  <span class="tok-str">"req"</span>: {
+    <span class="tok-str">"method"</span>: <span class="tok-str">"POST"</span>,
+    <span class="tok-str">"url"</span>: <span class="tok-str">"/items?limit=10"</span>,
+    <span class="tok-str">"headers"</span>: { <span class="tok-str">"content-type"</span>: <span class="tok-str">"application/json"</span> },
+    <span class="tok-str">"body"</span>: <span class="tok-str">"{\"name\":\"x\"}"</span>
+  }
+}</pre>
+      </div>
+      <p>The request <code>body</code> is decoded as UTF-8, so bytes that are not valid UTF-8 are replaced. Binary uploads do not arrive byte-exact.</p>
+      <p><strong>Each response</strong> carries its body as base64, the one binary-safe encoding every target language's standard library can produce:</p>
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">dispatch output</span><button class="copy-btn">Copy</button></div>
+<pre>{<span class="tok-str">"status"</span>: 200, <span class="tok-str">"headers"</span>: {<span class="tok-str">"content-type"</span>: <span class="tok-str">"text/plain"</span>}, <span class="tok-str">"body_b64"</span>: <span class="tok-str">"aGVsbG8="</span>}</pre>
+      </div>
+      <p><code>status</code> defaults to 200 and <code>body_b64</code> to empty, so <code>{}</code> is a valid empty 200. A response that is not valid JSON, or whose base64 does not decode, becomes a 500 for that request; the daemon keeps serving.</p>
+
+      <h3 id="daemon-abi-lifecycle">Instance lifecycle</h3>
+      <p>One instance per daemon process, alive for the life of the process. On start, <code>burn</code> instantiates the module with the same WASI grants a one-shot run gets, then runs its entry point once:</p>
+      <div class="table-scroll"><table class="doc-table">
+        <thead><tr><th>Module has</th><th>Typical source</th><th>Behavior</th></tr></thead>
+        <tbody>
+          <tr><td><code>_start</code></td><td>Rust / C / C++ with a <code>main</code>; Go with <code>//go:wasmexport</code></td><td>Called once. Returning, or exiting with code 0, continues to init. A non-zero exit stops the daemon with that code; a trap stops it with the trap's reason. Go always exits 0 here and requires <code>_start</code> before any exported call.</td></tr>
+          <tr><td><code>_initialize</code></td><td>C / C++ built with <code>-mexec-model=reactor</code></td><td>Called once; any trap stops the daemon.</td></tr>
+          <tr><td>Neither</td><td>Rust <code>#![no_main]</code> <code>cdylib</code></td><td>Straight to <code>afterburner_daemon_init</code>.</td></tr>
+        </tbody>
+      </table></div>
+      <p>Then <code>afterburner_daemon_init</code> runs once, and <code>afterburner_daemon_dispatch</code> runs once per request. Globals and heap survive between calls because the instance and its memory are never torn down, so a counter, cache or connection pool held in guest memory persists. Requests are dispatched one at a time into the single instance. Guest stdout and stderr are flushed to the process after init and after each request; a guest that buffers its own output should flush it inside the handler.</p>
+
+      <h3 id="daemon-abi-traps">A trap mid-request</h3>
+      <p>A JavaScript exception is caught inside the engine, so the daemon keeps running. A WASM trap in <code>afterburner_daemon_dispatch</code> (a panic, running out of fuel, an out-of-bounds access) unwinds through the host, and the guest's own invariants (a half-updated allocator, a half-written struct) can no longer be trusted. So a trap is <strong>fatal to the instance</strong>, exactly as an unhandled panic ends a normal server process: the request in flight gets a 500, the trap is reported, and <code>burn</code> exits non-zero.</p>
+      <p>A guest that wants to survive its own per-request bugs catches them inside the handler before they become a trap: <code>std::panic::catch_unwind</code> in Rust, <code>defer</code> + <code>recover()</code> in Go, <code>setjmp</code> / <code>longjmp</code> in C. Run several <code>burn</code> processes under a supervisor if a crash must not take the service down.</p>
+
+      <h3 id="daemon-abi-bounds">Fuel, memory &amp; timeouts</h3>
+      <ul>
+        <li><strong>Fuel is per call, never cumulative.</strong> The budget is reset to <code>NATIVE_DAEMON_FUEL_PER_CALL</code> (100,000,000 instructions, the same default a one-shot native run gets) before init and before every dispatch. A handler that loops forever runs out of fuel and traps, which ends the instance as above. A budget set once at startup would instead drain over the first few thousand requests and kill a healthy daemon. Verified across 100 dispatches on one instance, and end to end across 40 real HTTP requests.</li>
+        <li><strong>Memory is capped for the whole lifetime.</strong> The cap is applied once and never reset, because memory is the state a daemon is meant to keep. Growth past the cap fails inside the guest as an ordinary allocation failure. Unbounded unless a cap is set, the same as one-shot native runs.</li>
+        <li><strong>No separate wall-clock timeout.</strong> The ABI is synchronous compute with no import a guest can block on, so the only way a call fails to return is by burning instructions, which fuel already bounds.</li>
+      </ul>
+
+      <h3 id="daemon-abi-guests">Writing a guest</h3>
+      <p>Each sample below is a complete daemon that answers every request with a counter, proving state survives across calls. They use only each language's standard library, so they build with <code>burn run</code> on a single file.</p>
+
+      <div class="langtabs" id="daemon-abi-tabs">
+        <div class="langtabs__bar" role="tablist" aria-label="Native daemon guest per language">
+          <button class="langtabs__tab active" data-tab="rust" role="tab"><i class="devicon-rust-original lang-i" aria-hidden="true"></i>Rust</button>
+          <button class="langtabs__tab" data-tab="go" role="tab"><i class="devicon-go-plain lang-i" aria-hidden="true"></i>Go</button>
+          <button class="langtabs__tab" data-tab="c" role="tab"><i class="devicon-c-plain lang-i" aria-hidden="true"></i>C</button>
+          <button class="langtabs__tab" data-tab="cpp" role="tab"><i class="devicon-cplusplus-plain lang-i" aria-hidden="true"></i>C++</button>
+        </div>
+
+        <div class="langtabs__panel active" data-tab="rust">
+          <div class="codeblock">
+            <div class="codeblock__head"><span class="lang">server.rs</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-kw">use</span> std::sync::atomic::{AtomicU32, Ordering};
+
+<span class="tok-kw">static</span> COUNT: AtomicU32 = AtomicU32::<span class="tok-fn">new</span>(0);
+
+<span class="tok-com">// Every buffer is an exact-size boxed slice, so dealloc can rebuild it from (ptr, len).</span>
+<span class="tok-kw">fn</span> <span class="tok-fn">leak</span>(bytes: Vec&lt;<span class="tok-mod">u8</span>&gt;) -&gt; <span class="tok-mod">u32</span> {
+    Box::<span class="tok-fn">into_raw</span>(bytes.<span class="tok-fn">into_boxed_slice</span>()) <span class="tok-kw">as</span> *<span class="tok-kw">mut</span> <span class="tok-mod">u8</span> <span class="tok-kw">as</span> <span class="tok-mod">u32</span>
+}
+
+<span class="tok-kw">fn</span> <span class="tok-fn">respond</span>(body: Vec&lt;<span class="tok-mod">u8</span>&gt;) -&gt; <span class="tok-mod">i32</span> {
+    <span class="tok-kw">let</span> len = body.<span class="tok-fn">len</span>() <span class="tok-kw">as</span> <span class="tok-mod">u32</span>;
+    <span class="tok-kw">let</span> <span class="tok-kw">mut</span> header = <span class="tok-fn">leak</span>(body).<span class="tok-fn">to_le_bytes</span>().<span class="tok-fn">to_vec</span>();
+    header.<span class="tok-fn">extend_from_slice</span>(&amp;len.<span class="tok-fn">to_le_bytes</span>());
+    <span class="tok-fn">leak</span>(header) <span class="tok-kw">as</span> <span class="tok-mod">i32</span>
+}
+
+<span class="tok-kw">fn</span> <span class="tok-fn">b64</span>(data: &amp;[<span class="tok-mod">u8</span>]) -&gt; String {
+    <span class="tok-kw">const</span> T: &amp;[<span class="tok-mod">u8</span>; 64] = b<span class="tok-str">"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"</span>;
+    <span class="tok-kw">let</span> <span class="tok-kw">mut</span> out = String::<span class="tok-fn">with_capacity</span>(data.<span class="tok-fn">len</span>().<span class="tok-fn">div_ceil</span>(3) * 4);
+    <span class="tok-kw">for</span> c <span class="tok-kw">in</span> data.<span class="tok-fn">chunks</span>(3) {
+        <span class="tok-kw">let</span> n = <span class="tok-mod">u32</span>::<span class="tok-fn">from</span>(c[0]) &lt;&lt; 16
+            | <span class="tok-mod">u32</span>::<span class="tok-fn">from</span>(*c.<span class="tok-fn">get</span>(1).<span class="tok-fn">unwrap_or</span>(&amp;0)) &lt;&lt; 8
+            | <span class="tok-mod">u32</span>::<span class="tok-fn">from</span>(*c.<span class="tok-fn">get</span>(2).<span class="tok-fn">unwrap_or</span>(&amp;0));
+        <span class="tok-kw">for</span> i <span class="tok-kw">in</span> 0..4 {
+            out.<span class="tok-fn">push</span>(<span class="tok-kw">if</span> i &lt;= c.<span class="tok-fn">len</span>() { T[(n &gt;&gt; (18 - 6 * i) &amp; 63) <span class="tok-kw">as</span> <span class="tok-mod">usize</span>] <span class="tok-kw">as</span> <span class="tok-mod">char</span> } <span class="tok-kw">else</span> { <span class="tok-str">'='</span> });
+        }
+    }
+    out
+}
+
+<span class="tok-type">#[unsafe(no_mangle)]</span>
+<span class="tok-kw">pub extern</span> <span class="tok-str">"C"</span> <span class="tok-kw">fn</span> <span class="tok-fn">afterburner_alloc</span>(len: <span class="tok-mod">i32</span>) -&gt; <span class="tok-mod">i32</span> {
+    <span class="tok-fn">leak</span>(<span class="tok-fn">vec!</span>[0; len.<span class="tok-fn">max</span>(0) <span class="tok-kw">as</span> <span class="tok-mod">usize</span>]) <span class="tok-kw">as</span> <span class="tok-mod">i32</span>
+}
+
+<span class="tok-type">#[unsafe(no_mangle)]</span>
+<span class="tok-kw">pub extern</span> <span class="tok-str">"C"</span> <span class="tok-kw">fn</span> <span class="tok-fn">afterburner_dealloc</span>(ptr: <span class="tok-mod">i32</span>, len: <span class="tok-mod">i32</span>) {
+    <span class="tok-kw">unsafe</span> { <span class="tok-fn">drop</span>(Vec::<span class="tok-fn">from_raw_parts</span>(ptr <span class="tok-kw">as</span> *<span class="tok-kw">mut</span> <span class="tok-mod">u8</span>, 0, len.<span class="tok-fn">max</span>(0) <span class="tok-kw">as</span> <span class="tok-mod">usize</span>)) }
+}
+
+<span class="tok-type">#[unsafe(no_mangle)]</span>
+<span class="tok-kw">pub extern</span> <span class="tok-str">"C"</span> <span class="tok-kw">fn</span> <span class="tok-fn">afterburner_daemon_init</span>(_ptr: <span class="tok-mod">i32</span>, _len: <span class="tok-mod">i32</span>) -&gt; <span class="tok-mod">i32</span> {
+    <span class="tok-fn">respond</span>(<span class="tok-kw">br</span><span class="tok-str">#"{"listen":[{"port":8080}]}"#</span>.<span class="tok-fn">to_vec</span>())
+}
+
+<span class="tok-type">#[unsafe(no_mangle)]</span>
+<span class="tok-kw">pub extern</span> <span class="tok-str">"C"</span> <span class="tok-kw">fn</span> <span class="tok-fn">afterburner_daemon_dispatch</span>(ptr: <span class="tok-mod">i32</span>, len: <span class="tok-mod">i32</span>) -&gt; <span class="tok-mod">i32</span> {
+    <span class="tok-kw">let</span> _request = <span class="tok-kw">unsafe</span> { std::slice::<span class="tok-fn">from_raw_parts</span>(ptr <span class="tok-kw">as</span> *<span class="tok-kw">const</span> <span class="tok-mod">u8</span>, len <span class="tok-kw">as</span> <span class="tok-mod">usize</span>) };
+    <span class="tok-kw">let</span> n = COUNT.<span class="tok-fn">fetch_add</span>(1, Ordering::Relaxed) + 1;
+    <span class="tok-kw">let</span> body = <span class="tok-fn">b64</span>(<span class="tok-fn">format!</span>(<span class="tok-str">"request #{n}"</span>).<span class="tok-fn">as_bytes</span>());
+    <span class="tok-fn">respond</span>(<span class="tok-fn">format!</span>(<span class="tok-kw">r</span><span class="tok-str">#"{{"status":200,"headers":{{"content-type":"text/plain"}},"body_b64":"{body}"}}"#</span>).<span class="tok-fn">into_bytes</span>())
+}
+
+<span class="tok-kw">fn</span> <span class="tok-fn">main</span>() {}</pre>
+          </div>
+        </div>
+
+        <div class="langtabs__panel" data-tab="go">
+          <div class="codeblock">
+            <div class="codeblock__head"><span class="lang">server.go (Go 1.24+)</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-kw">package</span> main
+
+<span class="tok-kw">import</span> (
+	<span class="tok-str">"encoding/base64"</span>
+	<span class="tok-str">"encoding/binary"</span>
+	<span class="tok-str">"encoding/json"</span>
+	<span class="tok-str">"fmt"</span>
+	<span class="tok-str">"unsafe"</span>
+)
+
+<span class="tok-kw">var</span> count <span class="tok-mod">int32</span>
+
+<span class="tok-com">// The GC cannot see the host's references, so keep every handed-out buffer</span>
+<span class="tok-com">// reachable until the host frees it.</span>
+<span class="tok-kw">var</span> pinned = <span class="tok-kw">map</span>[<span class="tok-mod">int32</span>][]<span class="tok-mod">byte</span>{}
+
+<span class="tok-com">//go:wasmexport afterburner_alloc</span>
+<span class="tok-kw">func</span> <span class="tok-fn">alloc</span>(n <span class="tok-mod">int32</span>) <span class="tok-mod">int32</span> {
+	buf := <span class="tok-fn">make</span>([]<span class="tok-mod">byte</span>, n)
+	ptr := <span class="tok-mod">int32</span>(<span class="tok-mod">uintptr</span>(unsafe.<span class="tok-fn">Pointer</span>(unsafe.<span class="tok-fn">SliceData</span>(buf))))
+	pinned[ptr] = buf
+	<span class="tok-kw">return</span> ptr
+}
+
+<span class="tok-com">//go:wasmexport afterburner_dealloc</span>
+<span class="tok-kw">func</span> <span class="tok-fn">dealloc</span>(ptr, _ <span class="tok-mod">int32</span>) { <span class="tok-fn">delete</span>(pinned, ptr) }
+
+<span class="tok-kw">func</span> <span class="tok-fn">respond</span>(body []<span class="tok-mod">byte</span>) <span class="tok-mod">int32</span> {
+	p := <span class="tok-fn">alloc</span>(<span class="tok-mod">int32</span>(<span class="tok-fn">len</span>(body)))
+	<span class="tok-fn">copy</span>(pinned[p], body)
+	h := <span class="tok-fn">alloc</span>(8)
+	binary.LittleEndian.<span class="tok-fn">PutUint32</span>(pinned[h][0:], <span class="tok-mod">uint32</span>(p))
+	binary.LittleEndian.<span class="tok-fn">PutUint32</span>(pinned[h][4:], <span class="tok-mod">uint32</span>(<span class="tok-fn">len</span>(body)))
+	<span class="tok-kw">return</span> h
+}
+
+<span class="tok-com">//go:wasmexport afterburner_daemon_init</span>
+<span class="tok-kw">func</span> <span class="tok-fn">daemonInit</span>(_, _ <span class="tok-mod">int32</span>) <span class="tok-mod">int32</span> {
+	<span class="tok-kw">return</span> <span class="tok-fn">respond</span>([]<span class="tok-mod">byte</span>(<span class="tok-str">`{"listen":[{"port":8080}]}`</span>))
+}
+
+<span class="tok-com">//go:wasmexport afterburner_daemon_dispatch</span>
+<span class="tok-kw">func</span> <span class="tok-fn">daemonDispatch</span>(ptr, n <span class="tok-mod">int32</span>) <span class="tok-mod">int32</span> {
+	<span class="tok-kw">var</span> env <span class="tok-kw">struct</span>{ Req <span class="tok-kw">struct</span>{ Method, URL <span class="tok-mod">string</span> } }
+	_ = json.<span class="tok-fn">Unmarshal</span>(unsafe.<span class="tok-fn">Slice</span>((*<span class="tok-mod">byte</span>)(unsafe.<span class="tok-fn">Pointer</span>(<span class="tok-mod">uintptr</span>(ptr))), n), &amp;env)
+	count++
+	body := base64.StdEncoding.<span class="tok-fn">EncodeToString</span>([]<span class="tok-mod">byte</span>(fmt.<span class="tok-fn">Sprintf</span>(<span class="tok-str">"request #%d %s %s"</span>, count, env.Req.Method, env.Req.URL)))
+	<span class="tok-kw">return</span> <span class="tok-fn">respond</span>([]<span class="tok-mod">byte</span>(<span class="tok-str">`{"status":200,"headers":{"content-type":"text/plain"},"body_b64":"`</span> + body + <span class="tok-str">`"}`</span>))
+}
+
+<span class="tok-kw">func</span> <span class="tok-fn">main</span>() {}</pre>
+          </div>
+        </div>
+
+        <div class="langtabs__panel" data-tab="c">
+          <div class="codeblock">
+            <div class="codeblock__head"><span class="lang">server.c</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-com">#include &lt;stdint.h&gt;</span>
+<span class="tok-com">#include &lt;stdio.h&gt;</span>
+<span class="tok-com">#include &lt;stdlib.h&gt;</span>
+<span class="tok-com">#include &lt;string.h&gt;</span>
+
+<span class="tok-kw">static</span> <span class="tok-mod">int32_t</span> counter = 0;
+
+<span class="tok-type">__attribute__((export_name("afterburner_alloc")))</span>
+<span class="tok-mod">int32_t</span> <span class="tok-fn">afterburner_alloc</span>(<span class="tok-mod">int32_t</span> len) {
+    <span class="tok-kw">return</span> (<span class="tok-mod">int32_t</span>)(<span class="tok-mod">intptr_t</span>)<span class="tok-fn">malloc</span>(len &gt; 0 ? (<span class="tok-mod">size_t</span>)len : 1);
+}
+
+<span class="tok-type">__attribute__((export_name("afterburner_dealloc")))</span>
+<span class="tok-mod">void</span> <span class="tok-fn">afterburner_dealloc</span>(<span class="tok-mod">int32_t</span> ptr, <span class="tok-mod">int32_t</span> len) {
+    (<span class="tok-mod">void</span>)len;
+    <span class="tok-fn">free</span>((<span class="tok-mod">void</span> *)(<span class="tok-mod">intptr_t</span>)ptr);
+}
+
+<span class="tok-com">/* Copy body into a fresh buffer and return a pointer to its 8-byte header. */</span>
+<span class="tok-kw">static</span> <span class="tok-mod">int32_t</span> <span class="tok-fn">respond</span>(<span class="tok-kw">const</span> <span class="tok-mod">char</span> *body, <span class="tok-mod">size_t</span> len) {
+    <span class="tok-mod">char</span> *buf = <span class="tok-fn">malloc</span>(len ? len : 1);
+    <span class="tok-mod">uint8_t</span> *header = <span class="tok-fn">malloc</span>(8);
+    <span class="tok-fn">memcpy</span>(buf, body, len);
+    <span class="tok-mod">uint32_t</span> p = (<span class="tok-mod">uint32_t</span>)(<span class="tok-mod">intptr_t</span>)buf, n = (<span class="tok-mod">uint32_t</span>)len;
+    <span class="tok-fn">memcpy</span>(header, &amp;p, 4);        <span class="tok-com">/* wasm32 is little-endian */</span>
+    <span class="tok-fn">memcpy</span>(header + 4, &amp;n, 4);
+    <span class="tok-kw">return</span> (<span class="tok-mod">int32_t</span>)(<span class="tok-mod">intptr_t</span>)header;
+}
+
+<span class="tok-type">__attribute__((export_name("afterburner_daemon_init")))</span>
+<span class="tok-mod">int32_t</span> <span class="tok-fn">afterburner_daemon_init</span>(<span class="tok-mod">int32_t</span> ptr, <span class="tok-mod">int32_t</span> len) {
+    (<span class="tok-mod">void</span>)ptr; (<span class="tok-mod">void</span>)len;
+    <span class="tok-kw">static const</span> <span class="tok-mod">char</span> r[] = <span class="tok-str">"{\"listen\":[{\"port\":8080}]}"</span>;
+    <span class="tok-kw">return</span> <span class="tok-fn">respond</span>(r, <span class="tok-kw">sizeof</span> r - 1);
+}
+
+<span class="tok-type">__attribute__((export_name("afterburner_daemon_dispatch")))</span>
+<span class="tok-mod">int32_t</span> <span class="tok-fn">afterburner_daemon_dispatch</span>(<span class="tok-mod">int32_t</span> ptr, <span class="tok-mod">int32_t</span> len) {
+    (<span class="tok-mod">void</span>)ptr; (<span class="tok-mod">void</span>)len;          <span class="tok-com">/* the request envelope: len bytes of JSON at ptr */</span>
+    <span class="tok-kw">static const</span> <span class="tok-mod">char</span> b64[] = <span class="tok-str">"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"</span>;
+    <span class="tok-mod">char</span> text[32], enc[48], resp[128];
+    <span class="tok-mod">int</span> tn = <span class="tok-fn">snprintf</span>(text, <span class="tok-kw">sizeof</span> text, <span class="tok-str">"request #%d"</span>, ++counter);
+    <span class="tok-mod">size_t</span> o = 0;
+    <span class="tok-kw">for</span> (<span class="tok-mod">int</span> i = 0; i &lt; tn; i += 3) {
+        <span class="tok-mod">uint32_t</span> v = (<span class="tok-mod">uint8_t</span>)text[i] &lt;&lt; 16;
+        <span class="tok-kw">if</span> (i + 1 &lt; tn) v |= (<span class="tok-mod">uint8_t</span>)text[i + 1] &lt;&lt; 8;
+        <span class="tok-kw">if</span> (i + 2 &lt; tn) v |= (<span class="tok-mod">uint8_t</span>)text[i + 2];
+        enc[o++] = b64[(v &gt;&gt; 18) &amp; 63];
+        enc[o++] = b64[(v &gt;&gt; 12) &amp; 63];
+        enc[o++] = i + 1 &lt; tn ? b64[(v &gt;&gt; 6) &amp; 63] : <span class="tok-str">'='</span>;
+        enc[o++] = i + 2 &lt; tn ? b64[v &amp; 63] : <span class="tok-str">'='</span>;
+    }
+    <span class="tok-mod">int</span> rn = <span class="tok-fn">snprintf</span>(resp, <span class="tok-kw">sizeof</span> resp,
+        <span class="tok-str">"{\"status\":200,\"headers\":{\"content-type\":\"text/plain\"},\"body_b64\":\"%.*s\"}"</span>, (<span class="tok-mod">int</span>)o, enc);
+    <span class="tok-kw">return</span> <span class="tok-fn">respond</span>(resp, (<span class="tok-mod">size_t</span>)rn);
+}
+
+<span class="tok-mod">int</span> <span class="tok-fn">main</span>(<span class="tok-mod">void</span>) { <span class="tok-kw">return</span> 0; }</pre>
+          </div>
+        </div>
+
+        <div class="langtabs__panel" data-tab="cpp">
+          <p>C++ uses the same wasi-sdk mechanism as C via <code>clang++</code>. Each export must also be <code>extern "C"</code>, as at any C++ FFI boundary; the bodies are the C tab's, unchanged.</p>
+          <div class="codeblock">
+            <div class="codeblock__head"><span class="lang">server.cpp</span><button class="copy-btn">Copy</button></div>
+<pre><span class="tok-com">#include &lt;cstdint&gt;</span>
+
+<span class="tok-kw">extern</span> <span class="tok-str">"C"</span> {
+
+<span class="tok-type">__attribute__((export_name("afterburner_alloc")))</span>
+<span class="tok-mod">int32_t</span> <span class="tok-fn">afterburner_alloc</span>(<span class="tok-mod">int32_t</span> len);
+
+<span class="tok-type">__attribute__((export_name("afterburner_dealloc")))</span>
+<span class="tok-mod">void</span> <span class="tok-fn">afterburner_dealloc</span>(<span class="tok-mod">int32_t</span> ptr, <span class="tok-mod">int32_t</span> len);
+
+<span class="tok-type">__attribute__((export_name("afterburner_daemon_init")))</span>
+<span class="tok-mod">int32_t</span> <span class="tok-fn">afterburner_daemon_init</span>(<span class="tok-mod">int32_t</span> ptr, <span class="tok-mod">int32_t</span> len);
+
+<span class="tok-type">__attribute__((export_name("afterburner_daemon_dispatch")))</span>
+<span class="tok-mod">int32_t</span> <span class="tok-fn">afterburner_daemon_dispatch</span>(<span class="tok-mod">int32_t</span> ptr, <span class="tok-mod">int32_t</span> len);
+
+}  <span class="tok-com">// extern "C"; define the four functions below exactly as in server.c</span>
+
+<span class="tok-mod">int</span> <span class="tok-fn">main</span>() { <span class="tok-kw">return</span> 0; }</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="codeblock">
+        <div class="codeblock__head"><span class="lang">shell</span><button class="copy-btn">Copy</button></div>
+<pre>$ <span class="tok-mod">burn</span> run server.rs              <span class="tok-com"># stderr: listening on port(s) 8080</span>
+$ curl localhost:8080/
+request #1
+$ curl localhost:8080/
+request #2</pre>
+      </div>
+
+      <h3 id="daemon-abi-languages">Language support</h3>
+      <div class="table-scroll"><table class="doc-table">
+        <thead><tr><th>Language</th><th>Native daemon</th><th>How</th></tr></thead>
+        <tbody>
+          <tr><td><i class="devicon-rust-original lang-i" aria-hidden="true"></i>Rust</td><td>Yes</td><td><code>#[unsafe(no_mangle)] pub extern "C" fn</code> exports appear alongside <code>_start</code> (or alone, for a <code>#![no_main]</code> <code>cdylib</code>) with no extra build flags.</td></tr>
+          <tr><td><i class="devicon-c-plain lang-i" aria-hidden="true"></i>C</td><td>Yes</td><td><code>__attribute__((export_name("...")))</code> with wasi-sdk <code>clang</code>, no extra build flags. <code>-mexec-model=reactor</code> also works but is not required.</td></tr>
+          <tr><td><i class="devicon-cplusplus-plain lang-i" aria-hidden="true"></i>C++</td><td>Yes</td><td>Same as C via <code>clang++</code>, with each export declared <code>extern "C"</code>.</td></tr>
+          <tr><td><i class="devicon-go-plain lang-i" aria-hidden="true"></i>Go</td><td>Yes, Go 1.24+</td><td><code>//go:wasmexport</code>, first shipped in Go 1.24. Plain Go programs still need only 1.21; a package containing <code>//go:wasmexport</code> is checked for 1.24 up front, with a message naming the requirement.</td></tr>
+          <tr><td><i class="devicon-python-plain lang-i" aria-hidden="true"></i>Python</td><td>No</td><td>A Python package runs on the bundled Python interpreter, the same binary for every package, and Python source cannot add WASM exports to it. A Python program can still stay up by blocking in its own <code>accept()</code> loop (for example <code>ThreadingHTTPServer</code>; see <a href="https://github.com/afterburner-sh/afterburner/tree/master/examples/accept-webserver" style="color: var(--action);"><code>examples/accept-webserver</code></a>), which is a different mechanism.</td></tr>
+          <tr><td><i class="devicon-ruby-plain lang-i" aria-hidden="true"></i>Ruby</td><td>No</td><td>Same reason as Python, with the bundled Ruby interpreter.</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3 id="daemon-abi-scope">Current limits</h3>
+      <ul>
+        <li><strong>One instance per daemon, no worker pool.</strong> Requests are handled one at a time in a single instance. To use more cores, run several <code>burn</code> processes behind a load balancer, the same as running single-worker JavaScript daemons with <code>BURN_SHARDS=1</code>.</li>
+        <li><strong>HTTP in, HTTP out, synchronously.</strong> No outbound networking, raw TCP / TLS / UDP, or worker threads for native guests; those stay JavaScript-only.</li>
+        <li><strong>No listen-port gate yet.</strong> See the note under <a href="#daemon-abi-listen" style="color: var(--action);">Asking the host to listen</a>.</li>
+        <li><strong>No <code>afb.toml</code> settings.</strong> Detection comes only from the module's exports.</li>
+      </ul>
 
       <h2 id="cli"><span class="anchor">#</span>The <code>burn</code> CLI</h2>
       <p>A Deno-style command-line runtime. The CLI default is open (so existing Node scripts drop in without flags); pass <code>--sandbox</code> to flip to deny-by-default and grant with <code>--allow-*</code>. Every subcommand is below.</p>
