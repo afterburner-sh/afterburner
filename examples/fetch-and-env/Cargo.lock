@@ -76,6 +76,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "afterburner-afb"
+version = "0.2.9"
+dependencies = [
+ "afterburner-core",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "zstd",
+]
+
+[[package]]
 name = "afterburner-core"
 version = "0.2.9"
 dependencies = [
@@ -173,6 +188,7 @@ dependencies = [
 name = "afterburner-wasi"
 version = "0.2.9"
 dependencies = [
+ "afterburner-afb",
  "afterburner-core",
  "afterburner-node-compat",
  "anyhow",
@@ -1710,9 +1726,9 @@ dependencies = [
 
 [[package]]
 name = "kovan"
-version = "0.1.19"
+version = "0.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c140456f1fc2406f9218629ba654ae2f036a3e203eede77ef7ecd5342faecdc"
+checksum = "7919a54a249fd585dba9436a09301f747d4f6ca16689c0cbb619301df1cbdf8f"
 dependencies = [
  "once_cell",
  "portable-atomic",
@@ -1720,9 +1736,9 @@ dependencies = [
 
 [[package]]
 name = "kovan-channel"
-version = "0.1.19"
+version = "0.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7680bd3185bff7523acb534cd228db7072025510e56fc8917b453da00c0fd083"
+checksum = "013b9b50403275599d3a1b505c83bc791458d12041d66dd3749eedf2acb1a41a"
 dependencies = [
  "crossbeam-utils",
  "kovan",
@@ -1731,9 +1747,9 @@ dependencies = [
 
 [[package]]
 name = "kovan-map"
-version = "0.1.19"
+version = "0.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b60bb6145728c18ed9e1f8aa87941d634a52ce4d30106f906ef33280e304d10"
+checksum = "ee9fda66cc131f283a3237413de11ed4488ca1cc3599d9ca5de934e67dc6a031"
 dependencies = [
  "foldhash 0.2.0",
  "kovan",
@@ -1741,9 +1757,9 @@ dependencies = [
 
 [[package]]
 name = "kovan-queue"
-version = "0.1.19"
+version = "0.1.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f65d628b7fbb4bc0b6b82f3915c21f586f87bd4cbde9960fe69e21f07a52b089"
+checksum = "89c76a4c5d5ddb5c8976681c916200e4f9c5e71b70f061cf04232dabaff9c868"
 dependencies = [
  "crossbeam-utils",
  "kovan",
