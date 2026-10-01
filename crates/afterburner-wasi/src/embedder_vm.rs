@@ -13,7 +13,7 @@
 //! ## Design
 //!
 //! * One `Engine` per `EmbedderVm`, configured with the deterministic
-//!   profile (NaN canonicalization, relaxed-SIMD determinism, threads and
+//!   profile (NaN canonicalization by default, relaxed-SIMD determinism, threads and
 //!   shared memory off). See [`deterministic_engine`].
 //! * One `Arc<InstancePre<EmbedderState>>` per compiled module, built once by
 //!   [`EmbedderVm::compile`]. Per-call cost is a fresh `Store::new` plus
@@ -185,7 +185,16 @@ impl WasiCommandOpts {
 ///
 /// * `cranelift_nan_canonicalization(true)` - NaN payloads are canonicalized
 ///   so floating-point results are identical across host CPUs that produce
-///   different NaN bit patterns.
+///   different NaN bit patterns. This is the default; an embedder that
+///   values float throughput over cross-CPU NaN-payload identity opts out
+///   per engine with [`NanMode::Native`] (see [`shared_epoch_vm_with`]).
+///   Canonicalization costs a compare-and-select after every float
+///   operation, which dominates float-heavy inner loops (an f32 matrix
+///   multiply measured about twice as slow with it on). Native mode only
+///   changes the payload bits of a NaN result (sign and mantissa bits the
+///   host CPU chooses); non-NaN results and trapping behaviour are
+///   identical in both modes, and a guest that never inspects NaN bits
+///   cannot tell the modes apart.
 /// * `relaxed_simd_deterministic(true)` - relaxed-SIMD instructions choose
 ///   the single deterministic result instead of the host-preferred one. This
 ///   keeps SIMD output byte-identical across micro-architectures.
@@ -225,13 +234,28 @@ impl WasiCommandOpts {
 /// runs without it - the cache is an optimisation, never a correctness
 /// dependency, and never a determinism one.
 pub fn deterministic_engine() -> Result<Engine> {
-    let mut cfg = deterministic_config();
+    let mut cfg = deterministic_config(NanMode::Canonical);
     // On-disk compile cache (see the doc above). Added strictly after the
     // deterministic flags so they are part of the cache key, never altered by
     // it. Mirrors `wasm_engine::build_engine`'s wiring; failure is a warning,
     // the engine runs cache-less rather than failing the run.
     install_compile_cache(&mut cfg);
     Engine::new(&cfg).map_err(|e| AfterburnerError::Engine(format!("embedder engine: {e}")))
+}
+
+/// Whether the engine canonicalizes NaN payloads. See the
+/// `cranelift_nan_canonicalization` item in [`deterministic_engine`] for what
+/// each mode trades.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NanMode {
+    /// Every NaN result is rewritten to the canonical NaN, so results are
+    /// bit-identical across host CPUs. The default.
+    #[default]
+    Canonical,
+    /// NaN results keep whatever payload the host CPU produced. Faster on
+    /// float-heavy code; a NaN's payload bits may differ across CPU
+    /// architectures.
+    Native,
 }
 
 /// Like [`deterministic_engine`], but with wasmtime epoch interruption
@@ -248,7 +272,12 @@ pub fn deterministic_engine() -> Result<Engine> {
 /// separately, since the flag difference changes the cache key, exactly as
 /// the doc above describes for any deterministic-flag change).
 pub fn deterministic_engine_with_epoch() -> Result<Engine> {
-    let mut cfg = deterministic_config();
+    deterministic_engine_with_epoch_nan(NanMode::Canonical)
+}
+
+/// [`deterministic_engine_with_epoch`] with an explicit [`NanMode`].
+pub fn deterministic_engine_with_epoch_nan(nan: NanMode) -> Result<Engine> {
+    let mut cfg = deterministic_config(nan);
     cfg.epoch_interruption(true);
     install_compile_cache(&mut cfg);
     Engine::new(&cfg).map_err(|e| AfterburnerError::Engine(format!("embedder engine (epoch): {e}")))
@@ -257,11 +286,12 @@ pub fn deterministic_engine_with_epoch() -> Result<Engine> {
 /// The deterministic profile shared by [`deterministic_engine`] and
 /// [`deterministic_engine_with_epoch`], so the two configs can only ever
 /// differ on the one flag (`epoch_interruption`) that the epoch variant
-/// adds - never drift apart on anything else.
-fn deterministic_config() -> Config {
+/// adds - never drift apart on anything else. `nan` is the one deliberate
+/// per-engine knob.
+fn deterministic_config(nan: NanMode) -> Config {
     let mut cfg = Config::new();
     cfg.cranelift_opt_level(OptLevel::Speed)
-        .cranelift_nan_canonicalization(true)
+        .cranelift_nan_canonicalization(nan == NanMode::Canonical)
         // Keep relaxed-SIMD enabled but force deterministic semantics so
         // modules that use relaxed-SIMD instructions produce identical output
         // across host micro-architectures (AVX-512 vs SSE4, Neon variants, etc).
@@ -318,9 +348,29 @@ pub const EPOCH_TICK_PERIOD_MS: u64 = crate::chamber::TICK_PERIOD_MS;
 /// transient conditions in practice, so caching the failure never turns a
 /// one-time hiccup into a permanent outage that a retry would have cleared.
 pub fn shared_epoch_vm() -> Result<&'static EmbedderVm> {
-    static SHARED: OnceLock<std::result::Result<EmbedderVm, String>> = OnceLock::new();
-    let once = SHARED.get_or_init(|| {
-        let engine = deterministic_engine_with_epoch().map_err(|e| e.to_string())?;
+    shared_epoch_vm_with(NanMode::Canonical)
+}
+
+/// [`shared_epoch_vm`] for a chosen [`NanMode`]: one process-wide VM and one
+/// ticker thread per mode, built lazily on first use of that mode. A process
+/// that only ever asks for one mode never builds the other (no second
+/// engine, no second ticker). The two modes compile under different
+/// compile-cache keys, so a module compiled in one is not reused by the
+/// other.
+///
+/// # Errors
+///
+/// As [`shared_epoch_vm`]; the first outcome per mode is cached.
+pub fn shared_epoch_vm_with(nan: NanMode) -> Result<&'static EmbedderVm> {
+    type Shared = OnceLock<std::result::Result<EmbedderVm, String>>;
+    static CANONICAL: Shared = OnceLock::new();
+    static NATIVE: Shared = OnceLock::new();
+    let slot = match nan {
+        NanMode::Canonical => &CANONICAL,
+        NanMode::Native => &NATIVE,
+    };
+    let once = slot.get_or_init(|| {
+        let engine = deterministic_engine_with_epoch_nan(nan).map_err(|e| e.to_string())?;
         let ticker_engine = engine.clone();
         std::thread::Builder::new()
             .name("afterburner-embedder-epoch-ticker".into())

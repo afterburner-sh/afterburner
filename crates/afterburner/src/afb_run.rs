@@ -116,7 +116,9 @@ use std::time::Duration;
 
 use afterburner_afb::Afb;
 use afterburner_core::{AfterburnerError, EnvAccess, FsAccess, Manifold, Result};
-use afterburner_wasi::embedder_vm::{BoundedCommandOutput, CommandOutcome, WasiCommandOpts};
+use afterburner_wasi::embedder_vm::{
+    BoundedCommandOutput, CommandOutcome, NanMode, WasiCommandOpts,
+};
 
 /// The wire-format runtime-target string for a compiled (wasi-vfs-packed)
 /// Ruby `.afb`, and the archive path of a precompiled WASI command module -
@@ -197,6 +199,18 @@ pub struct AfbRunRequest {
     /// waited). Ruby-source refuses a timeout rather than silently ignoring
     /// it - see the module doc's "known gaps".
     pub timeout: Option<Duration>,
+    /// Whether the engine canonicalizes NaN payloads. Defaults to
+    /// [`NanMode::Canonical`] (cross-CPU bit-identical float results);
+    /// [`NanMode::Native`] trades that for float throughput - see
+    /// [`deterministic_engine`][afterburner_wasi::embedder_vm::deterministic_engine]'s
+    /// profile for the cost and what changes.
+    ///
+    /// Honored by the WASI-command families (compiled-WASM languages,
+    /// compiled Ruby). The Python and Ruby-source runners ignore it and stay
+    /// canonical: it relaxes a determinism guarantee rather than adding a
+    /// bound, so staying strict is never unsafe, and the guarantee is never
+    /// weakened where it was not asked for and honored.
+    pub nan_mode: NanMode,
 }
 
 /// What bound, if any, ended the run.
@@ -354,6 +368,7 @@ fn run_wasm(afb: &Afb, request: AfbRunRequest) -> Result<AfbRunOutput> {
         fuel,
         memory_bytes,
         timeout,
+        nan_mode,
     } = request;
 
     let wasm_bytes = afb.precompiled.get(PRECOMPILED_WASM_MEMBER).ok_or_else(|| {
@@ -367,7 +382,7 @@ fn run_wasm(afb: &Afb, request: AfbRunRequest) -> Result<AfbRunOutput> {
     // ticker thread, for the life of the process - see `shared_epoch_vm`'s
     // own doc): `timeout` is a real wall-clock bound only when the module
     // that runs it was compiled against that engine.
-    let vm = afterburner_wasi::embedder_vm::shared_epoch_vm()?;
+    let vm = afterburner_wasi::embedder_vm::shared_epoch_vm_with(nan_mode)?;
     let module = vm.compile(wasm_bytes, true, |_| Ok(()))?;
 
     let mut argv = vec![afb.qualified_name()];
@@ -397,6 +412,7 @@ fn run_ruby_wasm(afb: &Afb, request: AfbRunRequest) -> Result<AfbRunOutput> {
         fuel,
         memory_bytes,
         timeout,
+        nan_mode,
     } = request;
 
     let wasm_bytes = afb.precompiled.get(PRECOMPILED_WASM_MEMBER).ok_or_else(|| {
@@ -406,7 +422,7 @@ fn run_ruby_wasm(afb: &Afb, request: AfbRunRequest) -> Result<AfbRunOutput> {
         ))
     })?;
 
-    let vm = afterburner_wasi::embedder_vm::shared_epoch_vm()?;
+    let vm = afterburner_wasi::embedder_vm::shared_epoch_vm_with(nan_mode)?;
     let module = vm.compile(wasm_bytes, true, |_| Ok(()))?;
 
     let entry_rel = afb.manifest.package.entry.replace('\\', "/");
@@ -702,6 +718,7 @@ fn python_bounds(
         fuel,
         memory_bytes,
         timeout,
+        nan_mode: _,
     } = request;
 
     let rw_preopens = match manifold.fs {

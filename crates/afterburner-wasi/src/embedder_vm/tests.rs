@@ -627,3 +627,59 @@ fn deterministic_engine_runs_with_shared_cache() {
     let out = vm.run(&module, "run", None).expect("run");
     assert_eq!(out.result, 43, "cache wiring must not change the result");
 }
+
+// ---- NaN canonicalization mode -----------------------------------------
+
+/// A WASI command that computes `0.0 / 0.0` from memory (so the compiler
+/// cannot fold it) and exits with `sign << 2 | top two mantissa-side bits`
+/// (a proc_exit status above 255 is not a valid exit code). The canonical NaN
+/// is positive and quiet: code 3.
+fn nan_exit_wat() -> Vec<u8> {
+    wat(r#"
+      (module
+        (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
+        (memory (export "memory") 1)
+        (func (export "_start") (local $b i32)
+          (local.set $b
+            (i32.reinterpret_f32
+              (f32.div (f32.load (i32.const 0)) (f32.load (i32.const 0)))))
+          (i32.or
+            (i32.shl (i32.shr_u (local.get $b) (i32.const 31)) (i32.const 2))
+            (i32.and (i32.shr_u (local.get $b) (i32.const 22)) (i32.const 3)))
+          call $exit))
+    "#)
+}
+
+fn nan_exit_code(mode: NanMode) -> i32 {
+    let vm = shared_epoch_vm_with(mode).expect("shared vm");
+    let module = vm.compile(&nan_exit_wat(), true, |_| Ok(())).unwrap();
+    let out = vm
+        .run_command_bounded(&module, WasiCommandOpts::new(), None, None, None)
+        .unwrap();
+    match out.outcome {
+        CommandOutcome::Exited(code) => code,
+        other => panic!("expected an exit, got {other:?}"),
+    }
+}
+
+/// Canonical mode yields exactly the canonical NaN; native mode still yields
+/// a NaN (its payload sign is whatever the host CPU produces).
+#[test]
+fn nan_producing_guest_runs_in_both_modes() {
+    assert_eq!(nan_exit_code(NanMode::Canonical), 3);
+    assert_eq!(nan_exit_code(NanMode::Native) & 3, 3);
+}
+
+/// The default is canonical, `shared_epoch_vm` is the canonical VM, and the
+/// two modes are distinct engines.
+#[test]
+fn nan_mode_plumbing() {
+    assert_eq!(NanMode::default(), NanMode::Canonical);
+    let canonical = shared_epoch_vm_with(NanMode::Canonical).unwrap();
+    let native = shared_epoch_vm_with(NanMode::Native).unwrap();
+    assert!(Engine::same(
+        canonical.engine(),
+        shared_epoch_vm().unwrap().engine()
+    ));
+    assert!(!Engine::same(canonical.engine(), native.engine()));
+}

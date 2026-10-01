@@ -78,6 +78,52 @@ fn build_source_afb(language: &str, entry: &str, source: &str) -> Vec<u8> {
     bytes
 }
 
+// ---- NaN mode plumbing (WAT fixture, no toolchain) --------------------------
+
+/// A compiled-WASM `.afb` whose guest computes `0.0 / 0.0` and exits with
+/// `sign << 2 | the two bits below the quiet bit` (a proc_exit status above
+/// 255 is not a valid exit code); the canonical NaN is code 3. Needs no
+/// external toolchain, so unlike the rest of this file it is not `#[ignore]`d.
+fn nan_exit_afb() -> Vec<u8> {
+    let wasm = wat::parse_str(
+        r#"(module
+            (import "wasi_snapshot_preview1" "proc_exit" (func $exit (param i32)))
+            (memory (export "memory") 1)
+            (func (export "_start") (local $b i32)
+              (local.set $b
+                (i32.reinterpret_f32
+                  (f32.div (f32.load (i32.const 0)) (f32.load (i32.const 0)))))
+              (i32.or
+                (i32.shl (i32.shr_u (local.get $b) (i32.const 31)) (i32.const 2))
+                (i32.and (i32.shr_u (local.get $b) (i32.const 22)) (i32.const 3)))
+              call $exit))"#,
+    )
+    .expect("WAT parse");
+    build_compiled_afb("c", wasm)
+}
+
+#[test]
+fn nan_mode_reaches_the_engine_through_a_run_request() {
+    assert_eq!(AfbRunRequest::default().nan_mode, NanMode::Canonical);
+    let afb = nan_exit_afb();
+
+    let canonical = run_afb_bytes(&afb, AfbRunRequest::default()).expect("canonical run");
+    assert_eq!(canonical.outcome, AfbRunOutcome::Exited(3));
+
+    let native = run_afb_bytes(
+        &afb,
+        AfbRunRequest {
+            nan_mode: NanMode::Native,
+            ..Default::default()
+        },
+    )
+    .expect("native run");
+    let AfbRunOutcome::Exited(code) = native.outcome else {
+        panic!("expected an exit, got {:?}", native.outcome);
+    };
+    assert_eq!(code & 3, 3, "still a NaN in native mode");
+}
+
 // ---- compiled-language family (C via wasi-sdk clang) -----------------------
 
 /// Locate the wasi-sdk's `wasm32-wasip1-clang` wrapper: `WASI_SDK_PATH/bin/…`
