@@ -3,6 +3,24 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.2.9] - 2026-10-01
+
+Embedders can trade NaN-payload determinism for float throughput.
+
+### Embedder VM
+
+The deterministic engine profile canonicalizes every NaN result by default,
+so float results are bit-identical across host CPUs. That costs a
+compare-and-select after every float operation, which dominates float-heavy
+inner loops: an f32 matrix multiply measured about twice as slow with it on.
+`embedder_vm::NanMode` picks the behaviour per engine: `Canonical` (the
+default, unchanged) or `Native`, which keeps whatever NaN payload the host CPU
+produced. Non-NaN results and trapping behaviour are identical in both modes.
+`shared_epoch_vm_with(nan)` and `deterministic_engine_with_epoch_nan(nan)`
+build the engine for a mode, one shared VM per mode, under separate
+compile-cache keys. Bounded one-shot `.afb` runs take it as
+`AfbRunRequest::nan_mode`.
+
 ## [0.2.8] - 2026-09-14
 
 Daemons are no longer JavaScript-only, and embedders get a bounded, captured
