@@ -51,7 +51,7 @@ use wasmtime::{
 };
 use wasmtime_wasi::p1::{WasiP1Ctx, add_to_linker_sync};
 use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
-use wasmtime_wasi::{DirPerms, FilePerms, I32Exit, WasiCtxBuilder};
+use wasmtime_wasi::{FsPerms, I32Exit, WasiCtxBuilder};
 
 // ---- deterministic engine config -----------------------------------------
 
@@ -89,10 +89,10 @@ pub struct WasiCommandOpts {
     /// The first element is conventionally the program name (`argv[0]`).
     pub args: Vec<String>,
     /// Read-only preopens: (host_path, guest_path). Added with
-    /// `DirPerms::READ | FilePerms::READ`.
+    /// `FsPerms::ReadOnly`.
     pub preopens_ro: Vec<(PathBuf, String)>,
     /// Read-write preopens: (host_path, guest_path). Added with
-    /// `DirPerms::all() | FilePerms::all()`.
+    /// `FsPerms::ReadWrite`.
     pub preopens_rw: Vec<(PathBuf, String)>,
     /// Environment variables forwarded as `(key, value)` pairs.
     pub env_vars: Vec<(String, String)>,
@@ -1432,7 +1432,7 @@ impl EmbedderVm {
         if !host_backed {
             for (host_path, guest_path) in &opts.preopens_ro {
                 builder
-                    .preopened_dir(host_path, guest_path, DirPerms::READ, FilePerms::READ)
+                    .preopened_dir(host_path, guest_path, FsPerms::ReadOnly)
                     .map_err(|e| {
                         AfterburnerError::Engine(format!(
                             "embedder preopen-ro {}: {e}",
@@ -1443,7 +1443,7 @@ impl EmbedderVm {
 
             for (host_path, guest_path) in &opts.preopens_rw {
                 builder
-                    .preopened_dir(host_path, guest_path, DirPerms::all(), FilePerms::all())
+                    .preopened_dir(host_path, guest_path, FsPerms::ReadWrite)
                     .map_err(|e| {
                         AfterburnerError::Engine(format!(
                             "embedder preopen-rw {}: {e}",

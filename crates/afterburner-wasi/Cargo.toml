@@ -128,7 +128,7 @@ atomic-wait = { workspace = true }
 quinn = { workspace = true, optional = true }
 h3 = { workspace = true, optional = true }
 h3-quinn = { workspace = true, optional = true }
-wasmparser = "0.252.0"
+wasmparser = "0.260.0"
 flate2.workspace = true
 # Runtime, not build-only: the lazy runtime-bundle fetch into `~/.burn`
 # (`bundle_fetch.rs`, `#[path]`-included into `src/lib.rs`) downloads the stock
@@ -168,7 +168,7 @@ wat.workspace = true
 # server-config builder.
 rcgen = { workspace = true }
 # Binary instrumentation for wasm rewrite probes (e.g. instrument_sp).
-wasm-encoder = { version = "0.252", features = ["wasmparser"] }
+wasm-encoder = { version = "0.260", features = ["wasmparser"] }
 
 [build-dependencies]
 # The build script `#[path]`-includes the SAME `bundle_fetch.rs` engine the

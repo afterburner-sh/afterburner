@@ -191,6 +191,7 @@ fn encoding_key(alg: Algorithm, secret: &[u8]) -> Result<EncodingKey, String> {
             EncodingKey::from_ec_pem(secret).map_err(|e| format!("ec key: {e}"))
         }
         Algorithm::EdDSA => EncodingKey::from_ed_pem(secret).map_err(|e| format!("ed key: {e}")),
+        other => Err(format!("unsupported algorithm: {other:?}")),
     }
 }
 
@@ -211,6 +212,7 @@ fn decoding_key(alg: Algorithm, secret: &[u8]) -> Result<DecodingKey, String> {
             DecodingKey::from_ec_pem(secret).map_err(|e| format!("ec key: {e}"))
         }
         Algorithm::EdDSA => DecodingKey::from_ed_pem(secret).map_err(|e| format!("ed key: {e}")),
+        other => Err(format!("unsupported algorithm: {other:?}")),
     }
 }
 

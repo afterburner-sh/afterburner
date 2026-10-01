@@ -3,6 +3,38 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.2.9] - 2026-10-01
+
+Embedders can trade NaN-payload determinism for float throughput.
+
+### Embedder VM
+
+The deterministic engine profile canonicalizes every NaN result by default,
+so float results are bit-identical across host CPUs. That costs a
+compare-and-select after every float operation, which dominates float-heavy
+inner loops: an f32 matrix multiply measured about twice as slow with it on.
+`embedder_vm::NanMode` picks the behaviour per engine: `Canonical` (the
+default, unchanged) or `Native`, which keeps whatever NaN payload the host CPU
+produced. Non-NaN results and trapping behaviour are identical in both modes.
+`shared_epoch_vm_with(nan)` and `deterministic_engine_with_epoch_nan(nan)`
+build the engine for a mode, one shared VM per mode, under separate
+compile-cache keys. Bounded one-shot `.afb` runs take it as
+`AfbRunRequest::nan_mode`.
+
+### Dependencies
+
+kovan-map, kovan-channel and kovan-queue move to 0.1.22. Every other
+dependency moves to its latest release except the RustCrypto family: wasmtime
+and wasmtime-wasi 49, wasmparser and wasm-encoder 0.260, rquickjs 0.14,
+javy-plugin-api 7.1, ureq 3, zip 8, toml 1, hickory-resolver 0.26, rustyline 18,
+jsonwebtoken 11 and bcrypt 0.19. The RustCrypto crates (sha1, sha2, sha3, hmac,
+md-5, aes, aes-gcm, cbc, ctr, aes-kw, pbkdf2, scrypt, argon2, password-hash,
+p256, p384, p521, ed25519-dalek, x25519-dalek, spki, pkcs8, num-bigint-dig), rand
+0.8 and getrandom 0.2 stay on their current stable line until rsa 0.10 is
+released, because stable rsa 0.9 has no release on the newer digest line.
+Outbound HTTP keeps its previous behaviour on ureq 3: the same timeouts, a limit
+of 5 redirects, and non-2xx statuses returned to the caller.
+
 ## [0.2.8] - 2026-09-14
 
 Daemons are no longer JavaScript-only, and embedders get a bounded, captured

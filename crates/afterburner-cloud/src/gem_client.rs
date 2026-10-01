@@ -63,9 +63,7 @@ pub struct GemClient {
 impl GemClient {
     /// Create a client pointed at `base` (e.g. `"https://rubygems.org"` or a mock URL).
     pub fn new(base: impl Into<String>) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(60))
-            .build();
+        let agent = ecosystem::registry_agent();
         Self {
             agent,
             base: base.into().trim_end_matches('/').to_string(),
@@ -167,11 +165,12 @@ impl GemClient {
         let resp = self
             .agent
             .get(&url)
-            .set("accept", "application/json")
+            .header("accept", "application/json")
             .call()
             .map_err(|e| ecosystem::map_ureq(name, e))?;
         let mut body = String::new();
-        resp.into_reader()
+        resp.into_body()
+            .into_reader()
             .take(MAX_GEM_COMPRESSED)
             .read_to_string(&mut body)
             .map_err(CloudError::Io)?;

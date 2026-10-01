@@ -673,9 +673,7 @@ pub struct PipClient {
 impl PipClient {
     /// Build a client against an arbitrary index base (for tests / private indexes).
     pub fn new(base: impl Into<String>) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(60))
-            .build();
+        let agent = ecosystem::registry_agent();
         Self {
             agent,
             base: base.into().trim_end_matches('/').to_string(),
@@ -703,11 +701,12 @@ impl PipClient {
         let resp = self
             .agent
             .get(&url)
-            .set("accept", "application/json")
+            .header("accept", "application/json")
             .call()
             .map_err(|e| ecosystem::map_ureq(name, e))?;
         let mut body = String::new();
-        resp.into_reader()
+        resp.into_body()
+            .into_reader()
             .take(MAX_WHEEL_COMPRESSED)
             .read_to_string(&mut body)
             .map_err(CloudError::Io)?;

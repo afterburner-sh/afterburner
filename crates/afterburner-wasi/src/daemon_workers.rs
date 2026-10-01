@@ -218,7 +218,7 @@ struct ChildState {
 }
 
 enum Role {
-    Parent(ParentState),
+    Parent(Box<ParentState>),
     Child(ChildState),
 }
 
@@ -254,11 +254,11 @@ impl DaemonWorkers {
     pub fn new_parent(manifold: Manifold, config: WorkerConfig) -> Arc<Self> {
         let (tx, rx) = bounded_channel::<WorkerEvent>(1024);
         Arc::new(Self {
-            role: Role::Parent(ParentState {
+            role: Role::Parent(Box::new(ParentState {
                 next_id: AtomicI32::new(1),
                 active: HopscotchMap::new(),
                 alive: AtomicUsize::new(0),
-            }),
+            })),
             config,
             events_tx: tx,
             events_rx: rx,

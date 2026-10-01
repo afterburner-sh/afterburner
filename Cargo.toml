@@ -36,7 +36,7 @@ default-members = [
 exclude = ["examples"]
 
 [workspace.package]
-version = "0.2.8"
+version = "0.2.9"
 edition = "2024"
 rust-version = "1.90"
 authors = ["Theo Bulut <info@afterburner.sh>"]
@@ -54,16 +54,16 @@ keywords = ["javascript", "wasm", "sandbox", "runtime"]
 categories = ["wasm", "development-tools"]
 
 [workspace.dependencies]
-afterburner = { version = "0.2.8", path = "crates/afterburner" }
-afterburner-core = { version = "0.2.8", path = "crates/afterburner-core" }
-afterburner-wasi = { version = "0.2.8", path = "crates/afterburner-wasi" }
-afterburner-ignite = { version = "0.2.8", path = "crates/afterburner-ignite" }
-afterburner-flow = { version = "0.2.8", path = "crates/afterburner-flow" }
-afterburner-adaptive = { version = "0.2.8", path = "crates/afterburner-adaptive" }
-afterburner-node-compat = { version = "0.2.8", path = "crates/afterburner-node-compat" }
-afterburner-thrust = { version = "0.2.8", path = "crates/afterburner-thrust" }
-afterburner-afb = { version = "0.2.8", path = "crates/afterburner-afb" }
-afterburner-cloud = { version = "0.2.8", path = "crates/afterburner-cloud" }
+afterburner = { version = "0.2.9", path = "crates/afterburner" }
+afterburner-core = { version = "0.2.9", path = "crates/afterburner-core" }
+afterburner-wasi = { version = "0.2.9", path = "crates/afterburner-wasi" }
+afterburner-ignite = { version = "0.2.9", path = "crates/afterburner-ignite" }
+afterburner-flow = { version = "0.2.9", path = "crates/afterburner-flow" }
+afterburner-adaptive = { version = "0.2.9", path = "crates/afterburner-adaptive" }
+afterburner-node-compat = { version = "0.2.9", path = "crates/afterburner-node-compat" }
+afterburner-thrust = { version = "0.2.9", path = "crates/afterburner-thrust" }
+afterburner-afb = { version = "0.2.9", path = "crates/afterburner-afb" }
+afterburner-cloud = { version = "0.2.9", path = "crates/afterburner-cloud" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -77,14 +77,14 @@ blake3 = "1.5"
 # by the dependency. dirs/secrecy/zeroize/httpmock are reserved here for
 # the forthcoming afterburner-cloud client crate.
 tar = { version = "0.4", default-features = false }
-zstd = { version = "0.13", default-features = false }
-toml = "0.8"
+zstd = { version = "0.14", default-features = false }
+toml = "1.1"
 semver = { version = "1", features = ["serde"] }
 pubgrub = "0.4"
-dirs = "5"
+dirs = "7"
 secrecy = "0.10"
 zeroize = "1"
-httpmock = "0.7"
+httpmock = "0.8"
 sha1 = { version = "0.10", features = ["oid"] }
 thiserror = "2"
 hmac = "0.12"
@@ -109,10 +109,10 @@ num-traits = "0.2"
 num-integer = "0.1"
 spki = { version = "0.7", features = ["pem"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
 # Cross-process advisory lock (flock / LockFileEx) serializing the `~/.burn`
 # bundle-fetch engine (`bundle_fetch.rs`) across concurrent callers - already
 # in the tree transitively via rustyline/system-interface, promoted to a
@@ -120,22 +120,22 @@ ureq = { version = "2", features = ["json"] }
 fd-lock = "4"
 tempfile = "3"
 flate2 = "1"
-zip = { version = "2", default-features = false, features = ["deflate"] }
-brotli = { version = "8", default-features = false, features = ["std"] }
-kovan-map = "0.1.19"
-kovan-channel = "0.1.19"
-kovan-queue = "0.1.19"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+brotli = { version = "9", default-features = false, features = ["std"] }
+kovan-map = "0.1.22"
+kovan-channel = "0.1.22"
+kovan-queue = "0.1.22"
 libc = "0.2"
 # Colored + animated `burn` CLI output (brand palette spinners/styling). Used
 # only by the `bin` feature.
-crossterm = "0.28"
+crossterm = "0.29"
 # Arrow-key Select/MultiSelect menus for interactive CLI pickers. Used only
 # by the `bin` feature; default features off so it pulls just the core
 # prompt rendering (no editor/fuzzy/history extras).
-dialoguer = { version = "0.11", default-features = false }
+dialoguer = { version = "0.12", default-features = false }
 
-wasmtime = { version = "44", features = ["cranelift", "cache", "gc"] }
-wasmtime-wasi = "44"
+wasmtime = { version = "49", features = ["cranelift", "cache", "gc"] }
+wasmtime-wasi = "49"
 anyhow = "1"
 
 # B2 daemon-mode HTTP server plumbing. axum/tokio/hyper are only
@@ -156,7 +156,7 @@ futures-util = "0.3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rustls-pemfile = "2"
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 # time 0.3.48 breaks trait coherence for any crate with a blanket
 # `impl<T: Into<String>> From<T>` (E0119 in rcgen 0.13 AND 0.14). The lock
 # pins time to 0.3.47 (`cargo update -p time --precise 0.3.47`); if a plain
@@ -201,9 +201,7 @@ fast_image_resize = { version = "6", features = ["image"] }
 # plugin can't host-call from inside an async stack — it's running
 # inside Wasmtime). Default features pull in tokio + ring; we keep
 # them off and use the resolver's `Resolver` (sync) entry points.
-hickory-resolver = { version = "0.24", default-features = false, features = [
-    "tokio-runtime", "system-config",
-] }
+hickory-resolver = { version = "0.26", default-features = false, features = ["system-config", "tokio"] }
 
 # `socket2` is the canonical low-level socket-options crate; we use
 # its `SockRef::from(&tokio::net::TcpStream)` to actually toggle
@@ -211,38 +209,38 @@ hickory-resolver = { version = "0.24", default-features = false, features = [
 # detaching the stream. tokio itself exposes set_nodelay but no
 # keepalive knob, hence this dep. Gated behind `daemon` since net /
 # tls are the only callers.
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 # Cross-platform shared memory + futex. memmap2 wraps mmap/CreateFileMapping;
 # atomic-wait wraps futex (Linux) / __ulock (macOS) / WaitOnAddress (Windows).
 # Used by SharedArrayBuffer + Atomics.wait/notify across worker subprocesses.
 memmap2 = "0.9"
 atomic-wait = "1"
 
-rquickjs = { version = "0.11", features = ["bindgen"] }
+rquickjs = { version = "0.14", features = ["bindgen"] }
 
 fastrace = { version = "0.7", features = ["enable"] }
 
-javy-plugin-api = "6.0"
+javy-plugin-api = "7.1"
 
 # `burn` CLI surface (the `bin`/`release-cli` features only).
 clap = { version = "4", features = ["derive"] }
-rustyline = "14"
+rustyline = "18"
 # Pinned exact: oxc's API churns between minors; bumps are deliberate.
 oxc = { version = "=0.127.0", default-features = false, features = [
     "transformer", "codegen", "semantic", "ast_visit",
 ] }
 
 # node-compat optional password-hashing / JWT shadows (feature-gated).
-bcrypt = "0.17"
+bcrypt = "0.19"
 argon2 = { version = "0.5", features = ["std"] }
 password-hash = { version = "0.5", features = ["std"] }
-jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "rust_crypto"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
 
 # dev-dependencies shared across crates — single source of truth too.
 rand = "0.8"
 wat = "1"
 http = "1"
-serial_test = "3"
+serial_test = "4"
 
 [profile.release]
 opt-level = 3
