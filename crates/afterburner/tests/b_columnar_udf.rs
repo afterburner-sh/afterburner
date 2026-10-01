@@ -34,6 +34,10 @@ fn i32_le_bytes(xs: &[i32]) -> Vec<u8> {
     xs.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
+fn i64_le_bytes(xs: &[i64]) -> Vec<u8> {
+    xs.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
 fn f64_le_bytes(xs: &[f64]) -> Vec<u8> {
     xs.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
@@ -44,10 +48,22 @@ fn read_i32_col(data: &[u8]) -> Vec<i32> {
         .collect()
 }
 
+fn read_i64_col(data: &[u8]) -> Vec<i64> {
+    data.chunks_exact(8)
+        .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+        .collect()
+}
+
 fn read_f64_col(data: &[u8]) -> Vec<f64> {
     data.chunks_exact(8)
         .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
         .collect()
+}
+
+/// Read validity bit `i` out of a packed LSB-first bitmap (bit set = valid -
+/// the DuckDB/Arrow convention `afterburner_wasi::columnar` documents).
+fn is_valid(bitmap: &[u8], i: usize) -> bool {
+    (bitmap[i / 8] >> (i % 8)) & 1 == 1
 }
 
 #[test]
@@ -778,6 +794,139 @@ fn run_columnar_fuel_is_per_invocation_settable_and_uncapped() {
         .run_columnar_with(&id, &batch, &high)
         .expect("the same script + batch must succeed once fuel is scaled up");
     assert_eq!(out.row_count, 4);
+}
+
+#[test]
+fn run_columnar_int64_null_row_round_trips() {
+    // Fixed-width nullable round trip: row 1 of 3 is NULL going in, and
+    // must come back NULL with the other two values intact - the guest-
+    // side validity fix (input: a plain nullable Array instead of a
+    // zero-copy TypedArray view when validity_offset is non-zero; reply:
+    // a validity bitmap written back when any output row is null).
+    let burn = ab();
+    let id = burn
+        .register(
+            r#"module.exports = (b) => {
+                const x = b.columns.x;
+                const out = [];
+                for (let i = 0; i < b.row_count; i++) out.push(x[i]);
+                return { row_count: b.row_count, columns: { y: out } };
+            };"#,
+        )
+        .unwrap();
+
+    let data = i64_le_bytes(&[10, 0, 30]);
+    let validity = vec![0b0000_0101u8]; // bit set = valid: rows 0, 2 valid, row 1 invalid.
+    let mut batch = ColumnarBatch::new(3);
+    batch.push(ColumnRef {
+        name: "x",
+        dtype: ColumnDtype::Int64,
+        data: &data,
+        heap: None,
+        validity: Some(&validity),
+    });
+
+    let out = burn.run_columnar(&id, &batch).unwrap();
+    assert_eq!(out.row_count, 3);
+    let col = &out.columns[0];
+    assert_eq!(col.dtype, ColumnDtype::Int64);
+    let vals = read_i64_col(&col.data);
+    assert_eq!(vals[0], 10);
+    assert_eq!(vals[2], 30);
+    let bitmap = col
+        .validity
+        .as_ref()
+        .expect("a null-carrying output column must carry a validity bitmap");
+    assert!(is_valid(bitmap, 0) && !is_valid(bitmap, 1) && is_valid(bitmap, 2));
+}
+
+#[test]
+fn run_columnar_utf8_null_row_round_trips() {
+    // Same NULL-in-the-middle shape as `run_columnar_int64_null_row_round_trips`,
+    // exercised over the var-width (Utf8) path: the invalid row's slot is
+    // never decoded on the way in, and the reply's validity bitmap covers
+    // a var-width column exactly like a fixed-width one.
+    let burn = ab();
+    let id = burn
+        .register(
+            r#"module.exports = (b) => {
+                const s = b.columns.s;
+                const out = [];
+                for (let i = 0; i < b.row_count; i++) {
+                    out.push(s[i] === null ? null : s[i].toUpperCase());
+                }
+                return { row_count: b.row_count, columns: { upper: out } };
+            };"#,
+        )
+        .unwrap();
+
+    let inputs: Vec<&[u8]> = vec![b"hi", b"placeholder", b"bye"];
+    let (slots, heap) = build_var_column(&inputs);
+    let validity = vec![0b0000_0101u8]; // row 1 invalid.
+    let mut batch = ColumnarBatch::new(3);
+    batch.push(ColumnRef {
+        name: "s",
+        dtype: ColumnDtype::Utf8,
+        data: &slots,
+        heap: Some(&heap),
+        validity: Some(&validity),
+    });
+
+    let out = burn.run_columnar(&id, &batch).unwrap();
+    assert_eq!(out.row_count, 3);
+    let col = &out.columns[0];
+    assert_eq!(col.dtype, ColumnDtype::Utf8);
+    assert_eq!(col.row_str(0).unwrap(), "HI");
+    assert_eq!(col.row_str(2).unwrap(), "BYE");
+    let bitmap = col
+        .validity
+        .as_ref()
+        .expect("a null-carrying output column must carry a validity bitmap");
+    assert!(is_valid(bitmap, 0) && !is_valid(bitmap, 1) && is_valid(bitmap, 2));
+}
+
+#[test]
+fn run_columnar_fully_null_column_echo_keeps_exact_dtype_via_marker() {
+    // A column that is NULL for every row carries no type evidence in its
+    // JS values (every entry is `null`) - echoing it straight back
+    // (`columns: { x: b.columns.x }`, the EXACT array object the input
+    // parse built) must still report the original dtype tag, not the
+    // content-sampling fallback (Float64), so a caller's declared return
+    // type is honored even for an all-NULL argument or column.
+    let burn = ab();
+    let id = burn
+        .register(
+            r#"module.exports = (b) => ({
+                row_count: b.row_count,
+                columns: { x: b.columns.x },
+            });"#,
+        )
+        .unwrap();
+
+    let data = i64_le_bytes(&[0]);
+    let validity = vec![0b0000_0000u8]; // the only row is invalid.
+    let mut batch = ColumnarBatch::new(1);
+    batch.push(ColumnRef {
+        name: "x",
+        dtype: ColumnDtype::Int64,
+        data: &data,
+        heap: None,
+        validity: Some(&validity),
+    });
+
+    let out = burn.run_columnar(&id, &batch).unwrap();
+    assert_eq!(out.row_count, 1);
+    let col = &out.columns[0];
+    assert_eq!(
+        col.dtype,
+        ColumnDtype::Int64,
+        "an echoed all-NULL column keeps its exact dtype, not the Float64 no-evidence default"
+    );
+    let bitmap = col
+        .validity
+        .as_ref()
+        .expect("a null-carrying output column must carry a validity bitmap");
+    assert!(!is_valid(bitmap, 0));
 }
 
 /// Build a ptr-slot column (E6 form): short values inline exactly like

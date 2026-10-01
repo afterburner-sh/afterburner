@@ -71,6 +71,10 @@ const COLUMNAR_DISPATCHER: &str = r#"
     // dtype tags: 12=Utf8, 18=Bytea, 19=Jsonb (Phase 1.5).
     const DT_UTF8 = 12, DT_BYTEA = 18, DT_JSONB = 19;
     function isVarWidth(t) { return t === DT_UTF8 || t === DT_BYTEA || t === DT_JSONB; }
+    // Shared by every var-width decode/encode below - constructed once
+    // (module scope) rather than per call.
+    const dec = new TextDecoder("utf-8");
+    const enc = new TextEncoder();
     // Indexed by ColumnDtype tag (1..19). 0 = unused / variable-width
     // (the slot array's element size is 16 - INLINE_SLOT - but
     // var-width has a separate code path).
@@ -117,14 +121,129 @@ const COLUMNAR_DISPATCHER: &str = r#"
         if (v instanceof Float64Array) return 11;
         return 0;
     }
-    function classifyVar(v) {
-        // Returns dtype tag for a var-width column or 0 if not.
-        // Utf8: array of strings. Bytea: array of Uint8Arrays.
-        if (!Array.isArray(v) || v.length === 0) return 0;
-        const first = v[0];
-        if (typeof first === 'string') return DT_UTF8;
-        if (first instanceof Uint8Array) return DT_BYTEA;
-        return 0;
+    // Bit `i` of a packed validity bitmap, LSB-first, bit set = valid
+    // (DuckDB/Arrow convention - see afterburner-wasi/src/columnar.rs's
+    // module doc). Shared by every validity read on the input side.
+    function isValidBit(bytes, i) {
+        return (bytes[i >> 3] >> (i & 7)) & 1;
+    }
+    // A dtype tag this file's fixed-width/var-width WRITERS below can
+    // serialise byte-exactly from a marker alone (see `__abDtype` below):
+    // Int64 (bigint, setBigInt64), Float64 (number, setFloat64), and the
+    // three var-width tags (raw bytes, no width assumption). Any other
+    // original tag (Int32, UInt16, Date32, ...) is NOT in this set - a
+    // marker naming one of those is deliberately ignored below and the
+    // column falls back to content sampling, because the fixed-width
+    // writer only knows how to emit these two shapes; trusting a wider
+    // marker there would write the wrong byte width.
+    function isSafeMarkerTag(t) {
+        return t === 5 || t === 11 || t === DT_UTF8 || t === DT_BYTEA || t === DT_JSONB;
+    }
+    // Encode a plain output Array (never a real TypedArray - a TypedArray
+    // has no way to represent a missing element) that may hold `null`
+    // entries. When `v` is the EXACT array object an input column handed
+    // the UDF (see `__abDtype` at every nullable-column build site below),
+    // its original dtype is trusted directly - this is what lets a UDF
+    // that echoes a nullable argument back out (`columns: { x: batch.
+    // columns.x }`) round-trip its exact type, not just its nulls.
+    // Otherwise the dtype is inferred from the first non-null sample: a
+    // string -> Utf8, a Uint8Array -> Bytea, a bigint -> Int64, a number
+    // -> Float64. A column with no non-null sample at all (every row
+    // null, or zero rows, and no usable marker) carries no type evidence
+    // in JS - it defaults to Float64, a structurally valid "no data"
+    // reply whose bytes are never read because every row is invalid.
+    function encodeNullableColumn(name, v, out_row_count) {
+        const n = v.length;
+        if (n !== out_row_count) {
+            throw new Error("columnar UDF: column '" + name + "' length " + n + " ≠ row_count " + out_row_count);
+        }
+        let tag = (typeof v.__abDtype === 'number' && isSafeMarkerTag(v.__abDtype)) ? v.__abDtype : 0;
+        if (tag === 0) {
+            for (let j = 0; j < n; j++) {
+                const e = v[j];
+                if (e === null || e === undefined) continue;
+                if (typeof e === 'string') { tag = DT_UTF8; break; }
+                if (e instanceof Uint8Array) { tag = DT_BYTEA; break; }
+                if (typeof e === 'bigint') { tag = 5; break; } // Int64: the canonical 64-bit default
+                if (typeof e === 'number') { tag = 11; break; } // Float64: the canonical numeric default
+                throw new Error("columnar UDF: column '" + name + "' row " + j + " has unsupported value type " + typeof e);
+            }
+        }
+        if (tag === 0) tag = 11; // no evidence anywhere: a Float64 column of nulls
+
+        const nullBytes = new Uint8Array((n + 7) >> 3);
+        let anyNull = false;
+        if (isVarWidth(tag)) {
+            const encoded = new Array(n);
+            let heap_size = 0;
+            for (let j = 0; j < n; j++) {
+                const e = v[j];
+                if (e === null || e === undefined) {
+                    anyNull = true;
+                    encoded[j] = null;
+                    continue;
+                }
+                nullBytes[j >> 3] |= (1 << (j & 7));
+                let bytes;
+                if (tag === DT_UTF8) {
+                    if (typeof e !== 'string') {
+                        throw new Error("columnar UDF: col '" + name + "' row " + j + " is not a string");
+                    }
+                    bytes = enc.encode(e);
+                } else {
+                    if (!(e instanceof Uint8Array)) {
+                        throw new Error("columnar UDF: col '" + name + "' row " + j + " is not a Uint8Array");
+                    }
+                    bytes = e;
+                }
+                encoded[j] = bytes;
+                if (bytes.byteLength > INLINE_MAX) heap_size += bytes.byteLength;
+            }
+            const slots = new Uint8Array(n * INLINE_SLOT);
+            const slotsDV = new DataView(slots.buffer, slots.byteOffset, slots.byteLength);
+            const heap = new Uint8Array(heap_size);
+            let heap_cursor = 0;
+            for (let j = 0; j < n; j++) {
+                const b = encoded[j];
+                if (b === null) continue; // slot stays zero: len=0, inline, never read.
+                const sb = j * INLINE_SLOT;
+                slotsDV.setUint32(sb, b.byteLength, true);
+                if (b.byteLength <= INLINE_MAX) {
+                    slots.set(b, sb + 4);
+                } else {
+                    slots.set(b.subarray(0, 4), sb + 4);
+                    slotsDV.setUint32(sb + 12, heap_cursor, true);
+                    heap.set(b, heap_cursor);
+                    heap_cursor += b.byteLength;
+                }
+            }
+            return { tag: tag, slots: slots, heap: heap, data: null, validity: anyNull ? nullBytes : null };
+        }
+
+        const size = DTYPE_SIZE[tag];
+        const buf = new Uint8Array(n * size);
+        const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+        for (let j = 0; j < n; j++) {
+            const e = v[j];
+            if (e === null || e === undefined) {
+                anyNull = true;
+                continue; // element stays zero bytes, never read.
+            }
+            nullBytes[j >> 3] |= (1 << (j & 7));
+            const off = j * size;
+            if (tag === 5) {
+                if (typeof e !== 'bigint') {
+                    throw new Error("columnar UDF: col '" + name + "' row " + j + " is not a bigint");
+                }
+                dv.setBigInt64(off, e, true);
+            } else {
+                if (typeof e !== 'number') {
+                    throw new Error("columnar UDF: col '" + name + "' row " + j + " is not a number");
+                }
+                dv.setFloat64(off, e, true);
+            }
+        }
+        return { tag: tag, slots: null, heap: null, data: buf, validity: anyNull ? nullBytes : null };
     }
     globalThis.__ab_columnar_dispatch = function(userFn) {
         if (typeof userFn !== "function") {
@@ -136,13 +255,12 @@ const COLUMNAR_DISPATCHER: &str = r#"
         const column_count = dv.getUint32(4, true);
         const columns_offset = dv.getUint32(8, true);
 
-        const dec = new TextDecoder("utf-8");
-        const enc = new TextEncoder();
         const columns = {};
         for (let i = 0; i < column_count; i++) {
             const off = columns_offset + i * COL_HDR;
             const dtype = dv.getUint8(off);
             const data_off = dv.getUint32(off + 4, true);
+            const validity_off = dv.getUint32(off + 8, true);
             const name_off = dv.getUint32(off + 12, true);
             const name_len = dv.getUint32(off + 16, true);
             const heap_off = dv.getUint32(off + 20, true);
@@ -158,12 +276,16 @@ const COLUMNAR_DISPATCHER: &str = r#"
                 // hand back a Proxy that answers every index
                 // `0..row_count` with that same value - no
                 // row_count-sized materialization on the guest side
-                // either, matching the O(1) transfer cost.
+                // either, matching the O(1) transfer cost. A non-zero
+                // `validity_off` points at exactly ONE byte, bit 0 =
+                // whether the constant is valid for every row (see
+                // `ConstantColumnRef`'s doc) - never a per-row bitmap.
                 const ViewCtor = DTYPE_VIEW[dtype];
                 if (!ViewCtor) {
                     throw new Error("columnar UDF: unsupported constant dtype tag " + dtype + " for column '" + name + "'");
                 }
-                const constValue = new ViewCtor(buf.buffer, buf.byteOffset + data_off, 1)[0];
+                const constValid = validity_off === 0 || (dv.getUint8(validity_off) & 1) !== 0;
+                const constValue = constValid ? new ViewCtor(buf.buffer, buf.byteOffset + data_off, 1)[0] : null;
                 columns[name] = new Proxy([], {
                     get(target, prop, receiver) {
                         if (prop === "length") return row_count;
@@ -190,13 +312,22 @@ const COLUMNAR_DISPATCHER: &str = r#"
                 // pass over slots + heap; long slots dereference into
                 // the heap buffer. The dispatcher allocates
                 // `row_count` JS values up front; user UDFs index
-                // through them like `b.columns.email[i]`.
+                // through them like `b.columns.email[i]`. An invalid
+                // row (validity bit clear) is exposed as `null` - its
+                // slot bytes are never decoded.
                 const heap = (heap_len > 0)
                     ? buf.subarray(heap_off, heap_off + heap_len)
                     : new Uint8Array(0);
+                const validity = (validity_off !== 0)
+                    ? buf.subarray(validity_off, validity_off + ((row_count + 7) >> 3))
+                    : null;
                 const slotsDV = new DataView(buf.buffer, buf.byteOffset + data_off, row_count * INLINE_SLOT);
                 const arr = new Array(row_count);
                 for (let r = 0; r < row_count; r++) {
+                    if (validity && !isValidBit(validity, r)) {
+                        arr[r] = null;
+                        continue;
+                    }
                     const sb = r * INLINE_SLOT;
                     const len = slotsDV.getUint32(sb, true);
                     let bytes;
@@ -211,6 +342,10 @@ const COLUMNAR_DISPATCHER: &str = r#"
                     }
                     arr[r] = (dtype === DT_UTF8) ? dec.decode(bytes) : new Uint8Array(bytes);
                 }
+                // Tag with the wire dtype so a UDF that echoes this exact
+                // array back out (`columns: { x: batch.columns.x }`)
+                // round-trips its precise type - see `encodeNullableColumn`.
+                arr.__abDtype = dtype;
                 columns[name] = arr;
                 continue;
             }
@@ -219,6 +354,24 @@ const COLUMNAR_DISPATCHER: &str = r#"
             if (!ViewCtor) {
                 throw new Error("columnar UDF: unsupported dtype tag " + dtype + " for column '" + name + "'");
             }
+            if (validity_off !== 0) {
+                // At least one row may be invalid: expose a plain
+                // Array with `null` at each invalid row instead of the
+                // zero-copy TypedArray view - a TypedArray has no way
+                // to represent a missing element.
+                const validity = buf.subarray(validity_off, validity_off + ((row_count + 7) >> 3));
+                const view = new ViewCtor(buf.buffer, buf.byteOffset + data_off, row_count);
+                const arr = new Array(row_count);
+                for (let r = 0; r < row_count; r++) {
+                    arr[r] = isValidBit(validity, r) ? view[r] : null;
+                }
+                // Tag with the wire dtype so a UDF that echoes this exact
+                // array back out (`columns: { x: batch.columns.x }`)
+                // round-trips its precise type - see `encodeNullableColumn`.
+                arr.__abDtype = dtype;
+                columns[name] = arr;
+                continue;
+            }
             // TypedArray view directly into linmem at the blob offset.
             // Reading through `columns[name][i]` is a single linmem load.
             columns[name] = new ViewCtor(buf.buffer, buf.byteOffset + data_off, row_count);
@@ -226,7 +379,7 @@ const COLUMNAR_DISPATCHER: &str = r#"
 
         const out = userFn({row_count: row_count, columns: columns});
         if (!out || typeof out !== "object") {
-            throw new Error("columnar UDF: result must be {row_count, columns: {name: TypedArray|string[]|Uint8Array[]}}");
+            throw new Error("columnar UDF: result must be {row_count, columns: {name: TypedArray|Array}}");
         }
         const out_row_count = (out.row_count >>> 0);
         const out_columns = out.columns || {};
@@ -236,6 +389,8 @@ const COLUMNAR_DISPATCHER: &str = r#"
         const dtype_tags = new Array(out_names.length);
         const var_slots = new Array(out_names.length); // Uint8Array of length n*16, populated for var-width
         const var_heaps = new Array(out_names.length); // Uint8Array of heap bytes, populated for var-width
+        const fixed_bufs = new Array(out_names.length); // Uint8Array of pre-encoded bytes, populated for a nullable fixed-width Array output
+        const null_masks = new Array(out_names.length); // Uint8Array validity bitmap, or null when the column has no nulls
 
         for (let i = 0; i < out_names.length; i++) {
             const v = out_columns[out_names[i]];
@@ -244,67 +399,29 @@ const COLUMNAR_DISPATCHER: &str = r#"
                 dtype_tags[i] = fixed_tag;
                 var_slots[i] = null;
                 var_heaps[i] = null;
+                fixed_bufs[i] = null;
+                null_masks[i] = null;
                 continue;
             }
-            const var_tag = classifyVar(v);
-            if (var_tag !== 0) {
-                // Build slot array + heap. First pass: encode each
-                // value to bytes + accumulate heap size.
-                const n = v.length;
-                if (n !== out_row_count) {
-                    throw new Error("columnar UDF: column '" + out_names[i] + "' length " + n + " ≠ row_count " + out_row_count);
-                }
-                const encoded = new Array(n);
-                let heap_size = 0;
-                for (let j = 0; j < n; j++) {
-                    let bytes;
-                    if (var_tag === DT_UTF8) {
-                        if (typeof v[j] !== 'string') {
-                            throw new Error("columnar UDF: col '" + out_names[i] + "' row " + j + " is not a string");
-                        }
-                        bytes = enc.encode(v[j]);
-                    } else {
-                        if (!(v[j] instanceof Uint8Array)) {
-                            throw new Error("columnar UDF: col '" + out_names[i] + "' row " + j + " is not a Uint8Array");
-                        }
-                        bytes = v[j];
-                    }
-                    encoded[j] = bytes;
-                    if (bytes.byteLength > INLINE_MAX) heap_size += bytes.byteLength;
-                }
-                const slots = new Uint8Array(n * INLINE_SLOT);
-                const slotsDV = new DataView(slots.buffer, slots.byteOffset, slots.byteLength);
-                const heap = new Uint8Array(heap_size);
-                let heap_cursor = 0;
-                for (let j = 0; j < n; j++) {
-                    const b = encoded[j];
-                    const sb = j * INLINE_SLOT;
-                    slotsDV.setUint32(sb, b.byteLength, true);
-                    if (b.byteLength <= INLINE_MAX) {
-                        // Inline: write up to 12 bytes into slot[4..16].
-                        slots.set(b, sb + 4);
-                    } else {
-                        // Long: write 4-byte prefix + heap_offset.
-                        slots.set(b.subarray(0, 4), sb + 4);
-                        slotsDV.setUint32(sb + 12, heap_cursor, true);
-                        heap.set(b, heap_cursor);
-                        heap_cursor += b.byteLength;
-                    }
-                }
-                dtype_tags[i] = var_tag;
-                var_slots[i] = slots;
-                var_heaps[i] = heap;
-                continue;
+            if (!Array.isArray(v)) {
+                const tname = (v && v.constructor && v.constructor.name) || typeof v;
+                throw new Error("columnar UDF: column '" + out_names[i] + "' must be a fixed-width TypedArray or an Array (string[] / Uint8Array[] / number[] / bigint[], nulls allowed); got " + tname);
             }
-            const tname = (v && v.constructor && v.constructor.name) || typeof v;
-            throw new Error("columnar UDF: column '" + out_names[i] + "' must be a fixed-width TypedArray or a string[] / Uint8Array[]; got " + tname);
+            const encoded = encodeNullableColumn(out_names[i], v, out_row_count);
+            dtype_tags[i] = encoded.tag;
+            null_masks[i] = encoded.validity;
+            var_slots[i] = encoded.slots;
+            var_heaps[i] = encoded.heap;
+            fixed_bufs[i] = encoded.data;
         }
 
-        // Layout pass - same shape as before, plus heap regions
-        // for var-width columns appended after data + validity + name.
+        // Layout pass - same shape as before, plus a validity bitmap
+        // for a nullable column and heap regions for var-width columns,
+        // appended after data + name.
         let cursor = HEADER + out_names.length * COL_HDR;
         cursor = (cursor + 7) & ~7;
         const data_offsets = new Array(out_names.length);
+        const validity_offsets = new Array(out_names.length);
         const heap_offsets = new Array(out_names.length);
         const heap_lens = new Array(out_names.length);
         const name_bytes = new Array(out_names.length);
@@ -319,6 +436,14 @@ const COLUMNAR_DISPATCHER: &str = r#"
             } else {
                 const size = DTYPE_SIZE[tag];
                 cursor += out_row_count * size;
+            }
+        }
+        for (let i = 0; i < out_names.length; i++) {
+            if (null_masks[i]) {
+                validity_offsets[i] = cursor;
+                cursor += null_masks[i].byteLength;
+            } else {
+                validity_offsets[i] = 0;
             }
         }
         for (let i = 0; i < out_names.length; i++) {
@@ -347,21 +472,28 @@ const COLUMNAR_DISPATCHER: &str = r#"
             const hOff = HEADER + i * COL_HDR;
             dvR.setUint8(hOff, dtype_tags[i]);
             dvR.setUint32(hOff + 4, data_offsets[i], true);
-            // validity_offset = 0 (Phase 1.5 reply blobs always omit).
-            dvR.setUint32(hOff + 8, 0, true);
+            dvR.setUint32(hOff + 8, validity_offsets[i], true);
             dvR.setUint32(hOff + 12, name_offsets[i], true);
             dvR.setUint32(hOff + 16, name_bytes[i].byteLength, true);
             dvR.setUint32(hOff + 20, heap_offsets[i], true);
             dvR.setUint32(hOff + 24, heap_lens[i], true);
         }
         for (let i = 0; i < out_names.length; i++) {
-            const v = out_columns[out_names[i]];
-            const dst = new Uint8Array(reply.buffer, reply.byteOffset + data_offsets[i],
-                                        var_slots[i] ? var_slots[i].byteLength : v.byteLength);
+            let src;
             if (var_slots[i]) {
-                dst.set(var_slots[i]);
+                src = var_slots[i];
+            } else if (fixed_bufs[i]) {
+                src = fixed_bufs[i];
             } else {
-                dst.set(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
+                const v = out_columns[out_names[i]];
+                src = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+            }
+            const dst = new Uint8Array(reply.buffer, reply.byteOffset + data_offsets[i], src.byteLength);
+            dst.set(src);
+        }
+        for (let i = 0; i < out_names.length; i++) {
+            if (null_masks[i]) {
+                reply.set(null_masks[i], validity_offsets[i]);
             }
         }
         for (let i = 0; i < out_names.length; i++) {
