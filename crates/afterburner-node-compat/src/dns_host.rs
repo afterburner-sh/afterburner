@@ -35,9 +35,11 @@
 
 use afterburner_core::governance::helper_governance;
 use afterburner_core::{AfterburnerError, Manifold, NetAccess, Result};
-use hickory_resolver::Resolver;
+use hickory_resolver::proto::rr::RData;
+use hickory_resolver::{Resolver, TokioResolver};
 use kovan_channel::flavors::after::after;
 use kovan_channel::{bounded, select};
+use std::future::Future;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::time::Duration;
 
@@ -90,17 +92,34 @@ where
     }
 }
 
+/// Drive a hickory future to completion on a throwaway single-thread
+/// runtime. hickory 0.26 is async-only; every caller already runs on a
+/// short-lived worker thread (see [`with_timeout`]), so a per-call
+/// current-thread runtime keeps the synchronous host-call model.
+fn block_on<T>(fut: impl Future<Output = Result<T>>) -> Result<T> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| AfterburnerError::Host(format!("dns: runtime init: {e}")))?
+        .block_on(fut)
+}
+
 /// Build a hickory `Resolver`. When `servers` is non-empty, build a
 /// `ResolverConfig` from those addresses (UDP+TCP, port 53 default
 /// unless the address already specifies one). When empty, fall back
 /// to the system `/etc/resolv.conf` and finally to Cloudflare. We
 /// build per-call rather than caching: avoiding a global resolver
 /// keeps the code simpler and the `Resolver` constructor is cheap
-/// (~microseconds; no I/O until a lookup runs).
-fn make_resolver(servers: &[String]) -> Result<Resolver> {
-    use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
+/// (~microseconds; no I/O until a lookup runs). Must run inside a
+/// tokio runtime (see [`block_on`]).
+fn make_resolver(servers: &[String]) -> Result<TokioResolver> {
+    use hickory_resolver::config::{
+        CLOUDFLARE, ConnectionConfig, NameServerConfig, ResolverConfig,
+    };
+    use hickory_resolver::net::runtime::TokioRuntimeProvider;
+    let provider = TokioRuntimeProvider::default();
     if !servers.is_empty() {
-        let mut config = ResolverConfig::new();
+        let mut name_servers = Vec::new();
         for s in servers {
             let trimmed = s.trim();
             if trimmed.is_empty() {
@@ -127,26 +146,27 @@ fn make_resolver(servers: &[String]) -> Result<Resolver> {
             // Add both UDP and TCP - DNS responses larger than 512 bytes
             // (DNSSEC, big TXT) fall back to TCP; matching `getaddrinfo`
             // behavior keeps records like long SPF strings retrievable.
-            for protocol in [Protocol::Udp, Protocol::Tcp] {
-                let mut ns = NameServerConfig::new(addr, protocol);
-                ns.trust_negative_responses = false;
-                config.add_name_server(ns);
-            }
+            let mut udp = ConnectionConfig::udp();
+            udp.port = addr.port();
+            let mut tcp = ConnectionConfig::tcp();
+            tcp.port = addr.port();
+            name_servers.push(NameServerConfig::new(addr.ip(), false, vec![udp, tcp]));
         }
-        return Resolver::new(config, ResolverOpts::default()).map_err(|e| {
-            AfterburnerError::Host(format!("dns: resolver init (custom servers): {e}"))
-        });
+        let config = ResolverConfig::from_parts(None, vec![], name_servers);
+        return Resolver::builder_with_config(config, provider)
+            .build()
+            .map_err(|e| {
+                AfterburnerError::Host(format!("dns: resolver init (custom servers): {e}"))
+            });
     }
-    match Resolver::from_system_conf() {
+    match Resolver::builder_tokio().and_then(|b| b.build()) {
         Ok(r) => Ok(r),
         Err(_) => {
             // Fall back to Cloudflare's resolver. Hickory ships preset
             // configs for the major public resolvers.
-            Resolver::new(
-                hickory_resolver::config::ResolverConfig::cloudflare(),
-                hickory_resolver::config::ResolverOpts::default(),
-            )
-            .map_err(|e| AfterburnerError::Host(format!("dns resolver init: {e}")))
+            Resolver::builder_with_config(ResolverConfig::udp_and_tcp(&CLOUDFLARE), provider)
+                .build()
+                .map_err(|e| AfterburnerError::Host(format!("dns resolver init: {e}")))
         }
     }
 }
@@ -177,11 +197,22 @@ pub fn resolve4(hostname: &str, servers: &[String], m: &Manifold) -> Result<Vec<
     let hn = hostname.to_string();
     let s = servers.to_vec();
     with_timeout(m, format!("dns.resolve4({hostname})"), move || {
-        let resolver = make_resolver(&s)?;
-        let lookup = resolver
-            .ipv4_lookup(&hn)
-            .map_err(|e| AfterburnerError::Host(format!("dns.resolve4({hn}): {e}")))?;
-        Ok(lookup.iter().map(|a| a.0.to_string()).collect())
+        block_on(async {
+            let resolver = make_resolver(&s)?;
+            let lookup = resolver
+                .ipv4_lookup(&hn)
+                .await
+                .map_err(|e| AfterburnerError::Host(format!("dns.resolve4({hn}): {e}")))?;
+            Ok(lookup
+                .answers()
+                .iter()
+                .map(|r| &r.data)
+                .filter_map(|r| match r {
+                    RData::A(a) => Some(a.0.to_string()),
+                    _ => None,
+                })
+                .collect())
+        })
     })
 }
 
@@ -190,11 +221,22 @@ pub fn resolve6(hostname: &str, servers: &[String], m: &Manifold) -> Result<Vec<
     let hn = hostname.to_string();
     let s = servers.to_vec();
     with_timeout(m, format!("dns.resolve6({hostname})"), move || {
-        let resolver = make_resolver(&s)?;
-        let lookup = resolver
-            .ipv6_lookup(&hn)
-            .map_err(|e| AfterburnerError::Host(format!("dns.resolve6({hn}): {e}")))?;
-        Ok(lookup.iter().map(|a| a.0.to_string()).collect())
+        block_on(async {
+            let resolver = make_resolver(&s)?;
+            let lookup = resolver
+                .ipv6_lookup(&hn)
+                .await
+                .map_err(|e| AfterburnerError::Host(format!("dns.resolve6({hn}): {e}")))?;
+            Ok(lookup
+                .answers()
+                .iter()
+                .map(|r| &r.data)
+                .filter_map(|r| match r {
+                    RData::AAAA(a) => Some(a.0.to_string()),
+                    _ => None,
+                })
+                .collect())
+        })
     })
 }
 
@@ -203,17 +245,24 @@ pub fn resolve_mx(hostname: &str, servers: &[String], m: &Manifold) -> Result<Ve
     let hn = hostname.to_string();
     let s = servers.to_vec();
     with_timeout(m, format!("dns.resolveMx({hostname})"), move || {
-        let resolver = make_resolver(&s)?;
-        let lookup = resolver
-            .mx_lookup(&hn)
-            .map_err(|e| AfterburnerError::Host(format!("dns.resolveMx({hn}): {e}")))?;
-        Ok(lookup
-            .iter()
-            .map(|r| MxRecord {
-                exchange: r.exchange().to_string(),
-                priority: r.preference(),
-            })
-            .collect())
+        block_on(async {
+            let resolver = make_resolver(&s)?;
+            let lookup = resolver
+                .mx_lookup(&hn)
+                .await
+                .map_err(|e| AfterburnerError::Host(format!("dns.resolveMx({hn}): {e}")))?;
+            Ok(lookup
+                .answers()
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::MX(mx) => Some(MxRecord {
+                        exchange: mx.exchange.to_string(),
+                        priority: mx.preference,
+                    }),
+                    _ => None,
+                })
+                .collect())
+        })
     })
 }
 
@@ -222,21 +271,29 @@ pub fn resolve_txt(hostname: &str, servers: &[String], m: &Manifold) -> Result<V
     let hn = hostname.to_string();
     let s = servers.to_vec();
     with_timeout(m, format!("dns.resolveTxt({hostname})"), move || {
-        let resolver = make_resolver(&s)?;
-        let lookup = resolver
-            .txt_lookup(&hn)
-            .map_err(|e| AfterburnerError::Host(format!("dns.resolveTxt({hn}): {e}")))?;
-        // Node's `resolveTxt` returns `string[][]` - outer per record,
-        // inner per character-string fragment. TXT records can have
-        // multiple <character-string>s per RR (RFC 1035 §3.3.14).
-        Ok(lookup
-            .iter()
-            .map(|rec| {
-                rec.iter()
-                    .map(|frag| String::from_utf8_lossy(frag).into_owned())
-                    .collect::<Vec<_>>()
-            })
-            .collect())
+        block_on(async {
+            let resolver = make_resolver(&s)?;
+            let lookup = resolver
+                .txt_lookup(&hn)
+                .await
+                .map_err(|e| AfterburnerError::Host(format!("dns.resolveTxt({hn}): {e}")))?;
+            // Node's `resolveTxt` returns `string[][]` - outer per record,
+            // inner per character-string fragment. TXT records can have
+            // multiple <character-string>s per RR (RFC 1035 §3.3.14).
+            Ok(lookup
+                .answers()
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::TXT(rec) => Some(
+                        rec.txt_data
+                            .iter()
+                            .map(|frag| String::from_utf8_lossy(frag).into_owned())
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                })
+                .collect())
+        })
     })
 }
 
@@ -245,15 +302,22 @@ pub fn resolve_cname(hostname: &str, servers: &[String], m: &Manifold) -> Result
     let hn = hostname.to_string();
     let s = servers.to_vec();
     with_timeout(m, format!("dns.resolveCname({hostname})"), move || {
-        use hickory_resolver::proto::rr::RecordType;
-        let resolver = make_resolver(&s)?;
-        let lookup = resolver
-            .lookup(&hn, RecordType::CNAME)
-            .map_err(|e| AfterburnerError::Host(format!("dns.resolveCname({hn}): {e}")))?;
-        Ok(lookup
-            .iter()
-            .filter_map(|r| r.as_cname().map(|n| n.to_string()))
-            .collect())
+        block_on(async {
+            use hickory_resolver::proto::rr::RecordType;
+            let resolver = make_resolver(&s)?;
+            let lookup = resolver
+                .lookup(&hn, RecordType::CNAME)
+                .await
+                .map_err(|e| AfterburnerError::Host(format!("dns.resolveCname({hn}): {e}")))?;
+            Ok(lookup
+                .answers()
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::CNAME(n) => Some(n.to_string()),
+                    _ => None,
+                })
+                .collect())
+        })
     })
 }
 
@@ -262,15 +326,22 @@ pub fn resolve_ns(hostname: &str, servers: &[String], m: &Manifold) -> Result<Ve
     let hn = hostname.to_string();
     let s = servers.to_vec();
     with_timeout(m, format!("dns.resolveNs({hostname})"), move || {
-        use hickory_resolver::proto::rr::RecordType;
-        let resolver = make_resolver(&s)?;
-        let lookup = resolver
-            .lookup(&hn, RecordType::NS)
-            .map_err(|e| AfterburnerError::Host(format!("dns.resolveNs({hn}): {e}")))?;
-        Ok(lookup
-            .iter()
-            .filter_map(|r| r.as_ns().map(|n| n.to_string()))
-            .collect())
+        block_on(async {
+            use hickory_resolver::proto::rr::RecordType;
+            let resolver = make_resolver(&s)?;
+            let lookup = resolver
+                .lookup(&hn, RecordType::NS)
+                .await
+                .map_err(|e| AfterburnerError::Host(format!("dns.resolveNs({hn}): {e}")))?;
+            Ok(lookup
+                .answers()
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::NS(n) => Some(n.to_string()),
+                    _ => None,
+                })
+                .collect())
+        })
     })
 }
 
@@ -281,23 +352,33 @@ pub fn resolve_soa(hostname: &str, servers: &[String], m: &Manifold) -> Result<s
     let hn = hostname.to_string();
     let s = servers.to_vec();
     with_timeout(m, format!("dns.resolveSoa({hostname})"), move || {
-        use hickory_resolver::proto::rr::RecordType;
-        let resolver = make_resolver(&s)?;
-        let lookup = resolver
-            .lookup(&hn, RecordType::SOA)
-            .map_err(|e| AfterburnerError::Host(format!("dns.resolveSoa({hn}): {e}")))?;
-        let soa = lookup.iter().find_map(|r| r.as_soa()).ok_or_else(|| {
-            AfterburnerError::Host(format!("dns.resolveSoa({hn}): no SOA record"))
-        })?;
-        Ok(serde_json::json!({
-            "nsname":     soa.mname().to_string(),
-            "hostmaster": soa.rname().to_string(),
-            "serial":     soa.serial(),
-            "refresh":    soa.refresh(),
-            "retry":      soa.retry(),
-            "expire":     soa.expire(),
-            "minttl":     soa.minimum(),
-        }))
+        block_on(async {
+            use hickory_resolver::proto::rr::RecordType;
+            let resolver = make_resolver(&s)?;
+            let lookup = resolver
+                .lookup(&hn, RecordType::SOA)
+                .await
+                .map_err(|e| AfterburnerError::Host(format!("dns.resolveSoa({hn}): {e}")))?;
+            let soa = lookup
+                .answers()
+                .iter()
+                .find_map(|r| match &r.data {
+                    RData::SOA(soa) => Some(soa),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    AfterburnerError::Host(format!("dns.resolveSoa({hn}): no SOA record"))
+                })?;
+            Ok(serde_json::json!({
+                "nsname":     soa.mname.to_string(),
+                "hostmaster": soa.rname.to_string(),
+                "serial":     soa.serial,
+                "refresh":    soa.refresh,
+                "retry":      soa.retry,
+                "expire":     soa.expire,
+                "minttl":     soa.minimum,
+            }))
+        })
     })
 }
 
@@ -308,11 +389,21 @@ pub fn reverse(ip: &str, servers: &[String], m: &Manifold) -> Result<Vec<String>
     })?;
     let s = servers.to_vec();
     with_timeout(m, format!("dns.reverse({ip})"), move || {
-        let resolver = make_resolver(&s)?;
-        let lookup = resolver
-            .reverse_lookup(parsed)
-            .map_err(|e| AfterburnerError::Host(format!("dns.reverse: {e}")))?;
-        Ok(lookup.iter().map(|n| n.to_string()).collect())
+        block_on(async {
+            let resolver = make_resolver(&s)?;
+            let lookup = resolver
+                .reverse_lookup(parsed)
+                .await
+                .map_err(|e| AfterburnerError::Host(format!("dns.reverse: {e}")))?;
+            Ok(lookup
+                .answers()
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::PTR(n) => Some(n.to_string()),
+                    _ => None,
+                })
+                .collect())
+        })
     })
 }
 
@@ -422,16 +513,16 @@ mod tests {
     #[test]
     fn make_resolver_with_custom_servers_succeeds() {
         // Bare IP gets default port 53 appended.
-        let r = make_resolver(&["1.1.1.1".into()]);
+        let r = block_on(async { make_resolver(&["1.1.1.1".into()]) });
         assert!(r.is_ok(), "err: {:?}", r.err());
         // IP with explicit port honored verbatim.
-        let r = make_resolver(&["8.8.8.8:53".into()]);
+        let r = block_on(async { make_resolver(&["8.8.8.8:53".into()]) });
         assert!(r.is_ok());
     }
 
     #[test]
     fn make_resolver_rejects_garbage_server() {
-        let r = make_resolver(&["not an ip".into()]);
+        let r = block_on(async { make_resolver(&["not an ip".into()]) });
         assert!(matches!(r, Err(AfterburnerError::Host(_))));
     }
 }

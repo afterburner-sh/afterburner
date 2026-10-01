@@ -60,6 +60,8 @@ kovan-channel.workspace = true
 # synchronously from a worker thread; the timeout pattern is shared
 # with `lookup`.
 hickory-resolver = { workspace = true }
+# hickory 0.26 is async-only: a per-call current-thread runtime drives it.
+tokio = { workspace = true }
 
 # L3 shadows — pure-Rust substitutes for popular npm packages with
 # .node native addons. Each shadow gated behind its own feature so

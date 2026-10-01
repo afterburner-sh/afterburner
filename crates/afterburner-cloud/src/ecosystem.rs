@@ -288,7 +288,8 @@ pub fn download_capped(
 ) -> Result<Vec<u8>> {
     let resp = agent.get(url).call().map_err(|e| map_ureq(what, e))?;
     let mut buf = Vec::new();
-    resp.into_reader()
+    resp.into_body()
+        .into_reader()
         .take(compressed_limit + 1)
         .read_to_end(&mut buf)
         .map_err(CloudError::Io)?;
@@ -303,11 +304,28 @@ pub fn download_capped(
 /// Map a `ureq::Error` to a `CloudError`, substituting `what` as context.
 pub fn map_ureq(what: &str, e: ureq::Error) -> CloudError {
     match e {
-        ureq::Error::Status(404, _) => CloudError::Package(format!("package not found: {what}")),
-        ureq::Error::Status(code, resp) => CloudError::Status {
+        ureq::Error::StatusCode(404) => CloudError::Package(format!("package not found: {what}")),
+        ureq::Error::StatusCode(code) => CloudError::Status {
             code,
-            message: format!("{what}: {}", resp.status_text()),
+            message: format!("{what}: {}", status_text(code)),
         },
-        ureq::Error::Transport(t) => CloudError::Transport(format!("{what}: {t}")),
+        other => CloudError::Transport(format!("{what}: {other}")),
     }
+}
+
+fn status_text(code: u16) -> &'static str {
+    ureq::http::StatusCode::from_u16(code)
+        .ok()
+        .and_then(|s| s.canonical_reason())
+        .unwrap_or("unknown status")
+}
+
+/// Build the shared registry agent: a 60 s overall deadline and ureq 2's
+/// limit of 5 redirects. Non-2xx statuses surface as `ureq::Error::StatusCode`.
+pub fn registry_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(60)))
+        .max_redirects(5)
+        .build()
+        .into()
 }

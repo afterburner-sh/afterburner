@@ -450,7 +450,7 @@ fn parse_export_section_for_func_names(
 }
 
 /// Parse the name-section bytes (already extracted from the custom section).
-fn parse_name_section(data: &[u8], data_offset: usize, out: &mut HashMap<u32, String>) {
+fn parse_name_section(data: &[u8], data_offset: u64, out: &mut HashMap<u32, String>) {
     use wasmparser::BinaryReader;
     use wasmparser::Subsections;
 

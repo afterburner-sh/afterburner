@@ -67,7 +67,7 @@ afterburner-cloud = { version = "0.2.9", path = "crates/afterburner-cloud" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.11"
+sha2 = "0.10"
 blake3 = "1.5"
 
 # `.afb` package format (afterburner-afb). zstd is built without default
@@ -85,30 +85,30 @@ dirs = "7"
 secrecy = "0.10"
 zeroize = "1"
 httpmock = "0.8"
-sha1 = { version = "0.11", features = ["oid"] }
+sha1 = { version = "0.10", features = ["oid"] }
 thiserror = "2"
-hmac = "0.13"
-md-5 = "0.11"
-getrandom = "0.4"
-aes-gcm = "0.11"
-aes = "0.9"
-cbc = "0.2"
-pbkdf2 = "0.13"
-scrypt = "0.12"
+hmac = "0.12"
+md-5 = "0.10"
+getrandom = "0.2"
+aes-gcm = "0.10"
+aes = "0.8"
+cbc = { version = "0.1", features = ["std"] }
+pbkdf2 = "0.12"
+scrypt = "0.11"
 rsa = { version = "0.9", features = ["sha2"] }
-p256 = { version = "0.14", features = ["ecdsa", "ecdh", "pem", "pkcs8"] }
-p384 = { version = "0.14", features = ["ecdsa", "ecdh", "pem", "pkcs8"] }
-p521 = { version = "0.14", features = ["ecdsa", "ecdh", "pem", "pkcs8"] }
-ed25519-dalek = { version = "3", features = ["pem", "pkcs8", "rand_core"] }
-x25519-dalek = { version = "3", features = ["static_secrets"] }
-ctr = "0.10"
-aes-kw = "0.3"
-sha3 = "0.12"
-num-bigint-dig = { version = "0.9", features = ["prime"] }
+p256 = { version = "0.13", features = ["ecdsa", "ecdh", "pem", "pkcs8"] }
+p384 = { version = "0.13", features = ["ecdsa", "ecdh", "pem", "pkcs8"] }
+p521 = { version = "0.13", features = ["ecdsa", "ecdh", "pem", "pkcs8"] }
+ed25519-dalek = { version = "2", features = ["pem", "pkcs8", "rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ctr = "0.9"
+aes-kw = "0.2"
+sha3 = "0.10"
+num-bigint-dig = { version = "0.8", features = ["prime"] }
 num-traits = "0.2"
 num-integer = "0.1"
-spki = { version = "0.8", features = ["pem"] }
-pkcs8 = { version = "0.11", features = ["pem"] }
+spki = { version = "0.7", features = ["pem"] }
+pkcs8 = { version = "0.10", features = ["pem"] }
 base64 = "0.23"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
@@ -232,12 +232,12 @@ oxc = { version = "=0.127.0", default-features = false, features = [
 
 # node-compat optional password-hashing / JWT shadows (feature-gated).
 bcrypt = "0.19"
-argon2 = "0.6"
-password-hash = "0.6"
+argon2 = { version = "0.5", features = ["std"] }
+password-hash = { version = "0.5", features = ["std"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
 
 # dev-dependencies shared across crates — single source of truth too.
-rand = "0.10"
+rand = "0.8"
 wat = "1"
 http = "1"
 serial_test = "4"

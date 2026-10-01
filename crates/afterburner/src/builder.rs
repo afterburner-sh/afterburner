@@ -73,7 +73,7 @@ impl Default for Mode {
 
 enum EngineHolder {
     /// Single-threaded BurnCache around a trait-object combustor.
-    Cache(BurnCache),
+    Cache(Box<BurnCache>),
     #[cfg(feature = "thrust")]
     Thrust(Arc<afterburner_thrust::ThrustEngine>),
 }
@@ -926,7 +926,7 @@ impl AfterburnerBuilder {
         }
 
         Ok(Afterburner {
-            engine: EngineHolder::Cache(cache),
+            engine: EngineHolder::Cache(Box::new(cache)),
             defaults,
             _state_store: state_store,
             cwd: self.cwd,

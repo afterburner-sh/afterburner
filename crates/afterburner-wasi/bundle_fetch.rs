@@ -297,15 +297,23 @@ fn fetch_verified_once(
     label: &str,
     prog: &dyn BundleProgress,
 ) -> Result<Vec<u8>, String> {
-    let resp = ureq::get(url)
+    // Redirects stay at ureq 2's limit of 5; non-2xx statuses are errors.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .max_redirects(5)
+        .build()
+        .into();
+    let resp = agent
+        .get(url)
         .call()
         .map_err(|e| format!("GET {url}: {e}"))?;
     let total: Option<u64> = resp
-        .header("Content-Length")
+        .headers()
+        .get("Content-Length")
+        .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<u64>().ok());
     prog.begin(label, total);
 
-    let mut reader = resp.into_reader();
+    let mut reader = resp.into_body().into_reader();
     // Cap the buffer at the content length when known, else a sane default, so a
     // single allocation holds the bundle (the largest single artifact is the
     // toolchain tarball, ~250 MiB; bounded by the pinned content length).

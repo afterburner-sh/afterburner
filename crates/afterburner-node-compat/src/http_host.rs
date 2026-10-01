@@ -17,7 +17,7 @@
 //!
 //! ### Per-call timeouts (configurable)
 //!
-//! Every call has a wall-clock deadline applied via `ureq::Request::timeout`.
+//! Every call has a wall-clock deadline applied via the `ureq` global timeout.
 //! The default is 30 s (`DEFAULT_HTTP_REQUEST_TIMEOUT`); callers can
 //! override per-script via `Manifold::http_timeout_ms` so SLA-strict
 //! scripts can tighten the budget and batch jobs can loosen it.
@@ -26,6 +26,7 @@
 //! beyond its `FuelGauge::timeout_ms` while host I/O blocks.
 
 use afterburner_core::{AfterburnerError, Manifold, NetAccess, Result};
+use std::io::Read;
 use std::time::Duration;
 
 /// Default per-request wall-clock cap when `Manifold::http_timeout_ms`
@@ -71,43 +72,41 @@ pub fn request(
         .http_timeout_ms
         .map(Duration::from_millis)
         .unwrap_or(DEFAULT_HTTP_REQUEST_TIMEOUT);
-    let mut req = ureq::request(method, url).timeout(timeout);
+    // A fresh agent per call (as `ureq::request` did in ureq 2): `timeout` is
+    // the whole-call wall-clock deadline, redirects stay at 5, and non-2xx
+    // statuses are returned to the script as ordinary responses, not errors.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .max_redirects(5)
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut req = ureq::http::Request::builder().method(method).uri(url);
     for (k, v) in headers {
-        req = req.set(k, v);
+        req = req.header(k, v);
     }
+    let build_err = |e: ureq::http::Error| AfterburnerError::Host(format!("http: {e}"));
     let resp = match body {
-        Some(b) => req.send_bytes(b),
-        None => req.call(),
-    };
-    match resp {
-        Ok(r) => {
-            let status = r.status();
-            let hdrs: Vec<(String, String)> = r
-                .headers_names()
-                .into_iter()
-                .filter_map(|n| r.header(&n).map(|v| (n.clone(), v.to_string())))
-                .collect();
-            let mut buf = Vec::new();
-            r.into_reader()
-                .read_to_end(&mut buf)
-                .map_err(|e| AfterburnerError::Host(format!("http read: {e}")))?;
-            Ok(HttpResponse {
-                status,
-                headers: hdrs,
-                body: buf,
-            })
-        }
-        Err(ureq::Error::Status(code, r)) => {
-            let mut buf = Vec::new();
-            let _ = r.into_reader().read_to_end(&mut buf);
-            Ok(HttpResponse {
-                status: code,
-                headers: Vec::new(),
-                body: buf,
-            })
-        }
-        Err(e) => Err(AfterburnerError::Host(format!("http: {e}"))),
+        Some(b) => agent.run(req.body(b).map_err(build_err)?),
+        None => agent.run(req.body(()).map_err(build_err)?),
     }
+    .map_err(|e| AfterburnerError::Host(format!("http: {e}")))?;
+    let status = resp.status().as_u16();
+    let hdrs: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .filter_map(|(n, v)| Some((n.as_str().to_string(), v.to_str().ok()?.to_string())))
+        .collect();
+    let mut buf = Vec::new();
+    resp.into_body()
+        .into_reader()
+        .read_to_end(&mut buf)
+        .map_err(|e| AfterburnerError::Host(format!("http read: {e}")))?;
+    Ok(HttpResponse {
+        status,
+        headers: hdrs,
+        body: buf,
+    })
 }
 
 /// Extract `(host, effective_port)` from a URL.

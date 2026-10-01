@@ -795,7 +795,7 @@ impl WasmLoader {
     /// `preopens` lists a path).
     pub fn run_wasi(&self, module_id: ModuleId, config_json: &str) -> Result<i32> {
         use wasmtime_wasi::p1::WasiP1Ctx;
-        use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
+        use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
 
         let module = self.modules.get(&module_id).ok_or_else(|| {
             AfterburnerError::Host(format!("WebAssembly: unknown module {module_id}"))
@@ -825,7 +825,7 @@ impl WasmLoader {
             for (guest, host) in preopens {
                 if let Some(host_path) = host.as_str() {
                     builder
-                        .preopened_dir(host_path, guest, DirPerms::all(), FilePerms::all())
+                        .preopened_dir(host_path, guest, FsPerms::ReadWrite)
                         .map_err(|e| {
                             AfterburnerError::Host(format!("WASI preopen {host_path}: {e}"))
                         })?;
