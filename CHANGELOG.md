@@ -21,6 +21,14 @@ build the engine for a mode, one shared VM per mode, under separate
 compile-cache keys. Bounded one-shot `.afb` runs take it as
 `AfbRunRequest::nan_mode`.
 
+### Dependencies
+
+kovan-map, kovan-channel and kovan-queue move to 0.1.22. Every other
+dependency moves to its latest release, including wasmtime and wasmtime-wasi
+49, wasmparser and wasm-encoder 0.260, rquickjs 0.14, javy-plugin-api 7, the
+RustCrypto 0.11 to 0.14 line, rand 0.10, ureq 3, zip 8, toml 1, hickory-resolver
+0.26 and rustyline 18.
+
 ## [0.2.8] - 2026-09-14
 
 Daemons are no longer JavaScript-only, and embedders get a bounded, captured
