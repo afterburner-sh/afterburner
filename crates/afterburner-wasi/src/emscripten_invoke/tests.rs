@@ -18,12 +18,12 @@
 use super::*;
 use crate::embedder_vm::EmbedderState;
 use std::sync::LazyLock;
-use wasmtime::{AsContextMut, Config, Engine, Linker, Module, Ref, Store, Table, TableType};
+use wasmtime::{AsContextMut, Engine, Linker, Module, Ref, Store, Table, TableType};
 
 // ---- shared engine ----------------------------------------------------------
 
 static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
-    let mut cfg = Config::new();
+    let mut cfg = crate::wasm_engine::base_config();
     cfg.consume_fuel(true);
     Engine::new(&cfg).expect("test engine")
 });

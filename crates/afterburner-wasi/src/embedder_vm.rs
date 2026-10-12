@@ -289,7 +289,7 @@ pub fn deterministic_engine_with_epoch_nan(nan: NanMode) -> Result<Engine> {
 /// adds - never drift apart on anything else. `nan` is the one deliberate
 /// per-engine knob.
 fn deterministic_config(nan: NanMode) -> Config {
-    let mut cfg = Config::new();
+    let mut cfg = crate::wasm_engine::base_config();
     cfg.cranelift_opt_level(OptLevel::Speed)
         .cranelift_nan_canonicalization(nan == NanMode::Canonical)
         // Keep relaxed-SIMD enabled but force deterministic semantics so
