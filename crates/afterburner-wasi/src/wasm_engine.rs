@@ -1484,7 +1484,6 @@ impl Drop for WasmCombustor {
 /// too.
 pub fn base_config() -> Config {
     let mut config = Config::new();
-    #[cfg(target_os = "macos")]
     config.macos_use_mach_ports(false);
     config
 }

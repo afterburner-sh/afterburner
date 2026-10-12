@@ -4,7 +4,6 @@
 #[test]
 fn engines_start_after_a_host_engine_using_signal_traps() {
     let mut host = wasmtime::Config::new();
-    #[cfg(target_os = "macos")]
     host.macos_use_mach_ports(false);
     wasmtime::Engine::new(&host).expect("host engine");
 
