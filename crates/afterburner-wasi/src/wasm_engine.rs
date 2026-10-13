@@ -1472,8 +1472,24 @@ impl Drop for WasmCombustor {
 /// worker at all) leaves this `None` and uses
 /// [`WasmCombustor::serialize_module`] /
 /// [`WasmCombustor::register_precompiled_deserialize`] instead.
-fn build_engine(wasm_config: &WasmConfig) -> Result<Engine> {
+/// The [`Config`] every Afterburner engine starts from.
+///
+/// Wasmtime installs one trap handler per process, chosen by the first engine
+/// created, and panics when a later engine asks for the other mechanism. On
+/// macOS Afterburner selects signal handlers over Mach ports so it can share a
+/// process with embedders' own engines that do the same (DefraDB's lens), and
+/// because the Mach-port handler thread aborts the process when a signal
+/// interrupts its receive, which a host spawning child processes triggers.
+/// Embedders creating their own engines alongside Afterburner start from this
+/// too.
+pub fn base_config() -> Config {
     let mut config = Config::new();
+    config.macos_use_mach_ports(false);
+    config
+}
+
+fn build_engine(wasm_config: &WasmConfig) -> Result<Engine> {
+    let mut config = base_config();
     config
         .consume_fuel(true)
         .epoch_interruption(true)

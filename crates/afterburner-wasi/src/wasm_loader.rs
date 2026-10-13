@@ -163,11 +163,16 @@ static SHARED_ENGINE: OnceLock<Engine> = OnceLock::new();
 
 impl WasmLoader {
     pub fn new() -> Self {
-        // Default Engine config is fine - wasmtime defaults to
+        // The base config is fine - wasmtime defaults to
         // sane resource caps. We don't enable async or epoch
         // interruption in v1 since calls cross the wasmtime↔QuickJS
         // boundary synchronously.
-        let engine = SHARED_ENGINE.get_or_init(Engine::default).clone();
+        let engine = SHARED_ENGINE
+            .get_or_init(|| {
+                Engine::new(&crate::wasm_engine::base_config())
+                    .expect("wasmtime engine with the base config")
+            })
+            .clone();
         Self {
             standalone: Arc::new(StandaloneRegistry {
                 next_id: AtomicU64::new(1),

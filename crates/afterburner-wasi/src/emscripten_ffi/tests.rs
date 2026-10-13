@@ -87,7 +87,7 @@ const WAT: &str = r#"
 /// and the ffi imports, instantiate, and record the memory/table handles into
 /// the store data (as the real boot path does). Returns the store and instance.
 fn setup() -> (Store<EmbedderState>, Instance) {
-    let engine = Engine::default();
+    let engine = Engine::new(&crate::wasm_engine::base_config()).unwrap();
     let module = Module::new(&engine, WAT).expect("compile synthetic module");
 
     let mut linker: Linker<EmbedderState> = Linker::new(&engine);

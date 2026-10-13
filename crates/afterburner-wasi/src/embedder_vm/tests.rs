@@ -536,7 +536,7 @@ fn env_var_forwarded_into_wasm_module() {
 /// this must change with it (the test would otherwise compile a different
 /// module than production and stop guarding the real artifact).
 fn engine_with_cache_dir(dir: &std::path::Path) -> Engine {
-    let mut cfg = Config::new();
+    let mut cfg = crate::wasm_engine::base_config();
     cfg.cranelift_opt_level(OptLevel::Speed)
         .cranelift_nan_canonicalization(true)
         .wasm_relaxed_simd(true)
