@@ -95,7 +95,7 @@ jobs:
           target: wasm32-wasip1
           rustflags: ''
       - run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with:
           tool: nextest
       - uses: Swatinem/rust-cache@v2
@@ -131,7 +131,7 @@ jobs:
         with:
           name: nextest-wasi-archive
           path: ${{ runner.temp }}
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with:
           tool: nextest
       - name: nextest run (shard ${{ matrix.shard }}/6)
@@ -165,7 +165,7 @@ jobs:
         with:
           name: nextest-wasi-archive
           path: ${{ runner.temp }}
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2.85.5
         with:
           tool: nextest
       - name: Install Binaryen v130 (wasm-opt --translate-to-exnref)
