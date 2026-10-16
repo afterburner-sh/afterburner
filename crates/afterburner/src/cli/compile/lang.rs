@@ -424,12 +424,15 @@ fn compile_single_file_cpp(source_path: &Path) -> Result<Vec<u8>> {
 ///
 /// Clear remediation when the `wasm32-wasip1` target is not installed:
 /// `rustup target add wasm32-wasip1`.
+/// The package-local output path must override an embedding process's Cargo
+/// target-directory environment and configuration.
 fn compile_rust(pkg_dir: &Path) -> Result<Vec<u8>> {
     preflight_rust()?;
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
 
     let status = std::process::Command::new(&cargo)
         .args(["build", "--release", "--target", "wasm32-wasip1"])
+        .args(["--target-dir", "target"])
         .current_dir(pkg_dir)
         .status()
         .map_err(|e| {
