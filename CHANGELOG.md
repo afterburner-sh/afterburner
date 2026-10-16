@@ -3,6 +3,26 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.2.10] - 2026-10-16
+
+Afterburner engines coexist with an embedder's own Wasmtime engine on macOS.
+
+### Embedder VM
+
+Wasmtime installs one trap handler per process, chosen by the first engine, and
+panics when a later engine asks for the other mechanism. An embedder that hosts
+its own Wasmtime engine with Mach ports disabled (to stay fork-safe) aborted as
+soon as an Afterburner engine started. Every Afterburner engine, including the
+shared `WasmLoader` engine, now starts from `wasm_engine::base_config()`, which
+uses signal-based trap handling on macOS. Other platforms are unchanged.
+
+### Compile
+
+`burn compile` for a Rust package now always builds into the package's own
+`target/` directory, so a `CARGO_TARGET_DIR` or `build.target-dir` set by the
+environment or an embedding process no longer breaks finding the compiled
+`.wasm`.
+
 ## [0.2.9] - 2026-10-01
 
 Embedders can trade NaN-payload determinism for float throughput.
