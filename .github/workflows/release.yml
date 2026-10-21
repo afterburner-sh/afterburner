@@ -95,7 +95,7 @@ jobs:
           # users can run the x86_64 binary under emulation in the
           # meantime.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve tag
         id: tag
@@ -255,7 +255,7 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve tag
         id: tag
