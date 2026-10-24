@@ -3,6 +3,16 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.2.11] - 2026-10-25
+
+Afterburner moves to kovan 0.2.0.
+
+### Dependencies
+
+`kovan-map`, `kovan-channel` and `kovan-queue` 0.1.22 -> 0.2.0. A
+`HopscotchMap` remove no longer retries a failed shrink at the same population.
+Every example's lockfile resolves the same kovan as the workspace.
+
 ## [0.2.10] - 2026-10-16
 
 Afterburner engines coexist with an embedder's own Wasmtime engine on macOS.
