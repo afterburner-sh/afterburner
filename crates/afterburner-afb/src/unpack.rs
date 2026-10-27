@@ -116,10 +116,10 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
         }
     };
 
-    let entries = archive.entries().map_err(&to_afb_err)?;
+    let entries = archive.entries().map_err(to_afb_err)?;
     let mut count = 0usize;
     for entry in entries {
-        let mut entry = entry.map_err(&to_afb_err)?;
+        let mut entry = entry.map_err(to_afb_err)?;
 
         count += 1;
         if count > MAX_ENTRIES {
@@ -127,7 +127,7 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
         }
 
         let etype = entry.header().entry_type();
-        let raw_path = entry.path().map_err(&to_afb_err)?;
+        let raw_path = entry.path().map_err(to_afb_err)?;
         let display = raw_path.display().to_string();
 
         if etype.is_dir() {
@@ -140,7 +140,7 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
 
         let rel = safe_rel_path(&raw_path)?;
 
-        let size = entry.header().size().map_err(&to_afb_err)?;
+        let size = entry.header().size().map_err(to_afb_err)?;
         if size > MAX_ENTRY_BYTES {
             return Err(AfbError::EntryTooLarge {
                 path: rel,
@@ -163,7 +163,7 @@ pub(crate) fn unpack(bytes: &[u8]) -> Result<Afb> {
         }
 
         let mut buf = Vec::with_capacity(size.min(64 * 1024) as usize);
-        entry.read_to_end(&mut buf).map_err(&to_afb_err)?;
+        entry.read_to_end(&mut buf).map_err(to_afb_err)?;
 
         match rel.as_str() {
             "afb.toml" => {

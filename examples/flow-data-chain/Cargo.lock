@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "afterburner-core",
  "afterburner-flow",
@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-afb"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "afterburner-core",
  "semver",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-core"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "blake3",
  "fastrace",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-example-flow-data-chain"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "afterburner",
  "anyhow",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-flow"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "afterburner-core",
  "afterburner-wasi",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-ignite"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "afterburner-core",
  "afterburner-node-compat",
@@ -141,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-node-compat"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-thrust"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "afterburner-core",
  "afterburner-wasi",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-wasi"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "afterburner-afb",
  "afterburner-core",
@@ -1810,9 +1810,9 @@ dependencies = [
 
 [[package]]
 name = "kovan"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8808caee1b9c5cb703d0074e27cb4417c596eb353dd7e6fee82ad15c2cd48321"
+checksum = "30de8e1f374a1d4cb20f4031a771b0b9c34352c9fd35be65efd1407f71186675"
 dependencies = [
  "once_cell",
  "portable-atomic",
@@ -1820,20 +1820,19 @@ dependencies = [
 
 [[package]]
 name = "kovan-channel"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "455d2b647c09e1d93b33c927a995f1af1085509afab2f368f4860235e59f8929"
+checksum = "28714e9cbbaf6278719faa02950a2d6c7776fcdeb79f931c0880b13a769141a5"
 dependencies = [
  "crossbeam-utils",
  "kovan",
- "kovan-queue",
 ]
 
 [[package]]
 name = "kovan-map"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfba26ee83d79396ba6d42e8c68ff8b910af5988e3a94c56130b82df359609b7"
+checksum = "ba041f9f2d2a9912ea2b823a3db44af8d1070c558cd933e419ee69dac17c6143"
 dependencies = [
  "foldhash",
  "kovan",
@@ -1841,9 +1840,9 @@ dependencies = [
 
 [[package]]
 name = "kovan-queue"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "748210df44cc4c9b326d9d4a599a3591ae0b3e4cb2e2c79b2980618b36f0a3f5"
+checksum = "c446fe17daab001a9a8d2edc9b6f5fe8cb8f0fd29a90a4b4fbbf85d049897ee1"
 dependencies = [
  "crossbeam-utils",
  "kovan",

@@ -377,8 +377,10 @@ mod tests {
     /// helper (there is no `read_i32_col`: no test here decodes an
     /// Int32 OUTPUT column, since `_ab_classify` never infers Int32).
     fn read_i64_col(data: &[u8]) -> Vec<i64> {
-        data.chunks_exact(8)
-            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+        data.as_chunks::<8>()
+            .0
+            .iter()
+            .map(|&c| i64::from_le_bytes(c))
             .collect()
     }
 
@@ -428,8 +430,10 @@ def add_cols(b):
         assert_eq!(
             out.columns[0]
                 .data
-                .chunks_exact(8)
-                .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|&c| i64::from_le_bytes(c))
                 .collect::<Vec<_>>(),
             vec![11, 22, 33, 44, 55]
         );

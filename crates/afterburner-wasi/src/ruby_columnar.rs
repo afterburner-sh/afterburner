@@ -351,8 +351,10 @@ mod tests {
     /// `read_i32_col`: no test here decodes an Int32 OUTPUT column,
     /// since `ab_classify` never infers Int32).
     fn read_i64_col(data: &[u8]) -> Vec<i64> {
-        data.chunks_exact(8)
-            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+        data.as_chunks::<8>()
+            .0
+            .iter()
+            .map(|&c| i64::from_le_bytes(c))
             .collect()
     }
 

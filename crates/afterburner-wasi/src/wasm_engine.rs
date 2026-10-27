@@ -2435,8 +2435,10 @@ mod tests {
         assert_eq!(out.columns[0].dtype, ColumnDtype::Int32);
         let sums: Vec<i32> = out.columns[0]
             .data
-            .chunks_exact(4)
-            .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&c| i32::from_le_bytes(c))
             .collect();
         assert_eq!(sums, vec![11, 22, 33, 44, 55]);
     }
@@ -2494,8 +2496,10 @@ mod tests {
         assert_eq!(out.columns[0].dtype, ColumnDtype::Float64);
         let sums: Vec<f64> = out.columns[0]
             .data
-            .chunks_exact(8)
-            .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|&c| f64::from_le_bytes(c))
             .collect();
         // Row i's sum is sum_{j=1..=32} (i+1)*j  = (i+1) * (32*33/2) = 528*(i+1).
         for (i, s) in sums.iter().enumerate() {

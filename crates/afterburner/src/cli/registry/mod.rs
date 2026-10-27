@@ -208,15 +208,15 @@ fn scaffold_opts(cli: &Cli, a: &ScaffoldArgs) -> ScaffoldOpts {
             .clone()
             .or_else(|| a.scramdb.then(|| "scramdb".to_string())),
         allow_all: cli.allow_all,
-        net: cli.allow_net.as_deref().map(&any_or_list),
+        net: cli.allow_net.as_deref().map(any_or_list),
         env_keys: cli.allow_env.as_deref().map(split_list),
         // runtime `--allow-fs` is read-write; `--allow-fs-read` is read-only.
-        fs_read: cli.allow_fs_read.as_deref().map(&any_or_list),
+        fs_read: cli.allow_fs_read.as_deref().map(any_or_list),
         fs_write: cli
             .allow_fs
             .as_deref()
             .or(cli.allow_fs_write.as_deref())
-            .map(&any_or_list),
+            .map(any_or_list),
         crypto: a.allow_crypto,
         run: a.allow_run || cli.allow_child_process,
         vcs_git: a.vcs.as_deref() == Some("git"),
