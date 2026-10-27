@@ -3,6 +3,23 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.2.12] - 2026-10-27
+
+Afterburner moves to kovan 0.2.2.
+
+### Dependencies
+
+`kovan-map`, `kovan-channel` and `kovan-queue` 0.2.0 -> 0.2.2. Values retired by
+short-lived threads are freed while long-lived readers keep running, a wait that
+ends without a wakeup leaves the channel's wait list, `after()` and `tick()` run
+no thread, and a map write requires `Send` keys and values on targets with
+threads. Every example's lockfile resolves the same kovan as the workspace.
+
+### Toolchain
+
+The minimum supported Rust version is 1.99 (kovan 0.2.1 requires it), and the
+pinned toolchain is 1.99.0.
+
 ## [0.2.11] - 2026-10-25
 
 Afterburner moves to kovan 0.2.0.
