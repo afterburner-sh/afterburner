@@ -39,14 +39,18 @@ fn f64_le_bytes(xs: &[f64]) -> Vec<u8> {
 }
 
 fn read_i32_col(data: &[u8]) -> Vec<i32> {
-    data.chunks_exact(4)
-        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+    data.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&c| i32::from_le_bytes(c))
         .collect()
 }
 
 fn read_f64_col(data: &[u8]) -> Vec<f64> {
-    data.chunks_exact(8)
-        .map(|c| f64::from_le_bytes(c.try_into().unwrap()))
+    data.as_chunks::<8>()
+        .0
+        .iter()
+        .map(|&c| f64::from_le_bytes(c))
         .collect()
 }
 

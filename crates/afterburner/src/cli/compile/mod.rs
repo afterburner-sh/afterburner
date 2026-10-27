@@ -1151,7 +1151,7 @@ fn run_javy_sealed(javy: &str, src_path: &Path, wasm_path: &Path) -> Result<()> 
         .map_err(|e| javy_not_found_or(javy, e))?;
 
     if !status.success() {
-        let code = status.code().map_or(-1, |c| c);
+        let code = status.code().unwrap_or(-1);
         anyhow::bail!("`javy build` (sealed) exited with code {code}");
     }
     Ok(())
@@ -1178,7 +1178,7 @@ fn run_javy_dyn(javy: &str, src_path: &Path, wasm_path: &Path, plugin_path: &Pat
         .map_err(|e| javy_not_found_or(javy, e))?;
 
     if !status.success() {
-        let code = status.code().map_or(-1, |c| c);
+        let code = status.code().unwrap_or(-1);
         anyhow::bail!("`javy build` (dyn) exited with code {code}");
     }
     Ok(())

@@ -4,6 +4,6 @@
 # macros) differently across versions - which made `cargo fmt --all --check`
 # pass locally yet fail in CI. Pinning removes that skew.
 [toolchain]
-channel = "1.96.0"
+channel = "1.99.0"
 components = ["clippy", "rustfmt"]
 targets = ["wasm32-wasip1"]

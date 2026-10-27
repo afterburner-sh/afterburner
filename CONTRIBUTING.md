@@ -35,7 +35,7 @@ New code goes in the appropriate crate's license tier:
 ## Development
 
 - See `docs/REPO_CONVENTIONS.md` for code, testing, and commit conventions.
-- MSRV is Rust 1.90, edition 2024.
+- MSRV is Rust 1.99, edition 2024.
 - Run `cargo fmt --all`, `cargo clippy --all-targets`, and `cargo test
   --workspace` before opening a PR.
 - Tests are documentation: cover happy path, error paths, edge cases, and

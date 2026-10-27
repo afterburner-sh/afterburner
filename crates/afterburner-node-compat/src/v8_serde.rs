@@ -471,10 +471,8 @@ impl<'a> Decoder<'a> {
                         "v8.deserialize: odd byte count for UTF-16".into(),
                     ));
                 }
-                let mut units = Vec::with_capacity(bytes.len() / 2);
-                for chunk in bytes.chunks_exact(2) {
-                    units.push(u16::from_le_bytes([chunk[0], chunk[1]]));
-                }
+                let (pairs, _) = bytes.as_chunks::<2>();
+                let units: Vec<u16> = pairs.iter().map(|&pair| u16::from_le_bytes(pair)).collect();
                 let s = String::from_utf16_lossy(&units);
                 Ok(V8Value::String(s))
             }

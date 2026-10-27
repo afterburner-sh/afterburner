@@ -12,7 +12,7 @@ Wizer-preinitialized `.wasm` at
 
 | Tool | Version | Notes |
 |:-----|:--------|:------|
-| Rust | 1.90+ (2024 ed) | `rustup install stable` on most systems |
+| Rust | 1.99+ (2024 ed) | `rustup install stable` on most systems |
 | Cargo | shipped with Rust | `cargo build` / `cargo test` work unmodified |
 | libclang | any recent | required by `rquickjs-sys` bindgen |
 | C compiler | any recent | required by `rquickjs-sys` / QuickJS |
@@ -53,7 +53,7 @@ bash crates/afterburner-plugin/build.sh   # writes ../afterburner-wasi/plugin/af
 
 For local development end-to-end, install in this order:
 
-1. **Rust stable 1.90+** with the wasm32-wasip1 target:
+1. **Rust stable 1.99+** with the wasm32-wasip1 target:
    ```bash
    rustup install stable
    rustup target add wasm32-wasip1

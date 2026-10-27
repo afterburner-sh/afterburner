@@ -339,8 +339,10 @@ fn columnar_precompiled_output_equals_source_output() {
     // Verify the actual sum values (1+10=11, 2+20=22, ...).
     let sums: Vec<i32> = pc_out.columns[0]
         .data
-        .chunks_exact(4)
-        .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&c| i32::from_le_bytes(c))
         .collect();
     assert_eq!(
         sums,

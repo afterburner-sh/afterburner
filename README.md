@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://crates.io/crates/afterburner"><img src="https://img.shields.io/crates/v/afterburner?style=flat-square&color=e6832e" alt="crates.io"/></a>
   <a href="https://docs.rs/afterburner"><img src="https://img.shields.io/docsrs/afterburner?style=flat-square&color=2a9d8f" alt="docs.rs"/></a>
-  <img src="https://img.shields.io/badge/rust-1.90%2B_(2024_ed)-blue?style=flat-square&logo=rust&logoColor=white" alt="MSRV"/>
+  <img src="https://img.shields.io/badge/rust-1.99%2B_(2024_ed)-blue?style=flat-square&logo=rust&logoColor=white" alt="MSRV"/>
   <img src="https://img.shields.io/badge/license-BUSL--1.1-orange?style=flat-square" alt="License"/>
   <a href="https://discord.gg/GfTJmZaNNn"><img src="https://img.shields.io/badge/discord-join%20chat-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"/></a>
 </p>

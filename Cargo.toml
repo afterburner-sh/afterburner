@@ -38,7 +38,7 @@ exclude = ["examples"]
 [workspace.package]
 version = "0.2.11"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.99"
 authors = ["Theo Bulut <info@afterburner.sh>"]
 # Engine crates are source-available under BSL 1.1 (each version converts to
 # Apache-2.0 four years after its release). Apache-2.0 crates (afterburner-afb,
@@ -122,9 +122,9 @@ tempfile = "3"
 flate2 = "1"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 brotli = { version = "9", default-features = false, features = ["std"] }
-kovan-map = "0.2.0"
-kovan-channel = "0.2.0"
-kovan-queue = "0.2.0"
+kovan-map = "0.2.2"
+kovan-channel = "0.2.2"
+kovan-queue = "0.2.2"
 libc = "0.2"
 # Colored + animated `burn` CLI output (brand palette spinners/styling). Used
 # only by the `bin` feature.
