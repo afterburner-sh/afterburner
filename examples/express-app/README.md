@@ -2,7 +2,7 @@
 
 **Real Express.js app running inside Afterburner.**
 
-The Rust host (nuclei) accepts HTTP requests; each request becomes a JSON envelope handed to a sandboxed JS app that does `const express = require('express')` — the actual npm package, resolved out of `./node_modules/express`.
+The Rust host (nuclei) accepts HTTP requests; each request becomes a JSON envelope handed to a sandboxed JS app that does `const express = require('express')` - the actual npm package, resolved out of `./node_modules/express`.
 
 ```text
                 ┌──────────────────────────────────────────────┐
@@ -119,5 +119,5 @@ app.get('/counter', (req, res) => {
 ## Files
 
 - `package.json` — declares the `express` dependency.
-- `src/main.rs` — nuclei HTTP server, Afterburner builder (with `.cwd(...)`), request bridge.
+- `src/main.rs` - nuclei HTTP server, Afterburner builder (with `.cwd(...)`), request bridge.
 - `src/app.js` — real Express.js app + envelope ↔ `(req, res)` adapter.
