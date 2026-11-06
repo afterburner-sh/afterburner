@@ -1,8 +1,8 @@
 // dgram — Node 20's UDP socket module. The host-side coordinator
 // (`crates/afterburner-wasi/src/daemon_dgram.rs`) owns every
-// `tokio::net::UdpSocket`; this polyfill is a thin EventEmitter
-// façade. `dgram` requires daemon mode (the coordinator is tokio-
-// backed); calling `bind` / `send` from library mode surfaces a clear
+// `nuclei::net::UdpSocket`; this polyfill is a thin EventEmitter
+// façade. `dgram` requires daemon mode (the coordinator runs on
+// nuclei); calling `bind` / `send` from library mode surfaces a clear
 // `ERR_NO_DAEMON` rather than silently dropping packets.
 //
 // What works today: bind / address / send / close + `'listening'`,

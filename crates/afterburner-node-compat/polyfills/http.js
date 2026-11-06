@@ -34,7 +34,7 @@ function __plenum_install_http(moduleName) {
 
             // Prefer the async path when a daemon is attached. The
             // sync function still runs the request inline on the wasm
-            // thread; the async one dispatches onto Tokio and the
+            // thread; the async one dispatches onto nuclei and the
             // shard event loop fans the response back through a
             // `daemon-event`. Real Node-style: caller awaits a Promise
             // that resolves when the host signals completion, instead

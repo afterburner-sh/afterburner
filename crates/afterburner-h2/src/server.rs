@@ -7,7 +7,7 @@
 //! begin the HTTP/2 handshake. See [here](../index.html#handshake) for more
 //! details.
 //!
-//! This could be as basic as using Tokio's [`TcpListener`] to accept
+//! This could be as basic as using nuclei's [`TcpListener`] to accept
 //! connections, but usually it means using either ALPN or HTTP/1.1 protocol
 //! upgrades.
 //!
@@ -114,7 +114,7 @@
 //! [`http::Request<RecvStream>`]: ../struct.RecvStream.html
 //! [`RecvStream`]: ../struct.RecvStream.html
 //! [`SendStream`]: ../struct.SendStream.html
-//! [`TcpListener`]: https://docs.rs/tokio-core/0.1/tokio_core/net/struct.TcpListener.html
+//! [`TcpListener`]: https://docs.rs/nuclei/0.5.6/nuclei/net/struct.TcpListener.html
 
 use crate::codec::{Codec, UserError};
 use crate::frame::{self, Pseudo, PushPromiseHeaderError, Reason, Settings, StreamId};

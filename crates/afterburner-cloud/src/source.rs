@@ -94,7 +94,7 @@ fn deps_from_json(v: &serde_json::Value, coord: &str) -> Result<Vec<(String, Req
 mod tests {
     use super::*;
     use crate::resolve::resolve;
-    use httpmock::prelude::*;
+    use afterburner_mock_http::prelude::*;
     use serde_json::json;
 
     fn rt() -> Version {

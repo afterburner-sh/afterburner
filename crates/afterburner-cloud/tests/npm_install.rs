@@ -2,15 +2,15 @@
 // Copyright (c) 2026 vertexclique
 
 //! End-to-end coverage for the NATIVE npm installer against a mock npm
-//! registry (httpmock) - NO `npm` binary, NO process spawn, NO real
+//! registry (afterburner-mock-http) - NO `npm` binary, NO process spawn, NO real
 //! network. Proves the real install path: packument → version pick →
 //! tarball download → integrity check → extract → transitive deps →
 //! native rejection.
 
 use afterburner_cloud::lock::Lockfile;
 use afterburner_cloud::npm::NpmClient;
+use afterburner_mock_http::prelude::*;
 use flate2::write::GzEncoder;
-use httpmock::prelude::*;
 use sha1::{Digest, Sha1};
 use std::collections::BTreeMap;
 use std::io::Write;

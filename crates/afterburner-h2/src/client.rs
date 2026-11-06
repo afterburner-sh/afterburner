@@ -7,7 +7,7 @@
 //! the HTTP/2 handshake. See [here](../index.html#handshake) for more
 //! details.
 //!
-//! This could be as basic as using Tokio's [`TcpStream`] to connect to a remote
+//! This could be as basic as using nuclei's [`TcpStream`] to connect to a remote
 //! host, but usually it means using either ALPN or HTTP/1.1 protocol upgrades.
 //!
 //! Once a connection is obtained, it is passed to [`handshake`], which will
@@ -118,7 +118,7 @@
 //! }
 //! ```
 //!
-//! [`TcpStream`]: https://docs.rs/tokio-core/0.1/tokio_core/net/struct.TcpStream.html
+//! [`TcpStream`]: https://docs.rs/nuclei/0.5.6/nuclei/net/struct.TcpStream.html
 //! [`handshake`]: fn.handshake.html
 //! [executor]: https://docs.rs/futures/0.1/futures/future/trait.Executor.html
 //! [`SendRequest`]: struct.SendRequest.html

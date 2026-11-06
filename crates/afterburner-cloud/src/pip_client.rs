@@ -1049,7 +1049,7 @@ mod tests {
 
     #[test]
     fn resolve_closure_with_transitive_dep() {
-        use httpmock::prelude::*;
+        use afterburner_mock_http::prelude::*;
         use std::io::Cursor;
         use std::io::Write;
 
@@ -1156,7 +1156,7 @@ mod tests {
 
     #[test]
     fn corrupt_wheel_fails_sha256_check() {
-        use httpmock::prelude::*;
+        use afterburner_mock_http::prelude::*;
         use std::io::Cursor;
         use std::io::Write;
 
@@ -1209,7 +1209,7 @@ mod tests {
 
     #[test]
     fn host_native_wheel_is_refused() {
-        use httpmock::prelude::*;
+        use afterburner_mock_http::prelude::*;
 
         let server = MockServer::start();
 
@@ -1244,7 +1244,7 @@ mod tests {
 
     #[test]
     fn missing_package_is_a_clear_error() {
-        use httpmock::prelude::*;
+        use afterburner_mock_http::prelude::*;
 
         let server = MockServer::start();
         server.mock(|when, then| {

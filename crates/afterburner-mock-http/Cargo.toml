@@ -1,0 +1,17 @@
+[package]
+name = "afterburner-mock-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+# Dev-only test support: never published, plain std, no async runtime.
+publish = false
+license = "Apache-2.0"
+description = "Tiny std-only mock HTTP/1.1 server for the afterburner test suites"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

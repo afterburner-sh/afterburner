@@ -1114,7 +1114,7 @@ impl WasmCombustor {
 
     /// Spawn a long-lived daemon runtime with a stub `DaemonHttp`
     /// coordinator - no real TCP binding, just accounting. Used by
-    /// tests that exercise the plugin ABI without needing a tokio
+    /// tests that exercise the plugin ABI without needing a nuclei
     /// runtime or real sockets.
     pub fn spawn_daemon(
         &self,

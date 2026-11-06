@@ -13,8 +13,8 @@
 
 #![cfg(feature = "bin")]
 
+use afterburner_mock_http::prelude::*;
 use flate2::write::GzEncoder;
-use httpmock::prelude::*;
 use sha1::{Digest, Sha1};
 use std::io::Write;
 use std::process::Command;

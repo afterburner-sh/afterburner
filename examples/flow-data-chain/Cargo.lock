@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner"
-version = "0.2.12"
+version = "0.3.0"
 dependencies = [
  "afterburner-core",
  "afterburner-flow",
@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-afb"
-version = "0.2.12"
+version = "0.3.0"
 dependencies = [
  "afterburner-core",
  "semver",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-core"
-version = "0.2.12"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "fastrace",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-flow"
-version = "0.2.12"
+version = "0.3.0"
 dependencies = [
  "afterburner-core",
  "afterburner-wasi",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-ignite"
-version = "0.2.12"
+version = "0.3.0"
 dependencies = [
  "afterburner-core",
  "afterburner-node-compat",
@@ -141,12 +141,13 @@ dependencies = [
 
 [[package]]
 name = "afterburner-node-compat"
-version = "0.2.12"
+version = "0.3.0"
 dependencies = [
  "aes",
  "aes-gcm",
  "aes-kw",
  "afterburner-core",
+ "async-trait",
  "base64 0.23.1",
  "brotli",
  "cbc",
@@ -160,6 +161,7 @@ dependencies = [
  "kovan-channel",
  "kovan-map",
  "md-5",
+ "nuclei",
  "num-bigint-dig",
  "num-integer",
  "num-traits",
@@ -176,7 +178,6 @@ dependencies = [
  "sha2",
  "sha3",
  "spki",
- "tokio",
  "ureq",
  "uuid",
  "x25519-dalek",
@@ -185,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "afterburner-thrust"
-version = "0.2.12"
+version = "0.3.0"
 dependencies = [
  "afterburner-core",
  "afterburner-wasi",
@@ -198,11 +199,12 @@ dependencies = [
 
 [[package]]
 name = "afterburner-wasi"
-version = "0.2.12"
+version = "0.3.0"
 dependencies = [
  "afterburner-afb",
  "afterburner-core",
  "afterburner-node-compat",
+ "afterburner-wasi-host",
  "anyhow",
  "atomic-wait",
  "base64 0.23.1",
@@ -210,22 +212,45 @@ dependencies = [
  "fastrace",
  "fd-lock",
  "flate2",
+ "futures",
  "getrandom 0.2.17",
  "hex",
  "kovan-channel",
  "kovan-map",
  "libc",
  "memmap2",
+ "nuclei",
  "serde",
  "serde_json",
  "sha2",
  "tar",
  "tempfile",
- "tokio",
  "ureq",
  "wasmparser 0.260.0",
  "wasmtime",
- "wasmtime-wasi",
+]
+
+[[package]]
+name = "afterburner-wasi-host"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "bitflags",
+ "bytes",
+ "cap-primitives",
+ "futures",
+ "nuclei",
+ "rand 0.10.3",
+ "rustix",
+ "rustix-linux-procfs",
+ "thiserror 2.0.21",
+ "tracing",
+ "url",
+ "wasmtime",
+ "wasmtime-wasi-io",
+ "wiggle",
+ "windows-sys 0.61.2",
+ "winx",
 ]
 
 [[package]]
@@ -1424,7 +1449,6 @@ dependencies = [
  "rand 0.10.3",
  "thiserror 2.0.21",
  "tinyvec",
- "tokio",
  "tracing",
  "url",
 ]
@@ -1471,7 +1495,6 @@ dependencies = [
  "smallvec",
  "system-configuration",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
 ]
 
@@ -1810,9 +1833,9 @@ dependencies = [
 
 [[package]]
 name = "kovan"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30de8e1f374a1d4cb20f4031a771b0b9c34352c9fd35be65efd1407f71186675"
+checksum = "daa9f1b7bd4e214a839ec477347103f4265810e25cab696762ac65bd8701963b"
 dependencies = [
  "once_cell",
  "portable-atomic",
@@ -1820,9 +1843,9 @@ dependencies = [
 
 [[package]]
 name = "kovan-channel"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28714e9cbbaf6278719faa02950a2d6c7776fcdeb79f931c0880b13a769141a5"
+checksum = "9132bf6a8ccf1d07adaf2e53383167b26938c6bee94aefef9f386a804b5b9e9d"
 dependencies = [
  "crossbeam-utils",
  "kovan",
@@ -1830,9 +1853,9 @@ dependencies = [
 
 [[package]]
 name = "kovan-map"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba041f9f2d2a9912ea2b823a3db44af8d1070c558cd933e419ee69dac17c6143"
+checksum = "e37b89c7827b824d80ef7a8dba6aebd394d790dd571f6e0f00d0f8f6f6094de0"
 dependencies = [
  "foldhash",
  "kovan",
@@ -1840,9 +1863,9 @@ dependencies = [
 
 [[package]]
 name = "kovan-queue"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c446fe17daab001a9a8d2edc9b6f5fe8cb8f0fd29a90a4b4fbbf85d049897ee1"
+checksum = "dfb6480396d536cecf454bad4c133fd9a0130bac03306d2b8ece1f5d3000803a"
 dependencies = [
  "crossbeam-utils",
  "kovan",
@@ -1996,17 +2019,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mio"
-version = "1.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
-dependencies = [
- "libc",
- "wasi",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "moka"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2044,6 +2056,29 @@ dependencies = [
  "memchr",
  "minimal-lexical",
 ]
+
+[[package]]
+name = "nuclei"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2639d9b23dd5f30b5911a563c0b5d5e3c3b349763f2b4a88d33775475ff2e4a"
+dependencies = [
+ "futures-core",
+ "futures-io",
+ "kovan",
+ "kovan-channel",
+ "kovan-map",
+ "kovan-queue",
+ "libc",
+ "log",
+ "nuclei-macros",
+]
+
+[[package]]
+name = "nuclei-macros"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ecbaecdcaaa41e1eac7f65c51e778920dbf5ed814bf083442787cbfdc2c1d3e0"
 
 [[package]]
 name = "num-bigint-dig"
@@ -2910,16 +2945,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
-name = "signal-hook-registry"
-version = "1.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
-dependencies = [
- "errno",
- "libc",
-]
-
-[[package]]
 name = "signature"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3193,33 +3218,6 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
-
-[[package]]
-name = "tokio"
-version = "1.53.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
-dependencies = [
- "bytes",
- "libc",
- "mio",
- "pin-project-lite",
- "signal-hook-registry",
- "socket2",
- "tokio-macros",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tokio-macros"
-version = "2.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.6",
-]
 
 [[package]]
 name = "toml"
@@ -3798,31 +3796,6 @@ dependencies = [
  "indexmap",
  "wit-component",
  "wit-parser",
-]
-
-[[package]]
-name = "wasmtime-wasi"
-version = "49.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce11727cb331abeaace3681a4b072e4fe04818d7b99786d183b318671f9e4e0e"
-dependencies = [
- "async-trait",
- "bitflags",
- "bytes",
- "cap-primitives",
- "futures",
- "rand 0.10.3",
- "rustix",
- "rustix-linux-procfs",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "url",
- "wasmtime",
- "wasmtime-wasi-io",
- "wiggle",
- "windows-sys 0.61.2",
- "winx",
 ]
 
 [[package]]

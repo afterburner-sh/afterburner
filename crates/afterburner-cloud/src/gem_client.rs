@@ -770,7 +770,7 @@ mod tests {
 
     #[test]
     fn resolve_pure_gem_with_transitive_dep() {
-        use httpmock::prelude::*;
+        use afterburner_mock_http::prelude::*;
         use std::collections::BTreeMap;
 
         let server = MockServer::start();
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn corrupt_gem_fails_integrity() {
-        use httpmock::prelude::*;
+        use afterburner_mock_http::prelude::*;
         use std::collections::BTreeMap;
 
         let server = MockServer::start();
@@ -870,7 +870,7 @@ mod tests {
 
     #[test]
     fn native_gem_from_registry_is_rejected() {
-        use httpmock::prelude::*;
+        use afterburner_mock_http::prelude::*;
         use std::collections::BTreeMap;
 
         let server = MockServer::start();

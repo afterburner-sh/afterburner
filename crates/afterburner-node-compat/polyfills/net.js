@@ -1,7 +1,7 @@
 // net — raw TCP + AF_UNIX polyfill (B7).
 //
-// `Socket` is the JS-side facade for a host-owned `tokio::TcpStream`
-// or `tokio::net::UnixStream`. Operations cross into Rust via
+// `Socket` is the JS-side facade for a host-owned `nuclei::net::TcpStream`
+// or `nuclei::net::UnixStream`. Operations cross into Rust via
 // `__host_net_*` imports (TCP) or `__host_unix_*` imports (AF_UNIX);
 // inbound bytes / lifecycle events arrive via the daemon-event
 // dispatcher as `{kind:"net-..."}` or `{kind:"unix-..."}` envelopes.

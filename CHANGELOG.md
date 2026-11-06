@@ -25,8 +25,11 @@ that took a Tokio runtime handle take a nuclei runtime handle, and the optional
 
 ### Dependencies
 
-Removed: tokio, tokio-rustls, axum, hyper, hyper-util, wasmtime-wasi, and the
-Tokio runtime features of quinn and hickory-resolver. Added: nuclei 0.5.5.
+Removed: tokio, tokio-rustls, axum, hyper, hyper-util, wasmtime-wasi, the
+Tokio runtime features of quinn and hickory-resolver, and the httpmock test
+dependency (the tests' HTTP servers are `afterburner-mock-http`, an unpublished
+workspace crate on std threads), so no lockfile of the repository holds Tokio and
+a test fails if one ever does. Added: nuclei 0.5.6.
 
 ## [0.2.12] - 2026-10-27
 

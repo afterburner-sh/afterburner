@@ -1,5 +1,5 @@
 use afterburner_cloud::{CloudError, RegistryClient, cache};
-use httpmock::prelude::*;
+use afterburner_mock_http::prelude::*;
 use serde_json::json;
 
 fn anon(server: &MockServer) -> RegistryClient {

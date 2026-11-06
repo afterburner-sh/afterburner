@@ -131,19 +131,19 @@ pub struct HostState {
     /// `None` everywhere else - `net.connect` / `net.createServer`
     /// then surface a clear "requires daemon mode" error rather than
     /// silently spawning sockets from the library API. Gated behind
-    /// the `daemon` feature because the coordinator is tokio-backed.
+    /// the `daemon` feature because the coordinator runs on nuclei.
     #[cfg(feature = "daemon")]
     pub daemon_net: Option<Arc<crate::daemon_net::DaemonNet>>,
     /// Optional `tls` coordinator. Same lifecycle/posture as
-    /// `daemon_net`; gated behind `daemon` because it's also
-    /// tokio-backed (and pulls in `tokio-rustls`).
+    /// `daemon_net`; gated behind `daemon` because it also runs on
+    /// nuclei (rustls driven over a nuclei stream).
     #[cfg(feature = "daemon")]
     pub daemon_tls: Option<Arc<crate::daemon_tls::DaemonTls>>,
     /// Optional `dgram` (UDP) coordinator. Same lifecycle as
     /// `daemon_net` - installed only by the CLI's daemon path
     /// (`http.createServer().listen()` etc.); the library API never
     /// installs one so dgram polyfill calls cleanly error in non-daemon
-    /// mode. Gated behind `daemon` because it's tokio-backed.
+    /// mode. Gated behind `daemon` because it runs on nuclei.
     #[cfg(feature = "daemon")]
     pub daemon_dgram: Option<Arc<crate::daemon_dgram::DaemonDgram>>,
     /// Optional AF_UNIX socket coordinator. Same lifecycle as
@@ -154,7 +154,7 @@ pub struct HostState {
     pub daemon_unix: Option<Arc<crate::daemon_unix::DaemonUnix>>,
     /// Outbound HTTP coordinator - async per-shard. JS calls
     /// `http.request` end up here (via `__host_http_request_async`),
-    /// the request runs on the daemon's Tokio runtime, and the
+    /// the request runs on the daemon's nuclei runtime, and the
     /// response comes back through the shard's event loop. Library
     /// callers without a daemon Store (one-shot script mode) fall
     /// back to the synchronous `__host_http_request` path so simple

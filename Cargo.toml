@@ -38,6 +38,7 @@ default-members = [
     "crates/afterburner-thrust",
     "crates/afterburner-afb",
     "crates/afterburner-cloud",
+    "crates/afterburner-mock-http",
 ]
 
 # `examples/*` are standalone Cargo projects (each with its own
@@ -75,10 +76,12 @@ afterburner-node-compat = { version = "0.3.0", path = "crates/afterburner-node-c
 afterburner-thrust = { version = "0.3.0", path = "crates/afterburner-thrust" }
 afterburner-afb = { version = "0.3.0", path = "crates/afterburner-afb" }
 afterburner-cloud = { version = "0.3.0", path = "crates/afterburner-cloud" }
+# Dev-only mock HTTP server for the test suites (publish = false).
+afterburner-mock-http = { path = "crates/afterburner-mock-http" }
 
 # The runtime of every async path: thread-per-core, io_uring with an epoll
 # fallback. The afterburner workspace has no other async runtime.
-nuclei = { version = "0.5.5", default-features = false, features = ["iouring", "epoll", "attributes"] }
+nuclei = { version = "0.5.6", default-features = false, features = ["iouring", "epoll", "attributes"] }
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 async-trait = "0.1"
 
@@ -91,7 +94,7 @@ blake3 = "1.5"
 # features (no legacy-frame decode, no zdict builder, no compression
 # threads) — one trimmed build shared by afb packing and the node-compat
 # zlib shadow; decode memory is bounded at runtime via window_log_max, not
-# by the dependency. dirs/secrecy/zeroize/httpmock are reserved here for
+# by the dependency. dirs/secrecy/zeroize are reserved here for
 # the forthcoming afterburner-cloud client crate.
 tar = { version = "0.4", default-features = false }
 zstd = { version = "0.14", default-features = false }
@@ -101,7 +104,6 @@ pubgrub = "0.4"
 dirs = "7"
 secrecy = "0.10"
 zeroize = "1"
-httpmock = "0.8"
 sha1 = { version = "0.10", features = ["oid"] }
 thiserror = "2"
 hmac = "0.12"
@@ -215,7 +217,7 @@ fast_image_resize = { version = "6", features = ["image"] }
 # canonical pure-Rust async DNS resolver. We use it synchronously
 # from a worker thread so the host-import boundary stays sync (the
 # plugin can't host-call from inside an async stack — it's running
-# inside Wasmtime). Default features pull in tokio; we keep them off and
+# inside Wasmtime). Its default features pull in a second async runtime; we keep them off and
 # drive the resolver on nuclei through its `RuntimeProvider`.
 hickory-resolver = { version = "0.26", default-features = false, features = ["system-config"] }
 

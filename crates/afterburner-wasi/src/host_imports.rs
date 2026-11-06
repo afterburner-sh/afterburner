@@ -449,7 +449,7 @@ fn wrap_inspector(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError
     Ok(())
 }
 
-// `wrap_net` registers either the real tokio-backed coordinator (when
+// `wrap_net` registers either the real nuclei-backed coordinator (when
 // the `daemon` feature is on) or stubs that always return E_NO_DAEMON
 // (when it's off). The plugin's WASM module unconditionally imports
 // the eight `host_net_*` symbols, so we must always declare them.
@@ -1942,7 +1942,7 @@ pub(crate) fn wrap_http(linker: &mut Linker<HostState>) -> Result<(), Afterburne
     //
     // `host_http_request_async` returns the new `req_id` as i64
     // immediately and dispatches the actual round-trip onto the
-    // daemon's Tokio runtime. The shard's event loop polls the
+    // daemon's nuclei runtime. The shard's event loop polls the
     // outbound coordinator each tick; when a response arrives it
     // ships an envelope of kind `http-response` back into JS, where
     // the matching `globalThis.__ab_http_pending[req_id]` Promise
@@ -3642,7 +3642,7 @@ fn wrap_envelope(linker: &mut Linker<HostState>) -> Result<(), AfterburnerError>
 //
 // `host_http_listen` calls into `DaemonHttp::bind_listener` which -
 // under the `daemon` feature - binds a real TCP socket and spawns an
-// axum task on the stored tokio runtime. Without the feature it
+// task on the stored nuclei runtime. Without the feature it
 // degrades to an accounting-only stub, matching pre-B2.4 behaviour.
 //
 // `host_http_reply` parses the JSON payload the JS polyfill handed

@@ -157,7 +157,7 @@ __register_module('quic', function(module, exports, require) {
     /// Returns a Session whose `request(headers, body)` issues a real
     /// outbound H3 request via the host's quinn client + h3 client
     /// stack. Each `request` round-trips synchronously from the JS
-    /// side (the host runs `block_on` against the daemon's tokio
+    /// side (the host runs `block_on` against the daemon's nuclei
     /// runtime).
     function connect(addr, _options) {
         if (typeof globalThis.__host_http3_request !== 'function') {
