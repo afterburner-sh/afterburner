@@ -6,26 +6,26 @@
 //! `net` - raw TCP host coordinator (B7).
 //!
 //! Backs the `net.createConnection` / `net.createServer` polyfill in
-//! `polyfills/net.js`. The host owns every `tokio::net::TcpStream` and
-//! `tokio::net::TcpListener`; the JS-side `Socket` / `Server` is a
+//! `polyfills/net.js`. The host owns every `nuclei::net::TcpStream` and
+//! `nuclei::net::TcpListener`; the JS-side `Socket` / `Server` is a
 //! thin façade that crosses into Rust through `__host_net_*` imports.
 //!
 //! ## Architecture
 //!
-//! Per connection, one tokio task drives both halves of the socket
-//! through `tokio::select!`:
+//! Per connection, one nuclei task drives both halves of the socket
+//! through `nuclei::select!`:
 //!
 //! ```text
 //!   reader  ── stream.read() ────────────►  Data / End / Error events
-//!   writer  ── tokio::sync::Notify ───────►  drain queue & write
+//!   writer  ── nuclei::sync::Notify ──────►  drain queue & write
 //!                  ▲
 //!                  │ wake on every send
 //!   producer  ── kovan unbounded queue ───  __host_net_write
 //! ```
 //!
 //! The wake `Notify` paired with `try_recv` gives us async semantics
-//! over a kovan channel - no polling, no Mutex, no `tokio::sync::mpsc`
-//! (workspace rule: kovan channels everywhere).
+//! over a kovan channel - no polling, no Mutex (workspace rule: kovan
+//! channels everywhere).
 //!
 //! ## Backpressure
 //!
@@ -48,6 +48,7 @@
 //! installs a `DaemonNet` so `net.createServer` cleanly errors.
 
 use crate::daemon_net_gate::net_outbound_allowed;
+use crate::daemon_tls::{ClientTlsStream, TlsConnector};
 use afterburner_core::Manifold;
 use kovan_channel::flavors::bounded::{
     Receiver as BoundedRx, Sender as BoundedTx, channel as bounded_channel,
@@ -56,16 +57,28 @@ use kovan_channel::flavors::unbounded::{
     Receiver as UnboundedRx, Sender as UnboundedTx, channel as unbounded_channel,
 };
 use kovan_map::HopscotchMap;
+use nuclei::io::{AsyncReadExt, AsyncWriteExt};
+use nuclei::net::{TcpListener, TcpStream};
+use nuclei::runtime::RuntimeHandle as Handle;
+use nuclei::sync::Notify;
+use nuclei::task::AbortHandle;
 use rustls::pki_types::ServerName;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::runtime::Handle;
-use tokio::sync::Notify;
-use tokio::task::AbortHandle;
-use tokio_rustls::TlsConnector;
+
+/// Spawn `fut` detached on `rt` and return the handle that aborts it. A nuclei
+/// `Task` cancels on drop, so every fire-and-forget spawn goes through here.
+pub(crate) fn spawn_abortable<F>(rt: &Handle, fut: F) -> AbortHandle
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let task = rt.spawn(fut);
+    let abort = task.abort_handle();
+    task.detach();
+    abort
+}
 
 pub type ConnId = i32;
 pub type ServerId = i32;
@@ -141,7 +154,7 @@ pub enum NetEvent {
 #[derive(Clone)]
 struct ConnHandle {
     write_tx: UnboundedTx<WriteCmd>,
-    /// Wakes the connection task's `tokio::select!` arm when a new
+    /// Wakes the connection task's `select!` arm when a new
     /// `WriteCmd` lands on `write_tx`. Sender uses `notify_one`;
     /// receiver does `try_recv` then `notified().await`. Notify
     /// stores at most one permit so we never miss a wakeup, and it's
@@ -275,8 +288,8 @@ impl DaemonNet {
         self.events_rx.try_recv()
     }
 
-    /// Expose the tokio runtime handle so synchronous callers (Python socket
-    /// syscalls) can bridge into async via `Handle::block_on`.
+    /// Expose the nuclei runtime handle so synchronous callers (Python socket
+    /// syscalls) can bridge into async via `RuntimeHandle::block_on`.
     pub fn runtime(&self) -> &Handle {
         &self.runtime
     }
@@ -371,7 +384,7 @@ impl DaemonNet {
 
     pub fn set_no_delay(&self, conn_id: ConnId, enable: bool) -> i32 {
         // Cross to the worker thread that owns the TcpStream. The
-        // option flip happens in `drive_socket` via tokio's
+        // option flip happens in `drive_socket` via the stream's
         // `set_nodelay` (which itself goes through `setsockopt`).
         let Some(handle) = self.conns.get(&conn_id) else {
             return errors::E_BAD_ID;
@@ -395,7 +408,7 @@ impl DaemonNet {
     /// Signal the per-connection task to perform a TLS client handshake with
     /// `sni` as the server name (used for cert verification and SNI extension).
     ///
-    /// The handshake runs in the tokio task before the next guest write reaches
+    /// The handshake runs in the connection task before the next guest write reaches
     /// the wire. After the handshake the task drives the `TlsStream` instead of
     /// the raw `TcpStream`; the guest reads and writes plaintext as before.
     ///
@@ -441,10 +454,7 @@ impl DaemonNet {
         let evt_tx = self.events_tx.clone();
         let coord = Arc::clone(self);
 
-        let abort = self
-            .runtime
-            .spawn(server_task(server_id, bind, evt_tx, coord))
-            .abort_handle();
+        let abort = spawn_abortable(&self.runtime, server_task(server_id, bind, evt_tx, coord));
 
         self.servers.insert(server_id, ListenerHandle { abort });
         // Track the port so close_server can release the shared
@@ -506,9 +516,9 @@ impl DaemonNet {
         let evt_tx = self.events_tx.clone();
         let coord = Arc::clone(self);
 
-        let abort = self
-            .runtime
-            .spawn(client_task(
+        let abort = spawn_abortable(
+            &self.runtime,
+            client_task(
                 coord,
                 conn_id,
                 host,
@@ -517,8 +527,8 @@ impl DaemonNet {
                 Arc::clone(&wake),
                 Arc::clone(&pending),
                 evt_tx,
-            ))
-            .abort_handle();
+            ),
+        );
 
         ConnHandle {
             write_tx,
@@ -545,17 +555,17 @@ impl DaemonNet {
         let local = stream.local_addr().ok();
         let remote = stream.peer_addr().ok();
 
-        let abort = self
-            .runtime
-            .spawn(drive_socket(
+        let abort = spawn_abortable(
+            &self.runtime,
+            drive_socket(
                 conn_id,
                 stream,
                 write_rx,
                 Arc::clone(&wake),
                 Arc::clone(&pending),
                 evt_tx,
-            ))
-            .abort_handle();
+            ),
+        );
 
         let handle = ConnHandle {
             write_tx,
@@ -573,7 +583,7 @@ impl DaemonNet {
 // net_outbound_allowed and host_allowed live in daemon_net_gate (one canonical copy).
 
 // ---------------------------------------------------------------------
-// Per-connection / per-listener tokio tasks.
+// Per-connection / per-listener nuclei tasks.
 // ---------------------------------------------------------------------
 
 /// Outcome of `drive_socket`. The connection either closed normally or the
@@ -734,7 +744,7 @@ async fn server_task(
 
 /// Drive both halves of an established TCP socket. Reader posts
 /// `Data`/`End`/`Error`; writer drains the queue and posts `Drain`.
-/// Single task with `tokio::select!` - no polling, no Mutex.
+/// Single task with `nuclei::select!` - no polling, no Mutex.
 ///
 /// Returns `DriveExit::Closed` on normal termination (the `Close` event is
 /// sent before returning). Returns `DriveExit::TlsUpgrade` when the guest
@@ -797,8 +807,8 @@ async fn drive_socket(
                     writer_open = false;
                 }
                 WriteCmd::SetNoDelay(enable) => {
-                    // tokio's TcpStream exposes set_nodelay; we get
-                    // back to the underlying stream via OwnedWriteHalf::as_ref.
+                    // The std stream behind the handle exposes set_nodelay; we get
+                    // back to it via OwnedWriteHalf::as_ref.
                     if let Err(e) = write_half.as_ref().set_nodelay(enable) {
                         // Log via error event but don't tear the
                         // connection down - `setNoDelay` is advisory
@@ -846,7 +856,7 @@ async fn drive_socket(
             // simply won't have a writer arm to wake.
         }
 
-        tokio::select! {
+        nuclei::select! {
             // Inbound bytes.
             res = read_half.read(&mut read_buf) => {
                 match res {
@@ -889,13 +899,13 @@ async fn drive_socket(
 /// ignored (can only upgrade once).
 async fn drive_tls_socket(
     conn_id: ConnId,
-    stream: tokio_rustls::client::TlsStream<TcpStream>,
+    stream: ClientTlsStream<TcpStream>,
     write_rx: UnboundedRx<WriteCmd>,
     wake: Arc<Notify>,
     pending: Arc<AtomicUsize>,
     evt_tx: BoundedTx<NetEvent>,
 ) {
-    let (mut read_half, mut write_half) = tokio::io::split(stream);
+    let (mut read_half, mut write_half) = nuclei::io::split(stream);
     let mut read_buf = vec![0u8; READ_CHUNK];
     let mut had_error = false;
     let mut writer_open = true;
@@ -939,7 +949,7 @@ async fn drive_tls_socket(
             // Half-closed and queue drained.
         }
 
-        tokio::select! {
+        nuclei::select! {
             res = read_half.read(&mut read_buf) => {
                 match res {
                     Ok(0) => {

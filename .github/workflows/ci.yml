@@ -102,7 +102,9 @@ jobs:
         with:
           key: wasi-archive
       - name: nextest archive (afterburner-wasi)
-        run: cargo nextest archive -p afterburner-wasi --archive-file ${{ runner.temp }}/nextest-wasi.tar.zst
+        # `daemon` builds the shard pool, its thread budget and the embedded-exit
+        # tests too; without it they compile to nothing.
+        run: cargo nextest archive -p afterburner-wasi --features daemon --archive-file ${{ runner.temp }}/nextest-wasi.tar.zst
       - uses: actions/upload-artifact@v4
         with:
           name: nextest-wasi-archive
@@ -245,7 +247,52 @@ jobs:
         with:
           key: lib-engine
       - name: cargo test (afterburner + core + flow + adaptive + thrust, default features)
-        run: cargo test --workspace --exclude afterburner-wasi --exclude afterburner-afb --exclude afterburner-cloud --exclude afterburner-node-compat --exclude afterburner-ignite --exclude afterburner-plugin --no-fail-fast -- --test-threads=1
+        run: cargo test --workspace --exclude afterburner-wasi --exclude afterburner-afb --exclude afterburner-cloud --exclude afterburner-node-compat --exclude afterburner-ignite --exclude afterburner-plugin --exclude afterburner-wasi-host --exclude afterburner-quic --exclude afterburner-h2 --exclude afterburner-h3 --exclude afterburner-h3-quic --no-fail-fast -- --test-threads=1
+
+  # The protocol and host crates the runtime is built on: the WASI host,
+  # QUIC, HTTP/2, HTTP/3 and the HTTP/3 QUIC adapter (whose source the
+  # HTTP/3 tests compile in). Their tests run under coverage; the job fails
+  # when line coverage drops below the floor, and uploads the lcov report.
+  test-net-crates:
+    name: test / net-crates (coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: llvm-tools-preview
+          rustflags: ''
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: net-crates
+      - name: cargo llvm-cov (wasi-host, quic, h2, h3, h3-quic)
+        run: >-
+          cargo llvm-cov
+          -p afterburner-wasi-host -p afterburner-quic -p afterburner-h2
+          -p afterburner-h3 -p afterburner-h3-quic
+          --all-targets --no-fail-fast
+          --lcov --output-path lcov.info
+          --fail-under-lines 40
+          -- --test-threads=1
+      - name: coverage summary
+        if: always()
+        run: |
+          {
+            echo '### net-crates coverage'
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: net-crates-lcov
+          path: lcov.info
+          retention-days: 14
 
   # Pure host-only package crates: the `.afb` format and the registry
   # client. No wasm target, libclang, or 8 MB plugin cold-start — fast,
@@ -637,3 +684,13 @@ jobs:
           # *bundle* (polyfills/plenum) sha which build.sh writes to
           # the .bundle-sha256 sidecar — that's content-addressed.
           diff -u /tmp/expected.sha "$plugin_dir/afterburner_plugin.wasm.bundle-sha256"
+      - name: Upload the rebuilt plugin
+        # This build, with the pinned javy and Binaryen, is the reference: a maintainer whose
+        # local wasm-opt differs commits this artifact instead of a local build.
+        uses: actions/upload-artifact@v4
+        with:
+          name: afterburner-plugin-wasm
+          path: |
+            crates/afterburner-wasi/plugin/afterburner_plugin.wasm
+            crates/afterburner-wasi/plugin/afterburner_plugin.wasm.bundle-sha256
+          retention-days: 7

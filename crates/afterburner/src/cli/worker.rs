@@ -64,14 +64,11 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     )
     .context("worker child: init handshake")?;
 
-    // tokio runtime for the inherited daemon-mode plumbing (HTTP
+    // nuclei runtime for the inherited daemon-mode plumbing (HTTP
     // listeners, timers). Workers don't bind sockets in this minimal
     // subset, but the Wasm engine path expects a runtime to be present.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("tokio runtime")?;
-    let daemon_http = DaemonHttp::with_runtime(rt.handle().clone(), 64);
+    let rt = nuclei::Runtime::new().context("nuclei runtime")?;
+    let daemon_http = DaemonHttp::with_runtime(rt.handle(), 64);
 
     let combustor = WasmCombustor::new(WasmConfig {
         state_store: None,
@@ -98,21 +95,21 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     // workers can use net too. Inherits the (already-narrowed)
     // manifold from the parent's CLI flags - capability inheritance
     // is enforced one level up at spawn-time, not here.
-    let net = DaemonNet::new(rt.handle().clone(), manifold.clone());
+    let net = DaemonNet::new(rt.handle(), manifold.clone());
     daemon.install_net(Arc::clone(&net));
 
     // same posture as net.
-    let tls = DaemonTls::new(rt.handle().clone(), manifold.clone());
+    let tls = DaemonTls::new(rt.handle(), manifold.clone());
     daemon.install_tls(Arc::clone(&tls));
 
     // UDP coordinator inherits the same manifold as net.
-    let dgram = afterburner_wasi::DaemonDgram::new(rt.handle().clone(), manifold);
+    let dgram = afterburner_wasi::DaemonDgram::new(rt.handle(), manifold);
     daemon.install_dgram(Arc::clone(&dgram));
 
     // AF_UNIX coordinator: workers can use unix sockets too.
     #[cfg(unix)]
     {
-        let unix_coord = afterburner_wasi::daemon_unix::DaemonUnix::new(rt.handle().clone());
+        let unix_coord = afterburner_wasi::daemon_unix::DaemonUnix::new(rt.handle());
         daemon.install_unix(unix_coord);
     }
 
@@ -140,21 +137,23 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     {
         let shutdown = Arc::clone(&shutdown);
         rt.spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
+            let _ = nuclei::signal::ctrl_c().await;
             shutdown.store(true, Ordering::Release);
-        });
+        })
+        .detach();
     }
     #[cfg(unix)]
     {
         let shutdown = Arc::clone(&shutdown);
         rt.spawn(async move {
             if let Ok(mut sigterm) =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                nuclei::signal::unix::signal(nuclei::signal::unix::SignalKind::terminate())
             {
                 let _ = sigterm.recv().await;
                 shutdown.store(true, Ordering::Release);
             }
-        });
+        })
+        .detach();
     }
 
     run_child_event_loop(&mut daemon, &workers, &shutdown)?;

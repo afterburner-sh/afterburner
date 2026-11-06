@@ -26,9 +26,10 @@
 //! non-Linux target is a loud, typed [`AfterburnerError::GovernanceFailed`]
 //! rather than a silent skip.
 
+use crate::threads::ThreadKind;
 use crate::{AfterburnerError, Result};
 use std::sync::OnceLock;
-use std::thread::{self, JoinHandle};
+use std::thread::JoinHandle;
 
 /// Governance applied to one spawned thread: OS-level nice, CPU
 /// affinity, and a name-prefix override for attribution. Every
@@ -114,17 +115,15 @@ where
     F: FnOnce() + Send + 'static,
 {
     let (ack_tx, ack_rx) = kovan_channel::bounded::<Result<()>>(1);
-    let handle = thread::Builder::new()
-        .name(name.into())
-        .spawn(move || {
-            let outcome = apply_governance(&g);
-            let ok = outcome.is_ok();
-            ack_tx.send(outcome);
-            if ok {
-                body();
-            }
-        })
-        .map_err(|e| AfterburnerError::GovernanceFailed(format!("thread spawn failed: {e}")))?;
+    let handle = crate::threads::spawn(ThreadKind::Background, 0, name.into(), move || {
+        let outcome = apply_governance(&g);
+        let ok = outcome.is_ok();
+        ack_tx.send(outcome);
+        if ok {
+            body();
+        }
+    })
+    .map_err(|e| AfterburnerError::GovernanceFailed(format!("thread spawn failed: {e}")))?;
     match ack_rx.recv() {
         Some(Ok(())) => Ok(handle),
         Some(Err(e)) => {

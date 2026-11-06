@@ -20,7 +20,7 @@
 //! ## Why this crate, and why not `cli`
 //!
 //! `crate::cli` (the `burn` binary's own code) is gated behind the `bin`
-//! feature, which also pulls in `clap`, `rustyline`, `tokio`, `crossterm`,
+//! feature, which also pulls in `clap`, `rustyline`, `nuclei`, `crossterm`,
 //! `dialoguer`, and `afterburner-cloud` (the registry client) - CLI-only
 //! weight no embedder wants. This module lives in `afterburner`'s lib gated
 //! behind its own `afb-run` feature instead, because running a `.afb` needs

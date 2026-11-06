@@ -12,6 +12,7 @@
 use crate::cache;
 use crate::client::RegistryClient;
 use crate::error::{CloudError, Result};
+use afterburner_core::threads::{self, ThreadKind};
 use kovan_channel::flavors::unbounded::channel;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -113,42 +114,52 @@ pub fn install_concurrent(
     let abort = AtomicBool::new(false);
     let (tx, rx) = channel::<Report>();
 
-    std::thread::scope(|scope| {
+    let spawn_err = std::thread::scope(|scope| {
         // `&` so each `move` closure captures a copy; the atomics aren't `Copy`.
         let (next, abort) = (&next, &abort);
-        for _ in 0..jobs {
+        for w in 0..jobs {
             let tx = tx.clone();
-            scope.spawn(move || {
-                while !abort.load(Ordering::Relaxed) {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= items.len() {
-                        break;
-                    }
-                    let item = &items[i];
-                    progress.started(&item.coord);
-                    match installer.ensure(item) {
-                        Ok((outcome, warning)) => {
-                            progress.done(&item.coord, &outcome);
-                            tx.send(Report::Ok {
-                                coord: item.coord.clone(),
-                                outcome,
-                                warning,
-                            });
-                        }
-                        Err(e) => {
-                            progress.failed(&item.coord, &e.to_string());
-                            abort.store(true, Ordering::Relaxed);
-                            tx.send(Report::Err(e));
+            let name = format!("ab-install-{w}");
+            let started =
+                threads::spawn_scoped(scope, ThreadKind::Background, w, name, move || {
+                    while !abort.load(Ordering::Relaxed) {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= items.len() {
                             break;
                         }
+                        let item = &items[i];
+                        progress.started(&item.coord);
+                        match installer.ensure(item) {
+                            Ok((outcome, warning)) => {
+                                progress.done(&item.coord, &outcome);
+                                tx.send(Report::Ok {
+                                    coord: item.coord.clone(),
+                                    outcome,
+                                    warning,
+                                });
+                            }
+                            Err(e) => {
+                                progress.failed(&item.coord, &e.to_string());
+                                abort.store(true, Ordering::Relaxed);
+                                tx.send(Report::Err(e));
+                                break;
+                            }
+                        }
                     }
-                }
-            });
+                });
+            if let Err(e) = started {
+                abort.store(true, Ordering::Relaxed);
+                return Some(e);
+            }
         }
+        None
     });
     // Worker clones are gone after the scope join; drop ours so the drain ends.
     drop(tx);
     progress.finish();
+    if let Some(e) = spawn_err {
+        return Err(e.into());
+    }
 
     let mut summary = InstallSummary::default();
     let mut first_err = None;

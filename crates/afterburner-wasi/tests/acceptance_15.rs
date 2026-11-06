@@ -82,7 +82,7 @@ fn pick_port(offset: u16) -> u16 {
 ///
 /// The server runs in its own OS thread (it blocks inside the runtime); the test
 /// thread drives the client. After the assertions the OS thread is detached; the
-/// tokio runtime drops on test exit, which closes all sockets.
+/// nuclei runtime drops on test exit, which closes all sockets.
 ///
 /// Requires: `/tmp/pyodide-exnref.wasm`, `/tmp/python_stdlib.zip`, and the
 /// `daemon` feature.
@@ -139,21 +139,18 @@ server.serve_forever()
     use afterburner_core::Manifold;
     use afterburner_wasi::pyodide_runner::{PythonNetOpts, run_python_with_net};
 
-    // Build a multi-thread tokio runtime for the socket + thread bridge.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("[acceptance_15] build tokio runtime");
-    let handle = rt.handle().clone();
+    // Build a nuclei runtime for the socket + thread bridge.
+    let rt = nuclei::Runtime::new().expect("[acceptance_15] build nuclei runtime");
+    let handle = rt.handle();
 
     // Run the Python server in a dedicated OS thread; it blocks inside the
     // runtime for the duration of `serve_forever`.
     let source_clone = python_source.clone();
     let _server_thread = std::thread::spawn(move || {
-        // The tokio runtime handle is moved into this thread; drop order is
+        // The nuclei runtime handle is moved into this thread; drop order is
         // correct (runtime outlives this thread via the outer `rt`).
         let opts = PythonNetOpts {
-            tokio_handle: handle,
+            runtime: handle,
             manifold: Manifold::open(),
             rw_preopens: Vec::new(),
             host_context: None,
@@ -206,7 +203,7 @@ server.serve_forever()
     }
 
     // The server thread is detached (it runs inside `_server_thread`). The OS
-    // thread continues blocking on `serve_forever`, but the tokio runtime drops
+    // thread continues blocking on `serve_forever`, but the nuclei runtime drops
     // when `rt` goes out of scope at test exit, closing all sockets and
     // unblocking the serve loop.
     eprintln!("[acceptance_15] webserver: PASS (port {port}, 2 requests OK)");

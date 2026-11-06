@@ -58,6 +58,12 @@ pub fn run() -> Result<()> {
             return agent::hook_entry(host);
         }
     }
+    // Pin every thread the binary starts; an Err only means an embedder installed hooks first.
+    let _ = afterburner_core::threads::install_pinned(
+        afterburner_core::threads::ThreadBudget::for_cores(
+            afterburner_core::threads::cores().len(),
+        ),
+    );
     // Animated brand banner ahead of clap's top-level help.
     if matches!(
         std::env::args().nth(1).as_deref(),

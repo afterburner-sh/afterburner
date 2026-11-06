@@ -21,7 +21,7 @@
 
 #![cfg(feature = "bin")]
 
-use httpmock::prelude::*;
+use afterburner_mock_http::prelude::*;
 use std::process::Command;
 
 const BURN: &str = env!("CARGO_BIN_EXE_burn");

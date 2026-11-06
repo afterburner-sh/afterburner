@@ -1854,7 +1854,7 @@ pub fn wire_fs_env_funcs(
                             conn_fds_waiting.iter().map(|(_, cid)| *cid).collect();
                         let net2 = Arc::clone(&net);
                         let maybe_data = net.runtime().block_on(async move {
-                            tokio::time::timeout(timeout_dur, async move {
+                            nuclei::time::timeout(timeout_dur, async move {
                                 loop {
                                     if let Some(crate::daemon_net::NetEvent::Data {
                                         conn_id,
@@ -1864,7 +1864,7 @@ pub fn wire_fs_env_funcs(
                                     {
                                         return Some((conn_id, payload_b64));
                                     }
-                                    tokio::task::yield_now().await;
+                                    nuclei::task::yield_now().await;
                                 }
                             })
                             .await
@@ -1916,7 +1916,7 @@ pub fn wire_fs_env_funcs(
                     let net2 = Arc::clone(&net);
                     // Also route Data events to conn recv_bufs while waiting for a new connection.
                     let maybe_conn = net.runtime().block_on(async move {
-                        tokio::time::timeout(timeout_dur, async move {
+                        nuclei::time::timeout(timeout_dur, async move {
                             loop {
                                 if let Some(ev) = net2.try_recv_event() {
                                     match ev {
@@ -1937,7 +1937,7 @@ pub fn wire_fs_env_funcs(
                                         _ => {} // Listening and other events skipped.
                                     }
                                 }
-                                tokio::task::yield_now().await;
+                                nuclei::task::yield_now().await;
                             }
                         })
                         .await

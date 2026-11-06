@@ -2,11 +2,11 @@
 
 **Real Express.js app running inside Afterburner.**
 
-The Rust host (axum) accepts HTTP requests; each request becomes a JSON envelope handed to a sandboxed JS app that does `const express = require('express')` — the actual npm package, resolved out of `./node_modules/express`.
+The Rust host (nuclei) accepts HTTP requests; each request becomes a JSON envelope handed to a sandboxed JS app that does `const express = require('express')` - the actual npm package, resolved out of `./node_modules/express`.
 
 ```text
                 ┌──────────────────────────────────────────────┐
-HTTP   ─────►   │ axum (Rust)                                  │
+HTTP   ─────►   │ nuclei (Rust)                                │
                 │   ↓ envelope { method, path, query, headers, │
                 │     body }                                   │
                 │ Afterburner::run  →  thrust scheduler  →     │
@@ -54,8 +54,8 @@ curl -X POST -H 'Content-Type: application/json' \
 
 | Layer | Responsibility |
 |:------|:---------------|
-| `axum` (Rust, `src/main.rs`) | TCP + HTTP framing + concurrent request dispatch |
-| `tokio::task::spawn_blocking` | Each request runs Afterburner on a blocking pool thread |
+| `nuclei` (Rust, `src/main.rs`) | TCP + HTTP/1.1 framing + concurrent request dispatch |
+| `nuclei::spawn_blocking` | Each request runs Afterburner on a blocking pool thread |
 | `Afterburner` with `threaded(N)` | Hash-routes concurrent thrusts across N scheduler workers |
 | Wasmtime + Javy plugin | Sandboxed QuickJS execution of `app.js` |
 | `Afterburner::builder().cwd(path)` | Pins the require resolver to walk `node_modules` from the example dir, not from the host's cwd |
@@ -66,7 +66,7 @@ curl -X POST -H 'Content-Type: application/json' \
 
 Express expects `(req, res)` where `req` is an `IncomingMessage` (an `EventEmitter` that emits `'data'` / `'end'`) and `res` is a `ServerResponse` (with `setHeader`, `statusCode`, `write`, `end`, ...).
 
-Afterburner's HTTP polyfill (`crates/afterburner-node-compat/polyfills/http.js`) already exposes the factories that back the in-process daemon-mode HTTP server: `http._makeIncomingMessage` / `http._makeServerResponse`. The example reuses those to construct request/response objects from the axum-side envelope and capture the response by intercepting `res.end`. The result is fed back to the host as a `{status, headers, body}` JSON object that axum turns back into an HTTP response.
+Afterburner's HTTP polyfill (`crates/afterburner-node-compat/polyfills/http.js`) already exposes the factories that back the in-process daemon-mode HTTP server: `http._makeIncomingMessage` / `http._makeServerResponse`. The example reuses those to construct request/response objects from the host-side envelope and capture the response by intercepting `res.end`. The result is fed back to the host as a `{status, headers, body}` JSON object that the nuclei server turns back into an HTTP response.
 
 ### Body parsing
 
@@ -119,5 +119,5 @@ app.get('/counter', (req, res) => {
 ## Files
 
 - `package.json` — declares the `express` dependency.
-- `src/main.rs` — axum server, Afterburner builder (with `.cwd(...)`), request bridge.
+- `src/main.rs` - nuclei HTTP server, Afterburner builder (with `.cwd(...)`), request bridge.
 - `src/app.js` — real Express.js app + envelope ↔ `(req, res)` adapter.

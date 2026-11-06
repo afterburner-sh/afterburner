@@ -78,14 +78,11 @@ print('udp-echo-ok')
     use afterburner_core::Manifold;
     use afterburner_wasi::pyodide_runner::{PythonNetOpts, run_python_with_net};
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio rt");
-    let handle = rt.handle().clone();
+    let rt = nuclei::Runtime::new().expect("nuclei rt");
+    let handle = rt.handle();
 
     let opts = PythonNetOpts {
-        tokio_handle: handle,
+        runtime: handle,
         manifold: Manifold::open(),
         rw_preopens: Vec::new(),
         host_context: None,
@@ -179,16 +176,13 @@ print('unix-stream-ok')
     use afterburner_core::Manifold;
     use afterburner_wasi::pyodide_runner::{PythonNetOpts, run_python_with_net};
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio rt");
-    let handle = rt.handle().clone();
+    let rt = nuclei::Runtime::new().expect("nuclei rt");
+    let handle = rt.handle();
 
     // Probe: check if AF_UNIX is available in the Emscripten Python build.
     // If not, self-skip with an honest message rather than failing on "bad family".
     let probe_opts = PythonNetOpts {
-        tokio_handle: handle.clone(),
+        runtime: handle.clone(),
         manifold: Manifold::open(),
         rw_preopens: Vec::new(),
         host_context: None,
@@ -204,7 +198,7 @@ print('unix-stream-ok')
     }
 
     let opts = PythonNetOpts {
-        tokio_handle: handle,
+        runtime: handle,
         manifold: Manifold::open(),
         rw_preopens: Vec::new(),
         host_context: None,

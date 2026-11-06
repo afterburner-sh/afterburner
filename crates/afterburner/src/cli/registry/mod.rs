@@ -24,6 +24,7 @@ use afterburner_cloud::{
     CacheInstaller, Coord, InstallSummary, Manifest, RegistryClient, config, install_concurrent,
     pkg, scaffold,
 };
+use afterburner_core::threads::{self, ThreadKind};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -597,7 +598,17 @@ pub fn install(
     let (prog, renderer) = progress::InstallProgress::new();
 
     let summary = std::thread::scope(|scope| {
-        let handle = renderer.map(|r| scope.spawn(move || r.run()));
+        let handle = renderer
+            .map(|r| {
+                threads::spawn_scoped(
+                    scope,
+                    ThreadKind::Background,
+                    0,
+                    "ab-install-progress".into(),
+                    move || r.run(),
+                )
+            })
+            .transpose()?;
         let out = install_concurrent(&items, &installer, jobs, &prog);
         if let Some(h) = handle {
             let _ = h.join();

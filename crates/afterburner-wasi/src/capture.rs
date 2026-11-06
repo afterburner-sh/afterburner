@@ -34,10 +34,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use afterburner_wasi_host::cli::{IsTerminal, StdoutStream};
+use afterburner_wasi_host::p2::pipe::MemoryOutputPipe;
+use afterburner_wasi_host::p2::{OutputStream, Pollable, StreamError};
 use bytes::Bytes;
-use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
-use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
-use wasmtime_wasi::p2::{OutputStream, Pollable, StreamError};
 
 /// Growable result-capture pipe with a hard byte ceiling and a
 /// host-readable overflow flag. See the module docs for the contract.
@@ -104,7 +104,7 @@ impl CapturePipe {
     }
 }
 
-#[wasmtime_wasi::async_trait]
+#[afterburner_wasi_host::async_trait]
 impl OutputStream for CapturePipe {
     fn write(&mut self, bytes: Bytes) -> Result<(), StreamError> {
         if bytes.len() > self.remaining() {
@@ -133,7 +133,7 @@ impl OutputStream for CapturePipe {
     }
 }
 
-#[wasmtime_wasi::async_trait]
+#[afterburner_wasi_host::async_trait]
 impl Pollable for CapturePipe {
     async fn ready(&mut self) {}
 }
@@ -149,12 +149,12 @@ impl StdoutStream for CapturePipe {
         Box::new(self.clone())
     }
 
-    fn async_stream(&self) -> Box<dyn tokio::io::AsyncWrite + Send + Sync> {
+    fn async_stream(&self) -> Box<dyn nuclei::io::AsyncWrite + Send + Sync> {
         Box::new(self.clone())
     }
 }
 
-impl tokio::io::AsyncWrite for CapturePipe {
+impl nuclei::io::AsyncWrite for CapturePipe {
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -186,11 +186,11 @@ impl tokio::io::AsyncWrite for CapturePipe {
         std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(
+    fn poll_close(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_close(cx)
     }
 }
 

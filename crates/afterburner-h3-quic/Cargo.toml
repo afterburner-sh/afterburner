@@ -1,0 +1,36 @@
+[package]
+name = "afterburner-h3-quic"
+version.workspace = true
+edition = "2021"  # upstream quinn and h3-quinn are 2021 code
+rust-version.workspace = true
+authors.workspace = true
+# MIT, NOT the workspace BSL: this crate is derived from h3-quinn 0.0.10
+# (see NOTICE and LICENSE).
+license = "MIT"
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "HTTP/3 QUIC transport adapter for Afterburner on nuclei, derived from h3-quinn"
+keywords = ["http3", "quic", "h3", "nuclei"]
+categories = ["network-programming", "web-programming"]
+include = ["src/**/*", "LICENSE", "NOTICE", "Cargo.toml"]
+
+[features]
+tracing = ["dep:tracing"]
+
+[lib]
+name = "h3_quinn"
+
+[dependencies]
+bytes = "1"
+futures = "0.3.28"
+h3 = { package = "afterburner-h3", path = "../afterburner-h3", version = "0.3.0" }
+quinn = { package = "afterburner-quic", path = "../afterburner-quic", version = "0.3.0", default-features = false }
+tracing = { version = "0.1.40", optional = true }
+
+[dev-dependencies]
+http = "1"
+nuclei = { workspace = true }
+quinn = { package = "afterburner-quic", path = "../afterburner-quic", default-features = false, features = ["rustls-ring"] }
+rcgen = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std"] }

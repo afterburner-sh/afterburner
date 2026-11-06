@@ -5,7 +5,7 @@
 
 //! B2.2 - `DaemonRuntime` scaffold tests. Exercises the long-lived
 //! Store path end-to-end against the plugin's daemon modes without
-//! the axum listener layer (that lands in B2.4).
+//! the HTTP listener layer (that lands in B2.4).
 
 use afterburner_core::Manifold;
 use afterburner_wasi::{WasmCombustor, WasmConfig};
@@ -203,7 +203,7 @@ fn http_createserver_polyfill_end_to_end() {
     // `server_id` that `__host_http_listen` returned. A dispatched
     // event reaches the user's `cb(req, res)` - `res.end(body)`
     // flows back through `__host_http_reply` (stubbed in B2.1,
-    // real axum wiring lands in B2.4).
+    // real listener wiring lands in B2.4).
     let c = fresh();
     let mut daemon = c
         .spawn_daemon(

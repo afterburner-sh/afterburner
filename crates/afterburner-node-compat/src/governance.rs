@@ -6,7 +6,7 @@
 //! Governed spawn wrapper for node-compat's capability helper threads
 //! (the DNS resolver's per-call timeout worker in [`crate::dns_host`],
 //! the sqlite3 shadow's per-connection worker in
-//! [`crate::shadows::sqlite3`]).
+//! `crate::shadows::sqlite3`, behind the `shadow-sqlite3` feature).
 //!
 //! These threads are spawned deep inside host-call paths reached from
 //! many call sites - plumbing a `ThreadGovernance` value through every
@@ -16,10 +16,12 @@
 //! process-wide governance an embedder installs once via
 //! [`afterburner_core::governance::set_helper_governance`] and applies
 //! it exactly like every other governed spawn in the workspace. Unset
-//! (the default) is [`ThreadGovernance::default()`] - a pure no-op,
+//! (the default) is [`ThreadGovernance`]'s default - a pure no-op,
 //! today's ungoverned behavior, byte-identical.
 
 use afterburner_core::Result;
+#[cfg(doc)]
+use afterburner_core::governance::ThreadGovernance;
 use afterburner_core::governance::helper_governance;
 use std::thread::JoinHandle;
 

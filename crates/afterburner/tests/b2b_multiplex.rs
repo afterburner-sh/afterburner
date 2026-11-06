@@ -157,7 +157,7 @@ fn close_then_relisten_on_same_port_succeeds() {
             first.close(() => {{
                 results.push('first-closed');
                 // Give close enough time to complete the port release
-                // (abort is async inside tokio). 250ms is generous but
+                // (abort is async inside the runtime). 250ms is generous but
                 // bounded - a regressed close-leak still fails the
                 // test at the second listen's EADDRINUSE.
                 setTimeout(() => {{

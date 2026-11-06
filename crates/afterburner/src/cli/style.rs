@@ -273,7 +273,7 @@ impl Spinner {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let msg = msg.to_string();
-        let handle = std::thread::spawn(move || {
+        let body = move || {
             use crossterm::{cursor, execute, terminal};
             let mut err = std::io::stderr();
             let _ = execute!(err, cursor::Hide);
@@ -304,11 +304,15 @@ impl Spinner {
                 cursor::Show
             );
             let _ = err.flush();
-        });
-        Spinner {
-            stop,
-            handle: Some(handle),
-        }
+        };
+        let handle = afterburner_core::threads::spawn(
+            afterburner_core::threads::ThreadKind::Background,
+            0,
+            "burn-spinner".into(),
+            body,
+        )
+        .ok();
+        Spinner { stop, handle }
     }
 }
 

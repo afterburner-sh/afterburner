@@ -136,13 +136,10 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     let invocation = build_invocation(cli, script_label, user_args);
     let manifold = build_manifold(cli);
 
-    // Start tokio runtime for the axum listeners + signal handler.
-    // Multi-thread so axum's spawn happens off the main thread.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("tokio runtime")?;
-    let daemon_http = DaemonHttp::with_runtime(rt.handle().clone(), 1024);
+    // Start the nuclei runtime for the listeners + signal handlers; its
+    // workers run them off the main thread.
+    let rt = nuclei::Runtime::new().context("nuclei runtime")?;
+    let daemon_http = DaemonHttp::with_runtime(rt.handle(), 1024);
 
     // The WasmCombustor lives at the CLI level (bypasses the
     // Afterburner facade) because daemon mode needs direct access
@@ -208,14 +205,12 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
         daemon_http: Arc::clone(&daemon_http),
         transpile_hook: combustor.transpile_hook(),
         worker_config: WorkerConfig::default(),
-        tokio_handle: rt.handle().clone(),
+        runtime: rt.handle(),
         invocation,
         shutdown: Arc::clone(&shutdown),
         queue_depth_per_shard: None,
         #[cfg(unix)]
-        unix_coord: Some(afterburner_wasi::daemon_unix::DaemonUnix::new(
-            rt.handle().clone(),
-        )),
+        unix_coord: Some(afterburner_wasi::daemon_unix::DaemonUnix::new(rt.handle())),
     }) {
         Ok(p) => p,
         Err(e) => {
@@ -290,21 +285,23 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     {
         let shutdown = Arc::clone(&shutdown);
         rt.spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
+            let _ = nuclei::signal::ctrl_c().await;
             shutdown.store(true, Ordering::Release);
-        });
+        })
+        .detach();
     }
     #[cfg(unix)]
     {
         let shutdown = Arc::clone(&shutdown);
         rt.spawn(async move {
             if let Ok(mut sigterm) =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                nuclei::signal::unix::signal(nuclei::signal::unix::SignalKind::terminate())
             {
                 let _ = sigterm.recv().await;
                 shutdown.store(true, Ordering::Release);
             }
-        });
+        })
+        .detach();
     }
 
     // Main thread waits for shutdown signal OR all shards naturally
@@ -320,7 +317,7 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
     }
 
     // Shutdown: signal all shards, then drop the pool which joins
-    // all shard threads. Tokio runtime drains in-flight axum
+    // all shard threads. The nuclei runtime drains in-flight
     // tasks (best-effort, bounded by timeout).
     shutdown.store(true, Ordering::Release);
     drop(pool);

@@ -1,8 +1,8 @@
 // tls — raw TLS polyfill (B7).
 //
 // Layered on top of the same daemon-event plumbing as `net.js`: a JS
-// `TLSSocket` is the façade, the host owns the `tokio_rustls`
-// `TlsStream`, and lifecycle events arrive as `{kind: "tls-..."}`
+// `TLSSocket` is the façade, the host owns a rustls
+// `TlsStream` driven over a nuclei socket, and lifecycle events arrive as `{kind: "tls-..."}`
 // envelopes routed through `__ab_tls_handlers` and
 // `__ab_tls_server_handlers`.
 //

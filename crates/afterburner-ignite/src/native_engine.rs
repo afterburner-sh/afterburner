@@ -12,7 +12,7 @@
 //! ### Concurrency model - thread-local runtimes
 //!
 //! rquickjs's `Runtime`/`Context` are `!Send`/`!Sync` (without the
-//! `parallel` feature, which drags in tokio). Rather than serialize
+//! `parallel` feature, which drags in an async runtime). Rather than serialize
 //! access with a Mutex, each client thread gets its own lazily-created
 //! `Runtime` via `thread_local!`. There is **no cross-thread
 //! synchronization** on the hot path - two client threads can call
@@ -1071,6 +1071,18 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn spawn_native<T: Send + 'static>(
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> std::thread::JoinHandle<T> {
+        afterburner_core::threads::spawn(
+            afterburner_core::threads::ThreadKind::NativeCompile,
+            0,
+            "ab-native-test".into(),
+            body,
+        )
+        .unwrap()
+    }
+
     fn combust(source: &str, input: JsonValue) -> Result<JsonValue> {
         let c = NativeCombustor::new()?;
         let id = c.ignite(source)?;
@@ -1271,8 +1283,6 @@ mod tests {
 
     #[test]
     fn cross_thread_thrust_uses_per_thread_runtime() {
-        use std::thread;
-
         let c = Arc::new(NativeCombustor::new().unwrap());
         let id = c.ignite("module.exports = (d) => d.n * 2").unwrap();
 
@@ -1281,7 +1291,7 @@ mod tests {
         let mut handles = Vec::new();
         for n in 1..=4u64 {
             let c = c.clone();
-            handles.push(thread::spawn(move || {
+            handles.push(spawn_native(move || {
                 c.thrust(&id, &json!({ "n": n }), &FuelGauge::unlimited())
                     .unwrap()
             }));
@@ -1439,7 +1449,7 @@ mod tests {
                 .with_ledger(ledger.clone() as Arc<dyn MemoryLedger>),
         );
         let c2 = c.clone();
-        let handle = std::thread::spawn(move || {
+        let handle = spawn_native(move || {
             let id = c2.ignite("module.exports = () => 1 + 1").unwrap();
             let out = c2
                 .thrust(&id, &json!(null), &FuelGauge::unlimited())
@@ -1493,7 +1503,7 @@ mod tests {
         );
         let c2 = c.clone();
         let ledger2 = ledger.clone();
-        let handle = std::thread::spawn(move || {
+        let handle = spawn_native(move || {
             let id = c2.ignite("module.exports = () => 1").unwrap();
             c2.thrust(&id, &json!(null), &FuelGauge::unlimited())
                 .unwrap();
@@ -1536,7 +1546,7 @@ mod tests {
                 .with_ledger(ledger as Arc<dyn MemoryLedger>),
         );
         let c2 = c.clone();
-        let handle = std::thread::spawn(move || {
+        let handle = spawn_native(move || {
             let err = c2.ignite("module.exports = () => 1").unwrap_err();
             assert!(
                 matches!(err, AfterburnerError::LedgerDenied(_)),
@@ -1561,7 +1571,7 @@ mod tests {
                 .with_ledger(ledger as Arc<dyn MemoryLedger>),
         );
         let c2 = c.clone();
-        let handle = std::thread::spawn(move || {
+        let handle = spawn_native(move || {
             let id = c2.ignite("module.exports = () => 1").unwrap();
             let err = c2
                 .thrust(&id, &json!(null), &FuelGauge::unlimited())

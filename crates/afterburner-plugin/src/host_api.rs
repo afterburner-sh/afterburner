@@ -138,8 +138,8 @@ unsafe extern "C" {
         key_ptr: *const u8,
         key_len: u32,
     ) -> i32;
-    /// Outbound HTTP/3 request - sync wrapper that runs a quinn
-    /// client connect + h3 request inside the daemon's tokio runtime
+    /// Outbound HTTP/3 request - sync wrapper that runs a QUIC
+    /// client connect + h3 request inside the daemon's nuclei runtime
     /// via `block_on`. Output is JSON
     /// `{"status":N,"headers":{...},"body_b64":"..."}`.
     pub fn host_http3_request(
@@ -211,7 +211,7 @@ unsafe extern "C" {
         out_ptr: *mut u8,
         out_cap: u32,
     ) -> i32;
-    /// Spawn an outbound HTTP request on the daemon's Tokio runtime
+    /// Spawn an outbound HTTP request on the daemon's nuclei runtime
     /// and return the new `req_id` immediately. The completed
     /// response lands in JS as a `daemon-event` of kind
     /// `http-response`. Returns `-1` when no daemon coordinator is
@@ -633,7 +633,7 @@ unsafe extern "C" {
 
     // ---- http server (daemon mode B2) -------------------------------
     //
-    // `host_http_listen(port)` binds an axum listener on the host and
+    // `host_http_listen(port)` binds an HTTP listener on the host and
     // returns a `server_id` (>0) - scripts that call
     // `http.createServer(cb).listen(port)` hand the port to this
     // import. Subsequent HTTP requests on that listener are dispatched
@@ -643,11 +643,11 @@ unsafe extern "C" {
 
     // `host_http_reply(req_id, resp_json_ptr, resp_json_len)` sends
     // the reply bytes through the host's internal request→reply
-    // channel so axum can write the response to the socket. `resp_json`
+    // channel so the listener can write the response to the socket. `resp_json`
     // shape: `{status, headers: {...}, body: string}`.
     pub fn host_http_reply(req_id: i64, resp_ptr: *const u8, resp_len: u32) -> i32;
 
-    // `host_http_close(server_id)` aborts the axum listener task
+    // `host_http_close(server_id)` aborts the HTTP listener task
     // on the host side and releases the port. Returns 1 if the
     // server_id was known, 0 otherwise (idempotent - safe to call
     // twice). Backs `server.close()` in the http polyfill.
@@ -818,7 +818,7 @@ unsafe extern "C" {
 
     // ---- inspector / Chrome DevTools Protocol -----------------
     //
-    // `host_inspector_open(port)` boots an axum HTTP+WebSocket
+    // `host_inspector_open(port)` boots an HTTP+WebSocket
     // listener; the bound port (>=1) is returned, or a negative
     // error code on failure. `host_inspector_send` fans a CDP
     // notification / response to a specific session (or every
@@ -854,7 +854,7 @@ unsafe extern "C" {
 
     // ---- net (raw TCP, B7) ------------------------------------------
     //
-    // Process-wide tokio coordinator (`afterburner-wasi/daemon_net.rs`)
+    // Process-wide nuclei coordinator (`afterburner-wasi/daemon_net.rs`)
     // owns every TcpStream / TcpListener; the plugin's `net.js`
     // polyfill calls these to drive client connections, server
     // listeners, and writes. Inbound bytes / lifecycle events arrive

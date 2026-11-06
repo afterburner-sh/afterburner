@@ -155,16 +155,24 @@ mod tests {
 
     #[test]
     fn increment_is_atomic_under_concurrency() {
-        use std::thread;
+        use crate::threads::{ThreadKind, spawn};
         let store = InMemoryStateStore::shared();
         let mut handles = Vec::new();
-        for _ in 0..16 {
+        for i in 0..16 {
             let s = store.clone();
-            handles.push(thread::spawn(move || {
-                for _ in 0..1000 {
-                    s.increment_i64("hits", 1);
-                }
-            }));
+            handles.push(
+                spawn(
+                    ThreadKind::Background,
+                    i,
+                    format!("ab-test-{i}"),
+                    move || {
+                        for _ in 0..1000 {
+                            s.increment_i64("hits", 1);
+                        }
+                    },
+                )
+                .unwrap(),
+            );
         }
         for h in handles {
             h.join().unwrap();

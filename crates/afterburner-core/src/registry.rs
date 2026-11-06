@@ -683,15 +683,21 @@ mod tests {
         // With the `OnceLock`-gated `CompileCell`, concurrent registrations
         // of the same source fan into a single `ignite`; losers of the
         // insert race wait on the shared cell and observe the same id.
-        use std::thread;
+        use crate::threads::{ThreadKind, spawn};
         let (cache, mock) = cache_with_mock();
         let cache = std::sync::Arc::new(cache);
         let mut handles = Vec::new();
-        for _ in 0..16 {
+        for i in 0..16 {
             let c = cache.clone();
-            handles.push(thread::spawn(move || {
-                c.register("module.exports = () => 42").unwrap()
-            }));
+            handles.push(
+                spawn(
+                    ThreadKind::Background,
+                    i,
+                    format!("ab-test-{i}"),
+                    move || c.register("module.exports = () => 42").unwrap(),
+                )
+                .unwrap(),
+            );
         }
         let ids: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         assert!(ids.windows(2).all(|w| w[0].hash == w[1].hash));

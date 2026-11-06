@@ -9,7 +9,7 @@
 //! When JS calls `http.request(opts, cb)` (or `https.request`,
 //! `fetch`, anything that ends up at our `__host_http_request_async`
 //! host import), the wasm side allocates a `req_id` and spawns the
-//! request through this coordinator. The Tokio task polls the
+//! request through this coordinator. The nuclei task polls the
 //! upstream server, builds a response, and pushes a
 //! `HttpOutboundResponseEvent` onto the per-shard channel. The
 //! shard's event loop drains the channel each tick and dispatches
@@ -88,7 +88,7 @@ pub struct DaemonHttpOutbound {
     in_flight: AtomicUsize,
     event_tx: BoundedTx<HttpOutboundResponseEvent>,
     event_rx: BoundedRx<HttpOutboundResponseEvent>,
-    runtime: tokio::runtime::Handle,
+    runtime: nuclei::runtime::RuntimeHandle,
     /// Default per-request timeout. JS callers can override via the
     /// request option; this is the floor for runaway upstreams.
     default_timeout: Duration,
@@ -96,11 +96,11 @@ pub struct DaemonHttpOutbound {
 
 #[cfg(feature = "daemon")]
 impl DaemonHttpOutbound {
-    /// Build a coordinator bound to the given Tokio runtime. Channel
+    /// Build a coordinator bound to the given nuclei runtime. Channel
     /// capacity is 1024 - chosen large enough that a chatty
     /// installer (npm install resolving 50+ packages in parallel)
     /// doesn't backpressure on the dispatch loop.
-    pub fn new(runtime: tokio::runtime::Handle) -> Arc<Self> {
+    pub fn new(runtime: nuclei::runtime::RuntimeHandle) -> Arc<Self> {
         let (tx, rx) = bounded_channel(1024);
         Arc::new(Self {
             next_req_id: AtomicI64::new(1),
@@ -134,12 +134,12 @@ impl DaemonHttpOutbound {
         let to = timeout.unwrap_or(self.default_timeout);
 
         // Spawn a blocking task - the underlying http_host::request is
-        // a synchronous reqwest call. Tokio's `spawn_blocking`
-        // dispatches to its dedicated blocking pool so the reactor
-        // doesn't stall. Swapping the inner call for an async
+        // a synchronous reqwest call. nuclei's `spawn_blocking`
+        // dispatches to its dedicated blocking pool so the shards
+        // don't stall. Swapping the inner call for an async
         // `reqwest::get` would not change the channel or the JS side.
-        self.runtime.spawn(async move {
-            let event = match tokio::task::spawn_blocking(move || {
+        let task = self.runtime.spawn(async move {
+            let event = match nuclei::task::spawn_blocking(move || {
                 http_host::request(
                     &method_owned,
                     &url_owned,
@@ -148,6 +148,7 @@ impl DaemonHttpOutbound {
                     &manifold,
                 )
             })
+            .join()
             .await
             {
                 Ok(Ok(resp)) => {
@@ -205,6 +206,7 @@ impl DaemonHttpOutbound {
             // (1024) is far above any realistic outbound burst.
             coord.event_tx.send(event);
         });
+        task.detach();
 
         req_id
     }

@@ -799,8 +799,8 @@ impl WasmLoader {
     /// inside burn can't escape burn's overall Manifold even if
     /// `preopens` lists a path).
     pub fn run_wasi(&self, module_id: ModuleId, config_json: &str) -> Result<i32> {
-        use wasmtime_wasi::p1::WasiP1Ctx;
-        use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
+        use afterburner_wasi_host::p1::WasiP1Ctx;
+        use afterburner_wasi_host::{FsPerms, WasiCtxBuilder};
 
         let module = self.modules.get(&module_id).ok_or_else(|| {
             AfterburnerError::Host(format!("WebAssembly: unknown module {module_id}"))
@@ -840,7 +840,7 @@ impl WasmLoader {
         let wasi: WasiP1Ctx = builder.build_p1();
         let mut store = Store::new(&self.engine, wasi);
         let mut linker = wasmtime::Linker::<WasiP1Ctx>::new(&self.engine);
-        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |s| s)
+        afterburner_wasi_host::p1::add_to_linker_sync(&mut linker, |s| s)
             .map_err(|e| AfterburnerError::Host(format!("WASI linker: {e}")))?;
         let instance = linker
             .instantiate(&mut store, &module.module)
@@ -853,11 +853,11 @@ impl WasmLoader {
             Err(e) => {
                 // wasmtime wraps the WASI exit in an anyhow chain.
                 // Walk every cause AND check the outermost error.
-                if let Some(exit) = e.downcast_ref::<wasmtime_wasi::I32Exit>() {
+                if let Some(exit) = e.downcast_ref::<afterburner_wasi_host::I32Exit>() {
                     return Ok(exit.0);
                 }
                 for cause in e.chain() {
-                    if let Some(exit) = cause.downcast_ref::<wasmtime_wasi::I32Exit>() {
+                    if let Some(exit) = cause.downcast_ref::<afterburner_wasi_host::I32Exit>() {
                         return Ok(exit.0);
                     }
                 }

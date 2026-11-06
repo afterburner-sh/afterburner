@@ -15,8 +15,8 @@
 #![cfg(feature = "bin")]
 
 use afterburner_afb::digest::{digest as sha256_digest, hex as digest_hex};
+use afterburner_mock_http::prelude::*;
 use flate2::write::GzEncoder;
-use httpmock::prelude::*;
 use std::io::Write;
 use std::process::Command;
 
@@ -240,8 +240,8 @@ fn burn_install_rejects_native_extension_gem() {
 fn build_install_plan_includes_gem_deps() {
     // We test the manifest parsing path: write a temp afb.toml with [gem] and
     // confirm the resolved GemPackage set from a mock server is non-empty.
-    // This reuses the GemClient + httpmock combo that gem_client tests use.
-    use httpmock::prelude::*;
+    // This reuses the GemClient + mock server combo that gem_client tests use.
+    use afterburner_mock_http::prelude::*;
 
     let server = MockServer::start();
 

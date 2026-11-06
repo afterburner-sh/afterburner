@@ -1,0 +1,1 @@
+The WASI host of Afterburner, on the nuclei runtime. Derived from wasmtime-wasi 49.0.4 (Apache-2.0 WITH LLVM-exception); the public module paths and types are kept, while the runtime, sockets, timers, channels and IO traits are nuclei's.

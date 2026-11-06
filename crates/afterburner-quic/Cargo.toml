@@ -1,0 +1,51 @@
+[package]
+name = "afterburner-quic"
+version.workspace = true
+edition = "2021"  # upstream quinn and h3-quinn are 2021 code
+rust-version.workspace = true
+authors.workspace = true
+# MIT OR Apache-2.0, NOT the workspace BSL: this crate is derived from
+# quinn 0.11.12 (see NOTICE and LICENSE-MIT).
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "QUIC transport for Afterburner on nuclei, derived from quinn"
+keywords = ["quic", "nuclei"]
+categories = ["network-programming", "asynchronous"]
+include = ["src/**/*", "LICENSE-MIT", "NOTICE", "LICENSE-APACHE", "Cargo.toml"]
+
+[features]
+default = ["log", "rustls-ring", "bloom"]
+aws-lc-rs = ["proto/aws-lc-rs"]
+aws-lc-rs-fips = ["proto/aws-lc-rs-fips"]
+bloom = ["proto/bloom"]
+log = ["tracing/log", "proto/log", "udp/log"]
+platform-verifier = ["proto/platform-verifier"]
+qlog = ["proto/qlog"]
+ring = ["proto/ring"]
+rustls = ["rustls-ring"]
+rustls-aws-lc-rs = ["dep:rustls", "aws-lc-rs", "proto/rustls-aws-lc-rs", "proto/aws-lc-rs"]
+rustls-aws-lc-rs-fips = ["dep:rustls", "aws-lc-rs-fips", "proto/rustls-aws-lc-rs-fips", "proto/aws-lc-rs-fips"]
+rustls-log = ["rustls?/logging"]
+rustls-ring = ["dep:rustls", "ring", "proto/rustls-ring", "proto/ring"]
+
+[dependencies]
+bytes = "1"
+futures-io = "0.3.19"
+nuclei = { workspace = true }
+pin-project-lite = "0.2"
+proto = { package = "quinn-proto", version = "0.11.18", default-features = false }
+rustc-hash = "2"
+rustls = { version = "0.23.5", default-features = false, features = ["std"], optional = true }
+thiserror = "2.0.3"
+tracing = { version = "0.1.10", default-features = false, features = ["std"] }
+udp = { package = "quinn-udp", version = "0.5", default-features = false, features = ["tracing"] }
+
+[dev-dependencies]
+futures-util = "0.3"
+rand = "0.10.1"
+rcgen = { workspace = true }
+socket2 = ">=0.5, <0.7"
+tracing-futures = { version = "0.2.0", default-features = false, features = ["std-future"] }
+tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi"] }

@@ -1,0 +1,9 @@
+afterburner-quic
+
+This crate is derived from quinn 0.11.12 (https://github.com/quinn-rs/quinn), copyright the quinn developers, and is
+distributed under that crate's license, kept in LICENSE-MIT and LICENSE-APACHE (MIT OR Apache-2.0).
+
+The Afterburner authors modified the sources: the IO boundary runs on the
+nuclei runtime instead of Tokio, and the crate is renamed and versioned with
+the Afterburner workspace. The changes are recorded in the Afterburner
+repository's history (https://github.com/afterburner-sh/afterburner).

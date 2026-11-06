@@ -32,7 +32,7 @@ of `_start`, for languages whose toolchain builds a "reactor" rather than a
 shard pool call `dispatch_event` (-> `daemon_step`) once per HTTP request.
 Extending it to native guests means: the guest **exports** functions the
 host can call more than once, and the host - not the guest - owns the
-socket, the accept loop, and the axum plumbing.
+socket, the accept loop, and the HTTP plumbing.
 
 ## Exported ABI
 
@@ -341,7 +341,7 @@ expected sequence number in every response.
 
 ## What was reused vs. what is new
 
-Reused, unchanged: `DaemonHttp` (listener bind, axum/hyper request loop,
+Reused, unchanged: `DaemonHttp` (listener bind, nuclei request loop,
 pending-reply channel, port-claim arbitration), `daemon_envelopes::http_event_to_envelope`
 (request encoding), `ReplyEnvelope` (response type), the CLI's SIGINT/SIGTERM
 shutdown pattern, `WasiCommandOpts` (capability grants), `deterministic_engine`
@@ -353,7 +353,7 @@ counterpart to `DaemonRuntime`, same role (own the long-lived Store, expose
 init/dispatch), different guest calling convention (exported functions +
 linear-memory buffers instead of a `pending_envelope` field + a
 `daemon_step` re-entry). `cli/daemon_native.rs` - the native counterpart to
-`cli/daemon.rs`, same role (tokio runtime, bind listeners, drive the
+`cli/daemon.rs`, same role (nuclei runtime, bind listeners, drive the
 request loop, handle signals), much smaller because there is no shard pool,
 no bytecode compile, no worker/TLS/net wiring. Two new envelope
 parsers colocated in `daemon_envelopes.rs`.

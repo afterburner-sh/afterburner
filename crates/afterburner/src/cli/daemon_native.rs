@@ -77,13 +77,10 @@ pub fn execute(wasm_bytes: &[u8], opts: WasiCommandOpts) -> Result<()> {
         return Ok(());
     }
 
-    // Tokio runtime + DaemonHttp, exactly the shape `cli::daemon::execute`
+    // nuclei runtime + DaemonHttp, exactly the shape `cli::daemon::execute`
     // builds for JS - reused unchanged, not reimplemented.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("tokio runtime")?;
-    let daemon_http = DaemonHttp::with_runtime(rt.handle().clone(), 1024);
+    let rt = nuclei::Runtime::new().context("nuclei runtime")?;
+    let daemon_http = DaemonHttp::with_runtime(rt.handle(), 1024);
 
     let mut bound_ports = Vec::with_capacity(listen.len());
     for spec in &listen {
@@ -114,21 +111,23 @@ pub fn execute(wasm_bytes: &[u8], opts: WasiCommandOpts) -> Result<()> {
     {
         let shutdown = Arc::clone(&shutdown);
         rt.spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
+            let _ = nuclei::signal::ctrl_c().await;
             shutdown.store(true, Ordering::Release);
-        });
+        })
+        .detach();
     }
     #[cfg(unix)]
     {
         let shutdown = Arc::clone(&shutdown);
         rt.spawn(async move {
             if let Ok(mut sigterm) =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                nuclei::signal::unix::signal(nuclei::signal::unix::SignalKind::terminate())
             {
                 let _ = sigterm.recv().await;
                 shutdown.store(true, Ordering::Release);
             }
-        });
+        })
+        .detach();
     }
 
     // Single-instance request loop: park on the shared event channel
@@ -143,16 +142,14 @@ pub fn execute(wasm_bytes: &[u8], opts: WasiCommandOpts) -> Result<()> {
             if shutdown.load(Ordering::Acquire) {
                 break None;
             }
-            let event = match tokio::time::timeout(
-                Duration::from_millis(250),
-                daemon_http.recv_async_event(),
-            )
-            .await
-            {
-                Ok(Some(event)) => event,
-                Ok(None) => break None, // all senders dropped
-                Err(_elapsed) => continue,
-            };
+            let event =
+                match nuclei::timeout(Duration::from_millis(250), daemon_http.recv_async_event())
+                    .await
+                {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break None, // all senders dropped
+                    Err(_elapsed) => continue,
+                };
 
             let req_id = event.req_id;
             let envelope = http_event_to_envelope(&event);

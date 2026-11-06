@@ -2321,7 +2321,7 @@ __register_module('child_process', function(module, exports, require) {
     // child inline and dispatch events / callbacks on a microtask so
     // the canonical Node patterns (`.on('exit', …)`, `exec(cmd, cb)`)
     // work as expected. Real concurrent subprocess execution would
-    // need a Tokio-backed coordinator like the outbound HTTP path.
+    // need a nuclei-backed coordinator like the outbound HTTP path.
     var EventEmitter = require('events');
 
     function _bufferOf(text) {
@@ -4266,9 +4266,9 @@ __register_module('crypto', function(module, exports, require) {
 // ---- dgram.js ----
 // dgram — Node 20's UDP socket module. The host-side coordinator
 // (`crates/afterburner-wasi/src/daemon_dgram.rs`) owns every
-// `tokio::net::UdpSocket`; this polyfill is a thin EventEmitter
-// façade. `dgram` requires daemon mode (the coordinator is tokio-
-// backed); calling `bind` / `send` from library mode surfaces a clear
+// `nuclei::net::UdpSocket`; this polyfill is a thin EventEmitter
+// façade. `dgram` requires daemon mode (the coordinator runs on
+// nuclei); calling `bind` / `send` from library mode surfaces a clear
 // `ERR_NO_DAEMON` rather than silently dropping packets.
 //
 // What works today: bind / address / send / close + `'listening'`,
@@ -7463,7 +7463,7 @@ function __plenum_install_http(moduleName) {
 
             // Prefer the async path when a daemon is attached. The
             // sync function still runs the request inline on the wasm
-            // thread; the async one dispatches onto Tokio and the
+            // thread; the async one dispatches onto nuclei and the
             // shard event loop fans the response back through a
             // `daemon-event`. Real Node-style: caller awaits a Promise
             // that resolves when the host signals completion, instead
@@ -10021,8 +10021,8 @@ __register_module('module', function(module, exports, require) {
 // ---- net.js ----
 // net — raw TCP + AF_UNIX polyfill (B7).
 //
-// `Socket` is the JS-side facade for a host-owned `tokio::TcpStream`
-// or `tokio::net::UnixStream`. Operations cross into Rust via
+// `Socket` is the JS-side facade for a host-owned `nuclei::net::TcpStream`
+// or `nuclei::net::UnixStream`. Operations cross into Rust via
 // `__host_net_*` imports (TCP) or `__host_unix_*` imports (AF_UNIX);
 // inbound bytes / lifecycle events arrive via the daemon-event
 // dispatcher as `{kind:"net-..."}` or `{kind:"unix-..."}` envelopes.
@@ -13480,7 +13480,7 @@ __register_module('quic', function(module, exports, require) {
     /// Returns a Session whose `request(headers, body)` issues a real
     /// outbound H3 request via the host's quinn client + h3 client
     /// stack. Each `request` round-trips synchronously from the JS
-    /// side (the host runs `block_on` against the daemon's tokio
+    /// side (the host runs `block_on` against the daemon's nuclei
     /// runtime).
     function connect(addr, _options) {
         if (typeof globalThis.__host_http3_request !== 'function') {
@@ -16383,8 +16383,8 @@ __register_module('timers', function(module, exports, require) {
 // tls — raw TLS polyfill (B7).
 //
 // Layered on top of the same daemon-event plumbing as `net.js`: a JS
-// `TLSSocket` is the façade, the host owns the `tokio_rustls`
-// `TlsStream`, and lifecycle events arrive as `{kind: "tls-..."}`
+// `TLSSocket` is the façade, the host owns a rustls
+// `TlsStream` driven over a nuclei socket, and lifecycle events arrive as `{kind: "tls-..."}`
 // envelopes routed through `__ab_tls_handlers` and
 // `__ab_tls_server_handlers`.
 //

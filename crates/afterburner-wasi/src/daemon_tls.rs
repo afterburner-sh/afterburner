@@ -7,24 +7,25 @@
 //!
 //! Backs the `tls.connect` / `tls.createServer` polyfill in
 //! `polyfills/tls.js`. Architecture is the per-connection-task model
-//! borrowed from `daemon_net`, with `tokio_rustls::TlsStream<TcpStream>`
-//! standing in for the bare `TcpStream`. After the TLS handshake
-//! completes we use `tokio::io::split` so the read and write halves
-//! can be driven independently inside the connection task.
+//! borrowed from `daemon_net`, with the `stream::TlsStream` (rustls
+//! driven over a nuclei stream) standing in for the bare `TcpStream`.
+//! After the TLS handshake completes we use `nuclei::io::split` so the
+//! read and write halves can be driven independently inside the
+//! connection task.
 //!
 //! ## Architecture
 //!
 //! ```text
 //!   reader  ── stream.read() ────────────►  Data / End / Error events
-//!   writer  ── tokio::sync::Notify ───────►  drain queue & write
+//!   writer  ── nuclei::sync::Notify ──────►  drain queue & write
 //!                  ▲
 //!                  │ wake on every send
 //!   producer  ── kovan unbounded queue ───  __host_tls_write
 //! ```
 //!
 //! The wake `Notify` paired with `try_recv` gives us async semantics
-//! over a kovan channel - no polling, no Mutex, no `tokio::sync::mpsc`
-//! (workspace rule: kovan channels everywhere).
+//! over a kovan channel - no polling, no Mutex (workspace rule: kovan
+//! channels everywhere).
 //!
 //! ## Backpressure
 //!
@@ -67,18 +68,22 @@ use kovan_channel::flavors::unbounded::{
     Receiver as UnboundedRx, Sender as UnboundedTx, channel as unbounded_channel,
 };
 use kovan_map::HopscotchMap;
+use nuclei::io::{AsyncReadExt, AsyncWriteExt};
+use nuclei::net::{TcpListener, TcpStream};
+use nuclei::runtime::RuntimeHandle as Handle;
+use nuclei::sync::Notify;
+use nuclei::task::AbortHandle;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, RootCertStore, ServerConfig, SignatureScheme};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::runtime::Handle;
-use tokio::sync::Notify;
-use tokio::task::AbortHandle;
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+mod stream;
+pub use stream::{ClientTlsStream, ServerTlsStream, TlsAcceptor, TlsConnector};
+
+use crate::daemon_net::spawn_abortable;
 
 pub type TlsConnId = i32;
 pub type TlsServerId = i32;
@@ -430,10 +435,10 @@ impl DaemonTls {
         let evt_tx = self.events_tx.clone();
         let coord = Arc::clone(self);
 
-        let abort = self
-            .runtime
-            .spawn(server_task(server_id, bind, server_config, evt_tx, coord))
-            .abort_handle();
+        let abort = spawn_abortable(
+            &self.runtime,
+            server_task(server_id, bind, server_config, evt_tx, coord),
+        );
 
         self.servers.insert(server_id, ListenerHandle { abort });
         if self.shared_claims.is_some() {
@@ -482,9 +487,9 @@ impl DaemonTls {
         let wake = Arc::new(Notify::new());
         let evt_tx = self.events_tx.clone();
 
-        let abort = self
-            .runtime
-            .spawn(client_task(
+        let abort = spawn_abortable(
+            &self.runtime,
+            client_task(
                 conn_id,
                 host,
                 port,
@@ -494,8 +499,8 @@ impl DaemonTls {
                 Arc::clone(&wake),
                 Arc::clone(&pending),
                 evt_tx,
-            ))
-            .abort_handle();
+            ),
+        );
 
         ConnHandle {
             write_tx,
@@ -508,7 +513,7 @@ impl DaemonTls {
 
     fn register_accepted(
         self: &Arc<Self>,
-        stream: tokio_rustls::server::TlsStream<TcpStream>,
+        stream: ServerTlsStream<TcpStream>,
         local: Option<SocketAddr>,
         remote: Option<SocketAddr>,
     ) -> AcceptedConn {
@@ -538,17 +543,17 @@ impl DaemonTls {
             })
             .unwrap_or_default();
 
-        let abort = self
-            .runtime
-            .spawn(drive_server_socket(
+        let abort = spawn_abortable(
+            &self.runtime,
+            drive_server_socket(
                 conn_id,
                 stream,
                 write_rx,
                 Arc::clone(&wake),
                 Arc::clone(&pending),
                 evt_tx,
-            ))
-            .abort_handle();
+            ),
+        );
 
         let handle = ConnHandle {
             write_tx,
@@ -1002,7 +1007,7 @@ fn protocol_label(v: rustls::ProtocolVersion) -> String {
 }
 
 // ---------------------------------------------------------------------
-// Per-connection / per-listener tokio tasks.
+// Per-connection / per-listener nuclei tasks.
 // ---------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
@@ -1153,7 +1158,7 @@ async fn server_task(
         let acceptor = acceptor.clone();
         let evt_tx2 = evt_tx.clone();
         let coord2 = Arc::clone(&coord);
-        tokio::spawn(async move {
+        nuclei::spawn(async move {
             // Per-connection handshake - running it inline with
             // `accept` would let one slow client stall the loop.
             let tls = match acceptor.accept(stream).await {
@@ -1178,20 +1183,21 @@ async fn server_task(
                 cipher,
                 peer_cert_chain_der,
             });
-        });
+        })
+        .detach();
     }
 }
 
 /// Drive both halves of an established TLS client stream.
 async fn drive_client_socket(
     conn_id: TlsConnId,
-    stream: tokio_rustls::client::TlsStream<TcpStream>,
+    stream: ClientTlsStream<TcpStream>,
     write_rx: UnboundedRx<WriteCmd>,
     wake: Arc<Notify>,
     pending: Arc<AtomicUsize>,
     evt_tx: BoundedTx<TlsEvent>,
 ) {
-    let (read_half, write_half) = tokio::io::split(stream);
+    let (read_half, write_half) = nuclei::io::split(stream);
     drive_split(
         conn_id, read_half, write_half, write_rx, wake, pending, evt_tx,
     )
@@ -1201,13 +1207,13 @@ async fn drive_client_socket(
 /// Drive both halves of an established TLS server-accepted stream.
 async fn drive_server_socket(
     conn_id: TlsConnId,
-    stream: tokio_rustls::server::TlsStream<TcpStream>,
+    stream: ServerTlsStream<TcpStream>,
     write_rx: UnboundedRx<WriteCmd>,
     wake: Arc<Notify>,
     pending: Arc<AtomicUsize>,
     evt_tx: BoundedTx<TlsEvent>,
 ) {
-    let (read_half, write_half) = tokio::io::split(stream);
+    let (read_half, write_half) = nuclei::io::split(stream);
     drive_split(
         conn_id, read_half, write_half, write_rx, wake, pending, evt_tx,
     )
@@ -1226,8 +1232,8 @@ async fn drive_split<R, W>(
     pending: Arc<AtomicUsize>,
     evt_tx: BoundedTx<TlsEvent>,
 ) where
-    R: tokio::io::AsyncRead + Unpin,
-    W: tokio::io::AsyncWrite + Unpin,
+    R: nuclei::io::AsyncRead + Unpin,
+    W: nuclei::io::AsyncWrite + Unpin,
 {
     let mut read_buf = vec![0u8; READ_CHUNK];
     let mut had_error = false;
@@ -1269,7 +1275,7 @@ async fn drive_split<R, W>(
             // could do; reader keeps running until peer closes.
         }
 
-        tokio::select! {
+        nuclei::select! {
             res = read_half.read(&mut read_buf) => {
                 match res {
                     Ok(0) => {
@@ -1483,7 +1489,7 @@ mod tests {
     // mTLS in-process handshake tests
     //
     // These generate a tiny CA + leaf cert pair with rcgen 0.14, spin
-    // up a real tokio_rustls server + client in-process, and verify:
+    // up a real rustls server + client in-process (over nuclei), and verify:
     //
     //   (a) a client presenting a cert signed by the CA is accepted;
     //       both sides can see the peer cert chain.
@@ -1532,17 +1538,14 @@ mod tests {
         F: FnOnce(u16) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        use tokio::net::TcpListener;
-        use tokio_rustls::TlsAcceptor;
-
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
         // Drive the client on a separate task so server and client run
-        // concurrently inside the same tokio runtime.
-        tokio::spawn(client_fn(port));
+        // concurrently inside the same nuclei runtime.
+        nuclei::spawn(client_fn(port)).detach();
 
         let acceptor = TlsAcceptor::from(server_cfg);
         let (stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
@@ -1556,7 +1559,7 @@ mod tests {
         Ok(chain)
     }
 
-    #[tokio::test]
+    #[nuclei::test]
     async fn mtls_authorized_client_accepted() {
         // CA + leaf cert for the server identity.
         let server_ca = make_ca();
@@ -1602,10 +1605,8 @@ mod tests {
 
         let peer_chain = run_mtls_handshake(server_cfg, move |port| async move {
             use rustls::pki_types::ServerName;
-            use tokio::io::AsyncWriteExt;
-            use tokio_rustls::TlsConnector;
 
-            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            let tcp = TcpStream::connect(("127.0.0.1", port))
                 .await
                 .expect("TCP connect");
             let connector = TlsConnector::from(client_cfg);
@@ -1622,7 +1623,7 @@ mod tests {
         assert!(!peer_chain.is_empty(), "server must see client cert chain");
     }
 
-    #[tokio::test]
+    #[nuclei::test]
     async fn mtls_client_without_cert_rejected() {
         // CA + leaf for the server.
         let server_ca = make_ca();
@@ -1661,9 +1662,8 @@ mod tests {
         // returns Err when the acceptor.accept() call fails.
         let result = run_mtls_handshake(server_cfg, move |port| async move {
             use rustls::pki_types::ServerName;
-            use tokio_rustls::TlsConnector;
 
-            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            let tcp = TcpStream::connect(("127.0.0.1", port))
                 .await
                 .expect("TCP connect");
             let connector = TlsConnector::from(client_cfg);
@@ -1679,7 +1679,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nuclei::test]
     async fn mtls_client_wrong_ca_rejected() {
         // CA + leaf for the server.
         let server_ca = make_ca();
@@ -1721,9 +1721,8 @@ mod tests {
 
         let result = run_mtls_handshake(server_cfg, move |port| async move {
             use rustls::pki_types::ServerName;
-            use tokio_rustls::TlsConnector;
 
-            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            let tcp = TcpStream::connect(("127.0.0.1", port))
                 .await
                 .expect("TCP connect");
             let connector = TlsConnector::from(client_cfg);
@@ -1738,7 +1737,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[nuclei::test]
     async fn one_way_tls_unaffected_by_mtls_option() {
         // Confirm that one-way TLS (request_client_cert: false) still
         // works when the client presents no cert. This is the regression
@@ -1769,10 +1768,8 @@ mod tests {
 
         let peer_chain = run_mtls_handshake(server_cfg, move |port| async move {
             use rustls::pki_types::ServerName;
-            use tokio::io::AsyncWriteExt;
-            use tokio_rustls::TlsConnector;
 
-            let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            let tcp = TcpStream::connect(("127.0.0.1", port))
                 .await
                 .expect("TCP connect");
             let connector = TlsConnector::from(client_cfg);

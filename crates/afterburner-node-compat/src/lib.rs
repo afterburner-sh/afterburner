@@ -23,6 +23,7 @@ pub mod bundle;
 pub mod child_process_host;
 pub mod crypto_host;
 pub mod dns_host;
+mod dns_runtime;
 pub mod fs_host;
 pub mod governance;
 pub mod hash_handles;

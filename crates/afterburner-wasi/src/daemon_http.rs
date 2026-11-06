@@ -6,9 +6,9 @@
 //! Daemon HTTP coordinator - host-side state that backs
 //! `__host_http_listen` / `__host_http_reply`.
 //!
-//! Owns the axum listeners spawned by user scripts' `.listen(port)`
+//! Owns the nuclei HTTP listeners spawned by user scripts' `.listen(port)`
 //! calls and the per-request reply channels that ferry
-//! `ServerResponse.end(body)` output back to the waiting axum task.
+//! `ServerResponse.end(body)` output back to the waiting connection task.
 //!
 //! Listener binding happens synchronously so `.listen(3000)` that
 //! collides with an already-used port surfaces EADDRINUSE immediately
@@ -22,7 +22,7 @@
 //! Store. One-shot UDF / script thrusts leave it as `None` so they
 //! don't pay the coordinator's cost.
 //!
-//! Axum listener plumbing lives behind the `daemon` feature.
+//! Listener plumbing lives behind the `daemon` feature.
 //! Without the feature, `DaemonHttp` is a pure-accounting stub: it
 //! reserves `server_id`s and records `pending` reply slots, but
 //! never binds a real socket. The `burn` CLI enables the feature;
@@ -31,6 +31,12 @@
 use kovan_map::HopscotchMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
+
+// The HTTP/1.1 primitives are shared with the inspector's discovery server.
+#[cfg(feature = "daemon")]
+pub(crate) mod h1;
+#[cfg(feature = "daemon")]
+mod http2;
 
 /// Opaque identifier the JS side uses to key handlers and requests.
 pub type ServerId = i32;
@@ -43,7 +49,7 @@ pub struct ListenerSlot {
 }
 
 /// Per-request state the host keeps while an in-flight request is
-/// waiting on JS to call `res.end()`. Populated when axum receives
+/// waiting on JS to call `res.end()`. Populated when the server receives
 /// the request; consumed by `__host_http_reply`.
 #[derive(Clone)]
 pub struct PendingReply {
@@ -58,7 +64,7 @@ pub struct ReplyEnvelope {
     pub body: Vec<u8>,
 }
 
-/// Incoming event dispatched from the axum listener to the daemon
+/// Incoming event dispatched from the HTTP listener to the daemon
 /// event loop. The CLI's dispatcher thread wraps this in a
 /// `{mode: "daemon-event", event: ...}` envelope for the plugin.
 #[derive(Debug, Clone)]
@@ -126,7 +132,7 @@ pub struct DaemonHttp {
     /// port. Losers see the winner's id without taking any lock.
     shared_listeners: AtomicBool,
 
-    /// Daemon-feature channel - axum handlers push `DaemonEvent`s
+    /// Daemon-feature channel - connection tasks push `DaemonEvent`s
     /// through here; the CLI's dispatcher thread pops them off and
     /// calls `DaemonRuntime::dispatch_event`. `None` in stub mode
     /// (no `with_runtime` call).
@@ -136,17 +142,17 @@ pub struct DaemonHttp {
     event_rx: Option<kovan_channel::flavors::bounded::Receiver<DaemonEvent>>,
 
     /// Abort handles per listener so `server.close()` can release
-    /// the port cleanly. `tokio::task::AbortHandle` is `Clone` so it
-    /// stores fine inside the kovan map; aborting cancels the axum
-    /// `serve` future, which drops the bound `TcpListener`.
+    /// the port cleanly. `nuclei::task::AbortHandle` is `Clone` so it
+    /// stores fine inside the kovan map; aborting cancels the accept
+    /// loop, which drops the bound `TcpListener`.
     #[cfg(feature = "daemon")]
-    listener_tasks: HopscotchMap<ServerId, tokio::task::AbortHandle>,
+    listener_tasks: HopscotchMap<ServerId, nuclei::task::AbortHandle>,
 
-    /// Tokio runtime handle used to spawn axum listener tasks. `None`
+    /// Nuclei runtime handle used to spawn listener tasks. `None`
     /// in stub mode - any call to `bind_listener` without a handle
     /// logs and returns a negative error.
     #[cfg(feature = "daemon")]
-    runtime: Option<tokio::runtime::Handle>,
+    runtime: Option<nuclei::runtime::RuntimeHandle>,
 }
 
 impl fmt::Debug for DaemonHttp {
@@ -210,11 +216,14 @@ impl DaemonHttp {
     }
 
     /// Real-mode constructor - `bind_listener` will actually bind a
-    /// TCP socket and spawn an axum service on the supplied
-    /// runtime. `event_queue_cap` bounds the axum→dispatcher
+    /// TCP socket and spawn an HTTP service on the supplied
+    /// runtime. `event_queue_cap` bounds the listener→dispatcher
     /// channel; overflow backpressures incoming requests.
     #[cfg(feature = "daemon")]
-    pub fn with_runtime(handle: tokio::runtime::Handle, event_queue_cap: usize) -> Arc<Self> {
+    pub fn with_runtime(
+        handle: nuclei::runtime::RuntimeHandle,
+        event_queue_cap: usize,
+    ) -> Arc<Self> {
         let (tx, rx) = kovan_channel::bounded(event_queue_cap);
         Arc::new(Self {
             next_server_id: AtomicI32::new(1),
@@ -273,7 +282,7 @@ impl DaemonHttp {
     /// `__host_http_close` via `server.close()` in JS. Returns
     /// `true` if the server_id was known.
     ///
-    /// On the daemon path this also aborts the axum task so the
+    /// On the daemon path this also aborts the listener task so the
     /// socket is freed and a subsequent `.listen(port)` in the same
     /// process succeeds.
     pub fn close_listener(&self, id: ServerId) -> bool {
@@ -291,7 +300,7 @@ impl DaemonHttp {
     }
 
     /// Fetch (and remove) a pending reply slot. Called from
-    /// `__host_http_reply` to signal the axum task.
+    /// `__host_http_reply` to signal the connection task.
     pub fn take_reply(&self, req_id: ReqId) -> Option<PendingReply> {
         self.pending.remove(&req_id)
     }
@@ -311,7 +320,7 @@ impl DaemonHttp {
     /// payload the JS side handed to `__host_http_reply`. Returns
     /// `true` if a waiter was present. Missing slots are silently
     /// dropped - the most likely cause is a stale reply after the
-    /// axum task already timed out or disconnected.
+    /// connection task already timed out or disconnected.
     pub fn deliver_reply(&self, req_id: ReqId, reply: ReplyEnvelope) -> bool {
         if let Some(PendingReply { sender }) = self.pending.remove(&req_id) {
             sender.send(reply);
@@ -393,21 +402,21 @@ impl DaemonHttp {
     /// Register an abort handle for a sibling listener task so
     /// `server.close()` aborts it cleanly.
     #[cfg(feature = "daemon")]
-    pub fn register_listener_task(&self, id: ServerId, abort: tokio::task::AbortHandle) {
+    pub fn register_listener_task(&self, id: ServerId, abort: nuclei::task::AbortHandle) {
         self.listener_tasks.insert(id, abort);
     }
 
-    /// Tokio runtime handle attached to the coordinator. `None` in
+    /// Nuclei runtime handle attached to the coordinator. `None` in
     /// stub mode (no `with_runtime` call). Sibling coordinators that
     /// need to spawn tasks call this once at bind time.
     #[cfg(feature = "daemon")]
-    pub fn runtime_handle(&self) -> Option<tokio::runtime::Handle> {
+    pub fn runtime_handle(&self) -> Option<nuclei::runtime::RuntimeHandle> {
         self.runtime.clone()
     }
 
     /// Sender side of the daemon event channel - sibling coordinators
     /// (HTTP/3 etc.) push their incoming requests onto the same
-    /// channel the H1/H2 axum loop uses, so JS sees one unified
+    /// channel the H1/H2 loop uses, so JS sees one unified
     /// dispatch stream.
     #[cfg(feature = "daemon")]
     pub fn event_sender(&self) -> Option<kovan_channel::flavors::bounded::Sender<DaemonEvent>> {
@@ -415,7 +424,7 @@ impl DaemonHttp {
     }
 
     /// Bind a TCP listener on `port` synchronously; on success,
-    /// register the accepted socket with axum on the stored runtime
+    /// serve the accepted sockets on the stored runtime
     /// handle and return the new `server_id`.
     ///
     /// Returns:
@@ -429,7 +438,7 @@ impl DaemonHttp {
     /// * [`LISTEN_ERR_IO`] (-3) - any other bind failure (permission
     ///   denied on a privileged port, interface vanished, etc.).
     ///
-    /// The synchronous bind closes the race where a stale axum task
+    /// The synchronous bind closes the race where a stale listener task
     /// silently owned a port: if the OS refuses the bind we return a
     /// typed error *before* allocating a `server_id`, so JS sees
     /// the failure up front rather than via a stderr eprintln.
@@ -481,12 +490,11 @@ impl DaemonHttp {
             self.ports_in_use.remove(&port);
             return LISTEN_ERR_IO;
         }
-        // `TcpListener::from_std` registers the raw fd with the tokio
-        // reactor - it panics if called outside a runtime context.
-        // Enter the runtime synchronously for the duration of the
-        // conversion + spawn so the host function can stay sync.
+        // `TcpListener::new` registers the descriptor with a nuclei
+        // shard. Enter the runtime synchronously for the duration of
+        // the conversion + spawn so the host function can stay sync.
         let _enter = runtime.enter();
-        let tokio_listener = match tokio::net::TcpListener::from_std(std_listener) {
+        let listener = match nuclei::net::TcpListener::new(std_listener) {
             Ok(l) => l,
             Err(_) => {
                 self.ports_in_use.remove(&port);
@@ -494,17 +502,13 @@ impl DaemonHttp {
             }
         };
 
-        // Bound. Publish the listener slot + axum task.
+        // Bound. Publish the listener slot + accept-loop task.
         self.listeners.insert(new_id, ListenerSlot { port });
 
         let coord = Arc::clone(self);
-        let handle = runtime.spawn(axum_server::serve_listener(
-            tokio_listener,
-            new_id,
-            coord,
-            event_tx,
-        ));
-        self.listener_tasks.insert(new_id, handle.abort_handle());
+        let task = runtime.spawn(server::serve_listener(listener, new_id, coord, event_tx));
+        self.listener_tasks.insert(new_id, task.abort_handle());
+        task.detach();
         new_id
     }
 
@@ -517,7 +521,7 @@ impl DaemonHttp {
         self.register_listener(port)
     }
 
-    /// Pop the next event off the axum→dispatcher channel. Blocks
+    /// Pop the next event off the listener→dispatcher channel. Blocks
     /// until one arrives or the channel disconnects (all senders
     /// dropped). The CLI's dispatcher thread drives this in a loop
     /// until it receives a shutdown signal.
@@ -526,7 +530,7 @@ impl DaemonHttp {
         self.event_rx.as_ref().and_then(|rx| rx.recv())
     }
 
-    /// Non-daemon-feature recv - always returns None since no axum
+    /// Non-daemon-feature recv - always returns None since no listener
     /// task is pushing events.
     #[cfg(not(feature = "daemon"))]
     pub fn recv_event(&self) -> Option<DaemonEvent> {
@@ -560,40 +564,43 @@ impl DaemonHttp {
 }
 
 #[cfg(feature = "daemon")]
-mod axum_server {
-    //! axum handler wiring for incoming HTTP requests. Each listener
-    //! spawned by `bind_listener` runs its own `serve` task; the
-    //! handler converts the request into a `DaemonEvent`, ships it
-    //! to the dispatcher thread via the shared channel, and awaits
-    //! the reply that `__host_http_reply` delivers.
+use server::{ServerState, dispatch};
 
+#[cfg(feature = "daemon")]
+mod server {
+    //! HTTP wiring for incoming requests. Each listener spawned by
+    //! `bind_listener` runs its own accept loop; every connection task
+    //! converts a request into a `DaemonEvent`, ships it to the
+    //! dispatcher thread via the shared channel, and awaits the reply
+    //! that `__host_http_reply` delivers.
+
+    use super::h1::{Conn, MAX_BODY, ReadError, text_response};
     use super::*;
+    use http::Response;
+    use nuclei::net::{TcpListener, TcpStream};
 
-    /// Drive an already-bound listener through axum. Used by the
-    /// path where `bind_listener` performs a synchronous bind so
-    /// EADDRINUSE surfaces to JS before we ever allocate a server_id.
+    pub(crate) struct ServerState {
+        server_id: ServerId,
+        coord: Arc<DaemonHttp>,
+    }
+
+    /// Drive an already-bound listener. Used by the path where
+    /// `bind_listener` performs a synchronous bind so EADDRINUSE
+    /// surfaces to JS before we ever allocate a server_id.
     pub(super) async fn serve_listener(
-        listener: tokio::net::TcpListener,
+        listener: TcpListener,
         server_id: ServerId,
         coord: Arc<DaemonHttp>,
         _event_tx: kovan_channel::flavors::bounded::Sender<DaemonEvent>,
     ) {
-        // Per-connection accept loop. `hyper-util::server::conn::auto`
-        // inspects the first ~24 bytes of the accepted socket: if it
-        // sees the H2 connection preface
-        // (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`) it serves H2 frames
-        // (multiplexed streams, HPACK headers); otherwise it falls
-        // back to HTTP/1.1. One listener thus serves both protocols
-        // transparently, so `http2.createServer().listen()` and
-        // `http.createServer().listen()` route through the same path
-        // and the wire negotiation is invisible from the JS side.
-        use hyper::service::service_fn;
-        use hyper_util::rt::{TokioExecutor, TokioIo};
-
-        let state = Arc::new(ServerState {
-            server_id,
-            coord: Arc::clone(&coord),
-        });
+        // Per-connection accept loop. Each connection's first bytes are
+        // sniffed: the H2 connection preface (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`)
+        // selects the HTTP/2 engine, anything else is HTTP/1.1. One listener
+        // thus serves both protocols transparently, so
+        // `http2.createServer().listen()` and `http.createServer().listen()`
+        // route through the same path and the wire negotiation is invisible
+        // from the JS side.
+        let state = Arc::new(ServerState { server_id, coord });
         loop {
             let (socket, _peer) = match listener.accept().await {
                 Ok(pair) => pair,
@@ -602,63 +609,65 @@ mod axum_server {
                     return;
                 }
             };
-            let conn_state = Arc::clone(&state);
-            tokio::spawn(async move {
-                let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                    let conn_state = Arc::clone(&conn_state);
-                    async move {
-                        Ok::<_, std::convert::Infallible>(dispatch_hyper(conn_state, req).await)
-                    }
-                });
-                let io = TokioIo::new(socket);
-                let builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
-                let _ = builder.serve_connection_with_upgrades(io, svc).await;
-            });
+            nuclei::spawn(serve_connection(socket, Arc::clone(&state))).detach();
         }
     }
 
-    /// hyper-native dispatcher - same flow as the axum `dispatch_request`
-    /// but operates on `hyper::Request<Incoming>` so the H1/H2 auto
-    /// negotiation can hand us the request directly.
-    async fn dispatch_hyper(
-        state: Arc<ServerState>,
-        req: hyper::Request<hyper::body::Incoming>,
-    ) -> hyper::Response<axum::body::Body> {
-        use http_body_util::BodyExt;
-
-        let (parts, body) = req.into_parts();
-        let method = parts.method.to_string();
-        let url = parts
-            .uri
-            .path_and_query()
-            .map(|pq| pq.to_string())
-            .unwrap_or_else(|| "/".into());
-        let headers: Vec<(String, String)> = parts
-            .headers
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
-        const MAX_BODY: usize = 16 * 1024 * 1024;
-        let collected = match body.collect().await {
-            Ok(c) => c,
-            Err(e) => {
-                let mut resp = hyper::Response::new(axum::body::Body::from(format!(
-                    "burn: request body: {e}"
-                )));
-                *resp.status_mut() = hyper::StatusCode::PAYLOAD_TOO_LARGE;
-                return resp;
+    async fn serve_connection(socket: TcpStream, state: Arc<ServerState>) {
+        let mut conn = Conn::new(socket);
+        match conn.sniff_h2().await {
+            Ok(true) => {
+                let (io, ahead) = conn.into_parts();
+                super::http2::serve(io, ahead, state).await;
             }
-        };
-        let body_bytes = collected.to_bytes();
-        if body_bytes.len() > MAX_BODY {
-            let mut resp = hyper::Response::new(axum::body::Body::from(format!(
-                "burn: request body exceeds {} bytes",
-                MAX_BODY
-            )));
-            *resp.status_mut() = hyper::StatusCode::PAYLOAD_TOO_LARGE;
-            return resp;
+            Ok(false) => serve_h1(conn, state).await,
+            Err(_) => {}
         }
+    }
 
+    /// The HTTP/1.1 request loop of one connection: keep-alive until the
+    /// peer or the request closes it.
+    async fn serve_h1(mut conn: Conn<TcpStream>, state: Arc<ServerState>) {
+        loop {
+            let request = match conn.read_request(MAX_BODY).await {
+                Ok(Some(r)) => r,
+                Ok(None) | Err(ReadError::Io) => return,
+                Err(ReadError::Reject(status, reason)) => {
+                    let _ = conn.write_reject(status, reason).await;
+                    return;
+                }
+            };
+            let keep_alive = request.keep_alive();
+            let head_only = request.method == "HEAD";
+            let minor = request.minor;
+            let response = dispatch(
+                &state,
+                request.method,
+                request.url,
+                request.headers,
+                request.body,
+            )
+            .await;
+            if conn
+                .write_response(&response, minor, head_only, keep_alive)
+                .await
+                .is_err()
+                || !keep_alive
+            {
+                return;
+            }
+        }
+    }
+
+    /// Turns one request into a `DaemonEvent`, waits for the JS reply and
+    /// builds the response (a 500 for every failure on the way).
+    pub(crate) async fn dispatch(
+        state: &ServerState,
+        method: String,
+        url: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> Response<Vec<u8>> {
         let (reply_tx, reply_rx) = kovan_channel::bounded::<ReplyEnvelope>(1);
         let req_id = state.coord.register_pending(reply_tx);
         let event = DaemonEvent {
@@ -667,47 +676,26 @@ mod axum_server {
             method,
             url,
             headers,
-            body: body_bytes.to_vec(),
+            body,
         };
         let Some(event_tx) = state.coord.event_tx.as_ref() else {
-            let mut resp = hyper::Response::new(axum::body::Body::from(
-                "burn: daemon not running\n".to_string(),
-            ));
-            *resp.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
-            return resp;
+            return text_response(500, "burn: daemon not running\n");
         };
         event_tx.send_async(event).await;
         // `recv_async` now resolves to `None` when the reply sender is dropped
         // without responding (worker/shard gone) rather than parking forever;
         // surface a 500 instead of hanging.
         let Some(reply) = reply_rx.recv_async().await else {
-            let mut resp = hyper::Response::new(axum::body::Body::from(
-                "burn: no reply from daemon\n".to_string(),
-            ));
-            *resp.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
-            return resp;
+            return text_response(500, "burn: no reply from daemon\n");
         };
 
-        let mut builder = hyper::Response::builder().status(reply.status);
+        let mut builder = Response::builder().status(reply.status);
         for (name, value) in &reply.headers {
             builder = builder.header(name, value);
         }
-        match builder.body(axum::body::Body::from(reply.body)) {
-            Ok(r) => r,
-            Err(_) => {
-                let mut resp = hyper::Response::new(axum::body::Body::from(
-                    "burn: response build failed".to_string(),
-                ));
-                *resp.status_mut() = hyper::StatusCode::INTERNAL_SERVER_ERROR;
-                resp
-            }
-        }
-    }
-
-    #[derive(Clone)]
-    struct ServerState {
-        server_id: ServerId,
-        coord: Arc<DaemonHttp>,
+        builder
+            .body(reply.body)
+            .unwrap_or_else(|_| text_response(500, "burn: response build failed"))
     }
 }
 

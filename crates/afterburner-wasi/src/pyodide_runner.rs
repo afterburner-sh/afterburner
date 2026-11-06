@@ -1000,11 +1000,11 @@ pub fn run_pyodide_source(
 /// explicitly to each capability so the security posture stays deny-by-default.
 #[cfg(feature = "daemon")]
 pub struct PythonNetOpts {
-    /// A running tokio runtime handle. `DaemonNet` and the blocking socket
+    /// A running nuclei runtime handle. `DaemonNet` and the blocking socket
     /// bridge both require an async runtime; callers supply one so they control
-    /// its lifecycle (thread count, shutdown). A `Builder::new_multi_thread`
-    /// with `enable_all()` is the right choice for a webserver acceptance test.
-    pub tokio_handle: tokio::runtime::Handle,
+    /// its lifecycle (worker count, shutdown). A `nuclei::Builder` runtime with
+    /// the default workers is the right choice for a webserver acceptance test.
+    pub runtime: nuclei::runtime::RuntimeHandle,
     /// Manifold that grants the capabilities this run needs. Use
     /// `Manifold::open()` for a fully-open test run; narrow it for production.
     /// `Manifold::sealed()` (the default) denies all socket and thread ops.
@@ -1027,7 +1027,7 @@ pub struct PythonNetOpts {
 /// (plan `CONCURRENCY_AND_NETWORK_SURFACE_DESIGN.md` section 15). It wires
 /// `DaemonNet`, `DaemonWorkers`, and `DaemonSab` into the store so Python's
 /// socket syscalls and pthread shims reach the real OS rather than returning
-/// `EPERM`. The `tokio_handle` in `opts` is the async runtime the socket
+/// `EPERM`. The `runtime` in `opts` is the async runtime the socket
 /// bridge uses for `block_on` calls.
 ///
 /// # Errors
@@ -1036,17 +1036,16 @@ pub struct PythonNetOpts {
 #[cfg(feature = "daemon")]
 pub fn run_python_with_net(python_source: &str, opts: PythonNetOpts) -> Result<PyodideRunOutput> {
     let rt = resolve_runtime()?;
-    let daemon_net =
-        crate::daemon_net::DaemonNet::new(opts.tokio_handle.clone(), opts.manifold.clone());
+    let daemon_net = crate::daemon_net::DaemonNet::new(opts.runtime.clone(), opts.manifold.clone());
     let daemon_workers = crate::daemon_workers::DaemonWorkers::new_parent(
         opts.manifold.clone(),
         crate::daemon_workers::WorkerConfig::default(),
     );
     let daemon_sab = crate::daemon_sab::DaemonSab::new();
     let daemon_dgram_py =
-        crate::daemon_dgram::DaemonDgram::new(opts.tokio_handle.clone(), opts.manifold.clone());
+        crate::daemon_dgram::DaemonDgram::new(opts.runtime.clone(), opts.manifold.clone());
     #[cfg(unix)]
-    let daemon_unix = crate::daemon_unix::DaemonUnix::new(opts.tokio_handle.clone());
+    let daemon_unix = crate::daemon_unix::DaemonUnix::new(opts.runtime.clone());
     run_pyodide_with_daemon(
         &rt,
         python_source,

@@ -116,6 +116,7 @@ cargo build -p afterburner --release --features \
 | `cargo build` | Builds the six host crates (skips the plugin). |
 | `cargo test --workspace --exclude afterburner-plugin` | Runs the full 450+ test suite (set `--features bin,ts,all-shadows` to include the L3 shadow tests). |
 | `cargo clippy --workspace --exclude afterburner-plugin --all-targets` | Linter check. |
+| `cargo llvm-cov -p afterburner-wasi-host -p afterburner-quic -p afterburner-h2 -p afterburner-h3 -p afterburner-h3-quic --all-targets` | Line coverage of the WASI host and protocol crates (`cargo install cargo-llvm-cov`, `rustup component add llvm-tools-preview`); CI fails below its floor. |
 | `cargo test -p afterburner-ignite --release perf_smoke` | Native throughput smoke. |
 | `cargo test -p afterburner-wasi --release perf_smoke` | WASM throughput smoke. |
 | `crates/afterburner-plugin/build.sh` | Rebuild + Wizer-preinit the plugin. |
@@ -137,6 +138,30 @@ Applications opt in to logging with:
 ```rust
 afterburner_core::log::init();  // reads AFTERBURNER_LOG + AFTERBURNER_LOG_FORMAT
 ```
+
+---
+
+## Embedding: placing and sizing threads
+
+Every thread afterburner starts goes through `afterburner_core::threads::spawn`, tagged with a `ThreadKind`
+(`DaemonShard`, `DaemonWorker`, `GuestThread`, `NativeCompile`, `Background`). An embedding engine installs its
+placement and a `ThreadBudget` once, before the first afterburner call, so afterburner never oversubscribes the
+embedder's cores:
+
+```rust
+use afterburner_core::threads::{self, ThreadBudget, ThreadHooks, ThreadSpec};
+
+struct Placement;
+impl ThreadHooks for Placement {
+    // Runs first on every new thread: pin it, set its priority, account for it.
+    fn on_start(&self, spec: &ThreadSpec<'_>) { /* spec.kind, spec.index, spec.name */ }
+}
+threads::install(std::sync::Arc::new(Placement), ThreadBudget::for_cores(8))?;
+```
+
+The daemon shard pool runs `min(shard_count, budget.daemon_shards)` shards and the worker coordinator caps its
+concurrent workers at `budget.daemon_workers`. A second `install` is refused. The standalone `burn` binary installs
+nothing and runs on `ThreadBudget::for_cores` of the available parallelism.
 
 ---
 
@@ -164,7 +189,7 @@ lives in **[`docs/NODE_COMPAT.md`](./docs/NODE_COMPAT.md)**.
 | | `child_process` | `Manifold::child_process` — **native path only** |
 | | `worker_threads` (Worker / parentPort / workerData / postMessage / terminate / threadId) | `Manifold` — children inherit the parent's manifold (never widened); `BURN_WORKER_DEPTH` ≤ 8 |
 | | `net` (raw TCP) — `net.connect` / `net.createServer` / Socket / Server / `isIP{,v4,v6}`; daemon-only inbound listening; 64 KiB write HWM with `'drain'` backpressure | `Manifold::net` — outbound requires `OutboundFull` (raw TCP escapes URL-shaped policy, so `OutboundHttp` is rejected); host allow-list supports exact, `*`, and `*.suffix` |
-| | `tls` (raw TLS) — `tls.connect` / `tls.createServer` / TLSSocket on `tokio-rustls`; Mozilla `webpki-roots` for client verification, `rejectUnauthorized: false` + custom `ca:` PEM, ALPN; PEM `cert` + `key` on the server side | `Manifold::net` — same posture as `net` (`OutboundFull` only) |
+| | `tls` (raw TLS) - `tls.connect` / `tls.createServer` / TLSSocket on rustls over nuclei streams; Mozilla `webpki-roots` for client verification, `rejectUnauthorized: false` + custom `ca:` PEM, ALPN; PEM `cert` + `key` on the server side | `Manifold::net` - same posture as `net` (`OutboundFull` only) |
 | **Custom** | `afterburner:state` — cross-invocation key/value store | implicit — host installs the `StateStore` |
 
 The library default manifold is `Manifold::sealed()` — safe to hand
@@ -267,8 +292,9 @@ What happens:
 
 1. cargo-release bumps the workspace version (every member crate inherits via `version.workspace = true`).
 2. Commits the bump (`chore: release X.Y.Z`).
-3. Tags the commit `vX.Y.Z` and pushes commit + tag to `origin`.
-4. **Manual step** — run `.github/workflows/release.yml` from the GitHub UI's "Run workflow" button with the tag as input. The release workflow is intentionally set to `workflow_dispatch` only (auto-triggers commented out); see the comment at the top of the file. Once invoked it:
+3. Publishes every workspace crate but `afterburner-plugin` to crates.io in dependency order, waiting for each to reach the index before its dependents.
+4. Tags the commit `vX.Y.Z` and pushes commit + tag to `origin`.
+5. **Manual step** — run `.github/workflows/release.yml` from the GitHub UI's "Run workflow" button with the tag as input. The release workflow is intentionally set to `workflow_dispatch` only (auto-triggers commented out); see the comment at the top of the file. Once invoked it:
    - Builds `burn` for `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc` with `--features release-cli` against the `cli-release` Cargo profile.
    - Bundles the binary + `README.md` + `LICENSE` + `docs/`.
    - SHA-256 sidecar per archive.
@@ -276,6 +302,6 @@ What happens:
 
 Manual rolls without `cargo release` are also supported — bump `version` in `[workspace.package]` by hand, push a `v*.*.*` tag, then trigger the workflow.
 
-CI (`.github/workflows/ci.yml`) is also `workflow_dispatch`-only at the moment. When enabled it runs `fmt`, `clippy` (default + `release-cli`), workspace tests on Ubuntu + macOS, doc build, and a plugin-`.wasm` rebuild check that compares the bundled-polyfill SHA against the committed sidecar so polyfill drift can't sneak in.
+CI (`.github/workflows/ci.yml`) runs on every push and pull request to `master`: `fmt`, `clippy` with warnings as errors (default, `release-cli`, package crates), the library and CLI test tiers on Ubuntu, the WASI host and protocol crates' tests under coverage with a line floor (the lcov report is uploaded), the doc build, and a plugin-`.wasm` rebuild check that compares the bundled-polyfill SHA against the committed sidecar so polyfill drift can't sneak in.
 
 ---

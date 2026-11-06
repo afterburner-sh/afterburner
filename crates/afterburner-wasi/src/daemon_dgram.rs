@@ -6,9 +6,9 @@
 //! `dgram` - UDP socket host coordinator.
 //!
 //! Backs the `dgram.createSocket` polyfill in `polyfills/dgram.js`. The
-//! host owns every `tokio::net::UdpSocket`; the JS-side `Socket` is a
+//! host owns every `nuclei::net::UdpSocket`; the JS-side `Socket` is a
 //! thin EventEmitter façade that crosses into Rust through `__host_dgram_*`
-//! imports. Per socket, one tokio task drives the recv loop and posts
+//! imports. Per socket, one nuclei task drives the recv loop and posts
 //! `Message` / `Error` / `Close` events to the daemon event channel.
 //!
 //! ## Architecture
@@ -37,17 +37,18 @@
 //! `OutboundHttp` is rejected. The library API never installs a
 //! `DaemonDgram` so polyfill calls cleanly error in non-daemon mode.
 
+use crate::daemon_net::spawn_abortable;
 use afterburner_core::{Manifold, NetAccess};
 use kovan_channel::flavors::bounded::{
     Receiver as BoundedRx, Sender as BoundedTx, channel as bounded_channel,
 };
 use kovan_map::HopscotchMap;
+use nuclei::net::UdpSocket;
+use nuclei::runtime::RuntimeHandle as Handle;
+use nuclei::task::AbortHandle;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
-use tokio::net::UdpSocket;
-use tokio::runtime::Handle;
-use tokio::task::AbortHandle;
 
 pub type SocketId = i32;
 
@@ -129,7 +130,7 @@ impl DaemonDgram {
         Self::new_inner(runtime, manifold, None)
     }
 
-    /// Tokio runtime handle used by this coordinator.
+    /// Nuclei runtime handle used by this coordinator.
     pub fn runtime(&self) -> &Handle {
         &self.runtime
     }
@@ -260,40 +261,38 @@ impl DaemonDgram {
 
     fn spawn_recv_loop(&self, socket_id: SocketId, socket: Arc<UdpSocket>) -> AbortHandle {
         let events_tx = self.events_tx.clone();
-        self.runtime
-            .spawn(async move {
-                let mut buf = vec![0u8; MAX_DATAGRAM];
-                loop {
-                    match socket.recv_from(&mut buf).await {
-                        Ok((n, from)) => {
-                            let payload_b64 = base64::Engine::encode(
-                                &base64::engine::general_purpose::STANDARD,
-                                &buf[..n],
-                            );
-                            // kovan bounded `send` blocks if full. UDP
-                            // is best-effort, so we accept that
-                            // backpressure here - the daemon event
-                            // pump drains the channel each tick.
-                            events_tx.send(DgramEvent::Message {
-                                socket_id,
-                                from,
-                                payload_b64,
-                            });
-                        }
-                        Err(e) => {
-                            events_tx.send(DgramEvent::Error {
-                                socket_id,
-                                message: format!("dgram.recv: {e}"),
-                                code: io_error_code(&e).into(),
-                            });
-                            // Stop the loop on recv error - the JS side
-                            // will close the socket.
-                            break;
-                        }
+        spawn_abortable(&self.runtime, async move {
+            let mut buf = vec![0u8; MAX_DATAGRAM];
+            loop {
+                match socket.recv_from(&mut buf).await {
+                    Ok((n, from)) => {
+                        let payload_b64 = base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            &buf[..n],
+                        );
+                        // kovan bounded `send` blocks if full. UDP
+                        // is best-effort, so we accept that
+                        // backpressure here - the daemon event
+                        // pump drains the channel each tick.
+                        events_tx.send(DgramEvent::Message {
+                            socket_id,
+                            from,
+                            payload_b64,
+                        });
+                    }
+                    Err(e) => {
+                        events_tx.send(DgramEvent::Error {
+                            socket_id,
+                            message: format!("dgram.recv: {e}"),
+                            code: io_error_code(&e).into(),
+                        });
+                        // Stop the loop on recv error - the JS side
+                        // will close the socket.
+                        break;
                     }
                 }
-            })
-            .abort_handle()
+            }
+        })
     }
 
     /// Send a datagram. Returns the byte count on success or one of
@@ -357,7 +356,7 @@ impl DaemonDgram {
             return;
         };
         handle.abort.abort();
-        // Drop the Arc<UdpSocket> by dropping the handle below; tokio
+        // Drop the Arc<UdpSocket> by dropping the handle below; nuclei
         // closes the underlying fd when the last Arc goes away.
         drop(handle);
         // Owner: release the shared claim if any.

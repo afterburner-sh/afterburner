@@ -92,7 +92,7 @@ __register_module('child_process', function(module, exports, require) {
     // child inline and dispatch events / callbacks on a microtask so
     // the canonical Node patterns (`.on('exit', …)`, `exec(cmd, cb)`)
     // work as expected. Real concurrent subprocess execution would
-    // need a Tokio-backed coordinator like the outbound HTTP path.
+    // need a nuclei-backed coordinator like the outbound HTTP path.
     var EventEmitter = require('events');
 
     function _bufferOf(text) {

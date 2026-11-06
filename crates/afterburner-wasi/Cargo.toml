@@ -38,20 +38,19 @@ embed-ruby = []
 # feature of the same name.
 host-http = ["afterburner-core/host-http"]
 # Daemon-mode HTTP server plumbing (http.createServer().listen()).
-# Pulls axum + tokio + hyper into the crate. The `burn` CLI enables
+# Pulls rustls + the daemon's HTTP plumbing into the crate. The `burn` CLI enables
 # this; library consumers that only run UDF / one-shot scripts
 # leave it off and don't pay the cost.
 daemon = [
-    "dep:axum",
-    "dep:hyper",
-    "dep:hyper-util",
-    "dep:http-body-util",
     "dep:rustls",
-    "dep:tokio-rustls",
     "dep:rustls-pemfile",
     "dep:webpki-roots",
     "dep:socket2",
-    "dep:futures-util",
+    "dep:h2",
+    "dep:http",
+    "dep:httparse",
+    "dep:httpdate",
+    "dep:sha1",
 ]
 # HTTP/3 — opt-in. Pulls quinn + h3 + h3-quinn (~3 MB compile cost).
 # Includes daemon by transitive necessity (HTTP/3 builds on the same
@@ -80,7 +79,9 @@ afterburner-core.workspace = true
 # `afterburner-afb`'s own Cargo.toml.
 afterburner-afb.workspace = true
 wasmtime.workspace = true
-wasmtime-wasi = { workspace = true, features = ["p1"] }
+afterburner-wasi-host = { workspace = true, features = ["p1"] }
+nuclei = { workspace = true }
+futures = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 kovan-map.workspace = true
@@ -93,9 +94,8 @@ hex.workspace = true
 base64.workspace = true
 getrandom.workspace = true
 
-# Daemon deps. All cross-platform — `axum`, `tokio`, `hyper`,
-# `bytes`, `rustls`, `tokio-rustls`, `rustls-pemfile`, `webpki-roots`,
-# `socket2` build on Linux, macOS, and Windows. Previously these
+# Daemon deps. All cross-platform - `bytes`, `rustls`,
+# `rustls-pemfile`, `webpki-roots`, `socket2` build on Linux, macOS, and Windows. Previously these
 # were under `[target.'cfg(unix)'.dependencies]`, which silently
 # skipped them on Windows targets — `cargo build --target
 # *-windows-msvc --features daemon` failed with "cannot find module
@@ -106,25 +106,21 @@ getrandom.workspace = true
 # matrix in `.github/workflows/release.yml` until we migrate to
 # `aws-lc-rs`. x86_64-windows builds clean with these deps in the
 # main `[dependencies]` table.
-axum = { workspace = true, optional = true }
-# `tokio` + `bytes` are unconditional (not daemon-gated): the
-# `capture::CapturePipe` stdout capture implements wasmtime-wasi's
-# `StdoutStream` / `OutputStream`, whose signatures name
-# `tokio::io::AsyncWrite` and `bytes::Bytes`. Zero added weight —
-# wasmtime-wasi itself depends on both unconditionally.
-tokio = { workspace = true }
-hyper = { workspace = true, optional = true }
-hyper-util = { workspace = true, optional = true }
-http-body-util = { workspace = true, optional = true }
+# `bytes` is unconditional (not daemon-gated): the `capture::CapturePipe`
+# stdout capture implements the WASI host's output stream, whose
+# signatures name `bytes::Bytes`.
 bytes = { workspace = true }
 rustls = { workspace = true, optional = true }
-tokio-rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
 socket2 = { workspace = true, optional = true }
-futures-util = { workspace = true, optional = true }
 memmap2 = { workspace = true }
 atomic-wait = { workspace = true }
+h2 = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+httparse = { workspace = true, optional = true }
+httpdate = { workspace = true, optional = true }
+sha1 = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 h3 = { workspace = true, optional = true }
 h3-quinn = { workspace = true, optional = true }
