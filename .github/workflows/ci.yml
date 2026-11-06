@@ -684,3 +684,13 @@ jobs:
           # *bundle* (polyfills/plenum) sha which build.sh writes to
           # the .bundle-sha256 sidecar — that's content-addressed.
           diff -u /tmp/expected.sha "$plugin_dir/afterburner_plugin.wasm.bundle-sha256"
+      - name: Upload the rebuilt plugin
+        # This build, with the pinned javy and Binaryen, is the reference: a maintainer whose
+        # local wasm-opt differs commits this artifact instead of a local build.
+        uses: actions/upload-artifact@v4
+        with:
+          name: afterburner-plugin-wasm
+          path: |
+            crates/afterburner-wasi/plugin/afterburner_plugin.wasm
+            crates/afterburner-wasi/plugin/afterburner_plugin.wasm.bundle-sha256
+          retention-days: 7
