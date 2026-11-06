@@ -62,12 +62,12 @@ use afterburner_core::threads::{self, ThreadKind};
 use afterburner_core::{
     AfterburnerError, HostContext, Manifold, Result, ScriptInvocation, SharedStateStore,
 };
+use nuclei::sync::mpsc;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use nuclei::sync::mpsc;
 use wasmtime::{Engine, InstancePre};
 
 /// Default per-shard mailbox depth. Bounded so a stalled shard
@@ -143,6 +143,9 @@ pub struct DaemonShardPool {
     dispatcher_task: Option<nuclei::task::Task<()>>,
     /// Per-shard init outcomes - collected during spawn().
     init_results: Vec<InitResult>,
+    /// The shards' shutdown flag; `Drop` raises it so a shard holding a
+    /// listener stops instead of being joined forever.
+    shutdown: Arc<AtomicBool>,
 }
 
 struct ShardHandle {
@@ -411,6 +414,7 @@ impl DaemonShardPool {
             daemon_http: cfg.daemon_http,
             dispatcher_task: Some(dispatcher_task),
             init_results,
+            shutdown: cfg.shutdown,
         })
     }
 
@@ -469,10 +473,10 @@ impl DaemonShardPool {
 
 impl Drop for DaemonShardPool {
     fn drop(&mut self) {
-        // Drop the http_tx senders, then join the threads. Each
-        // shard's `recv()` returns `None` when its sender drops, so
-        // the loop exits naturally. The shutdown flag (if set) also
-        // breaks out of the per-shard event loops.
+        // A dropped pool can no longer route a request, so its shards stop:
+        // a shard with a live listener would otherwise loop forever. A drain
+        // that must finish in-flight work calls `join_all` first.
+        self.shutdown.store(true, Ordering::Release);
         for shard in &mut self.shards {
             if let Some(join) = shard.join.take() {
                 let _ = join.join();
@@ -1146,16 +1150,13 @@ async fn run_dispatcher(
         // timeout re-checks `shutdown` periodically without adding
         // routing latency: an event arriving mid-park wakes this
         // future immediately.
-        let event = match nuclei::time::timeout(
-            Duration::from_millis(250),
-            coord.recv_async_event(),
-        )
-        .await
-        {
-            Ok(Some(event)) => event,
-            Ok(None) => break,         // all senders dropped - shutting down
-            Err(_elapsed) => continue, // tick: re-check shutdown, keep parking
-        };
+        let event =
+            match nuclei::time::timeout(Duration::from_millis(250), coord.recv_async_event()).await
+            {
+                Ok(Some(event)) => event,
+                Ok(None) => break,         // all senders dropped - shutting down
+                Err(_elapsed) => continue, // tick: re-check shutdown, keep parking
+            };
         let start = next.fetch_add(1, Ordering::Relaxed) % n;
         let mut sent = false;
         // `Option`-wrapped so a failed `try_send` can hand the event back
