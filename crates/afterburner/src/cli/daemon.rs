@@ -205,7 +205,7 @@ pub fn execute(cli: &Cli, source: &str, script_label: &str, user_args: &[String]
         daemon_http: Arc::clone(&daemon_http),
         transpile_hook: combustor.transpile_hook(),
         worker_config: WorkerConfig::default(),
-        runtime_handle: rt.handle(),
+        runtime: rt.handle(),
         invocation,
         shutdown: Arc::clone(&shutdown),
         queue_depth_per_shard: None,
