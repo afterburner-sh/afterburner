@@ -1202,15 +1202,6 @@ dependencies = [
 
 [[package]]
 name = "convert_case"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "affbf0190ed2caf063e3def54ff444b449371d55c58e513a95ab98eca50adb49"
-dependencies = [
- "unicode-segmentation",
-]
-
-[[package]]
-name = "convert_case"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1af709f1f33454bf52eadfc8c78b3b9ef9cb26fb54d16dc9cd9a7299f899fd1b"
@@ -2378,6 +2369,11 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash",
+]
 
 [[package]]
 name = "hashbrown"
@@ -2878,23 +2874,23 @@ dependencies = [
 
 [[package]]
 name = "javy"
-version = "8.1.0"
+version = "7.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5679b8c3d13df0aa91ed63adc87b98fa1a4e067634db394b694ea453c8291cb"
+checksum = "0de2ed172feeacbcb567c8c0d927254b73150163cf7bbcfdab9c40fb25cd46d8"
 dependencies = [
  "anyhow",
  "bitflags 2.13.2",
  "fastrand",
  "quickcheck",
- "rquickjs 0.12.2",
+ "rquickjs 0.11.0",
  "serde",
 ]
 
 [[package]]
 name = "javy-plugin-api"
-version = "7.1.0"
+version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "354b2c35e84ad2c2aff099650ff844cd16aa9d0629f6853b52d986a0002cde57"
+checksum = "2f2aad5af6548c9bc12601fc54c55de54176d9a681939fe50d50af4ecc7f9c68"
 dependencies = [
  "anyhow",
  "javy",
@@ -4660,12 +4656,12 @@ dependencies = [
 
 [[package]]
 name = "rquickjs"
-version = "0.12.2"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e04e4eedfb060b503b5f0a2644abb890b0b3620d3fb674f9455f230014964e4"
+checksum = "c50dc6d6c587c339edb4769cf705867497a2baf0eca8b4645fa6ecd22f02c77a"
 dependencies = [
- "rquickjs-core 0.12.2",
- "rquickjs-macro 0.12.2",
+ "rquickjs-core 0.11.0",
+ "rquickjs-macro 0.11.0",
 ]
 
 [[package]]
@@ -4680,13 +4676,13 @@ dependencies = [
 
 [[package]]
 name = "rquickjs-core"
-version = "0.12.2"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16e4f499ac5b943d97ee6dbc44f23c2c10426f420f7d2f1793d6318911b6608c"
+checksum = "b8bf7840285c321c3ab20e752a9afb95548c75cd7f4632a0627cea3507e310c1"
 dependencies = [
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
  "relative-path",
- "rquickjs-sys 0.12.2",
+ "rquickjs-sys 0.11.0",
 ]
 
 [[package]]
@@ -4702,18 +4698,18 @@ dependencies = [
 
 [[package]]
 name = "rquickjs-macro"
-version = "0.12.2"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cbcc8219b70ee2faa08d5339f47f15741cba2ce0cb9640e8495f2ab51293f50"
+checksum = "7106215ff41a5677b104906a13e1a440b880f4b6362b5dc4f3978c267fad2b80"
 dependencies = [
- "convert_case 0.11.0",
+ "convert_case 0.10.0",
  "fnv",
  "ident_case",
  "indexmap",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "rquickjs-core 0.12.2",
+ "rquickjs-core 0.11.0",
  "syn 2.0.119",
 ]
 
@@ -4734,9 +4730,9 @@ dependencies = [
 
 [[package]]
 name = "rquickjs-sys"
-version = "0.12.2"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a13ac243b86a74120814ef7e9e30ad5a2c1199b7b9963b1cf7c84e4cdc1cad99"
+checksum = "27344601ef27460e82d6a4e1ecb9e7e99f518122095f3c51296da8e9be2b9d83"
 dependencies = [
  "bindgen 0.72.1",
  "cc",

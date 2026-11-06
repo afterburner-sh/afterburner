@@ -236,7 +236,10 @@ rquickjs = { version = "0.14", features = ["bindgen"] }
 
 fastrace = { version = "0.7", features = ["enable"] }
 
-javy-plugin-api = "7.1"
+# The plugin's QuickJS: 6.0 is what the shipped plugin is built with. 7.x carries a newer
+# QuickJS whose native JSON.rawJSON and Symbol.dispose clash with the polyfills (a daemon-init
+# trap); moving to it means the polyfills defer to native features first.
+javy-plugin-api = "6.0"
 
 # `burn` CLI surface (the `bin`/`release-cli` features only).
 clap = { version = "4", features = ["derive"] }
