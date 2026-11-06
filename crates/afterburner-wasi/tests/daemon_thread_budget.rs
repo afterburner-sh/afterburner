@@ -70,6 +70,8 @@ fn shard_pool_runs_at_most_the_budgeted_shards_each_placed_by_the_hook() {
         .compile_daemon_init_bytecode(&source, &invocation)
         .expect("compile daemon-init bytecode");
 
+    // The listener keeps both shards serving; the flag stops them before the pool is dropped.
+    let shutdown = Arc::new(AtomicBool::new(false));
     let pool = DaemonShardPool::spawn(ShardPoolConfig {
         shard_count: 8,
         expand_only_for_http_listener: true,
@@ -84,7 +86,7 @@ fn shard_pool_runs_at_most_the_budgeted_shards_each_placed_by_the_hook() {
         worker_config: WorkerConfig::default(),
         runtime: rt.handle(),
         invocation,
-        shutdown: Arc::new(AtomicBool::new(false)),
+        shutdown: Arc::clone(&shutdown),
         queue_depth_per_shard: None,
         #[cfg(unix)]
         unix_coord: None,
@@ -98,5 +100,7 @@ fn shard_pool_runs_at_most_the_budgeted_shards_each_placed_by_the_hook() {
     );
     assert_eq!(hooks.shard_starts.load(Ordering::SeqCst), 2);
     assert_eq!(hooks.shard_indexes.load(Ordering::SeqCst), 0b11);
+    shutdown.store(true, Ordering::Release);
+    drop(pool);
     rt.shutdown_timeout(std::time::Duration::from_secs(2));
 }

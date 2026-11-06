@@ -143,9 +143,6 @@ pub struct DaemonShardPool {
     dispatcher_task: Option<nuclei::task::Task<()>>,
     /// Per-shard init outcomes - collected during spawn().
     init_results: Vec<InitResult>,
-    /// The shards' shutdown flag; `Drop` raises it so a shard holding a
-    /// listener stops instead of being joined forever.
-    shutdown: Arc<AtomicBool>,
 }
 
 struct ShardHandle {
@@ -414,7 +411,6 @@ impl DaemonShardPool {
             daemon_http: cfg.daemon_http,
             dispatcher_task: Some(dispatcher_task),
             init_results,
-            shutdown: cfg.shutdown,
         })
     }
 
@@ -473,10 +469,11 @@ impl DaemonShardPool {
 
 impl Drop for DaemonShardPool {
     fn drop(&mut self) {
-        // A dropped pool can no longer route a request, so its shards stop:
-        // a shard with a live listener would otherwise loop forever. A drain
-        // that must finish in-flight work calls `join_all` first.
-        self.shutdown.store(true, Ordering::Release);
+        // Join every shard as it drains: a shard ends when its event loop
+        // empties (after its `beforeExit` and `exit` lifecycle, which may
+        // re-arm it) or when the shutdown flag is raised. A shard holding a
+        // listener never empties, so whoever drops a serving pool raises the
+        // flag first, as the CLI's daemon mode does.
         for shard in &mut self.shards {
             if let Some(join) = shard.join.take() {
                 let _ = join.join();
