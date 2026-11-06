@@ -23,9 +23,25 @@ use crate::daemon_http::{
     PortClaim, ReplyEnvelope, ServerId,
 };
 use bytes::{Buf, Bytes};
+use nuclei::runtime::RuntimeHandle;
 use std::cell::RefCell;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
+
+/// A quinn endpoint on `socket`, its timers, tasks and UDP IO on the nuclei `runtime`.
+fn nuclei_endpoint(
+    server_config: Option<quinn::ServerConfig>,
+    socket: std::net::UdpSocket,
+    runtime: &RuntimeHandle,
+) -> std::io::Result<quinn::Endpoint> {
+    let _enter = runtime.enter();
+    quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        server_config,
+        socket,
+        quinn::NucleiRuntime::new(runtime.clone()),
+    )
+}
 
 thread_local! {
     /// Stashed cert+key for the next `host_http3_listen` call on this
@@ -83,7 +99,7 @@ pub fn bind_h3_listener(
     // claimed the TCP socket on the same port; we claim the UDP one.
     // Multi-shard mode: only shard 0 binds the UDP socket; the
     // followers see the existing claim and skip the bind (the spawned
-    // tokio task is shared via the daemon Arc).
+    // nuclei task is shared via the daemon Arc).
     match daemon.try_claim_h3_port(port) {
         PortClaim::Owner(_) => { /* fall through to bind */ }
         PortClaim::Follower(_) => return server_id,
@@ -98,12 +114,11 @@ pub fn bind_h3_listener(
         }
     };
 
-    let _enter = runtime.enter();
     // When the process is a forked cluster worker, switch to a
     // SO_REUSEPORT-bound UDP socket so sibling H3 listeners on the
     // same port co-bind successfully.
-    let endpoint = if crate::daemon_cluster::cluster_mode_enabled() {
-        let udp = match crate::daemon_cluster::build_udp_socket(bind_addr) {
+    let udp = if crate::daemon_cluster::cluster_mode_enabled() {
+        match crate::daemon_cluster::build_udp_socket(bind_addr) {
             Ok(s) => s,
             Err(crate::daemon_cluster::ClusterBindError::AddrInUse) => {
                 daemon.release_h3_port(port);
@@ -113,19 +128,10 @@ pub fn bind_h3_listener(
                 daemon.release_h3_port(port);
                 return LISTEN_ERR_IO;
             }
-        };
-        let runtime_handle = quinn::default_runtime().expect("tokio runtime present");
-        let endpoint_config = quinn::EndpointConfig::default();
-        match quinn::Endpoint::new(endpoint_config, Some(server_config), udp, runtime_handle) {
-            Ok(e) => e,
-            Err(_) => {
-                daemon.release_h3_port(port);
-                return LISTEN_ERR_IO;
-            }
         }
     } else {
-        match quinn::Endpoint::server(server_config, bind_addr) {
-            Ok(e) => e,
+        match std::net::UdpSocket::bind(bind_addr) {
+            Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 daemon.release_h3_port(port);
                 return LISTEN_ERR_ADDR_IN_USE;
@@ -136,9 +142,18 @@ pub fn bind_h3_listener(
             }
         }
     };
+    let endpoint = match nuclei_endpoint(Some(server_config), udp, &runtime) {
+        Ok(e) => e,
+        Err(_) => {
+            daemon.release_h3_port(port);
+            return LISTEN_ERR_IO;
+        }
+    };
 
     let coord = Arc::clone(&daemon);
-    runtime.spawn(serve_h3_endpoint(endpoint, server_id, coord));
+    runtime
+        .spawn(serve_h3_endpoint(endpoint, server_id, coord))
+        .detach();
     server_id
 }
 
@@ -177,7 +192,7 @@ async fn serve_h3_endpoint(
 ) {
     while let Some(incoming) = endpoint.accept().await {
         let daemon = Arc::clone(&daemon);
-        tokio::spawn(async move {
+        nuclei::spawn(async move {
             let conn = match incoming.await {
                 Ok(c) => c,
                 Err(_) => return,
@@ -192,9 +207,10 @@ async fn serve_h3_endpoint(
             // Accept request streams in a loop until the client closes.
             while let Ok(Some(resolver)) = h3_server.accept().await {
                 let daemon = Arc::clone(&daemon);
-                tokio::spawn(handle_h3_request(resolver, server_id, daemon));
+                nuclei::spawn(handle_h3_request(resolver, server_id, daemon)).detach();
             }
-        });
+        })
+        .detach();
     }
 }
 
@@ -258,7 +274,7 @@ async fn handle_h3_request(
         return;
     };
 
-    let mut resp_builder = hyper::Response::builder().status(reply.status);
+    let mut resp_builder = http::Response::builder().status(reply.status);
     for (name, value) in &reply.headers {
         resp_builder = resp_builder.header(name, value);
     }
@@ -282,7 +298,7 @@ async fn handle_h3_request(
 /// client plus h3 client. Used by `quic.connect(...).request(...)`
 /// from JS. Returns JSON `{"status":N,"headers":{...},"body_b64":"..."}`
 /// on success or `__HOST_ERR__:<msg>` on failure. The runtime is
-/// the same daemon tokio runtime - `block_on` on a sync host
+/// the same daemon nuclei runtime - `block_on` on a sync host
 /// import, matching the shape of `host_http_request`.
 pub fn h3_request_sync(
     daemon: &Arc<DaemonHttp>,
@@ -296,12 +312,20 @@ pub fn h3_request_sync(
     let url_owned = url.to_string();
     let method_owned = method.to_string();
     let body_owned = body.to_vec();
-    runtime.block_on(async move { h3_request_inner(&url_owned, &method_owned, &body_owned).await })
+    let handle = runtime.clone();
+    runtime.block_on(async move {
+        h3_request_inner(&handle, &url_owned, &method_owned, &body_owned).await
+    })
 }
 
-async fn h3_request_inner(url: &str, method: &str, body: &[u8]) -> Result<String, String> {
+async fn h3_request_inner(
+    runtime: &RuntimeHandle,
+    url: &str,
+    method: &str,
+    body: &[u8],
+) -> Result<String, String> {
     use base64::Engine;
-    use hyper::Uri;
+    use http::Uri;
 
     let uri: Uri = url.parse().map_err(|e| format!("bad url: {e}"))?;
     let host = uri.host().ok_or("url missing host")?.to_string();
@@ -333,7 +357,9 @@ async fn h3_request_inner(url: &str, method: &str, body: &[u8]) -> Result<String
         .map_err(|e| format!("quic client cfg: {e}"))?;
     let client_cfg = quinn::ClientConfig::new(Arc::new(quic_client));
 
-    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())
+    let client_socket = std::net::UdpSocket::bind(("0.0.0.0", 0))
+        .map_err(|e| format!("client endpoint: {e}"))?;
+    let mut endpoint = nuclei_endpoint(None, client_socket, runtime)
         .map_err(|e| format!("client endpoint: {e}"))?;
     endpoint.set_default_client_config(client_cfg);
 
@@ -346,11 +372,11 @@ async fn h3_request_inner(url: &str, method: &str, body: &[u8]) -> Result<String
     let (mut driver, mut send_request) = h3::client::new(h3_conn)
         .await
         .map_err(|e| format!("h3 client: {e}"))?;
-    let drive_task = tokio::spawn(async move {
+    let drive_task = nuclei::spawn(async move {
         let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
     });
 
-    let req = hyper::Request::builder()
+    let req = http::Request::builder()
         .method(method)
         .uri(url)
         .body(())
@@ -444,7 +470,7 @@ async fn send_simple_response(
     status: u16,
     body: &[u8],
 ) {
-    let resp = match hyper::Response::builder().status(status).body(()) {
+    let resp = match http::Response::builder().status(status).body(()) {
         Ok(r) => r,
         Err(_) => return,
     };

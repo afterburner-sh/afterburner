@@ -36,7 +36,8 @@
 use afterburner_core::governance::helper_governance;
 use afterburner_core::{AfterburnerError, Manifold, NetAccess, Result};
 use hickory_resolver::proto::rr::RData;
-use hickory_resolver::{Resolver, TokioResolver};
+use crate::dns_runtime::NucleiRuntimeProvider;
+use hickory_resolver::Resolver;
 use kovan_channel::flavors::after::after;
 use kovan_channel::{bounded, select};
 use std::future::Future;
@@ -92,17 +93,14 @@ where
     }
 }
 
-/// Drive a hickory future to completion on a throwaway single-thread
-/// runtime. hickory 0.26 is async-only; every caller already runs on a
-/// short-lived worker thread (see [`with_timeout`]), so a per-call
-/// current-thread runtime keeps the synchronous host-call model.
+/// Drive a hickory future to completion on nuclei. hickory 0.26 is
+/// async-only; every caller already runs on a short-lived worker thread
+/// (see [`with_timeout`]), so `block_on` keeps the synchronous host-call model.
 fn block_on<T>(fut: impl Future<Output = Result<T>>) -> Result<T> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| AfterburnerError::Host(format!("dns: runtime init: {e}")))?
-        .block_on(fut)
+    nuclei::block_on(fut)
 }
+
+type NucleiResolver = Resolver<NucleiRuntimeProvider>;
 
 /// Build a hickory `Resolver`. When `servers` is non-empty, build a
 /// `ResolverConfig` from those addresses (UDP+TCP, port 53 default
@@ -110,14 +108,13 @@ fn block_on<T>(fut: impl Future<Output = Result<T>>) -> Result<T> {
 /// to the system `/etc/resolv.conf` and finally to Cloudflare. We
 /// build per-call rather than caching: avoiding a global resolver
 /// keeps the code simpler and the `Resolver` constructor is cheap
-/// (~microseconds; no I/O until a lookup runs). Must run inside a
-/// tokio runtime (see [`block_on`]).
-fn make_resolver(servers: &[String]) -> Result<TokioResolver> {
+/// (~microseconds; no I/O until a lookup runs). Must run inside
+/// [`block_on`].
+fn make_resolver(servers: &[String]) -> Result<NucleiResolver> {
     use hickory_resolver::config::{
         CLOUDFLARE, ConnectionConfig, NameServerConfig, ResolverConfig,
     };
-    use hickory_resolver::net::runtime::TokioRuntimeProvider;
-    let provider = TokioRuntimeProvider::default();
+    let provider = NucleiRuntimeProvider;
     if !servers.is_empty() {
         let mut name_servers = Vec::new();
         for s in servers {
@@ -159,7 +156,7 @@ fn make_resolver(servers: &[String]) -> Result<TokioResolver> {
                 AfterburnerError::Host(format!("dns: resolver init (custom servers): {e}"))
             });
     }
-    match Resolver::builder_tokio().and_then(|b| b.build()) {
+    match Resolver::builder(provider.clone()).and_then(|b| b.build()) {
         Ok(r) => Ok(r),
         Err(_) => {
             // Fall back to Cloudflare's resolver. Hickory ships preset

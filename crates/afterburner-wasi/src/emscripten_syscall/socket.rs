@@ -14,7 +14,7 @@
 //!
 //! CPython's socket module is synchronous (blocking `connect`, `recv`, etc.).
 //! Each syscall bridges to the async `DaemonNet` coordinator by entering the
-//! tokio runtime (`Handle::block_on`) so the calling Wasm instance parks on
+//! nuclei runtime (`RuntimeHandle::block_on`) so the calling Wasm instance parks on
 //! real I/O without spinning. Because the Python runtime is single-instance
 //! per run (no shared linear memory across guest threads), one blocking
 //! syscall does not stall other guests - they each own their own instance.
@@ -35,7 +35,7 @@
 //! - ECONNREFUSED (-111): connection refused.
 
 // The real implementation is compiled only when the `daemon` feature is active,
-// because `DaemonNet` and the tokio runtime live behind that feature gate.
+// because `DaemonNet` and the nuclei runtime live behind that feature gate.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -585,7 +585,7 @@ pub mod blocking {
         let handle = net.runtime().clone();
         let net2 = Arc::clone(net);
         let result: i32 = handle.block_on(async move {
-            match tokio::time::timeout(TIMEOUT, async {
+            match nuclei::time::timeout(TIMEOUT, async {
                 loop {
                     if let Some(ev) = net2.try_recv_event() {
                         match ev {
@@ -606,7 +606,7 @@ pub mod blocking {
                             _ => {}
                         }
                     }
-                    tokio::task::yield_now().await;
+                    nuclei::task::yield_now().await;
                 }
             })
             .await
@@ -635,12 +635,12 @@ pub mod blocking {
         let handle = net.runtime().clone();
         let net2 = Arc::clone(net);
         let maybe = handle.block_on(async move {
-            tokio::time::timeout(TIMEOUT, async {
+            nuclei::time::timeout(TIMEOUT, async {
                 loop {
                     if let Some(ev) = net2.try_recv_event() {
                         return ev;
                     }
-                    tokio::task::yield_now().await;
+                    nuclei::task::yield_now().await;
                 }
             })
             .await
@@ -697,12 +697,12 @@ pub mod blocking {
         let handle = net.runtime().clone();
         let net2 = Arc::clone(net);
         let maybe = handle.block_on(async move {
-            tokio::time::timeout(TIMEOUT, async {
+            nuclei::time::timeout(TIMEOUT, async {
                 loop {
                     if let Some(ev) = net2.try_recv_event() {
                         return ev;
                     }
-                    tokio::task::yield_now().await;
+                    nuclei::task::yield_now().await;
                 }
             })
             .await
@@ -762,12 +762,12 @@ pub mod blocking {
             }
             let dgram2 = Arc::clone(dgram);
             let maybe_ev = handle.block_on(async move {
-                tokio::time::timeout(remaining, async move {
+                nuclei::time::timeout(remaining, async move {
                     loop {
                         if let Some(ev) = dgram2.try_recv_event() {
                             return ev;
                         }
-                        tokio::task::yield_now().await;
+                        nuclei::task::yield_now().await;
                     }
                 })
                 .await
@@ -812,7 +812,7 @@ pub mod blocking {
         let handle = unix.runtime().clone();
         let unix2 = Arc::clone(unix);
         handle.block_on(async move {
-            match tokio::time::timeout(TIMEOUT, async {
+            match nuclei::time::timeout(TIMEOUT, async {
                 loop {
                     if let Some(ev) = unix2.try_recv_event() {
                         match ev {
@@ -828,7 +828,7 @@ pub mod blocking {
                             _ => {}
                         }
                     }
-                    tokio::task::yield_now().await;
+                    nuclei::task::yield_now().await;
                 }
             })
             .await
@@ -854,12 +854,12 @@ pub mod blocking {
         let handle = unix.runtime().clone();
         let unix2 = Arc::clone(unix);
         let maybe = handle.block_on(async move {
-            tokio::time::timeout(TIMEOUT, async {
+            nuclei::time::timeout(TIMEOUT, async {
                 loop {
                     if let Some(ev) = unix2.try_recv_event() {
                         return ev;
                     }
-                    tokio::task::yield_now().await;
+                    nuclei::task::yield_now().await;
                 }
             })
             .await
@@ -917,12 +917,12 @@ pub mod blocking {
         let handle = unix.runtime().clone();
         let unix2 = Arc::clone(unix);
         let maybe = handle.block_on(async move {
-            tokio::time::timeout(TIMEOUT, async {
+            nuclei::time::timeout(TIMEOUT, async {
                 loop {
                     if let Some(ev) = unix2.try_recv_event() {
                         return ev;
                     }
-                    tokio::task::yield_now().await;
+                    nuclei::task::yield_now().await;
                 }
             })
             .await
@@ -962,12 +962,12 @@ pub mod blocking {
         let handle = unix.runtime().clone();
         let unix2 = Arc::clone(unix);
         let maybe = handle.block_on(async move {
-            tokio::time::timeout(TIMEOUT, async {
+            nuclei::time::timeout(TIMEOUT, async {
                 loop {
                     if let Some(ev) = unix2.try_recv_event() {
                         return ev;
                     }
-                    tokio::task::yield_now().await;
+                    nuclei::task::yield_now().await;
                 }
             })
             .await

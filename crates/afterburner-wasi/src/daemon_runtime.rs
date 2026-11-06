@@ -29,12 +29,12 @@ use afterburner_core::{
     AfterburnerError, HostContext, InMemoryStateStore, Manifold, Result, ScriptInvocation,
     SharedStateStore,
 };
+use afterburner_wasi_host::I32Exit;
 use bytes::Bytes;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use wasmtime::{Engine, InstancePre, Store, Trap, TypedFunc};
-use wasmtime_wasi::I32Exit;
 
 /// Cumulative stdout-capture ceiling for the daemon's long-lived
 /// Store. Matches the engine-wide default

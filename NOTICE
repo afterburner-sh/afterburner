@@ -18,6 +18,24 @@ examples/ (see examples/LICENSE), and the afterburner-afb and burn/*
 packages — are licensed under Apache-2.0 via their own LICENSE /
 `license` metadata and are not subject to the Business Source License.
 
+The afterburner-wasi-host crate is derived from wasmtime-wasi 49.0.4,
+Copyright (c) The Wasmtime Project Developers (Bytecode Alliance), licensed
+under the Apache License, Version 2.0 with the LLVM Exception (see
+crates/afterburner-wasi-host/LICENSE). It is modified: the Tokio runtime,
+sockets, timers, channels and IO traits are replaced by nuclei's.
+
+The afterburner-quic crate is derived from quinn 0.11.12, Copyright (c) 2018
+The quinn Developers, and the afterburner-h3-quic crate from h3-quinn 0.0.10,
+Copyright (c) 2020 h3 authors, both licensed under the MIT License (see each
+crate's LICENSE file). They are modified: the Tokio runtime, channels and IO
+traits are replaced by nuclei's and futures-io's.
+
+The afterburner-h2 crate is derived from h2 0.4.20, Copyright (c) 2017 h2
+authors, and the afterburner-h3 crate from h3 0.0.8, Copyright (c) 2020 h3
+authors, both licensed under the MIT License (see each crate's LICENSE file).
+They are modified: the Tokio IO traits, channels and test runtime are replaced
+by futures-io's and nuclei's.
+
 "Afterburner", "burn", and related Marks are trademarks of vertexclique. See
 TRADEMARK.md. Use of the source code under the LICENSE does not grant any
 trademark rights.

@@ -11,13 +11,13 @@
 use afterburner_core::{HostContext, Manifold, SharedStateStore};
 use afterburner_node_compat::hash_handles::HashHandleStore;
 use afterburner_node_compat::sign_handles::SignHandleStore;
+use afterburner_wasi_host::p1::WasiP1Ctx;
+use afterburner_wasi_host::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use bytes::Bytes;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use wasmtime::{ResourceLimiter, StoreLimits, StoreLimitsBuilder};
-use wasmtime_wasi::p1::WasiP1Ctx;
-use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 
 use crate::capture::CapturePipe;
 
@@ -240,7 +240,7 @@ impl HostState {
         // exhaustion vector. Surfaced to the caller via WasmTrap on error.
         let stderr = MemoryOutputPipe::new(64 * 1024);
 
-        let wasi = wasmtime_wasi::WasiCtxBuilder::new()
+        let wasi = afterburner_wasi_host::WasiCtxBuilder::new()
             .stdin(stdin)
             .stdout(stdout.clone())
             .stderr(stderr.clone())

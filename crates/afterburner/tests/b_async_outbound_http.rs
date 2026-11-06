@@ -5,7 +5,7 @@
 
 //! Async outbound HTTP - `__host_http_request_async` end-to-end.
 //!
-//! The wasm side dispatches the request through Tokio (no
+//! The wasm side dispatches the request through the nuclei runtime (no
 //! wasm-thread blocking), and the response comes back through the
 //! shard event loop as a `daemon-event` of kind `http-response`,
 //! which resolves the matching `globalThis.__ab_http_pending`
@@ -121,7 +121,7 @@ fn http_request_callback_form_fires() {
 fn parallel_fetches_complete_concurrently() {
     // Three concurrent fetches should take roughly the time of one
     // round-trip - proof the host side dispatches each on its own
-    // Tokio task instead of serialising them on the wasm thread.
+    // nuclei task instead of serialising them on the wasm thread.
     // The JS side self-times the parallel-fetch window (excluding
     // burn cold-start) and prints the elapsed millis. Measuring
     // outside burn would conflate cold-start time with dispatch

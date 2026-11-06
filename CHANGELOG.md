@@ -3,6 +3,31 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.3.0] - 2026-11-06
+
+Afterburner no longer uses Tokio. nuclei is the runtime.
+
+### Breaking
+
+An embedder no longer runs afterburner inside a Tokio runtime. The daemon types
+that took a Tokio runtime handle take a nuclei runtime handle, and the optional
+`tokio` dependency of the `afterburner` crate is gone.
+
+### Changed
+
+- The daemon's sockets, timers, signals and HTTP serving run on nuclei, and TLS
+  is rustls over a nuclei stream.
+- `burn daemon`, `burn worker` and the native daemon start a nuclei runtime and
+  take SIGINT and SIGTERM through nuclei; the shutdown order is unchanged.
+- The DNS resolver of the Node compatibility layer runs on nuclei.
+- The WASI host is afterburner's own (`afterburner-wasi-host`), derived from
+  wasmtime-wasi 49 (Apache-2.0 WITH LLVM-exception) and running on nuclei.
+
+### Dependencies
+
+Removed: tokio, tokio-rustls, axum, hyper, hyper-util, wasmtime-wasi, and the
+Tokio runtime features of quinn and hickory-resolver. Added: nuclei 0.5.5.
+
 ## [0.2.12] - 2026-10-27
 
 Afterburner moves to kovan 0.2.2.

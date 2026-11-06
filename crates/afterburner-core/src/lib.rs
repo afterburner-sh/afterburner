@@ -25,6 +25,7 @@ pub mod manifold;
 pub mod registry;
 pub mod session;
 pub mod state_store;
+pub mod threads;
 pub mod types;
 
 /// This crate's version, used by `afterburner-afb` to enforce a package's

@@ -45,7 +45,7 @@ toml = { workspace = true }
 clap = { workspace = true, optional = true }
 rustyline = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
+nuclei = { workspace = true, optional = true }
 # Pulled in unconditionally — the CLI's tls envelope translator
 # encodes peer-cert-chain DER as base64 for the polyfill.
 base64 = { workspace = true }
@@ -81,10 +81,10 @@ tempfile.workspace = true
 afterburner-core = { path = "../afterburner-core" }
 afterburner-wasi = { path = "../afterburner-wasi" }
 # B7 tls test fixtures — generate self-signed certs and spin up a
-# tokio-rustls server in a background thread so the burn-as-client
-# tests don't need any external infrastructure.
+# rustls server over a nuclei stream in a background thread so the
+# burn-as-client tests don't need any external infrastructure.
 rustls = { workspace = true }
-tokio-rustls = { workspace = true }
+nuclei = { workspace = true }
 rustls-pemfile = { workspace = true }
 rcgen = { workspace = true }
 # HTTP/3 client tests — quinn + h3 + h3-quinn used to exercise
@@ -96,12 +96,7 @@ h3-quinn = { workspace = true }
 http.workspace = true
 http-body-util.workspace = true
 bytes.workspace = true
-tokio = { workspace = true, features = [
-    "rt-multi-thread",
-    "io-util",
-    "net",
-    "macros",
-] }
+futures = { workspace = true }
 # B7 sharp test fixtures — generate small PNGs / RGBA images at
 # test time so we don't ship binary fixture files.
 image = { workspace = true }
@@ -137,7 +132,7 @@ thrust = ["dep:afterburner-thrust", "wasm"]
 flow = ["dep:afterburner-flow", "wasm"]
 # Daemon-mode runtime (DaemonShardPool / DaemonRuntime / DaemonNet / DaemonTls +
 # net/tls/http listeners) for EMBEDDERS that host a long-lived daemon in-process
-# without the `bin` CLI deps. Forwards the wasi `daemon` feature (axum + tokio +
+# without the `bin` CLI deps. Forwards the wasi `daemon` feature (nuclei +
 # rustls); `bin` already implies it.
 daemon = ["wasm", "afterburner-wasi/daemon"]
 # `run_afb_bytes` - run one `.afb` to completion as a bounded, captured
@@ -152,7 +147,7 @@ afb-run = ["wasm", "dep:afterburner-afb"]
 host-http = ["afterburner-wasi?/host-http"]
 # `bin` pulls in the CLI deps + selects the default modes that `burn`
 # assumes (adaptive for auto-tier, thrust for --workers, wasi/daemon
-# for http.createServer() support, tokio for the daemon event loop
+# for http.createServer() support, nuclei for the daemon event loop
 # and SIGINT handler). `ts` is bundled in: real-world Node code
 # requires ESM lowering so `npm.js`'s `import('chalk')` etc. parse
 # under our CJS resolver — matches Node 24's default-on TS-strip.
@@ -160,7 +155,7 @@ bin = [
     "dep:clap",
     "dep:rustyline",
     "dep:anyhow",
-    "dep:tokio",
+    "dep:nuclei",
     "dep:afterburner-cloud",
     "dep:semver",
     "dep:libc",

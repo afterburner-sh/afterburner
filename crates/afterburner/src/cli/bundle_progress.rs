@@ -70,10 +70,13 @@ pub fn install() {
 
     RENDERER.get_or_init(|| {
         let (tx, rx) = channel();
-        let handle = std::thread::Builder::new()
-            .name("burn-bundle-progress".to_string())
-            .spawn(move || Renderer { rx }.run())
-            .ok();
+        let handle = afterburner_core::threads::spawn(
+            afterburner_core::threads::ThreadKind::Background,
+            0,
+            "burn-bundle-progress".to_string(),
+            move || Renderer { rx }.run(),
+        )
+        .ok();
         afterburner_wasi::bundle::set_progress_reporter(Box::new(CliBundleProgress {
             tx: Some(tx),
         }));

@@ -4,11 +4,11 @@
 // Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
 //! HTTP/3 server end-to-end via the `node:quic` polyfill + the
-//! `daemon_http3` (quinn + h3-quinn) coordinator.
+//! `daemon_http3` (quinn + h3) coordinator.
 //!
 //! Real wire format - every test sets up a self-signed TLS-1.3 cert,
 //! starts a `QuicEndpoint.listen({port, cert, key})` in a `burn`
-//! subprocess, and connects with a quinn-based client to confirm the
+//! subprocess, and connects with a QUIC client to confirm the
 //! H3 handshake completes and request/response shapes round-trip.
 //!
 //! Run with `--test-threads=1` - same daemon-startup pressure as
@@ -119,35 +119,46 @@ fn insecure_client_config() -> rustls::ClientConfig {
     cfg
 }
 
+/// A client-only QUIC endpoint on an ephemeral UDP port, on the
+/// nuclei runtime the caller is inside.
+fn client_endpoint() -> std::io::Result<quinn::Endpoint> {
+    quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        None,
+        std::net::UdpSocket::bind("0.0.0.0:0")?,
+        quinn::NucleiRuntime::new(nuclei::runtime::RuntimeHandle::current()),
+    )
+}
+
 /// Wait until a UDP-bound listener answers a QUIC INITIAL probe.
 /// Probing UDP without a full handshake is unreliable, so we just
-/// retry a short connect with `quinn::Endpoint::client` until it
+/// retry a short connect with a client endpoint until it
 /// either succeeds or times out.
 async fn wait_for_h3(port: u16, max: Duration) -> bool {
     let deadline = Instant::now() + max;
-    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).unwrap();
+    let mut endpoint = client_endpoint().unwrap();
     let cfg = quinn::ClientConfig::new(Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(insecure_client_config()).unwrap(),
+        quinn::crypto::rustls::QuicClientConfig::try_from(insecure_client_config())
+            .unwrap(),
     ));
     endpoint.set_default_client_config(cfg);
     while Instant::now() < deadline {
         let connecting =
             endpoint.connect(format!("127.0.0.1:{port}").parse().unwrap(), "127.0.0.1");
         if let Ok(c) = connecting
-            && tokio::time::timeout(Duration::from_millis(500), c)
+            && nuclei::timeout(Duration::from_millis(500), c)
                 .await
                 .is_ok()
         {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        nuclei::sleep(Duration::from_millis(150)).await;
     }
     false
 }
 
 async fn h3_request(port: u16, path: &str) -> Result<(u16, Vec<u8>), String> {
-    let mut endpoint =
-        quinn::Endpoint::client("0.0.0.0:0".parse().unwrap()).map_err(|e| e.to_string())?;
+    let mut endpoint = client_endpoint().map_err(|e| e.to_string())?;
     let cfg = quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(insecure_client_config())
             .map_err(|e| e.to_string())?,
@@ -160,8 +171,10 @@ async fn h3_request(port: u16, path: &str) -> Result<(u16, Vec<u8>), String> {
         .await
         .map_err(|e| e.to_string())?;
     let h3_conn = h3_quinn::Connection::new(conn);
-    let (mut driver, mut send) = h3::client::new(h3_conn).await.map_err(|e| e.to_string())?;
-    let drive = tokio::spawn(async move {
+    let (mut driver, mut send) = h3::client::new(h3_conn)
+        .await
+        .map_err(|e| e.to_string())?;
+    let drive = nuclei::spawn(async move {
         let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
     });
 
@@ -182,15 +195,13 @@ async fn h3_request(port: u16, path: &str) -> Result<(u16, Vec<u8>), String> {
         let bs = chunk.copy_to_bytes(to_copy);
         body.extend_from_slice(&bs);
     }
-    drive.abort();
+    // Dropping a nuclei task cancels it.
+    drop(drive);
     Ok((status, body))
 }
 
-fn rt() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
+fn rt() -> nuclei::Runtime {
+    nuclei::Runtime::builder().worker_threads(2).build().unwrap()
 }
 
 // ---- module surface -------------------------------------------------

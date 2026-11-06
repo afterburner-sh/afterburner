@@ -9,7 +9,7 @@
 //! Each test spins up a fixture TCP server in a background thread,
 //! then runs `burn` with an inline parent script that connects via
 //! `net.connect`, exchanges bytes, and asserts the result. Validates
-//! the full IPC path: __host_net_connect → tokio TcpStream::connect →
+//! the full IPC path: __host_net_connect → nuclei TcpStream::connect →
 //! Connect event → daemon_event dispatcher → socket._dispatchConnect
 //! → user 'connect' callback; same in reverse for the data direction.
 

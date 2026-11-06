@@ -8,7 +8,7 @@
 //!
 //! ## Why not wasmtime-wasi preview-1?
 //!
-//! The standard `wasmtime_wasi::p1::add_to_linker_sync` implementation
+//! The standard `afterburner_wasi_host::p1::add_to_linker_sync` implementation
 //! accesses guest memory via `caller.get_export("memory")`. Emscripten modules
 //! IMPORT their linear memory as `env.memory` and do NOT export it, so the
 //! standard accessor fails with "missing required memory export" at the first

@@ -27,6 +27,8 @@ use super::build::build_afterburner;
 
 #[cfg(feature = "thrust")]
 use super::build::build_threaded_for_bench;
+#[cfg(feature = "thrust")]
+use afterburner_core::threads::{self, ThreadKind};
 
 #[allow(clippy::needless_return)]
 pub fn bench(cli: &Cli, path: &PathBuf, iters: usize, workers: usize) -> Result<()> {
@@ -81,17 +83,23 @@ pub fn bench(cli: &Cli, path: &PathBuf, iters: usize, workers: usize) -> Result<
             let mut handles = Vec::with_capacity(workers);
             for w in 0..workers {
                 let my_iters = per_thread + if w < remainder { 1 } else { 0 };
-                handles.push(s.spawn(move || -> Result<Vec<u128>> {
-                    let mut lat = Vec::with_capacity(my_iters);
-                    for _ in 0..my_iters {
-                        let i0 = Instant::now();
-                        ab_ref
-                            .run(id_ref, &Value::Null)
-                            .map_err(|e: AfterburnerError| anyhow::anyhow!("{e}"))?;
-                        lat.push(i0.elapsed().as_micros());
-                    }
-                    Ok(lat)
-                }));
+                handles.push(threads::spawn_scoped(
+                    s,
+                    ThreadKind::DaemonWorker,
+                    w,
+                    format!("ab-bench-{w}"),
+                    move || -> Result<Vec<u128>> {
+                        let mut lat = Vec::with_capacity(my_iters);
+                        for _ in 0..my_iters {
+                            let i0 = Instant::now();
+                            ab_ref
+                                .run(id_ref, &Value::Null)
+                                .map_err(|e: AfterburnerError| anyhow::anyhow!("{e}"))?;
+                            lat.push(i0.elapsed().as_micros());
+                        }
+                        Ok(lat)
+                    },
+                )?);
             }
             let mut all: Vec<u128> = Vec::with_capacity(iters);
             for h in handles {

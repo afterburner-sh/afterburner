@@ -31,11 +31,11 @@ use afterburner_node_compat::{
     child_process_host, crypto_host, dns_host, fs_host, http_host, os_host, prime_host,
     subtle_host, v8_host, zlib_host,
 };
+use afterburner_wasi_host::I32Exit;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use std::time::{Duration, Instant};
 use wasmtime::{Caller, Linker, Memory};
-use wasmtime_wasi::I32Exit;
 
 const NS: &str = "afterburner:host";
 

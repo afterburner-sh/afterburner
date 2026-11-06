@@ -1,0 +1,45 @@
+[package]
+name = "afterburner-h3"
+version.workspace = true
+# Upstream's edition: the derived sources are not ported to 2024.
+edition = "2021"
+rust-version.workspace = true
+authors.workspace = true
+# MIT, NOT the workspace BSL: this crate is derived from h3 0.0.8
+# (see NOTICE and LICENSE).
+license = "MIT"
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+description = "HTTP/3 over QUIC for Afterburner on nuclei, derived from h3"
+keywords = ["http3", "quic", "h3", "nuclei"]
+categories = ["network-programming", "web-programming::http-client", "web-programming::http-server"]
+include = ["src/**/*", "LICENSE", "Cargo.toml"]
+
+[features]
+i-implement-a-third-party-backend-and-opt-into-breaking-changes = []
+tracing = ["dep:tracing"]
+
+[lib]
+name = "h3"
+
+[dependencies]
+bytes = "1"
+fastrand = "2.0.1"
+futures-util = { version = "0.3", default-features = false, features = ["io"] }
+http = "1"
+nuclei = { workspace = true }
+pin-project-lite = { version = "0.2", default-features = false }
+tracing = { version = "0.1.40", optional = true }
+
+[dev-dependencies]
+# The tests read the backend API the feature opens, as upstream runs them.
+afterburner-h3 = { path = ".", features = ["i-implement-a-third-party-backend-and-opt-into-breaking-changes"] }
+assert_matches = "1.5.0"
+futures = { workspace = true }
+nuclei = { workspace = true }
+proptest = "1"
+quinn = { package = "afterburner-quic", path = "../afterburner-quic", default-features = false, features = ["rustls-ring"] }
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter", "time", "tracing-log"] }

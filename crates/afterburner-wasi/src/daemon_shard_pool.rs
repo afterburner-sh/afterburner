@@ -30,7 +30,7 @@
 //!
 //! Shard panic isolation: every dispatch call is wrapped in
 //! `catch_unwind`. A panicking shard's reply is dropped (HTTP 500
-//! at the axum layer); the pool keeps serving from surviving
+//! at the HTTP layer); the pool keeps serving from surviving
 //! shards. The pool's `shards_alive()` reports liveness for tests
 //! and ops.
 //!
@@ -38,7 +38,7 @@
 //! on a single bound socket via `kovan_map::HopscotchMap::
 //! get_or_insert` (CAS-based, no Mutex). Per-request dispatch uses
 //! an `AtomicUsize` round-robin counter; the per-shard mailbox is a
-//! bounded `tokio::sync::mpsc` channel.
+//! bounded `nuclei::sync::mpsc` channel.
 
 #![cfg(feature = "daemon")]
 
@@ -58,6 +58,7 @@ use crate::daemon_tls::DaemonTls;
 use crate::daemon_unix::DaemonUnix;
 use crate::daemon_workers::{DaemonWorkers, WorkerConfig};
 use crate::host::TranspileFn;
+use afterburner_core::threads::{self, ThreadKind};
 use afterburner_core::{
     AfterburnerError, HostContext, Manifold, Result, ScriptInvocation, SharedStateStore,
 };
@@ -66,7 +67,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use nuclei::sync::mpsc;
 use wasmtime::{Engine, InstancePre};
 
 /// Default per-shard mailbox depth. Bounded so a stalled shard
@@ -120,7 +121,8 @@ pub struct ShardPoolConfig {
     pub daemon_http: Arc<DaemonHttp>,
     pub transpile_hook: Option<TranspileFn>,
     pub worker_config: WorkerConfig,
-    pub tokio_handle: tokio::runtime::Handle,
+    /// The nuclei runtime every coordinator of every shard spawns its IO tasks on.
+    pub runtime: nuclei::runtime::RuntimeHandle,
     pub invocation: ScriptInvocation,
     pub shutdown: Arc<AtomicBool>,
     /// Override for the per-shard mailbox depth. `None` -> default.
@@ -138,7 +140,7 @@ pub struct DaemonShardPool {
     /// The dispatcher task that drains `daemon_http`'s event channel
     /// and routes each event to a shard. Lives for the pool's
     /// lifetime; abort on `Drop`.
-    dispatcher_task: Option<tokio::task::JoinHandle<()>>,
+    dispatcher_task: Option<nuclei::task::Task<()>>,
     /// Per-shard init outcomes - collected during spawn().
     init_results: Vec<InitResult>,
 }
@@ -220,8 +222,10 @@ impl DaemonShardPool {
             .queue_depth_per_shard
             .unwrap_or(DEFAULT_SHARD_QUEUE_DEPTH);
         let (init_tx, init_rx) = std::sync::mpsc::channel::<InitOutcome>();
-        let mut shards = Vec::with_capacity(cfg.shard_count);
-        let mut init_results: Vec<InitResult> = Vec::with_capacity(cfg.shard_count);
+        // The embedder's budget caps the configured count so shards never oversubscribe its cores.
+        let shard_count = cfg.shard_count.min(threads::budget().daemon_shards.max(1));
+        let mut shards = Vec::with_capacity(shard_count);
+        let mut init_results: Vec<InitResult> = Vec::with_capacity(shard_count);
         let mut first_failure: Option<(usize, AfterburnerError, Vec<u8>, Vec<u8>)> = None;
 
         // Helper to spawn a single shard. Used twice: once eagerly
@@ -246,7 +250,7 @@ impl DaemonShardPool {
                 shared_claims: Arc::clone(&shared_claims),
                 transpile_hook: cfg.transpile_hook.clone(),
                 worker_config: cfg.worker_config.clone(),
-                tokio_handle: cfg.tokio_handle.clone(),
+                runtime: cfg.runtime.clone(),
                 http_rx,
                 shutdown: Arc::clone(&cfg.shutdown),
                 init_tx: init_tx.clone(),
@@ -257,12 +261,15 @@ impl DaemonShardPool {
                 unix_coord: cfg.unix_coord.clone(),
             };
 
-            let join = std::thread::Builder::new()
-                .name(format!("burn-shard-{shard_idx}"))
-                .spawn(move || {
+            let join = threads::spawn(
+                ThreadKind::DaemonShard,
+                shard_idx,
+                format!("burn-shard-{shard_idx}"),
+                move || {
                     shard_main(args);
-                })
-                .map_err(|e| AfterburnerError::Engine(format!("spawn shard {shard_idx}: {e}")))?;
+                },
+            )
+            .map_err(|e| AfterburnerError::Engine(format!("spawn shard {shard_idx}: {e}")))?;
 
             shards.push(ShardHandle {
                 http_tx,
@@ -306,11 +313,11 @@ impl DaemonShardPool {
         // expansion gate is enabled (set false to force the
         // legacy "always multi-shard" behavior).
         let should_expand = first_failure.is_none()
-            && cfg.shard_count > 1
+            && shard_count > 1
             && (!cfg.expand_only_for_http_listener || cfg.daemon_http.listener_count() > 0);
 
         if should_expand {
-            for shard_idx in 1..cfg.shard_count {
+            for shard_idx in 1..shard_count {
                 if let Err(e) = spawn_one(shard_idx, &mut shards) {
                     first_failure = Some((shard_idx, e, Vec::new(), Vec::new()));
                     break;
@@ -375,7 +382,7 @@ impl DaemonShardPool {
         // Sort results by shard idx so callers see deterministic order.
         init_results.sort_by_key(|r| r.shard_idx);
 
-        // Spawn the dispatcher task on the tokio runtime. It drains
+        // Spawn the dispatcher task on the nuclei runtime. It drains
         // `daemon_http.event_rx` and RR-sends each event to a shard.
         let shard_senders: Vec<mpsc::Sender<DaemonEvent>> =
             shards.iter().map(|s| s.http_tx.clone()).collect();
@@ -388,7 +395,7 @@ impl DaemonShardPool {
         let coord = Arc::clone(&cfg.daemon_http);
         let shutdown_disp = Arc::clone(&cfg.shutdown);
 
-        let dispatcher_task = cfg.tokio_handle.spawn(async move {
+        let dispatcher_task = cfg.runtime.spawn(async move {
             run_dispatcher(
                 coord,
                 shard_senders,
@@ -471,9 +478,8 @@ impl Drop for DaemonShardPool {
                 let _ = join.join();
             }
         }
-        if let Some(task) = self.dispatcher_task.take() {
-            task.abort();
-        }
+        // Dropping a nuclei task cancels it, which stops the dispatcher.
+        drop(self.dispatcher_task.take());
     }
 }
 
@@ -496,7 +502,7 @@ struct ShardThreadArgs {
     shared_claims: Arc<SharedPortClaims>,
     transpile_hook: Option<TranspileFn>,
     worker_config: WorkerConfig,
-    tokio_handle: tokio::runtime::Handle,
+    runtime: nuclei::runtime::RuntimeHandle,
     http_rx: mpsc::Receiver<DaemonEvent>,
     shutdown: Arc<AtomicBool>,
     init_tx: std::sync::mpsc::Sender<InitOutcome>,
@@ -535,7 +541,7 @@ fn shard_main_inner(args: ShardThreadArgs) {
         shared_claims,
         transpile_hook,
         worker_config,
-        tokio_handle,
+        runtime,
         mut http_rx,
         shutdown,
         init_tx,
@@ -578,18 +584,18 @@ fn shard_main_inner(args: ShardThreadArgs) {
     let workers = DaemonWorkers::new_parent(manifold.clone(), worker_config);
     daemon.install_workers(Arc::clone(&workers));
     let net = DaemonNet::new_with_claims(
-        tokio_handle.clone(),
+        runtime.clone(),
         manifold.clone(),
         Arc::clone(&shared_claims),
     );
     daemon.install_net(Arc::clone(&net));
     let tls = DaemonTls::new_with_claims(
-        tokio_handle.clone(),
+        runtime.clone(),
         manifold.clone(),
         Arc::clone(&shared_claims),
     );
     daemon.install_tls(Arc::clone(&tls));
-    let dgram = DaemonDgram::new_with_claims(tokio_handle.clone(), manifold, shared_claims);
+    let dgram = DaemonDgram::new_with_claims(runtime.clone(), manifold, shared_claims);
     daemon.install_dgram(Arc::clone(&dgram));
     #[cfg(unix)]
     if let Some(ref u) = unix_coord {
@@ -598,18 +604,18 @@ fn shard_main_inner(args: ShardThreadArgs) {
 
     // Outbound HTTP coordinator - async per-shard. JS calls to
     // `http.request` / `https.request` / `fetch` go through this
-    // coord, which spawns the actual round-trip on the same Tokio
-    // runtime that drives axum / net / tls. Responses come back
+    // coord, which spawns the actual round-trip on the same nuclei
+    // runtime that drives http / net / tls. Responses come back
     // through a per-shard channel that the dispatch loop polls each
     // tick (added below alongside the other event sources).
-    let http_outbound = crate::daemon_http_outbound::DaemonHttpOutbound::new(tokio_handle.clone());
+    let http_outbound = crate::daemon_http_outbound::DaemonHttpOutbound::new(runtime.clone());
     daemon.install_http_outbound(Arc::clone(&http_outbound));
 
     // Inspector / Chrome DevTools Protocol coordinator. Cheap to
     // construct (no listener until `inspector.open(port)`); installed
     // unconditionally so the JS side's `__host_inspector_open` host
     // import lights up the moment user code enables the inspector.
-    let inspector = crate::daemon_inspector::DaemonInspector::new(tokio_handle.clone());
+    let inspector = crate::daemon_inspector::DaemonInspector::new(runtime.clone());
     daemon.install_inspector(Arc::clone(&inspector));
 
     // Step 3: run init from precompiled bytecode. The shared
@@ -949,7 +955,7 @@ fn shard_event_loop(
 /// propagate up the shard thread; we log + carry on with the next
 /// event. The HTTP reply (if any) was registered as a pending slot
 /// in `DaemonHttp.pending` - when the panicked dispatch fails to
-/// call `__host_http_reply`, axum's `recv_async` waits forever on
+/// call `__host_http_reply`, the HTTP task's `recv_async` waits forever on
 /// that req_id. To prevent this, we cancel the pending slot on
 /// dispatch error.
 ///
@@ -1039,12 +1045,12 @@ fn dispatch_with_panic_isolation(
     }
 }
 
-/// Synthesise a 500 response into a pending reply slot so the axum
+/// Synthesise a 500 response into a pending reply slot so the HTTP
 /// task isn't stuck forever waiting on `__host_http_reply`. Idempotent
 /// - `take_reply` returns `None` if the JS already replied.
 fn cancel_pending_reply(coord: &Arc<DaemonHttp>, req_id: i64) {
     if let Some(pending) = coord.take_reply(req_id) {
-        // Best-effort send of an empty 500. The axum side just sees
+        // Best-effort send of an empty 500. The HTTP side just sees
         // a generic internal-error response.
         pending.sender.send(crate::daemon_http::ReplyEnvelope {
             status: 500,
@@ -1117,7 +1123,7 @@ fn flush_streams(
 // ----- dispatcher task -----
 
 /// Drain `DaemonHttp.event_rx` in an async loop, RR-route each event
-/// to a shard's mailbox. Lives on the tokio runtime; aborted by
+/// to a shard's mailbox. Lives on the nuclei runtime; cancelled by
 /// the pool's `Drop`.
 async fn run_dispatcher(
     coord: Arc<DaemonHttp>,
@@ -1140,8 +1146,11 @@ async fn run_dispatcher(
         // timeout re-checks `shutdown` periodically without adding
         // routing latency: an event arriving mid-park wakes this
         // future immediately.
-        let event = match tokio::time::timeout(Duration::from_millis(250), coord.recv_async_event())
-            .await
+        let event = match nuclei::time::timeout(
+            Duration::from_millis(250),
+            coord.recv_async_event(),
+        )
+        .await
         {
             Ok(Some(event)) => event,
             Ok(None) => break,         // all senders dropped - shutting down
@@ -1192,7 +1201,7 @@ async fn run_dispatcher(
             {
                 let _ = shard_senders[idx].send(event).await;
             }
-            // If all are down: silently drop. Caller's axum
+            // If all are down: silently drop. Caller's HTTP
             // task observes a stuck reply slot and times out.
         }
     }

@@ -13,11 +13,10 @@ publish = false
 # combustor.
 afterburner = { path = "../../crates/afterburner", features = ["thrust"] }
 
-# Transport layer. axum + tokio host the real HTTP server; each
+# Transport layer. nuclei hosts the real HTTP server; each
 # incoming request becomes a JSON envelope handed to the JS app via
 # Afterburner::run.
-axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+nuclei = "0.5.5"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

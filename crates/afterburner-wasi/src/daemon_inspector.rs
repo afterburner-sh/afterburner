@@ -5,7 +5,7 @@
 
 //! Inspector / Chrome DevTools Protocol bridge.
 //!
-//! Boots an axum HTTP+WebSocket listener bound to an inspector port
+//! Boots an HTTP+WebSocket listener on nuclei bound to an inspector port
 //! when the JS side calls `inspector.open(port)`. Serves the standard
 //! discovery endpoints DevTools queries on attach
 //! (`/json/version`, `/json`, `/json/list`, `/json/protocol`) and
@@ -25,16 +25,21 @@ use kovan_map::HopscotchMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU16, Ordering};
 
-use axum::Router;
-use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
-use axum::response::{Json, Response};
-use axum::routing::get;
+use crate::daemon_http::h1::{Conn, ReadError, text_response};
+use http::{HeaderValue, Response};
+use nuclei::net::{TcpListener, TcpStream};
+use nuclei::runtime::RuntimeHandle;
+use nuclei::sync::mpsc::UnboundedSender;
+use nuclei::task::Task;
 use serde_json::json;
-use tokio::sync::mpsc::UnboundedSender as TokioUnboundedSender;
-use tokio::task::JoinHandle;
+
+mod ws;
+use ws::{Message, Ws};
 
 pub type SessionId = i32;
+
+/// Largest request body the discovery endpoints accept.
+const MAX_REQUEST_BODY: usize = 2 * 1024 * 1024;
 
 /// Single CDP frame routed from the WebSocket reader to the JS
 /// plugin via the daemon event loop.
@@ -59,14 +64,14 @@ pub const ERR_BIND: i32 = -2;
 pub const ERR_ALREADY_OPEN: i32 = -3;
 pub const ERR_NOT_OPEN: i32 = -4;
 
-/// Shared state across the axum router and the daemon event loop.
+/// Shared state across the HTTP connections and the daemon event loop.
 struct InspectorInner {
     next_session_id: AtomicI32,
     /// Per-session outbound channel: the dispatcher pushes frames the
-    /// WS writer drains. Tokio unbounded so the JS handler never
+    /// WS task drains. Unbounded so the JS handler never
     /// blocks; backpressure isn't needed at CDP scale (a single human
     /// debugger driving the protocol).
-    sessions: HopscotchMap<SessionId, TokioUnboundedSender<String>>,
+    sessions: HopscotchMap<SessionId, UnboundedSender<String>>,
     events_tx: Sender<InspectorEvent>,
     events_rx: Receiver<InspectorEvent>,
     bound_port: AtomicU16,
@@ -85,13 +90,13 @@ struct InspectorInner {
 /// Public coordinator handle stored on `HostState::daemon_inspector`.
 pub struct DaemonInspector {
     inner: Arc<InspectorInner>,
-    runtime: tokio::runtime::Handle,
-    server_task: parking_lot_free::OnceCell<JoinHandle<()>>,
+    runtime: RuntimeHandle,
+    server_task: parking_lot_free::OnceCell<Task<()>>,
 }
 
 /// Tiny once-cell used because we want one-shot publish of the
-/// listener task without pulling in std's Mutex. `JoinHandle` is
-/// Clone-free, so we can't store it in a HopscotchMap; this cell
+/// listener task without pulling in std's Mutex. `Task` is Clone-free,
+/// so we can't store it in a HopscotchMap; this cell
 /// is set exactly once at `open()` and read at `close()`.
 mod parking_lot_free {
     use std::cell::UnsafeCell;
@@ -133,7 +138,7 @@ mod parking_lot_free {
 }
 
 impl DaemonInspector {
-    pub fn new(runtime: tokio::runtime::Handle) -> Arc<Self> {
+    pub fn new(runtime: RuntimeHandle) -> Arc<Self> {
         let (tx, rx) = channel::<InspectorEvent>(1024);
         Arc::new(Self {
             inner: Arc::new(InspectorInner {
@@ -221,26 +226,13 @@ impl DaemonInspector {
             Ok(a) => a.port(),
             Err(_) => return ERR_BIND,
         };
-        if std_listener.set_nonblocking(true).is_err() {
-            return ERR_BIND;
-        }
-        let listener = match tokio::net::TcpListener::from_std(std_listener) {
+        let listener = match TcpListener::new(std_listener) {
             Ok(l) => l,
             Err(_) => return ERR_BIND,
         };
         inner.bound_port.store(actual_port, Ordering::Release);
 
-        let app = Router::new()
-            .route("/json", get(json_targets))
-            .route("/json/list", get(json_targets))
-            .route("/json/version", get(json_version))
-            .route("/json/protocol", get(json_protocol))
-            .route("/devtools/page/{id}", get(ws_handler))
-            .with_state(Arc::clone(&inner));
-
-        let task = self.runtime.spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
+        let task = self.runtime.spawn(serve(listener, inner));
         self.server_task.set(task);
         actual_port as i32
     }
@@ -251,10 +243,9 @@ impl DaemonInspector {
         if self.bound_port() == 0 {
             return ERR_NOT_OPEN;
         }
-        if let Some(t) = self.server_task.take() {
-            t.abort();
-        }
-        // Drop every per-session sender. The WS writer task observes
+        // Dropping the task cancels the accept loop.
+        drop(self.server_task.take());
+        // Drop every per-session sender. The WS task observes
         // its receiver close and shuts down, which closes the socket.
         let ids: Vec<SessionId> = self.inner.sessions.iter().map(|(id, _)| id).collect();
         for id in ids {
@@ -268,25 +259,137 @@ impl DaemonInspector {
     }
 }
 
-// ---- HTTP discovery handlers ----------------------------------
+// ---- HTTP routing ---------------------------------------------
 
-async fn json_version(State(inner): State<Arc<InspectorInner>>) -> Json<serde_json::Value> {
+async fn serve(listener: TcpListener, inner: Arc<InspectorInner>) {
+    while let Ok((stream, _peer)) = listener.accept().await {
+        nuclei::spawn(serve_connection(stream, Arc::clone(&inner))).detach();
+    }
+}
+
+/// The inspector's routes; every other path is a 404.
+enum Route {
+    Version,
+    Protocol,
+    Targets,
+    Devtools,
+    NotFound,
+}
+
+fn route(path: &str) -> Route {
+    match path {
+        "/json" | "/json/list" => Route::Targets,
+        "/json/version" => Route::Version,
+        "/json/protocol" => Route::Protocol,
+        _ => match path.strip_prefix("/devtools/page/") {
+            Some(id) if !id.is_empty() && !id.contains('/') => Route::Devtools,
+            _ => Route::NotFound,
+        },
+    }
+}
+
+async fn serve_connection(stream: TcpStream, inner: Arc<InspectorInner>) {
+    let mut conn = Conn::new(stream);
+    loop {
+        let request = match conn.read_request(MAX_REQUEST_BODY).await {
+            Ok(Some(r)) => r,
+            Ok(None) | Err(ReadError::Io) => return,
+            Err(ReadError::Reject(status, reason)) => {
+                let _ = conn.write_reject(status, reason).await;
+                return;
+            }
+        };
+        let keep_alive = request.keep_alive();
+        let head_only = request.method == "HEAD";
+        let readable = request.method == "GET" || head_only;
+        let path = request.url.split('?').next().unwrap_or("/");
+        let response = match route(path) {
+            Route::NotFound => text_response(404, ""),
+            _ if !readable => {
+                let mut r = text_response(405, "");
+                r.headers_mut()
+                    .insert("allow", HeaderValue::from_static("GET,HEAD"));
+                r
+            }
+            Route::Version => json_response(&version_doc(&inner)),
+            Route::Protocol => json_response(&protocol_doc()),
+            Route::Targets => json_response(&targets_doc(&inner)),
+            Route::Devtools => {
+                let accept = if head_only { None } else { upgrade_accept(&request) };
+                match accept {
+                    Some(accept) => {
+                        let reply = format!(
+                            "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\n\
+                             connection: Upgrade\r\nsec-websocket-accept: {accept}\r\n\r\n"
+                        );
+                        if conn.write_raw(reply.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        let (io, ahead) = conn.into_parts();
+                        session(Ws::new(io, ahead), inner).await;
+                        return;
+                    }
+                    None => text_response(400, "burn: expected a WebSocket upgrade"),
+                }
+            }
+        };
+        if conn
+            .write_response(&response, request.minor, head_only, keep_alive)
+            .await
+            .is_err()
+            || !keep_alive
+        {
+            return;
+        }
+    }
+}
+
+/// The `Sec-WebSocket-Accept` value when `request` is a valid WebSocket
+/// upgrade (RFC 6455 section 4.2.1), else `None`.
+fn upgrade_accept(request: &crate::daemon_http::h1::Request) -> Option<String> {
+    let token = |name: &str, wanted: &str| {
+        request
+            .header(name)
+            .is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case(wanted)))
+    };
+    if !token("upgrade", "websocket")
+        || !token("connection", "upgrade")
+        || request.header("sec-websocket-version") != Some("13")
+    {
+        return None;
+    }
+    request
+        .header("sec-websocket-key")
+        .filter(|k| !k.is_empty())
+        .map(ws::accept_key)
+}
+
+fn json_response(value: &serde_json::Value) -> Response<Vec<u8>> {
+    let mut response = Response::new(serde_json::to_vec(value).unwrap_or_default());
+    response.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+fn version_doc(inner: &InspectorInner) -> serde_json::Value {
     let port = inner.bound_port.load(Ordering::Acquire);
-    Json(json!({
+    json!({
         "Browser": "burn/1.0",
         "Protocol-Version": "1.3",
         "User-Agent": "burn-cdp/1.0",
         "V8-Version": "Afterburner",
         "WebKit-Version": "0.0",
         "webSocketDebuggerUrl": format!("ws://127.0.0.1:{port}/devtools/page/burn-{port}"),
-    }))
+    })
 }
 
-async fn json_protocol() -> Json<serde_json::Value> {
+fn protocol_doc() -> serde_json::Value {
     // Real Node ships a 6 KiB protocol descriptor here. We embed a
     // minimal shape so DevTools' GET /json/protocol succeeds even
     // without a full document.
-    Json(json!({
+    json!({
         "version": { "major": "1", "minor": "3" },
         "domains": [
             { "domain": "Runtime" },
@@ -295,12 +398,12 @@ async fn json_protocol() -> Json<serde_json::Value> {
             { "domain": "Profiler" },
             { "domain": "Inspector" },
         ],
-    }))
+    })
 }
 
-async fn json_targets(State(inner): State<Arc<InspectorInner>>) -> Json<serde_json::Value> {
+fn targets_doc(inner: &InspectorInner) -> serde_json::Value {
     let port = inner.bound_port.load(Ordering::Acquire);
-    Json(json!([{
+    json!([{
         "description": "burn instance",
         "devtoolsFrontendUrl": format!(
             "devtools://devtools/bundled/inspector.html?ws=127.0.0.1:{port}/devtools/page/burn-{port}"
@@ -310,20 +413,14 @@ async fn json_targets(State(inner): State<Arc<InspectorInner>>) -> Json<serde_js
         "type": "node",
         "url": "burn://main",
         "webSocketDebuggerUrl": format!("ws://127.0.0.1:{port}/devtools/page/burn-{port}"),
-    }]))
+    }])
 }
 
-// ---- WebSocket upgrade ----------------------------------------
+// ---- WebSocket session ----------------------------------------
 
-async fn ws_handler(State(inner): State<Arc<InspectorInner>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| handle_ws(socket, inner))
-}
-
-async fn handle_ws(socket: WebSocket, inner: Arc<InspectorInner>) {
-    use futures_util::{SinkExt, StreamExt};
-
+async fn session(mut socket: Ws<TcpStream>, inner: Arc<InspectorInner>) {
     let session_id = inner.next_session_id.fetch_add(1, Ordering::Relaxed);
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (out_tx, mut out_rx) = nuclei::sync::mpsc::unbounded_channel::<String>();
     inner.sessions.insert(session_id, out_tx);
 
     // Notify JS that a session opened so it can send the
@@ -334,79 +431,96 @@ async fn handle_ws(socket: WebSocket, inner: Arc<InspectorInner>) {
         kind: InspectorEventKind::SessionOpened,
     });
 
-    let (mut sink, mut stream) = socket.split();
-
-    // Writer task - drains the per-session out channel into the WS.
-    let writer = tokio::spawn(async move {
-        while let Some(payload) = out_rx.recv().await {
-            if sink.send(Message::Text(payload.into())).await.is_err() {
-                break;
+    // One task serves both directions: client frames in, queued CDP replies
+    // and notifications out. When the socket closes we notify JS so any
+    // per-session state can be cleaned up.
+    loop {
+        nuclei::select! {
+            incoming = socket.next() => {
+                let text = match incoming {
+                    Ok(Message::Text(t)) => t,
+                    Ok(Message::Binary(b)) => match String::from_utf8(b) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    },
+                    Ok(Message::Ping(payload)) => {
+                        if socket.send_pong(&payload).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    Ok(Message::Pong) => continue,
+                    Ok(Message::Close(payload)) => {
+                        let _ = socket.send_close(&payload).await;
+                        break;
+                    }
+                    Err(_) => break,
+                };
+                if intercept_resume(&inner, session_id, &text) {
+                    continue;
+                }
+                inner.events_tx.send(InspectorEvent {
+                    session_id,
+                    kind: InspectorEventKind::Message(text),
+                });
             }
-        }
-        let _ = sink.close().await;
-    });
-
-    // Reader loop - runs in this task. When the socket closes,
-    // we abort the writer and notify JS so any per-session state
-    // can be cleaned up.
-    while let Some(msg) = stream.next().await {
-        let bytes = match msg {
-            // axum 0.8 / tungstenite ship Text as Utf8Bytes and Binary
-            // as Bytes - convert both to owned String for downstream
-            // serde_json parsing.
-            Ok(Message::Text(t)) => t.to_string(),
-            Ok(Message::Binary(b)) => match String::from_utf8(b.to_vec()) {
-                Ok(s) => s,
-                Err(_) => continue,
-            },
-            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
-            Ok(Message::Close(_)) => break,
-            Err(_) => break,
-        };
-        // Intercept resume-class commands on the Rust side: when the
-        // JS instance is parked in `host_inspector_pause`, the WS
-        // event-loop can't route the resume through JS (the wasmtime
-        // store is busy). Wake the pause channel directly here.
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&bytes)
-            && let Some(method) = v.get("method").and_then(|m| m.as_str())
-        {
-            let code = match method {
-                "Debugger.resume" => Some(0),
-                "Debugger.stepOver" => Some(1),
-                "Debugger.stepInto" => Some(2),
-                "Debugger.stepOut" => Some(3),
-                _ => None,
-            };
-            if let Some(c) = code {
-                let ids: Vec<i64> = inner.pause_signals.iter().map(|(id, _)| id).collect();
-                for id in ids {
-                    if let Some(tx) = inner.pause_signals.remove(&id) {
-                        tx.send(c);
+            outgoing = out_rx.recv() => {
+                match outgoing {
+                    Some(payload) => {
+                        if socket.send_text(&payload).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => {
+                        let _ = socket.send_close(&[3, 232]).await;
+                        break;
                     }
                 }
-                // Send the spec ack so the client's pending id
-                // resolves. The JS dispatcher also handles this
-                // method but for the no-paused case its result is
-                // identical (`{}`).
-                if let Some(id) = v.get("id").and_then(|x| x.as_i64()) {
-                    let reply = serde_json::json!({"id": id, "result": {}}).to_string();
-                    if let Some(s) = inner.sessions.get(&session_id) {
-                        let _ = s.send(reply);
-                    }
-                }
-                continue;
             }
         }
-        inner.events_tx.send(InspectorEvent {
-            session_id,
-            kind: InspectorEventKind::Message(bytes),
-        });
     }
 
     inner.sessions.remove(&session_id);
-    writer.abort();
     inner.events_tx.send(InspectorEvent {
         session_id,
         kind: InspectorEventKind::SessionClosed,
     });
+}
+
+/// Intercept resume-class commands on the Rust side: when the
+/// JS instance is parked in `host_inspector_pause`, the WS
+/// event-loop can't route the resume through JS (the wasmtime
+/// store is busy). Wake the pause channel directly here. Returns
+/// `true` when `text` was such a command and is fully handled.
+fn intercept_resume(inner: &InspectorInner, session_id: SessionId, text: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let Some(method) = v.get("method").and_then(|m| m.as_str()) else {
+        return false;
+    };
+    let code = match method {
+        "Debugger.resume" => 0,
+        "Debugger.stepOver" => 1,
+        "Debugger.stepInto" => 2,
+        "Debugger.stepOut" => 3,
+        _ => return false,
+    };
+    let ids: Vec<i64> = inner.pause_signals.iter().map(|(id, _)| id).collect();
+    for id in ids {
+        if let Some(tx) = inner.pause_signals.remove(&id) {
+            tx.send(code);
+        }
+    }
+    // Send the spec ack so the client's pending id
+    // resolves. The JS dispatcher also handles this
+    // method but for the no-paused case its result is
+    // identical (`{}`).
+    if let Some(id) = v.get("id").and_then(|x| x.as_i64()) {
+        let reply = serde_json::json!({"id": id, "result": {}}).to_string();
+        if let Some(s) = inner.sessions.get(&session_id) {
+            let _ = s.send(reply);
+        }
+    }
+    true
 }

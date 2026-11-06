@@ -380,12 +380,18 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         // Background acceptor that holds the connection open.
         // Detached: we don't join - the listener drops with the test.
-        std::thread::spawn(move || {
-            for stream in listener.incoming().take(1) {
-                let _ = stream; // hold open
-                std::thread::sleep(std::time::Duration::from_secs(30));
-            }
-        });
+        afterburner_core::threads::spawn(
+            afterburner_core::threads::ThreadKind::Background,
+            0,
+            "ab-http-test-acceptor".into(),
+            move || {
+                for stream in listener.incoming().take(1) {
+                    let _ = stream; // hold open
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                }
+            },
+        )
+        .expect("spawn acceptor");
 
         let mut m = Manifold::open();
         m.http_timeout_ms = Some(250);

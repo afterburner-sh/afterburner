@@ -134,7 +134,7 @@ fn rust_daemon_serves_multiple_requests() {
 /// `daemon_runtime_native`'s own
 /// `fuel_is_replenished_not_accumulated_across_many_dispatches` unit test
 /// proves the mechanism directly; this proves it end to end through the
-/// real CLI, real sockets, real axum dispatch).
+/// real CLI, real sockets, real HTTP dispatch).
 #[test]
 #[serial]
 fn rust_daemon_survives_many_sequential_requests() {

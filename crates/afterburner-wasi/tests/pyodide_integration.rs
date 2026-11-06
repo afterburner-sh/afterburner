@@ -163,14 +163,11 @@ fn live_https_get_returns_200() {
     use afterburner_core::Manifold;
     use afterburner_wasi::pyodide_runner::{PythonNetOpts, run_python_with_net};
 
-    // Build a tokio runtime; the socket bridge needs async I/O.
-    let tokio_rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime for live_https test");
+    // Build a nuclei runtime; the socket bridge needs async I/O.
+    let nuclei_rt = nuclei::Runtime::new().expect("nuclei runtime for live_https test");
 
     let opts = PythonNetOpts {
-        tokio_handle: tokio_rt.handle().clone(),
+        runtime: nuclei_rt.handle(),
         manifold: Manifold::open(),
         rw_preopens: Vec::new(),
         host_context: None,

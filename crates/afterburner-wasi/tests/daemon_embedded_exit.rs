@@ -33,11 +33,8 @@ use afterburner_wasi::{DaemonHttp, WasmCombustor, WasmConfig};
 fn embedded_policy_guest_exit_stops_the_shard_not_the_host() {
     set_exit_process_on_guest_exit(false);
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("build tokio runtime");
-    let daemon_http = DaemonHttp::with_runtime(rt.handle().clone(), 64);
+    let rt = nuclei::Runtime::new().expect("build nuclei runtime");
+    let daemon_http = DaemonHttp::with_runtime(rt.handle(), 64);
 
     // The ref'd interval keeps the event loop alive so the shard does not
     // finish by draining; the timer then delivers `process.exit(7)` through
@@ -73,7 +70,7 @@ fn embedded_policy_guest_exit_stops_the_shard_not_the_host() {
         daemon_http: Arc::clone(&daemon_http),
         transpile_hook: combustor.transpile_hook(),
         worker_config: WorkerConfig::default(),
-        tokio_handle: rt.handle().clone(),
+        runtime: rt.handle(),
         invocation,
         shutdown: Arc::new(AtomicBool::new(false)),
         queue_depth_per_shard: None,

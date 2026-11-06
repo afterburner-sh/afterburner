@@ -43,15 +43,15 @@ use crate::emscripten_fs::InMemFs;
 use crate::emscripten_sidemodule::SideModuleRegistry;
 use afterburner_core::log::Level;
 use afterburner_core::{AfterburnerError, Result, ab_event};
+use afterburner_wasi_host::p1::{WasiP1Ctx, add_to_linker_sync};
+use afterburner_wasi_host::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
+use afterburner_wasi_host::{FsPerms, I32Exit, WasiCtxBuilder};
 use std::path::PathBuf; // also used by WasiCommandOpts and EmbedderState::rw_preopens
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use wasmtime::{
     Config, Engine, InstancePre, Linker, Module, OptLevel, Store, Trap, WasmBacktraceDetails,
 };
-use wasmtime_wasi::p1::{WasiP1Ctx, add_to_linker_sync};
-use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
-use wasmtime_wasi::{FsPerms, I32Exit, WasiCtxBuilder};
 
 // ---- deterministic engine config -----------------------------------------
 
@@ -372,15 +372,18 @@ pub fn shared_epoch_vm_with(nan: NanMode) -> Result<&'static EmbedderVm> {
     let once = slot.get_or_init(|| {
         let engine = deterministic_engine_with_epoch_nan(nan).map_err(|e| e.to_string())?;
         let ticker_engine = engine.clone();
-        std::thread::Builder::new()
-            .name("afterburner-embedder-epoch-ticker".into())
-            .spawn(move || {
+        afterburner_core::threads::spawn(
+            afterburner_core::threads::ThreadKind::Background,
+            0,
+            "afterburner-embedder-epoch-ticker".into(),
+            move || {
                 loop {
                     std::thread::sleep(Duration::from_millis(EPOCH_TICK_PERIOD_MS));
                     ticker_engine.increment_epoch();
                 }
-            })
-            .map_err(|e| format!("spawning epoch ticker: {e}"))?;
+            },
+        )
+        .map_err(|e| format!("spawning epoch ticker: {e}"))?;
         Ok(EmbedderVm { engine })
     });
     once.as_ref()
@@ -800,7 +803,7 @@ impl EmbedderState {
     /// Create a WASI-enabled state with stdout captured to an in-memory pipe.
     ///
     /// Required when the store is used with a linker that wired
-    /// `wasmtime_wasi::p1::add_to_linker_sync`, such as ordinary WASI command
+    /// `afterburner_wasi_host::p1::add_to_linker_sync`, such as ordinary WASI command
     /// modules. Not used for Emscripten modules that import rather than export
     /// their linear memory; use [`EmbedderState::for_emscripten`] instead.
     pub fn with_wasi() -> Self {

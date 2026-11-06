@@ -9,7 +9,7 @@
 //!
 //! Backs `AF_UNIX SOCK_STREAM` and `AF_UNIX SOCK_DGRAM` socket syscalls
 //! from the Emscripten Python runtime. Mirrors the architecture of
-//! `daemon_net` but uses `tokio::net::{UnixListener, UnixStream, UnixDatagram}`.
+//! `daemon_net` but uses `nuclei::net::{UnixListener, UnixStream, UnixDatagram}`.
 //!
 //! ## Architecture
 //!
@@ -36,11 +36,12 @@ use kovan_channel::flavors::unbounded::{
 use kovan_map::HopscotchMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixDatagram, UnixListener, UnixStream};
-use tokio::runtime::Handle;
-use tokio::sync::Notify;
-use tokio::task::AbortHandle;
+use crate::daemon_net::spawn_abortable;
+use nuclei::io::{AsyncReadExt, AsyncWriteExt};
+use nuclei::net::{UnixDatagram, UnixListener, UnixStream};
+use nuclei::runtime::RuntimeHandle as Handle;
+use nuclei::sync::Notify;
+use nuclei::task::AbortHandle;
 
 pub type ConnId = i32;
 pub type ServerId = i32;
@@ -278,9 +279,8 @@ impl DaemonUnix {
         // Remove stale socket file first (mirrors Python's os.unlink before bind).
         let _ = std::fs::remove_file(path);
 
-        // UnixListener::bind is synchronous. No block_on needed.
-        // It must be called from within a tokio context so the listener
-        // can be moved into the spawned accept-loop task below.
+        // UnixListener::bind is synchronous; it runs inside the runtime so the
+        // listener registers with a shard before the accept-loop task owns it.
         let listener = match self.runtime.block_on(async { UnixListener::bind(path) }) {
             Ok(l) => l,
             Err(e) => {
@@ -293,10 +293,10 @@ impl DaemonUnix {
         let evt_tx = self.events_tx.clone();
         let coord = Arc::clone(self);
 
-        let abort = self
-            .runtime
-            .spawn(accept_loop(server_id, listener, evt_tx, coord))
-            .abort_handle();
+        let abort = spawn_abortable(
+            &self.runtime,
+            accept_loop(server_id, listener, evt_tx, coord),
+        );
         self.servers.insert(server_id, ListenerHandle { abort });
         self.alive_servers.fetch_add(1, Ordering::Release);
         // Announce listening so the JS `'listening'` event fires. The envelope
@@ -326,7 +326,7 @@ impl DaemonUnix {
             return errors::E_BAD_PATH;
         }
         let socket_id = self.next_dgram_id.fetch_add(1, Ordering::Relaxed);
-        let sock = match UnixDatagram::bind(path) {
+        let sock = match self.runtime.block_on(async { UnixDatagram::bind(path) }) {
             Ok(s) => Arc::new(s),
             Err(e) => {
                 *last_error = format!("unix.bind_dgram({path}): {e}");
@@ -393,17 +393,17 @@ impl DaemonUnix {
         let wake = Arc::new(Notify::new());
         let evt_tx = self.events_tx.clone();
 
-        let abort = self
-            .runtime
-            .spawn(client_task(
+        let abort = spawn_abortable(
+            &self.runtime,
+            client_task(
                 conn_id,
                 path,
                 write_rx,
                 Arc::clone(&wake),
                 Arc::clone(&pending),
                 evt_tx,
-            ))
-            .abort_handle();
+            ),
+        );
 
         ConnHandle {
             write_tx,
@@ -423,17 +423,17 @@ impl DaemonUnix {
         let wake = Arc::new(Notify::new());
         let evt_tx = self.events_tx.clone();
 
-        let abort = self
-            .runtime
-            .spawn(drive_socket(
+        let abort = spawn_abortable(
+            &self.runtime,
+            drive_socket(
                 conn_id,
                 stream,
                 write_rx,
                 Arc::clone(&wake),
                 Arc::clone(&pending),
                 evt_tx,
-            ))
-            .abort_handle();
+            ),
+        );
 
         let handle = ConnHandle {
             write_tx,
@@ -449,24 +449,22 @@ impl DaemonUnix {
 
     fn spawn_dgram_recv(&self, socket_id: i32, socket: Arc<UnixDatagram>) -> AbortHandle {
         let evt_tx = self.events_tx.clone();
-        self.runtime
-            .spawn(async move {
-                let mut buf = vec![0u8; MAX_DGRAM];
-                while let Ok((n, _sender)) = socket.recv_from(&mut buf).await {
-                    let payload_b64 = base64_encode(&buf[..n]);
-                    evt_tx.send(UnixEvent::DgramMessage {
-                        socket_id,
-                        payload_b64,
-                    });
-                }
-                // Recv error on a Unix datagram socket typically means the
-                // socket was closed; the task exits.
-            })
-            .abort_handle()
+        spawn_abortable(&self.runtime, async move {
+            let mut buf = vec![0u8; MAX_DGRAM];
+            while let Ok((n, _sender)) = socket.recv_from(&mut buf).await {
+                let payload_b64 = base64_encode(&buf[..n]);
+                evt_tx.send(UnixEvent::DgramMessage {
+                    socket_id,
+                    payload_b64,
+                });
+            }
+            // Recv error on a Unix datagram socket typically means the
+            // socket was closed; the task exits.
+        })
     }
 }
 
-// ---- tokio tasks -----------------------------------------------------------
+// ---- nuclei tasks ----------------------------------------------------------
 
 async fn client_task(
     conn_id: ConnId,
@@ -584,7 +582,7 @@ async fn drive_socket(
             // Read half is closed; just wait for the writer to drain.
             wake.notified().await;
         } else {
-            tokio::select! {
+            nuclei::select! {
                 res = read_half.read(&mut read_buf) => {
                     match res {
                         Ok(0) => {

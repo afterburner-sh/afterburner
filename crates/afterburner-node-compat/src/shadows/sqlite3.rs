@@ -420,7 +420,7 @@ fn row_to_json(row: &rusqlite::Row<'_>, column_names: &[String]) -> Result<JsonV
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
+    use afterburner_core::threads::{ThreadKind, spawn};
 
     fn open_mem() -> (Arc<SqliteShadow>, DbId) {
         let s = Arc::new(SqliteShadow::new());
@@ -814,13 +814,17 @@ mod tests {
         for &id in &ids {
             let s = Arc::clone(&s);
             let b = Arc::clone(&barrier);
-            handles.push(thread::spawn(move || {
-                b.wait();
-                for i in 0..50 {
-                    s.run(id, "INSERT INTO t VALUES (?)", vec![json!(i)])
-                        .expect("insert");
-                }
-            }));
+            let index = handles.len();
+            handles.push(
+                spawn(ThreadKind::Background, index, format!("ab-sqlite-test-{index}"), move || {
+                    b.wait();
+                    for i in 0..50 {
+                        s.run(id, "INSERT INTO t VALUES (?)", vec![json!(i)])
+                            .expect("insert");
+                    }
+                })
+                .expect("spawn"),
+            );
         }
         for h in handles {
             h.join().expect("join");

@@ -29,10 +29,10 @@
 use crate::daemon_runtime::map_daemon_trap;
 use crate::embedder_vm::{WasiCommandOpts, deterministic_engine};
 use afterburner_core::{AfterburnerError, Result};
+use afterburner_wasi_host::WasiCtxBuilder;
+use afterburner_wasi_host::p1::{WasiP1Ctx, add_to_linker_sync};
+use afterburner_wasi_host::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime::{Instance, Linker, Memory, Module, Store, StoreLimits, TypedFunc};
-use wasmtime_wasi::WasiCtxBuilder;
-use wasmtime_wasi::p1::{WasiP1Ctx, add_to_linker_sync};
-use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 
 /// Fuel budget applied fresh before every `afterburner_daemon_init` /
 /// `afterburner_daemon_dispatch` call. Matches
@@ -227,7 +227,7 @@ impl NativeDaemonRuntime {
         }
         for (host_path, guest_path) in &opts.preopens_ro {
             builder
-                .preopened_dir(host_path, guest_path, wasmtime_wasi::FsPerms::ReadOnly)
+                .preopened_dir(host_path, guest_path, afterburner_wasi_host::FsPerms::ReadOnly)
                 .map_err(|e| {
                     AfterburnerError::Engine(format!(
                         "native daemon preopen-ro {}: {e}",
@@ -237,7 +237,7 @@ impl NativeDaemonRuntime {
         }
         for (host_path, guest_path) in &opts.preopens_rw {
             builder
-                .preopened_dir(host_path, guest_path, wasmtime_wasi::FsPerms::ReadWrite)
+                .preopened_dir(host_path, guest_path, afterburner_wasi_host::FsPerms::ReadWrite)
                 .map_err(|e| {
                     AfterburnerError::Engine(format!(
                         "native daemon preopen-rw {}: {e}",

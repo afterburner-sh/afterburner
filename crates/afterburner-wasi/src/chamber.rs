@@ -25,8 +25,8 @@
 
 use afterburner_core::log::Level;
 use afterburner_core::{AfterburnerError, FuelGauge, Result, ab_event};
+use afterburner_wasi_host::I32Exit;
 use wasmtime::{Engine, InstancePre, Store, Trap};
-use wasmtime_wasi::I32Exit;
 
 use crate::host::HostState;
 

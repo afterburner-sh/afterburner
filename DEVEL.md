@@ -140,6 +140,30 @@ afterburner_core::log::init();  // reads AFTERBURNER_LOG + AFTERBURNER_LOG_FORMA
 
 ---
 
+## Embedding: placing and sizing threads
+
+Every thread afterburner starts goes through `afterburner_core::threads::spawn`, tagged with a `ThreadKind`
+(`DaemonShard`, `DaemonWorker`, `GuestThread`, `NativeCompile`, `Background`). An embedding engine installs its
+placement and a `ThreadBudget` once, before the first afterburner call, so afterburner never oversubscribes the
+embedder's cores:
+
+```rust
+use afterburner_core::threads::{self, ThreadBudget, ThreadHooks, ThreadSpec};
+
+struct Placement;
+impl ThreadHooks for Placement {
+    // Runs first on every new thread: pin it, set its priority, account for it.
+    fn on_start(&self, spec: &ThreadSpec<'_>) { /* spec.kind, spec.index, spec.name */ }
+}
+threads::install(std::sync::Arc::new(Placement), ThreadBudget::for_cores(8))?;
+```
+
+The daemon shard pool runs `min(shard_count, budget.daemon_shards)` shards and the worker coordinator caps its
+concurrent workers at `budget.daemon_workers`. A second `install` is refused. The standalone `burn` binary installs
+nothing and runs on `ThreadBudget::for_cores` of the available parallelism.
+
+---
+
 ## Node.js Compat Surface
 
 Afterburner targets the **Node.js 20.x LTS API surface**. The summary
@@ -164,7 +188,7 @@ lives in **[`docs/NODE_COMPAT.md`](./docs/NODE_COMPAT.md)**.
 | | `child_process` | `Manifold::child_process` — **native path only** |
 | | `worker_threads` (Worker / parentPort / workerData / postMessage / terminate / threadId) | `Manifold` — children inherit the parent's manifold (never widened); `BURN_WORKER_DEPTH` ≤ 8 |
 | | `net` (raw TCP) — `net.connect` / `net.createServer` / Socket / Server / `isIP{,v4,v6}`; daemon-only inbound listening; 64 KiB write HWM with `'drain'` backpressure | `Manifold::net` — outbound requires `OutboundFull` (raw TCP escapes URL-shaped policy, so `OutboundHttp` is rejected); host allow-list supports exact, `*`, and `*.suffix` |
-| | `tls` (raw TLS) — `tls.connect` / `tls.createServer` / TLSSocket on `tokio-rustls`; Mozilla `webpki-roots` for client verification, `rejectUnauthorized: false` + custom `ca:` PEM, ALPN; PEM `cert` + `key` on the server side | `Manifold::net` — same posture as `net` (`OutboundFull` only) |
+| | `tls` (raw TLS) — `tls.connect` / `tls.createServer` / TLSSocket on rustls over nuclei streams; Mozilla `webpki-roots` for client verification, `rejectUnauthorized: false` + custom `ca:` PEM, ALPN; PEM `cert` + `key` on the server side | `Manifold::net` — same posture as `net` (`OutboundFull` only) |
 | **Custom** | `afterburner:state` — cross-invocation key/value store | implicit — host installs the `StateStore` |
 
 The library default manifold is `Manifold::sealed()` — safe to hand

@@ -7,11 +7,11 @@
 //! B7 - `tls` raw TLS integration.
 //!
 //! Each test generates a fresh self-signed cert with `rcgen`, starts
-//! a tokio-rustls echo server in a multi-thread runtime on a
+//! a rustls echo server over a nuclei stream in a nuclei runtime on a
 //! background thread, then runs `burn` with an inline parent script
 //! that opens a TLS connection back to that server. Round-tripping
 //! bytes through the rustls handshake validates the full IPC path:
-//! `__host_tls_connect` → tokio-rustls handshake → Connect event →
+//! `__host_tls_connect` → rustls handshake → Connect event →
 //! daemon-event dispatcher → `socket._dispatchSecureConnect` → user
 //! 'secureConnect' callback; same in reverse for the data direction.
 //!
@@ -30,9 +30,9 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener as TokioListener;
-use tokio_rustls::TlsAcceptor;
+use afterburner_wasi::daemon_tls::TlsAcceptor;
+use nuclei::io::{AsyncReadExt, AsyncWriteExt};
+use nuclei::net::TcpListener as NucleiListener;
 
 const BURN: &str = env!("CARGO_BIN_EXE_burn");
 
@@ -57,12 +57,12 @@ fn make_test_certs() -> TestCerts {
     }
 }
 
-/// Bind a tokio-rustls echo server. Returns the bound port. The
-/// server is single-threaded (one connection at a time) - fine for
-/// the round-trip tests.
+/// Bind a rustls echo server over nuclei streams. Returns the bound
+/// port. Connections are served as nuclei tasks - fine for the
+/// round-trip tests.
 fn spawn_tls_echo_server(certs: &TestCerts) -> u16 {
     // Bind synchronously so the test can return a port before the
-    // tokio runtime has fully set up.
+    // nuclei runtime has fully set up.
     let std_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = std_listener.local_addr().expect("local_addr").port();
     std_listener.set_nonblocking(true).expect("set_nonblocking");
@@ -77,20 +77,17 @@ fn spawn_tls_echo_server(certs: &TestCerts) -> u16 {
     );
 
     thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("rt");
+        let rt = nuclei::Runtime::new().expect("rt");
         rt.block_on(async move {
-            let tokio_listener = TokioListener::from_std(std_listener).expect("from_std");
+            let nuclei_listener = NucleiListener::new(std_listener).expect("from_std");
             let acceptor = TlsAcceptor::from(server_config);
             loop {
-                let (stream, _) = match tokio_listener.accept().await {
+                let (stream, _) = match nuclei_listener.accept().await {
                     Ok(p) => p,
                     Err(_) => return,
                 };
                 let acceptor = acceptor.clone();
-                tokio::spawn(async move {
+                nuclei::spawn(async move {
                     let mut tls = match acceptor.accept(stream).await {
                         Ok(t) => t,
                         Err(_) => return,
@@ -111,7 +108,8 @@ fn spawn_tls_echo_server(certs: &TestCerts) -> u16 {
                     // client side gets a clean EOF rather than a
                     // "peer closed without close_notify" error.
                     let _ = tls.shutdown().await;
-                });
+                })
+                .detach();
             }
         });
     });
@@ -365,14 +363,11 @@ fn alpn_echo_negotiates_protocol() {
     let server_config = Arc::new(server_config);
 
     thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("rt");
+        let rt = nuclei::Runtime::new().expect("rt");
         rt.block_on(async move {
-            let tokio_listener = TokioListener::from_std(std_listener).expect("from_std");
+            let nuclei_listener = NucleiListener::new(std_listener).expect("from_std");
             let acceptor = TlsAcceptor::from(server_config);
-            if let Ok((stream, _)) = tokio_listener.accept().await
+            if let Ok((stream, _)) = nuclei_listener.accept().await
                 && let Ok(mut tls) = acceptor.accept(stream).await
             {
                 let mut buf = [0u8; 4096];

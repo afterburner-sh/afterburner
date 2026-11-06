@@ -64,7 +64,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::mpsc::{
     Receiver as UnboundedRx, Sender as UnboundedTx, channel as unbounded_channel,
 };
-use std::thread;
+use afterburner_core::threads::{self, ThreadKind};
 use std::time::Duration;
 
 pub type WorkerId = i32;
@@ -251,7 +251,11 @@ impl std::fmt::Debug for DaemonWorkers {
 }
 
 impl DaemonWorkers {
-    pub fn new_parent(manifold: Manifold, config: WorkerConfig) -> Arc<Self> {
+    pub fn new_parent(manifold: Manifold, mut config: WorkerConfig) -> Arc<Self> {
+        // The embedder's budget caps concurrent workers so they never oversubscribe its cores.
+        config.max_concurrent = config
+            .max_concurrent
+            .min(threads::budget().daemon_workers.max(1));
         let (tx, rx) = bounded_channel::<WorkerEvent>(1024);
         Arc::new(Self {
             role: Role::Parent(Box::new(ParentState {
@@ -281,20 +285,26 @@ impl DaemonWorkers {
             let tx = events_tx.clone();
             let max = config.max_frame_bytes;
             let closed = Arc::clone(&parent_closed);
-            thread::Builder::new()
-                .name("burn-worker-stdin".into())
-                .spawn(move || child_stdin_pump(tx, max, closed))
-                .map_err(|e| ChildInitError::Spawn(e.to_string()))?;
+            threads::spawn(
+                ThreadKind::DaemonWorker,
+                0,
+                "burn-worker-stdin".into(),
+                move || child_stdin_pump(tx, max, closed),
+            )
+            .map_err(|e| ChildInitError::Spawn(e.to_string()))?;
         }
 
         // Stdout writer thread (child → parent frames). Single
         // consumer of the queue; writes are serialized through this
         // thread, so no user-level lock on stdout is needed.
         let (stdout_tx, stdout_rx) = unbounded_channel::<Vec<u8>>();
-        thread::Builder::new()
-            .name("burn-worker-stdout".into())
-            .spawn(move || child_stdout_writer(stdout_rx))
-            .map_err(|e| ChildInitError::Spawn(e.to_string()))?;
+        threads::spawn(
+            ThreadKind::DaemonWorker,
+            1,
+            "burn-worker-stdout".into(),
+            move || child_stdout_writer(stdout_rx),
+        )
+        .map_err(|e| ChildInitError::Spawn(e.to_string()))?;
 
         Ok(Arc::new(Self {
             role: Role::Child(ChildState {
@@ -482,28 +492,37 @@ impl DaemonWorkers {
         // pipe. Detached (no JoinHandle stored): exits when stdin_tx
         // is dropped or the pipe closes. The OS reaps any survivors
         // when the parent process exits.
-        thread::Builder::new()
-            .name(format!("burn-worker-{id}-writer"))
-            .spawn(move || parent_writer_pump(stdin, stdin_rx))
-            .expect("spawn writer thread");
+        threads::spawn(
+            ThreadKind::DaemonWorker,
+            id as usize,
+            format!("burn-worker-{id}-writer"),
+            move || parent_writer_pump(stdin, stdin_rx),
+        )
+        .expect("spawn writer thread");
 
         // Reader thread - child→parent events. `events_tx.send` is
         // bounded; backpressure is intentional so a chatty worker
         // doesn't outpace the daemon event loop.
         let evt_tx = self.events_tx.clone();
         let max_frame = self.config.max_frame_bytes;
-        thread::Builder::new()
-            .name(format!("burn-worker-{id}-reader"))
-            .spawn(move || parent_reader_pump(id, stdout, evt_tx, max_frame))
-            .expect("spawn reader thread");
+        threads::spawn(
+            ThreadKind::DaemonWorker,
+            id as usize,
+            format!("burn-worker-{id}-reader"),
+            move || parent_reader_pump(id, stdout, evt_tx, max_frame),
+        )
+        .expect("spawn reader thread");
 
         // Waiter thread - owns the Child, observes its exit, posts
         // an Exit event.
         let evt_tx2 = self.events_tx.clone();
-        thread::Builder::new()
-            .name(format!("burn-worker-{id}-waiter"))
-            .spawn(move || waiter_pump(id, child, evt_tx2))
-            .expect("spawn waiter thread");
+        threads::spawn(
+            ThreadKind::DaemonWorker,
+            id as usize,
+            format!("burn-worker-{id}-waiter"),
+            move || waiter_pump(id, child, evt_tx2),
+        )
+        .expect("spawn waiter thread");
 
         let init_frame = serde_json::json!({
             "type": frame::INIT,

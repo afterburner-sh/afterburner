@@ -3,17 +3,17 @@
 // Licensed under the Business Source License 1.1.
 // Change Date: 10 years after this version's release. Change License: Apache-2.0.
 
-//! B2.4 - real axum listener end-to-end. Spawns a `DaemonHttp`
-//! with a live tokio runtime, a WasmCombustor, and a dispatcher
+//! B2.4 - real HTTP listener end-to-end. Spawns a `DaemonHttp`
+//! with a live nuclei runtime, a WasmCombustor, and a dispatcher
 //! thread; makes a real HTTP request against `127.0.0.1:PORT` and
 //! checks the response came through the full pipeline:
 //!
 //! ```text
-//! raw TCP → axum handler → DaemonEvent channel →
+//! raw TCP → HTTP handler → DaemonEvent channel →
 //! dispatcher thread → DaemonRuntime::dispatch_event →
 //! plugin daemon_event mode → user JS handler → res.end(body) →
 //! __host_http_reply → DaemonHttp::deliver_reply →
-//! kovan bounded channel → axum handler → TCP response
+//! kovan bounded channel → HTTP handler → TCP response
 //! ```
 
 #![cfg(feature = "daemon")]
@@ -40,7 +40,7 @@ fn pick_port() -> u16 {
 }
 
 /// Block until `127.0.0.1:port` accepts a TCP connection or the
-/// deadline elapses. Axum's bind + serve runs on the tokio runtime
+/// deadline elapses. The bind + serve runs on the nuclei runtime
 /// asynchronously - we need to wait for the listener to actually be
 /// up before firing a request at it.
 fn wait_for_listener(port: u16, timeout: Duration) -> bool {
@@ -74,11 +74,8 @@ fn hello_from_burn_serves_http() {
     // This is the headline example in IMPL_PLAN_BURN_RUNTIME.md §1,
     // minus the CLI wrapper (B2.5). Exercises every hop of the
     // daemon pipeline against a real socket.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("build tokio runtime");
-    let daemon_http = DaemonHttp::with_runtime(rt.handle().clone(), 64);
+    let rt = nuclei::Runtime::new().expect("build nuclei runtime");
+    let daemon_http = DaemonHttp::with_runtime(rt.handle(), 64);
 
     let port = pick_port();
     let source = format!(
@@ -100,7 +97,7 @@ fn hello_from_burn_serves_http() {
         "createServer().listen() should register"
     );
 
-    // Dispatcher thread: drains events the axum handler pushes and
+    // Dispatcher thread: drains events the HTTP handler pushes and
     // feeds them to the long-lived Store. A shutdown flag lets us
     // stop cleanly at the end of the test without leaking threads.
     let done = Arc::new(AtomicBool::new(false));
@@ -131,12 +128,12 @@ fn hello_from_burn_serves_http() {
         Ok(())
     });
 
-    // Wait for the axum listener to bind. The spawn happens inside
+    // Wait for the HTTP listener to bind. The spawn happens inside
     // daemon-init's `__host_http_listen` call, but the actual bind
-    // completes asynchronously on the tokio runtime.
+    // completes asynchronously on the nuclei runtime.
     assert!(
         wait_for_listener(port, Duration::from_secs(3)),
-        "axum listener never came up on :{port}"
+        "HTTP listener never came up on :{port}"
     );
 
     // Fire the request.
@@ -161,11 +158,8 @@ fn hello_from_burn_serves_http() {
 
 #[test]
 fn headers_and_status_roundtrip() {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio");
-    let daemon_http = DaemonHttp::with_runtime(rt.handle().clone(), 64);
+    let rt = nuclei::Runtime::new().expect("nuclei");
+    let daemon_http = DaemonHttp::with_runtime(rt.handle(), 64);
     let port = pick_port();
     let source = format!(
         r#"
@@ -230,11 +224,8 @@ fn sealed_manifold_denies_listen() {
     // outbound: a sealed manifold's `.listen(port)` must be refused
     // BEFORE any socket bind, surfacing the permission-denied detail
     // on the server's 'error' event.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio");
-    let daemon_http = DaemonHttp::with_runtime(rt.handle().clone(), 64);
+    let rt = nuclei::Runtime::new().expect("nuclei");
+    let daemon_http = DaemonHttp::with_runtime(rt.handle(), 64);
     let port = pick_port();
     let source = format!(
         r#"
@@ -275,11 +266,8 @@ fn listen_granted_port_binds_and_other_port_is_denied() {
     // A `Ports([p])` grant lets the daemon bind exactly p - and
     // nothing else (checked here via a second server on p2).
     use afterburner_core::ListenAccess;
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("tokio");
-    let daemon_http = DaemonHttp::with_runtime(rt.handle().clone(), 64);
+    let rt = nuclei::Runtime::new().expect("nuclei");
+    let daemon_http = DaemonHttp::with_runtime(rt.handle(), 64);
     let port = pick_port();
     let denied_port = pick_port();
     let mut manifold = Manifold::sealed();

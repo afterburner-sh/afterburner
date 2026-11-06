@@ -583,6 +583,15 @@ mod tests {
     use afterburner_core::Manifold;
     use std::sync::Arc;
 
+    fn spawn_guest<T: Send + 'static>(
+        index: usize,
+        body: impl FnOnce() -> T + Send + 'static,
+    ) -> std::thread::JoinHandle<T> {
+        use afterburner_core::threads::{ThreadKind, spawn};
+        spawn(ThreadKind::GuestThread, index, format!("ab-guest-test-{index}"), body)
+            .expect("spawn guest thread")
+    }
+
     // ---- DaemonSab futex round-trip ----------------------------------------
 
     /// Allocate a 64-byte region, store a sentinel, wait with mismatching
@@ -635,7 +644,7 @@ mod tests {
 
         let sab2 = Arc::clone(&sab);
         // Spawner: after 15 ms change the word and wake.
-        std::thread::spawn(move || {
+        spawn_guest(0, move || {
             std::thread::sleep(std::time::Duration::from_millis(15));
             sab2.atomic_store(id, 0, 99, 4);
             sab2.notify(id, 0, 1);
@@ -741,7 +750,7 @@ mod tests {
 
         let sab_waker = Arc::clone(&sab);
         // Waker thread: sleep 20 ms, set to 1, wake.
-        std::thread::spawn(move || {
+        spawn_guest(0, move || {
             std::thread::sleep(std::time::Duration::from_millis(20));
             sab_waker.atomic_store(id, 0, 1, 4);
             sab_waker.notify(id, 0, 1);
@@ -794,9 +803,9 @@ mod tests {
         sab.atomic_store(id, 0, 0, 4);
 
         let handles: Vec<_> = (0..N)
-            .map(|_| {
+            .map(|i| {
                 let s = Arc::clone(&sab);
-                std::thread::spawn(move || {
+                spawn_guest(i, move || {
                     // CAS-loop: increment the 32-bit word at offset 0 by 1.
                     loop {
                         let old = s.atomic_load(id, 0, 4);

@@ -15,6 +15,7 @@ mod progress;
 use super::args::{Cli, ScaffoldArgs};
 use super::style;
 use afterburner_cloud::afterburner_afb::digest::hex;
+use afterburner_core::threads::{self, ThreadKind};
 use afterburner_cloud::gem_client::{DEFAULT_GEM_REGISTRY, GemClient};
 use afterburner_cloud::lock::{LOCKFILE_NAME, Lockfile};
 use afterburner_cloud::resolve::{Req, resolve, runtime_version};
@@ -597,7 +598,17 @@ pub fn install(
     let (prog, renderer) = progress::InstallProgress::new();
 
     let summary = std::thread::scope(|scope| {
-        let handle = renderer.map(|r| scope.spawn(move || r.run()));
+        let handle = renderer
+            .map(|r| {
+                threads::spawn_scoped(
+                    scope,
+                    ThreadKind::Background,
+                    0,
+                    "ab-install-progress".into(),
+                    move || r.run(),
+                )
+            })
+            .transpose()?;
         let out = install_concurrent(&items, &installer, jobs, &prog);
         if let Some(h) = handle {
             let _ = h.join();

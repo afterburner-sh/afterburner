@@ -38,6 +38,8 @@ use afterburner_core::{
     Result, RunResult, ScriptId, ScriptInvocation, ScriptOutcome, SharedStateStore, ab_event,
     sha256,
 };
+use afterburner_wasi_host::I32Exit;
+use afterburner_wasi_host::p1::add_to_linker_sync;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use bytes::Bytes;
@@ -51,8 +53,6 @@ use wasmtime::{
     Config, Engine, InstanceAllocationStrategy, InstancePre, Linker, Module, OptLevel,
     PoolingAllocationConfig, Trap,
 };
-use wasmtime_wasi::I32Exit;
-use wasmtime_wasi::p1::add_to_linker_sync;
 
 /// The custom plugin binary (Wizer-preinitialized), committed to the
 /// repo and baked into the host crate at compile time.
