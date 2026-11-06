@@ -94,7 +94,7 @@ hex.workspace = true
 base64.workspace = true
 getrandom.workspace = true
 
-# Daemon deps. All cross-platform — `bytes`, `rustls`,
+# Daemon deps. All cross-platform - `bytes`, `rustls`,
 # `rustls-pemfile`, `webpki-roots`, `socket2` build on Linux, macOS, and Windows. Previously these
 # were under `[target.'cfg(unix)'.dependencies]`, which silently
 # skipped them on Windows targets — `cargo build --target

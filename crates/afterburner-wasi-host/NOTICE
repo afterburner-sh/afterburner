@@ -1,0 +1,9 @@
+afterburner-wasi-host
+
+This crate is derived from wasmtime-wasi 49.0.4 (https://github.com/bytecodealliance/wasmtime), copyright the Wasmtime Project Developers, and is
+distributed under that crate's license, kept in LICENSE (Apache-2.0 WITH LLVM-exception).
+
+The Afterburner authors modified the sources: the IO boundary runs on the
+nuclei runtime instead of Tokio, and the crate is renamed and versioned with
+the Afterburner workspace. The changes are recorded in the Afterburner
+repository's history (https://github.com/afterburner-sh/afterburner).

@@ -1,0 +1,9 @@
+afterburner-h2
+
+This crate is derived from h2 0.4.20 (https://github.com/hyperium/h2), copyright the h2 authors, and is
+distributed under that crate's license, kept in LICENSE (MIT).
+
+The Afterburner authors modified the sources: the IO boundary runs on the
+nuclei runtime instead of Tokio, and the crate is renamed and versioned with
+the Afterburner workspace. The changes are recorded in the Afterburner
+repository's history (https://github.com/afterburner-sh/afterburner).

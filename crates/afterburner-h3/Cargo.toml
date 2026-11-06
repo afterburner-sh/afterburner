@@ -14,7 +14,7 @@ documentation.workspace = true
 description = "HTTP/3 over QUIC for Afterburner on nuclei, derived from h3"
 keywords = ["http3", "quic", "h3", "nuclei"]
 categories = ["network-programming", "web-programming::http-client", "web-programming::http-server"]
-include = ["src/**/*", "LICENSE", "Cargo.toml"]
+include = ["src/**/*", "LICENSE", "NOTICE", "Cargo.toml"]
 
 [features]
 i-implement-a-third-party-backend-and-opt-into-breaking-changes = []
@@ -40,6 +40,6 @@ futures = { workspace = true }
 nuclei = { workspace = true }
 proptest = "1"
 quinn = { package = "afterburner-quic", path = "../afterburner-quic", default-features = false, features = ["rustls-ring"] }
-rcgen = "0.13"
+rcgen = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter", "time", "tracing-log"] }

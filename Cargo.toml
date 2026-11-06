@@ -156,7 +156,7 @@ anyhow = "1"
 
 # B2 daemon-mode HTTP server plumbing. The listeners run on nuclei; these
 # are only pulled by `afterburner-wasi/daemon` (off by default) and the
-# `burn` CLI — library consumers who don't run `http.createServer().listen()`
+# `burn` CLI - library consumers who don't run `http.createServer().listen()`
 # don't pay the compile-time or binary-size cost.
 http-body-util = "0.1"
 bytes = "1"

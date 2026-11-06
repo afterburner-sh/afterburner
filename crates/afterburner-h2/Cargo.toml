@@ -14,7 +14,7 @@ documentation.workspace = true
 description = "HTTP/2 over futures-io for Afterburner on nuclei, derived from h2"
 keywords = ["http", "async", "non-blocking", "nuclei"]
 categories = ["asynchronous", "network-programming", "web-programming::http-client", "web-programming::http-server"]
-include = ["src/**/*", "LICENSE", "Cargo.toml"]
+include = ["src/**/*", "LICENSE", "NOTICE", "Cargo.toml"]
 
 [features]
 stream = []

@@ -14,7 +14,7 @@ description = "WASI host for Afterburner on nuclei, derived from wasmtime-wasi"
 keywords = ["webassembly", "wasm", "wasi", "nuclei"]
 categories = ["wasm"]
 readme = "README.md"
-include = ["src/**/*", "witx/**/*", "README.md", "LICENSE", "Cargo.toml"]
+include = ["src/**/*", "witx/**/*", "README.md", "LICENSE", "NOTICE", "Cargo.toml"]
 
 [features]
 default = ["p1", "p2", "p3"]

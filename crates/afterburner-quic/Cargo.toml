@@ -13,7 +13,7 @@ documentation.workspace = true
 description = "QUIC transport for Afterburner on nuclei, derived from quinn"
 keywords = ["quic", "nuclei"]
 categories = ["network-programming", "asynchronous"]
-include = ["src/**/*", "LICENSE-MIT", "Cargo.toml"]
+include = ["src/**/*", "LICENSE-MIT", "NOTICE", "LICENSE-APACHE", "Cargo.toml"]
 
 [features]
 default = ["log", "rustls-ring", "bloom"]
@@ -45,7 +45,7 @@ udp = { package = "quinn-udp", version = "0.5", default-features = false, featur
 [dev-dependencies]
 futures-util = "0.3"
 rand = "0.10.1"
-rcgen = "0.14"
+rcgen = { workspace = true }
 socket2 = ">=0.5, <0.7"
 tracing-futures = { version = "0.2.0", default-features = false, features = ["std-future"] }
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi"] }
