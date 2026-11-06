@@ -91,7 +91,11 @@ fn shard_pool_runs_at_most_the_budgeted_shards_each_placed_by_the_hook() {
     })
     .expect("spawn shard pool");
 
-    assert_eq!(pool.shard_count(), 2, "budget of 2 must cap 8 requested shards");
+    assert_eq!(
+        pool.shard_count(),
+        2,
+        "budget of 2 must cap 8 requested shards"
+    );
     assert_eq!(hooks.shard_starts.load(Ordering::SeqCst), 2);
     assert_eq!(hooks.shard_indexes.load(Ordering::SeqCst), 0b11);
     rt.shutdown_timeout(std::time::Duration::from_secs(2));

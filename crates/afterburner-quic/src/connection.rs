@@ -6,30 +6,29 @@ use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     },
-    task::{Context, Poll, Waker, ready},
+    task::{ready, Context, Poll, Waker},
 };
 
 use bytes::Bytes;
-use nuclei::sync::{Notified, Notify, mpsc, oneshot};
+use nuclei::sync::{mpsc, oneshot, Notified, Notify};
 use pin_project_lite::pin_project;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
-use tracing::{Instrument, Span, debug_span};
+use tracing::{debug_span, Instrument, Span};
 
 use crate::{
-    ConnectionEvent, Duration, Instant, VarInt,
     mutex::Mutex,
     recv_stream::RecvStream,
     runtime::{AsyncTimer, AsyncUdpSocket, Runtime, UdpPoller},
     send_stream::SendStream,
-    udp_transmit,
+    udp_transmit, ConnectionEvent, Duration, Instant, VarInt,
 };
 use proto::{
-    ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
-    StreamId, congestion::Controller,
+    congestion::Controller, ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent,
+    Side, StreamEvent, StreamId,
 };
 
 /// In-progress connection attempt future

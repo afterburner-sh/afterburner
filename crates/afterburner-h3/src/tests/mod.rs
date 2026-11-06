@@ -101,9 +101,8 @@ impl Pair {
         crypto.max_early_data_size = u32::MAX;
         crypto.alpn_protocols = vec![b"h3".to_vec()];
 
-        let mut server_config = ServerConfig::with_crypto(Arc::new(
-            QuicServerConfig::try_from(crypto).unwrap(),
-        ));
+        let mut server_config =
+            ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(crypto).unwrap()));
         server_config.transport = self.config.clone();
         let endpoint = endpoint(Some(server_config));
 
@@ -168,6 +167,6 @@ pub fn build_certs() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
     (
         cert.cert.into(),
-        PrivateKeyDer::Pkcs8(cert.key_pair.serialize_der().into()),
+        PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into()),
     )
 }

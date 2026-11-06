@@ -15,7 +15,11 @@ const MAX_WRITE_SLICES: usize = 64;
 
 /// Writes from the front of `buf` with one vectored write and advances it by what was
 /// written. Returns the byte count; zero when `buf` is empty.
-fn poll_write_buf<T, B>(io: Pin<&mut T>, cx: &mut Context<'_>, buf: &mut B) -> Poll<io::Result<usize>>
+fn poll_write_buf<T, B>(
+    io: Pin<&mut T>,
+    cx: &mut Context<'_>,
+    buf: &mut B,
+) -> Poll<io::Result<usize>>
 where
     T: AsyncWrite + ?Sized,
     B: Buf,

@@ -221,7 +221,7 @@ async fn client_close_only_on_last_sender_drop() {
             }) if code == Code::H3_REQUEST_CANCELLED.value()
         );
 
-        let _ = request_stream_1.finish().await.unwrap();
+        request_stream_1.finish().await.unwrap();
 
         let mut request_stream_2 = send2
             .send_request(Request::get("http://no.way").body(()).unwrap())
@@ -234,7 +234,7 @@ async fn client_close_only_on_last_sender_drop() {
                 code
             }) if code == Code::H3_REQUEST_CANCELLED.value()
         );
-        let _ = request_stream_2.finish().await.unwrap();
+        request_stream_2.finish().await.unwrap();
 
         drop(send1);
         drop(send2);
@@ -905,11 +905,9 @@ async fn server_not_blocking_on_idle_request() {
 
         // no bidirectional stream is started by the server
         // this will fail when server sends the error
-        let err = connection
-            .accept_bi()
-            .await
-            .err()
-            .expect("connection should error after sending wrong data on control stream");
+        let Err(err) = connection.accept_bi().await else {
+            panic!("connection should error after sending wrong data on control stream");
+        };
 
         assert_matches!(err,
         quinn::ConnectionError::ApplicationClosed(quinn::ApplicationClose { error_code, .. })

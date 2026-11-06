@@ -513,7 +513,7 @@ mod tests {
         state.recv_reset(frame::Reset::new(stream_id, Reason::NO_ERROR), true);
 
         assert!(state.is_recv_end_stream());
-        assert_eq!(state.ensure_recv_open().unwrap(), false);
+        assert!(!state.ensure_recv_open().unwrap());
         assert_eq!(
             state.ensure_reason(PollReset::Streaming).unwrap(),
             Some(Reason::NO_ERROR)

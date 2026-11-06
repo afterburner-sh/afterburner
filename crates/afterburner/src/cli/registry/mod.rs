@@ -15,7 +15,6 @@ mod progress;
 use super::args::{Cli, ScaffoldArgs};
 use super::style;
 use afterburner_cloud::afterburner_afb::digest::hex;
-use afterburner_core::threads::{self, ThreadKind};
 use afterburner_cloud::gem_client::{DEFAULT_GEM_REGISTRY, GemClient};
 use afterburner_cloud::lock::{LOCKFILE_NAME, Lockfile};
 use afterburner_cloud::resolve::{Req, resolve, runtime_version};
@@ -25,6 +24,7 @@ use afterburner_cloud::{
     CacheInstaller, Coord, InstallSummary, Manifest, RegistryClient, config, install_concurrent,
     pkg, scaffold,
 };
+use afterburner_core::threads::{self, ThreadKind};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;

@@ -380,7 +380,10 @@ struct WriteStreamConsumer {
     location: WriteLocation,
     result: Option<oneshot::Sender<Result<(), ErrorCode>>>,
     buffer: BytesMut,
-    task: Option<(AbortHandle, FallibleTask<std::io::Result<(BytesMut, usize)>>)>,
+    task: Option<(
+        AbortHandle,
+        FallibleTask<std::io::Result<(BytesMut, usize)>>,
+    )>,
 }
 
 #[derive(Copy, Clone)]

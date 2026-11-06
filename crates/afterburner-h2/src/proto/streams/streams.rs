@@ -8,9 +8,9 @@ use crate::proto::{peer, Error, Initiator, Open, Peer, WindowSize};
 use crate::{client, proto, server};
 
 use bytes::{Buf, Bytes};
+use futures_io::AsyncWrite;
 use http::{HeaderMap, Request, Response};
 use std::task::{Context, Poll, Waker};
-use futures_io::AsyncWrite;
 
 use std::sync::{Arc, Mutex};
 use std::{fmt, io};

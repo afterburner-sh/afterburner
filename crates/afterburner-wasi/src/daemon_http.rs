@@ -220,7 +220,10 @@ impl DaemonHttp {
     /// runtime. `event_queue_cap` bounds the listener→dispatcher
     /// channel; overflow backpressures incoming requests.
     #[cfg(feature = "daemon")]
-    pub fn with_runtime(handle: nuclei::runtime::RuntimeHandle, event_queue_cap: usize) -> Arc<Self> {
+    pub fn with_runtime(
+        handle: nuclei::runtime::RuntimeHandle,
+        event_queue_cap: usize,
+    ) -> Arc<Self> {
         let (tx, rx) = kovan_channel::bounded(event_queue_cap);
         Arc::new(Self {
             next_server_id: AtomicI32::new(1),

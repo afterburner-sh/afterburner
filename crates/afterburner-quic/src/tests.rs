@@ -13,8 +13,8 @@ use std::{
     pin::pin,
     str,
     sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     },
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
 };
@@ -26,11 +26,11 @@ use futures_util::{join, try_join};
 use nuclei::sync::{Latch, Notify};
 use nuclei::time::{sleep, timeout};
 use nuclei::{Runtime, RuntimeHandle};
-use proto::{RandomConnectionIdGenerator, crypto::rustls::QuicClientConfig};
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use proto::{crypto::rustls::QuicClientConfig, RandomConnectionIdGenerator};
+use rand::{rngs::StdRng, Rng, SeedableRng};
 use rustls::{
-    RootCertStore,
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    RootCertStore,
 };
 use socket2::{Domain, Protocol, Socket, Type};
 use tracing::{error_span, info};

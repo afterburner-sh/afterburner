@@ -166,7 +166,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Ws<IO> {
                 let mut eight = [0u8; 8];
                 eight.copy_from_slice(&b[2..10]);
                 (
-                    usize::try_from(u64::from_be_bytes(eight)).map_err(|_| bad("frame too large"))?,
+                    usize::try_from(u64::from_be_bytes(eight))
+                        .map_err(|_| bad("frame too large"))?,
                     10,
                 )
             }
@@ -285,9 +286,18 @@ mod tests {
         bytes.extend(client_frame(0x89, b"hi"));
         bytes.extend(client_frame(0x88, &[3, 232]));
         let mut ws = ws_with(&bytes).await;
-        assert_eq!(ws.next().await.expect("text"), Message::Text("{\"id\":1}".into()));
-        assert_eq!(ws.next().await.expect("ping"), Message::Ping(b"hi".to_vec()));
-        assert_eq!(ws.next().await.expect("close"), Message::Close(vec![3, 232]));
+        assert_eq!(
+            ws.next().await.expect("text"),
+            Message::Text("{\"id\":1}".into())
+        );
+        assert_eq!(
+            ws.next().await.expect("ping"),
+            Message::Ping(b"hi".to_vec())
+        );
+        assert_eq!(
+            ws.next().await.expect("close"),
+            Message::Close(vec![3, 232])
+        );
     }
 
     #[nuclei::test]
@@ -298,7 +308,10 @@ mod tests {
         bytes.extend(client_frame(0x80, b"ef"));
         bytes.extend(client_frame(0x81, &long));
         let mut ws = ws_with(&bytes).await;
-        assert_eq!(ws.next().await.expect("joined"), Message::Text("abcdef".into()));
+        assert_eq!(
+            ws.next().await.expect("joined"),
+            Message::Text("abcdef".into())
+        );
         assert_eq!(
             ws.next().await.expect("long"),
             Message::Text(String::from_utf8(long).expect("ascii"))

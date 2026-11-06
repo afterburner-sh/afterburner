@@ -40,14 +40,20 @@ impl sync_filesystem::HostDescriptor for WasiFilesystemCtxView<'_> {
         &mut self,
         fd: Resource<sync_filesystem::Descriptor>,
     ) -> FsResult<sync_filesystem::DescriptorFlags> {
-        Ok(in_runtime(async { async_filesystem::HostDescriptor::get_flags(self, fd).await })?.into())
+        Ok(
+            in_runtime(async { async_filesystem::HostDescriptor::get_flags(self, fd).await })?
+                .into(),
+        )
     }
 
     fn get_type(
         &mut self,
         fd: Resource<sync_filesystem::Descriptor>,
     ) -> FsResult<sync_filesystem::DescriptorType> {
-        Ok(in_runtime(async { async_filesystem::HostDescriptor::get_type(self, fd).await })?.into())
+        Ok(
+            in_runtime(async { async_filesystem::HostDescriptor::get_type(self, fd).await })?
+                .into(),
+        )
     }
 
     fn set_size(

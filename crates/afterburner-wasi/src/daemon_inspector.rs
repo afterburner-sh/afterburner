@@ -315,7 +315,11 @@ async fn serve_connection(stream: TcpStream, inner: Arc<InspectorInner>) {
             Route::Protocol => json_response(&protocol_doc()),
             Route::Targets => json_response(&targets_doc(&inner)),
             Route::Devtools => {
-                let accept = if head_only { None } else { upgrade_accept(&request) };
+                let accept = if head_only {
+                    None
+                } else {
+                    upgrade_accept(&request)
+                };
                 match accept {
                     Some(accept) => {
                         let reply = format!(
@@ -366,10 +370,9 @@ fn upgrade_accept(request: &crate::daemon_http::h1::Request) -> Option<String> {
 
 fn json_response(value: &serde_json::Value) -> Response<Vec<u8>> {
     let mut response = Response::new(serde_json::to_vec(value).unwrap_or_default());
-    response.headers_mut().insert(
-        "content-type",
-        HeaderValue::from_static("application/json"),
-    );
+    response
+        .headers_mut()
+        .insert("content-type", HeaderValue::from_static("application/json"));
     response
 }
 

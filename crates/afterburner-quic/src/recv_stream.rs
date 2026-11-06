@@ -1,15 +1,15 @@
 use std::{
-    future::{Future, poll_fn},
+    future::{poll_fn, Future},
     io,
     pin::Pin,
-    task::{Context, Poll, ready},
+    task::{ready, Context, Poll},
 };
 
 use bytes::Bytes;
 use proto::{Chunk, Chunks, ClosedStream, ConnectionError, ReadableError, StreamId};
 use thiserror::Error;
 
-use crate::{VarInt, connection::ConnectionRef};
+use crate::{connection::ConnectionRef, VarInt};
 
 /// A cursor over a caller's byte slice that tracks how much has been filled
 struct ReadBuf<'a> {

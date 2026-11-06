@@ -4,11 +4,11 @@ use crate::proto::{self, PingPayload};
 
 use atomic_waker::AtomicWaker;
 use bytes::Buf;
+use futures_io::AsyncWrite;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use futures_io::AsyncWrite;
 
 /// Acknowledges ping requests from the remote.
 #[derive(Debug)]

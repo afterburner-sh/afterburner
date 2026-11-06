@@ -639,8 +639,7 @@ impl Pseudo {
 
     /// Whether it has status 1xx
     pub(crate) fn is_informational(&self) -> bool {
-        self.status
-            .map_or(false, |status| status.is_informational())
+        self.status.is_some_and(|status| status.is_informational())
     }
 }
 
@@ -949,7 +948,7 @@ impl HeaderBlock {
                         if !self.is_over_size {
                             self.field_size += header_size;
                             if self.fields.try_append(name, value).is_err() {
-                                // HeaderMap capacity exceeded — treat as over-size
+                                // HeaderMap capacity exceeded - treat as over-size
                                 // so the stream is rejected downstream (RST_STREAM / 431)
                                 // instead of panicking on the 24,577th unique header.
                                 self.is_over_size = true;
@@ -1244,15 +1243,11 @@ mod test {
 
         let num_headers = 25_000;
 
-        // Build the HPACK block
-        let mut hpack = Vec::new();
+        // Build the HPACK block. Pseudo-headers: :method GET, :scheme http and :path /
+        // (static indexes 2, 6 and 4).
+        let mut hpack = vec![0x82u8, 0x86, 0x84];
 
-        // Pseudo-headers
-        hpack.push(0x82u8); // :method GET (static index 2)
-        hpack.push(0x86); // :scheme http (static index 6)
-        hpack.push(0x84); // :path / (static index 4)
-
-        // :authority "localhost" — literal with incremental indexing
+        // :authority "localhost": literal with incremental indexing
         hpack.push(0x41); // literal with indexing, name index 1 (= ":authority")
         hpack.push(0x09); // value length 9
         hpack.extend_from_slice(b"localhost");
@@ -1288,7 +1283,7 @@ mod test {
         let (mut headers, mut hpack_data) = Headers::load(head, payload).unwrap();
         // hpack_data contains the HPACK payload (no padding/priority in our frame)
 
-        // Decode the HPACK block — this should NOT panic
+        // Decode the HPACK block - this should NOT panic
         let mut decoder = hpack::Decoder::new(4096);
         const DEFAULT_MAX_HEADER_LIST_SIZE: usize = 16 << 20; // 16 MB
         headers

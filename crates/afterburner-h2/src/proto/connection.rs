@@ -7,12 +7,12 @@ use crate::proto::*;
 
 use bytes::Bytes;
 use futures_core::Stream;
+use futures_io::AsyncRead;
 use std::io;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
-use futures_io::AsyncRead;
 
 /// An H2 connection
 #[derive(Debug)]
@@ -301,7 +301,7 @@ where
     /// Advances the internal state of the connection.
     pub fn poll(&mut self, cx: &mut Context) -> Poll<Result<(), Error>> {
         // XXX(eliza): cloning the span is unfortunately necessary here in
-        // order to placate the borrow checker — `self` is mutably borrowed by
+        // order to placate the borrow checker - `self` is mutably borrowed by
         // `poll2`, which means that we can't borrow `self.span` to enter it.
         // The clone is just an atomic ref bump.
         let span = self.inner.span.clone();
@@ -545,7 +545,7 @@ where
         if self
             .go_away
             .going_away()
-            .map_or(false, |frame| frame.reason() == reason)
+            .is_some_and(|frame| frame.reason() == reason)
         {
             tracing::trace!("    -> already going away");
             *self.state = State::Closing(reason, initiator);

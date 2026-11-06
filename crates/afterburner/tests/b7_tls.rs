@@ -19,6 +19,9 @@
 //! flips the topology - burn binds, host connects with rustls - to
 //! cover the `tls.createServer` path.
 
+use afterburner_wasi::daemon_tls::TlsAcceptor;
+use nuclei::io::{AsyncReadExt, AsyncWriteExt};
+use nuclei::net::TcpListener as NucleiListener;
 use rcgen::generate_simple_self_signed;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
@@ -30,9 +33,6 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
-use afterburner_wasi::daemon_tls::TlsAcceptor;
-use nuclei::io::{AsyncReadExt, AsyncWriteExt};
-use nuclei::net::TcpListener as NucleiListener;
 
 const BURN: &str = env!("CARGO_BIN_EXE_burn");
 

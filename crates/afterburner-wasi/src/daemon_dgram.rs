@@ -37,18 +37,18 @@
 //! `OutboundHttp` is rejected. The library API never installs a
 //! `DaemonDgram` so polyfill calls cleanly error in non-daemon mode.
 
+use crate::daemon_net::spawn_abortable;
 use afterburner_core::{Manifold, NetAccess};
 use kovan_channel::flavors::bounded::{
     Receiver as BoundedRx, Sender as BoundedTx, channel as bounded_channel,
 };
 use kovan_map::HopscotchMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
-use crate::daemon_net::spawn_abortable;
 use nuclei::net::UdpSocket;
 use nuclei::runtime::RuntimeHandle as Handle;
 use nuclei::task::AbortHandle;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 pub type SocketId = i32;
 

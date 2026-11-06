@@ -420,7 +420,6 @@ where
                 Ok(Frame::Settings(_)) => {
                     #[cfg(feature = "tracing")]
                     trace!("Got settings");
-                    ()
                 }
 
                 Ok(Frame::Goaway(id)) => {

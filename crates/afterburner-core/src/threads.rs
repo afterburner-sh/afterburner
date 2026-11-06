@@ -322,7 +322,11 @@ impl Pinned {
         let mut slices = [(0, 0); KINDS];
         let mut start = 0;
         for (i, w) in want.iter().enumerate() {
-            let len = if total <= n { *w } else { (w * n / total).max(1) };
+            let len = if total <= n {
+                *w
+            } else {
+                (w * n / total).max(1)
+            };
             slices[i] = (start % n.max(1), len);
             start += len;
         }
@@ -436,12 +440,13 @@ mod tests {
         assert_eq!(super::budget(), budget);
 
         let starts = rec.clone();
-        let (id, started_before_body) = spawn(ThreadKind::DaemonShard, 7, "ab-test".into(), move || {
-            (thread::current().id(), starts.starts.load(Ordering::SeqCst))
-        })
-        .expect("spawn")
-        .join()
-        .expect("join");
+        let (id, started_before_body) =
+            spawn(ThreadKind::DaemonShard, 7, "ab-test".into(), move || {
+                (thread::current().id(), starts.starts.load(Ordering::SeqCst))
+            })
+            .expect("spawn")
+            .join()
+            .expect("join");
         assert_eq!(started_before_body, 1);
         let seen = rec.seen.lock().expect("lock");
         assert_eq!(seen.len(), 1);

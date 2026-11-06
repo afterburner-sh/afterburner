@@ -690,9 +690,12 @@ mod tests {
         for i in 0..16 {
             let c = cache.clone();
             handles.push(
-                spawn(ThreadKind::Background, i, format!("ab-test-{i}"), move || {
-                    c.register("module.exports = () => 42").unwrap()
-                })
+                spawn(
+                    ThreadKind::Background,
+                    i,
+                    format!("ab-test-{i}"),
+                    move || c.register("module.exports = () => 42").unwrap(),
+                )
                 .unwrap(),
             );
         }

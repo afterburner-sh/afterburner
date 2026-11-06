@@ -227,7 +227,11 @@ impl NativeDaemonRuntime {
         }
         for (host_path, guest_path) in &opts.preopens_ro {
             builder
-                .preopened_dir(host_path, guest_path, afterburner_wasi_host::FsPerms::ReadOnly)
+                .preopened_dir(
+                    host_path,
+                    guest_path,
+                    afterburner_wasi_host::FsPerms::ReadOnly,
+                )
                 .map_err(|e| {
                     AfterburnerError::Engine(format!(
                         "native daemon preopen-ro {}: {e}",
@@ -237,7 +241,11 @@ impl NativeDaemonRuntime {
         }
         for (host_path, guest_path) in &opts.preopens_rw {
             builder
-                .preopened_dir(host_path, guest_path, afterburner_wasi_host::FsPerms::ReadWrite)
+                .preopened_dir(
+                    host_path,
+                    guest_path,
+                    afterburner_wasi_host::FsPerms::ReadWrite,
+                )
                 .map_err(|e| {
                     AfterburnerError::Engine(format!(
                         "native daemon preopen-rw {}: {e}",

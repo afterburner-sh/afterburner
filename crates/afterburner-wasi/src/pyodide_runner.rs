@@ -1036,8 +1036,7 @@ pub struct PythonNetOpts {
 #[cfg(feature = "daemon")]
 pub fn run_python_with_net(python_source: &str, opts: PythonNetOpts) -> Result<PyodideRunOutput> {
     let rt = resolve_runtime()?;
-    let daemon_net =
-        crate::daemon_net::DaemonNet::new(opts.runtime.clone(), opts.manifold.clone());
+    let daemon_net = crate::daemon_net::DaemonNet::new(opts.runtime.clone(), opts.manifold.clone());
     let daemon_workers = crate::daemon_workers::DaemonWorkers::new_parent(
         opts.manifold.clone(),
         crate::daemon_workers::WorkerConfig::default(),

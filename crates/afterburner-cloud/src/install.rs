@@ -120,32 +120,33 @@ pub fn install_concurrent(
         for w in 0..jobs {
             let tx = tx.clone();
             let name = format!("ab-install-{w}");
-            let started = threads::spawn_scoped(scope, ThreadKind::Background, w, name, move || {
-                while !abort.load(Ordering::Relaxed) {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= items.len() {
-                        break;
-                    }
-                    let item = &items[i];
-                    progress.started(&item.coord);
-                    match installer.ensure(item) {
-                        Ok((outcome, warning)) => {
-                            progress.done(&item.coord, &outcome);
-                            tx.send(Report::Ok {
-                                coord: item.coord.clone(),
-                                outcome,
-                                warning,
-                            });
-                        }
-                        Err(e) => {
-                            progress.failed(&item.coord, &e.to_string());
-                            abort.store(true, Ordering::Relaxed);
-                            tx.send(Report::Err(e));
+            let started =
+                threads::spawn_scoped(scope, ThreadKind::Background, w, name, move || {
+                    while !abort.load(Ordering::Relaxed) {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= items.len() {
                             break;
                         }
+                        let item = &items[i];
+                        progress.started(&item.coord);
+                        match installer.ensure(item) {
+                            Ok((outcome, warning)) => {
+                                progress.done(&item.coord, &outcome);
+                                tx.send(Report::Ok {
+                                    coord: item.coord.clone(),
+                                    outcome,
+                                    warning,
+                                });
+                            }
+                            Err(e) => {
+                                progress.failed(&item.coord, &e.to_string());
+                                abort.store(true, Ordering::Relaxed);
+                                tx.send(Report::Err(e));
+                                break;
+                            }
+                        }
                     }
-                }
-            });
+                });
             if let Err(e) = started {
                 abort.store(true, Ordering::Relaxed);
                 return Some(e);

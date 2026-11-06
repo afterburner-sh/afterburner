@@ -9,19 +9,18 @@ use std::{
     pin::Pin,
     str,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
     },
     task::{Context, Poll, Waker},
 };
 
 use crate::{
-    Instant,
     runtime::{AsyncUdpSocket, Runtime},
-    udp_transmit,
+    udp_transmit, Instant,
 };
 use bytes::{Bytes, BytesMut};
-use nuclei::sync::{Notified, Notify, mpsc};
+use nuclei::sync::{mpsc, Notified, Notify};
 use pin_project_lite::pin_project;
 use proto::{
     self as proto, ClientConfig, ConnectError, ConnectionError, ConnectionHandle, DatagramEvent,
@@ -29,11 +28,11 @@ use proto::{
 };
 use rustc_hash::FxHashMap;
 use tracing::{Instrument, Span};
-use udp::{BATCH_SIZE, RecvMeta};
+use udp::{RecvMeta, BATCH_SIZE};
 
 use crate::{
-    ConnectionEvent, EndpointConfig, IO_LOOP_BOUND, RECV_TIME_BOUND, VarInt,
-    connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter,
+    connection::Connecting, incoming::Incoming, work_limiter::WorkLimiter, ConnectionEvent,
+    EndpointConfig, VarInt, IO_LOOP_BOUND, RECV_TIME_BOUND,
 };
 
 /// A QUIC endpoint.

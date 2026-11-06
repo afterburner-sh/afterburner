@@ -34,10 +34,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use bytes::Bytes;
 use afterburner_wasi_host::cli::{IsTerminal, StdoutStream};
 use afterburner_wasi_host::p2::pipe::MemoryOutputPipe;
 use afterburner_wasi_host::p2::{OutputStream, Pollable, StreamError};
+use bytes::Bytes;
 
 /// Growable result-capture pipe with a hard byte ceiling and a
 /// host-readable overflow flag. See the module docs for the contract.

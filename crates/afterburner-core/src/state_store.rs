@@ -161,11 +161,16 @@ mod tests {
         for i in 0..16 {
             let s = store.clone();
             handles.push(
-                spawn(ThreadKind::Background, i, format!("ab-test-{i}"), move || {
-                    for _ in 0..1000 {
-                        s.increment_i64("hits", 1);
-                    }
-                })
+                spawn(
+                    ThreadKind::Background,
+                    i,
+                    format!("ab-test-{i}"),
+                    move || {
+                        for _ in 0..1000 {
+                            s.increment_i64("hits", 1);
+                        }
+                    },
+                )
                 .unwrap(),
             );
         }

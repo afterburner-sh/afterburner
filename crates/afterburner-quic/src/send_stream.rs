@@ -1,7 +1,7 @@
 use std::{
-    future::{Future, poll_fn},
+    future::{poll_fn, Future},
     io,
-    pin::{Pin, pin},
+    pin::{pin, Pin},
     task::{Context, Poll},
 };
 
@@ -10,8 +10,8 @@ use proto::{ClosedStream, ConnectionError, FinishError, StreamId, Written};
 use thiserror::Error;
 
 use crate::{
-    VarInt,
     connection::{ConnectionRef, State},
+    VarInt,
 };
 
 /// A stream that can only be used to send data

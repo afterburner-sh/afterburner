@@ -87,7 +87,9 @@ impl WorkLimiter {
         }
 
         if let Mode::Measure = self.mode {
-            let elapsed = self.start_time.map_or(Duration::ZERO, |start| now() - start);
+            let elapsed = self
+                .start_time
+                .map_or(Duration::ZERO, |start| now() - start);
 
             let time_per_work_item_nanos = (elapsed.as_nanos()) as f64 / self.completed as f64;
 

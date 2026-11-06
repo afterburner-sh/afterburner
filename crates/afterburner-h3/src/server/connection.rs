@@ -11,9 +11,9 @@ use std::{
 };
 
 use bytes::Buf;
+use nuclei::sync::mpsc;
 use quic::RecvStream;
 use quic::StreamId;
-use nuclei::sync::mpsc;
 
 use crate::{
     connection::ConnectionInner,
@@ -237,7 +237,6 @@ where
             Frame::Settings(_setting) => {
                 #[cfg(feature = "tracing")]
                 trace!("Got settings > {:?}", _setting);
-                ()
             }
             &Frame::Goaway(id) => self.inner.process_goaway(&mut self.recv_closing, id)?,
             _frame @ Frame::MaxPushId(_) | _frame @ Frame::CancelPush(_) => {

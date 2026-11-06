@@ -138,17 +138,14 @@ async fn wait_for_h3(port: u16, max: Duration) -> bool {
     let deadline = Instant::now() + max;
     let mut endpoint = client_endpoint().unwrap();
     let cfg = quinn::ClientConfig::new(Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(insecure_client_config())
-            .unwrap(),
+        quinn::crypto::rustls::QuicClientConfig::try_from(insecure_client_config()).unwrap(),
     ));
     endpoint.set_default_client_config(cfg);
     while Instant::now() < deadline {
         let connecting =
             endpoint.connect(format!("127.0.0.1:{port}").parse().unwrap(), "127.0.0.1");
         if let Ok(c) = connecting
-            && nuclei::timeout(Duration::from_millis(500), c)
-                .await
-                .is_ok()
+            && nuclei::timeout(Duration::from_millis(500), c).await.is_ok()
         {
             return true;
         }
@@ -171,9 +168,7 @@ async fn h3_request(port: u16, path: &str) -> Result<(u16, Vec<u8>), String> {
         .await
         .map_err(|e| e.to_string())?;
     let h3_conn = h3_quinn::Connection::new(conn);
-    let (mut driver, mut send) = h3::client::new(h3_conn)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (mut driver, mut send) = h3::client::new(h3_conn).await.map_err(|e| e.to_string())?;
     let drive = nuclei::spawn(async move {
         let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
     });
@@ -201,7 +196,10 @@ async fn h3_request(port: u16, path: &str) -> Result<(u16, Vec<u8>), String> {
 }
 
 fn rt() -> nuclei::Runtime {
-    nuclei::Runtime::builder().worker_threads(2).build().unwrap()
+    nuclei::Runtime::builder()
+        .worker_threads(2)
+        .build()
+        .unwrap()
 }
 
 // ---- module surface -------------------------------------------------

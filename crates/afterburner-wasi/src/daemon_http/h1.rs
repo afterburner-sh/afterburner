@@ -143,7 +143,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Conn<IO> {
     }
 
     /// Reads one line (without its CRLF) of at most `limit` bytes.
-    async fn read_line(&mut self, limit: usize, over: (u16, &'static str)) -> Result<Vec<u8>, ReadError> {
+    async fn read_line(
+        &mut self,
+        limit: usize,
+        over: (u16, &'static str),
+    ) -> Result<Vec<u8>, ReadError> {
         let mut from = 0;
         loop {
             if let Some(i) = self.buf[from..].windows(2).position(|w| w == b"\r\n") {
@@ -164,7 +168,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Conn<IO> {
 
     /// Reads the next request, or `None` when the peer closed between requests.
     /// `max_body` caps the body; a larger one is rejected with 413 before it is read.
-    pub(crate) async fn read_request(&mut self, max_body: usize) -> Result<Option<Request>, ReadError> {
+    pub(crate) async fn read_request(
+        &mut self,
+        max_body: usize,
+    ) -> Result<Option<Request>, ReadError> {
         let mut head = loop {
             let mut raw = [httparse::EMPTY_HEADER; MAX_HEADERS];
             let mut parsed = httparse::Request::new(&mut raw);
@@ -173,7 +180,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Conn<IO> {
                     let head = Request {
                         method: parsed.method.unwrap_or("GET").to_owned(),
                         url: target_url(parsed.path.unwrap_or("/"))?,
-                        minor: parsed.version.unwrap_or(1) as u8,
+                        minor: parsed.version.unwrap_or(1),
                         headers: parsed
                             .headers
                             .iter()
@@ -220,7 +227,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> Conn<IO> {
 
         if let Some(te) = transfer {
             if !te.eq_ignore_ascii_case("chunked") {
-                return Err(ReadError::Reject(501, "burn: unsupported transfer encoding"));
+                return Err(ReadError::Reject(
+                    501,
+                    "burn: unsupported transfer encoding",
+                ));
             }
             if expects_continue {
                 self.io.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await?;
@@ -414,13 +424,10 @@ mod tests {
 
     #[nuclei::test]
     async fn reads_a_content_length_body() {
-        let req = read_one(
-            b"POST /p HTTP/1.1\r\ncontent-length: 5\r\n\r\nhello",
-            1024,
-        )
-        .await
-        .expect("parse")
-        .expect("request");
+        let req = read_one(b"POST /p HTTP/1.1\r\ncontent-length: 5\r\n\r\nhello", 1024)
+            .await
+            .expect("parse")
+            .expect("request");
         assert_eq!(req.body, b"hello");
     }
 
@@ -499,7 +506,11 @@ mod tests {
         drop(client);
         let mut conn = Conn::new(server);
         let first = conn.read_request(1024).await.expect("first").expect("some");
-        let second = conn.read_request(1024).await.expect("second").expect("some");
+        let second = conn
+            .read_request(1024)
+            .await
+            .expect("second")
+            .expect("some");
         assert_eq!((first.url.as_str(), second.url.as_str()), ("/1", "/2"));
         assert!(first.keep_alive());
         assert!(!second.keep_alive());
@@ -512,7 +523,10 @@ mod tests {
         client.write_all(H2_PREFACE).await.expect("write");
         assert!(Conn::new(server).sniff_h2().await.expect("sniff"));
         let (mut client, server) = duplex(4096);
-        client.write_all(b"GET / HTTP/1.1\r\n\r\n").await.expect("write");
+        client
+            .write_all(b"GET / HTTP/1.1\r\n\r\n")
+            .await
+            .expect("write");
         assert!(!Conn::new(server).sniff_h2().await.expect("sniff"));
     }
 
@@ -521,9 +535,13 @@ mod tests {
         let (client, server) = duplex(4096);
         let mut conn = Conn::new(server);
         let mut resp = text_response(200, "hello");
-        resp.headers_mut().insert("content-length", "99".parse().expect("value"));
-        resp.headers_mut().insert("x-k", "v".parse().expect("value"));
-        conn.write_response(&resp, 1, false, false).await.expect("write");
+        resp.headers_mut()
+            .insert("content-length", "99".parse().expect("value"));
+        resp.headers_mut()
+            .insert("x-k", "v".parse().expect("value"));
+        conn.write_response(&resp, 1, false, false)
+            .await
+            .expect("write");
         drop(conn);
         let mut text = String::new();
         let mut client = client;

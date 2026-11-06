@@ -17,8 +17,8 @@ use std::{
 ///
 /// Queued streams are ordered by stream ID, as we need to ensure that
 /// lower-numbered streams are sent headers before higher-numbered ones.
-/// This is because "idle" stream IDs – those which have been initiated but
-/// have yet to receive frames – will be implicitly closed on receipt of a
+/// This is because "idle" stream IDs - those which have been initiated but
+/// have yet to receive frames - will be implicitly closed on receipt of a
 /// frame on a higher stream ID. If these queues was not ordered by stream
 /// IDs, some mechanism would be necessary to ensure that the lowest-numbered]
 /// idle stream is opened first.

@@ -105,7 +105,10 @@ impl<T> FrameReader<T> {
 impl<T: AsyncRead + Unpin> FrameReader<T> {
     /// The next frame, `None` at a clean end of the stream, an error for a stream that
     /// ends inside a frame. After an error the reader yields `None`.
-    pub(super) fn poll_frame(&mut self, cx: &mut Context<'_>) -> Poll<Option<io::Result<BytesMut>>> {
+    pub(super) fn poll_frame(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<io::Result<BytesMut>>> {
         loop {
             if self.errored {
                 return Poll::Ready(None);
@@ -201,8 +204,14 @@ mod tests {
         data.extend(frame(b""));
         data.extend(frame(&[7u8; 20_000]));
         for piece in [1, 2, 9, 4096, usize::MAX] {
-            let mut reader = FrameReader::new(Pieces { data: data.clone(), piece });
-            let frames: Vec<_> = collect(&mut reader).into_iter().map(|f| f.unwrap()).collect();
+            let mut reader = FrameReader::new(Pieces {
+                data: data.clone(),
+                piece,
+            });
+            let frames: Vec<_> = collect(&mut reader)
+                .into_iter()
+                .map(|f| f.unwrap())
+                .collect();
             assert_eq!(frames.len(), 3, "piece {piece}");
             assert_eq!(&frames[0][HEADER_LEN..], b"hello");
             assert_eq!(frames[1].len(), HEADER_LEN);
@@ -212,7 +221,10 @@ mod tests {
 
     #[test]
     fn oversized_length_is_rejected_before_the_payload() {
-        let mut reader = FrameReader::new(Pieces { data: frame(&[0u8; 64]), piece: 4096 });
+        let mut reader = FrameReader::new(Pieces {
+            data: frame(&[0u8; 64]),
+            piece: 4096,
+        });
         reader.set_max_frame_length(63);
         let mut items = collect(&mut reader);
         assert_eq!(items.len(), 1);
@@ -227,12 +239,18 @@ mod tests {
         let mut reader = FrameReader::new(Pieces { data, piece: 4096 });
         let items = collect(&mut reader);
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].as_ref().unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(
+            items[0].as_ref().unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
     }
 
     #[test]
     fn a_stream_ending_between_frames_is_a_clean_end() {
-        let mut reader = FrameReader::new(Pieces { data: frame(b"x"), piece: 4096 });
+        let mut reader = FrameReader::new(Pieces {
+            data: frame(b"x"),
+            piece: 4096,
+        });
         let items = collect(&mut reader);
         assert_eq!(items.len(), 1);
         assert!(items[0].is_ok());

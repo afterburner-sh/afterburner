@@ -27,6 +27,7 @@
 //! `HopscotchMap<i32, DgramHandle>` for active sockets, atomics for counters,
 //! kovan channels for events. **No `Mutex` anywhere.**
 
+use crate::daemon_net::spawn_abortable;
 use kovan_channel::flavors::bounded::{
     Receiver as BoundedRx, Sender as BoundedTx, channel as bounded_channel,
 };
@@ -34,14 +35,13 @@ use kovan_channel::flavors::unbounded::{
     Receiver as UnboundedRx, Sender as UnboundedTx, channel as unbounded_channel,
 };
 use kovan_map::HopscotchMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use crate::daemon_net::spawn_abortable;
 use nuclei::io::{AsyncReadExt, AsyncWriteExt};
 use nuclei::net::{UnixDatagram, UnixListener, UnixStream};
 use nuclei::runtime::RuntimeHandle as Handle;
 use nuclei::sync::Notify;
 use nuclei::task::AbortHandle;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
 pub type ConnId = i32;
 pub type ServerId = i32;

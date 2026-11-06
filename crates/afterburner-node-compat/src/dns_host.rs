@@ -33,11 +33,11 @@
 //! worker thread is orphaned and cleans itself up when the resolver
 //! eventually returns.
 
+use crate::dns_runtime::NucleiRuntimeProvider;
 use afterburner_core::governance::helper_governance;
 use afterburner_core::{AfterburnerError, Manifold, NetAccess, Result};
-use hickory_resolver::proto::rr::RData;
-use crate::dns_runtime::NucleiRuntimeProvider;
 use hickory_resolver::Resolver;
+use hickory_resolver::proto::rr::RData;
 use kovan_channel::flavors::after::after;
 use kovan_channel::{bounded, select};
 use std::future::Future;
@@ -156,7 +156,7 @@ fn make_resolver(servers: &[String]) -> Result<NucleiResolver> {
                 AfterburnerError::Host(format!("dns: resolver init (custom servers): {e}"))
             });
     }
-    match Resolver::builder(provider.clone()).and_then(|b| b.build()) {
+    match Resolver::builder(provider).and_then(|b| b.build()) {
         Ok(r) => Ok(r),
         Err(_) => {
             // Fall back to Cloudflare's resolver. Hickory ships preset

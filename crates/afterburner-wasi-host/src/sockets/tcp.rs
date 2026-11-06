@@ -642,8 +642,7 @@ impl Drop for TcpSendStream {
         // The shutdown waits until the bytes the stream accepted reached the
         // kernel, so the peer reads all of them before the end of the stream.
         let stream = self.inner.clone();
-        nuclei::spawn(async move { _ = stream.shut(std::net::Shutdown::Write).await })
-            .detach();
+        nuclei::spawn(async move { _ = stream.shut(std::net::Shutdown::Write).await }).detach();
     }
 }
 

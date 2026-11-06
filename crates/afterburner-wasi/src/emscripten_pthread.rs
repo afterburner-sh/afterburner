@@ -588,8 +588,13 @@ mod tests {
         body: impl FnOnce() -> T + Send + 'static,
     ) -> std::thread::JoinHandle<T> {
         use afterburner_core::threads::{ThreadKind, spawn};
-        spawn(ThreadKind::GuestThread, index, format!("ab-guest-test-{index}"), body)
-            .expect("spawn guest thread")
+        spawn(
+            ThreadKind::GuestThread,
+            index,
+            format!("ab-guest-test-{index}"),
+            body,
+        )
+        .expect("spawn guest thread")
     }
 
     // ---- DaemonSab futex round-trip ----------------------------------------

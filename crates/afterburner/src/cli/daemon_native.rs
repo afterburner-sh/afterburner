@@ -142,16 +142,14 @@ pub fn execute(wasm_bytes: &[u8], opts: WasiCommandOpts) -> Result<()> {
             if shutdown.load(Ordering::Acquire) {
                 break None;
             }
-            let event = match nuclei::timeout(
-                Duration::from_millis(250),
-                daemon_http.recv_async_event(),
-            )
-            .await
-            {
-                Ok(Some(event)) => event,
-                Ok(None) => break None, // all senders dropped
-                Err(_elapsed) => continue,
-            };
+            let event =
+                match nuclei::timeout(Duration::from_millis(250), daemon_http.recv_async_event())
+                    .await
+                {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break None, // all senders dropped
+                    Err(_elapsed) => continue,
+                };
 
             let req_id = event.req_id;
             let envelope = http_event_to_envelope(&event);

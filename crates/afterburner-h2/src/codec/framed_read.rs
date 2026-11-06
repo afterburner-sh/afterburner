@@ -13,9 +13,9 @@ use bytes::{Buf, BytesMut};
 
 use std::io;
 
+use futures_io::AsyncRead;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use futures_io::AsyncRead;
 
 // 16 MB "sane default" taken from golang http2
 const DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE: usize = 16 << 20;

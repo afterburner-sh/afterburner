@@ -51,7 +51,11 @@ impl<IO: AsyncRead + Unpin> AsyncRead for Replay<IO> {
 }
 
 impl<IO: AsyncWrite + Unpin> AsyncWrite for Replay<IO> {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().io).poll_write(cx, buf)
     }
 
@@ -120,7 +124,10 @@ async fn serve_stream(
             return;
         };
         if payload.len() + chunk.len() > MAX_BODY {
-            send(&mut respond, super::h1::text_response(413, "burn: request body too large"));
+            send(
+                &mut respond,
+                super::h1::text_response(413, "burn: request body too large"),
+            );
             return;
         }
         payload.extend_from_slice(&chunk);

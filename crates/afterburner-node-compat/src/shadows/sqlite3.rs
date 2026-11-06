@@ -816,13 +816,18 @@ mod tests {
             let b = Arc::clone(&barrier);
             let index = handles.len();
             handles.push(
-                spawn(ThreadKind::Background, index, format!("ab-sqlite-test-{index}"), move || {
-                    b.wait();
-                    for i in 0..50 {
-                        s.run(id, "INSERT INTO t VALUES (?)", vec![json!(i)])
-                            .expect("insert");
-                    }
-                })
+                spawn(
+                    ThreadKind::Background,
+                    index,
+                    format!("ab-sqlite-test-{index}"),
+                    move || {
+                        b.wait();
+                        for i in 0..50 {
+                            s.run(id, "INSERT INTO t VALUES (?)", vec![json!(i)])
+                                .expect("insert");
+                        }
+                    },
+                )
                 .expect("spawn"),
             );
         }

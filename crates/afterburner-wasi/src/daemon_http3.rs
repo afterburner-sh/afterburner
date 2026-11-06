@@ -357,8 +357,8 @@ async fn h3_request_inner(
         .map_err(|e| format!("quic client cfg: {e}"))?;
     let client_cfg = quinn::ClientConfig::new(Arc::new(quic_client));
 
-    let client_socket = std::net::UdpSocket::bind(("0.0.0.0", 0))
-        .map_err(|e| format!("client endpoint: {e}"))?;
+    let client_socket =
+        std::net::UdpSocket::bind(("0.0.0.0", 0)).map_err(|e| format!("client endpoint: {e}"))?;
     let mut endpoint = nuclei_endpoint(None, client_socket, runtime)
         .map_err(|e| format!("client endpoint: {e}"))?;
     endpoint.set_default_client_config(client_cfg);

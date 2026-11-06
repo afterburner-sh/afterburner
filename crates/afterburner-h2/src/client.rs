@@ -143,14 +143,14 @@ use crate::proto::{self, Error};
 use crate::{FlowControl, PingPong, RecvStream, SendStream};
 
 use bytes::{Buf, Bytes};
+use futures_io::{AsyncRead, AsyncWrite};
+use futures_util::io::AsyncWriteExt;
 use http::{uri, HeaderMap, Method, Request, Response, Version};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
-use futures_io::{AsyncRead, AsyncWrite};
-use futures_util::io::AsyncWriteExt;
 use tracing::Instrument;
 
 /// Initializes new HTTP/2 streams on a connection by sending a request.

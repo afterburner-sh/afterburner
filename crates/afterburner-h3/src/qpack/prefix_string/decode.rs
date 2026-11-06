@@ -1,3 +1,6 @@
+// The Huffman tables list each symbol as a char or an integer code; `bits_decode!` casts both.
+#![allow(clippy::char_lit_as_u8)]
+
 use super::BitWindow;
 
 #[derive(Debug, PartialEq)]

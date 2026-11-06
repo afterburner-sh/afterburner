@@ -61,10 +61,10 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 // blocking `recv` has no such lost-wakeup, and these single-consumer command
 // queues gain nothing from a lock-free structure: one dedicated thread does
 // blocking pipe I/O, so the std channel is both correct and the right tool.
+use afterburner_core::threads::{self, ThreadKind};
 use std::sync::mpsc::{
     Receiver as UnboundedRx, Sender as UnboundedTx, channel as unbounded_channel,
 };
-use afterburner_core::threads::{self, ThreadKind};
 use std::time::Duration;
 
 pub type WorkerId = i32;
