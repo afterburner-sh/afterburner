@@ -93,7 +93,7 @@ dependencies = [
  "libc",
  "nuclei",
  "oxc",
- "rcgen 0.14.10",
+ "rcgen",
  "rustls",
  "rustls-pemfile",
  "rustyline",
@@ -196,6 +196,7 @@ dependencies = [
  "atomic-waker",
  "bytes",
  "env_logger",
+ "flate2",
  "fnv",
  "futures-core",
  "futures-io",
@@ -228,7 +229,7 @@ dependencies = [
  "nuclei",
  "pin-project-lite",
  "proptest",
- "rcgen 0.13.2",
+ "rcgen",
  "rustls",
  "tracing",
  "tracing-subscriber",
@@ -242,6 +243,10 @@ dependencies = [
  "afterburner-quic",
  "bytes",
  "futures",
+ "http",
+ "nuclei",
+ "rcgen",
+ "rustls",
  "tracing",
 ]
 
@@ -335,7 +340,7 @@ dependencies = [
  "quinn-proto",
  "quinn-udp",
  "rand 0.10.3",
- "rcgen 0.14.10",
+ "rcgen",
  "rustc-hash",
  "rustls",
  "socket2",
@@ -391,7 +396,7 @@ dependencies = [
  "nuclei",
  "p256",
  "rand 0.8.8",
- "rcgen 0.14.10",
+ "rcgen",
  "rsa",
  "rustls",
  "rustls-pemfile",
@@ -4704,19 +4709,6 @@ dependencies = [
 
 [[package]]
 name = "rcgen"
-version = "0.13.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
-dependencies = [
- "pem 3.0.6",
- "ring",
- "rustls-pki-types",
- "time",
- "yasna 0.5.2",
-]
-
-[[package]]
-name = "rcgen"
 version = "0.14.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
@@ -4726,7 +4718,7 @@ dependencies = [
  "rustls-pki-types",
  "time",
  "x509-parser",
- "yasna 0.6.0",
+ "yasna",
 ]
 
 [[package]]
@@ -7146,15 +7138,6 @@ dependencies = [
  "ring",
  "rusticata-macros",
  "thiserror 2.0.21",
- "time",
-]
-
-[[package]]
-name = "yasna"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
-dependencies = [
  "time",
 ]
 

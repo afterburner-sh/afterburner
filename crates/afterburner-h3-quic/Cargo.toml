@@ -28,3 +28,9 @@ h3 = { package = "afterburner-h3", path = "../afterburner-h3", version = "0.3.0"
 quinn = { package = "afterburner-quic", path = "../afterburner-quic", version = "0.3.0", default-features = false }
 tracing = { version = "0.1.40", optional = true }
 
+[dev-dependencies]
+http = "1"
+nuclei = { workspace = true }
+quinn = { package = "afterburner-quic", path = "../afterburner-quic", default-features = false, features = ["rustls-ring"] }
+rcgen = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std"] }
