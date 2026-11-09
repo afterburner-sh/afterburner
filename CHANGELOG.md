@@ -3,6 +3,16 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.3.1] - 2026-11-09
+
+### Changed
+
+- nuclei 0.5.7 and kovan 0.2.4. kovan 0.2.4 ends a thread's reservation at the drop of its
+  outermost guard, and nuclei 0.5.7 submits what a thread retired before it sleeps, so a thread
+  that waits (a daemon worker between requests, a pooled thread) no longer holds back memory
+  other threads retire.
+- Every crate of the workspace goes to 0.3.1.
+
 ## [0.3.0] - 2026-11-06
 
 Afterburner no longer uses Tokio. nuclei is the runtime.
