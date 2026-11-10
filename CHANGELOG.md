@@ -3,6 +3,16 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.3.2] - 2026-11-10
+
+### Changed
+
+- nuclei 0.5.8 and kovan 0.2.5. kovan 0.2.5 fixes the memory orderings its reclamation rests on:
+  with 0.2.4 a retire could free a value with nothing ordering a reader's reads of it before the
+  free, a data race under Rust's memory model that x86-64's own ordering hid. nuclei 0.5.8 requires
+  kovan 0.2.5, and on macOS a FIFO read to its end no longer waits for good.
+- Every crate of the workspace goes to 0.3.2.
+
 ## [0.3.1] - 2026-11-09
 
 ### Changed

@@ -24,8 +24,8 @@ name = "h3_quinn"
 [dependencies]
 bytes = "1"
 futures = "0.3.28"
-h3 = { package = "afterburner-h3", path = "../afterburner-h3", version = "0.3.1" }
-quinn = { package = "afterburner-quic", path = "../afterburner-quic", version = "0.3.1", default-features = false }
+h3 = { package = "afterburner-h3", path = "../afterburner-h3", version = "0.3.2" }
+quinn = { package = "afterburner-quic", path = "../afterburner-quic", version = "0.3.2", default-features = false }
 tracing = { version = "0.1.40", optional = true }
 
 [dev-dependencies]
