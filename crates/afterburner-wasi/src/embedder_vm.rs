@@ -328,8 +328,9 @@ pub const EPOCH_TICK_PERIOD_MS: u64 = crate::chamber::TICK_PERIOD_MS;
 
 /// A process-wide [`EmbedderVm`] whose engine has epoch interruption
 /// enabled ([`deterministic_engine_with_epoch`]), paired with exactly one
-/// background ticker thread that calls `Engine::increment_epoch()` every
-/// [`EPOCH_TICK_PERIOD_MS`] for as long as the process runs.
+/// background ticker thread that advances the epoch by one per whole
+/// [`EPOCH_TICK_PERIOD_MS`] elapsed, catching up after a late wake, for
+/// as long as the process runs.
 ///
 /// Built and the ticker spawned lazily, the first time any caller needs a
 /// wall-clock bound (a `timeout`) on a run - never per call. A fresh
@@ -376,12 +377,7 @@ pub fn shared_epoch_vm_with(nan: NanMode) -> Result<&'static EmbedderVm> {
             afterburner_core::threads::ThreadKind::Background,
             0,
             "afterburner-embedder-epoch-ticker".into(),
-            move || {
-                loop {
-                    std::thread::sleep(Duration::from_millis(EPOCH_TICK_PERIOD_MS));
-                    ticker_engine.increment_epoch();
-                }
-            },
+            move || crate::chamber::run_epoch_ticker(&ticker_engine, || true),
         )
         .map_err(|e| format!("spawning epoch ticker: {e}"))?;
         Ok(EmbedderVm { engine })
