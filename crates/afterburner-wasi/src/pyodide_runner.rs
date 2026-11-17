@@ -31,7 +31,7 @@ use wasmtime::{
 };
 
 use crate::{
-    embedder_vm::{EPOCH_TICK_PERIOD_MS, EmbedderState, shared_epoch_vm},
+    embedder_vm::{EmbedderState, shared_epoch_vm},
     emscripten_dylink::{
         fill_got_table_slots, parse_got_name_to_slot, resolve_self_provided_got_func,
         wire_got_func_stubs_from_module,
@@ -568,7 +568,8 @@ fn boot_pyodide_instance(
     // to refuse. One engine for the whole process means one ticker thread and
     // one compile-cache key, so the expensive CPython compile below is still
     // done exactly once.
-    let engine = shared_epoch_vm()?.engine().clone();
+    let epoch_vm = shared_epoch_vm()?;
+    let engine = epoch_vm.engine().clone();
     // #56/#62: Cranelift-compiling the ~25-34 MiB CPython runtime dominates cold
     // start. Compile it once, persist the artifact as a cwasm next to the wasm,
     // and mmap-deserialize it on every subsequent boot.
@@ -625,9 +626,9 @@ fn boot_pyodide_instance(
     // honest reading of a wall clock for the call: booting CPython is time the
     // caller waited.
     store.set_epoch_deadline(match timeout {
-        Some(d) => (d.as_millis().max(1))
-            .div_ceil(EPOCH_TICK_PERIOD_MS as u128)
-            .max(1) as u64,
+        Some(d) => {
+            crate::chamber::deadline_ticks(epoch_vm.epoch_clock(), d, std::time::Instant::now())
+        }
         None => u64::MAX / 2,
     });
 
@@ -1123,6 +1124,8 @@ pub struct PyodideRunBounds {
     /// [`AfterburnerError::Timeout`], not a partial result. Rounded up to
     /// the ticker's granularity
     /// ([`EPOCH_TICK_PERIOD_MS`][crate::embedder_vm::EPOCH_TICK_PERIOD_MS]).
+    /// It fires no earlier than one period before its time and no later
+    /// than one late ticker wake after it.
     /// `None` applies no wall clock; fuel remains the instruction bound
     /// either way.
     pub timeout: Option<std::time::Duration>,

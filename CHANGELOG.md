@@ -15,6 +15,12 @@ All notable changes to afterburner are documented here. This project adheres to
   and a request reaches `req.on('data')` as exactly the bytes the client sent, on HTTP/1, HTTP/2
   and HTTP/3. Covered by `response_of_all_256_byte_values_arrives_exact` and
   `burn_request_bytes_echo_exact`.
+- A guest's timeout no longer stretches or shrinks under load. An epoch ticker that woke late
+  counted wake-ups, so a 5 s timeout took about 19 s on a loaded host; the tickers now catch up to
+  elapsed time (#81), and a store created while its ticker is overdue has that backlog added to
+  its deadline, so a timeout fires no earlier than one period before its time and no later than
+  one late wake after it. Covered by `a_store_created_while_the_ticker_is_overdue_is_not_stopped_early`
+  and the `deadline_ticks` tests in `chamber`.
 
 ### Changed
 

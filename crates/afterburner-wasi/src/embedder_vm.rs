@@ -324,13 +324,20 @@ fn deterministic_config(nan: NanMode) -> Config {
 /// epoch-driven bound in this crate (the plugin combustor's per-call
 /// timeout, and this one) shares one constant instead of two that could
 /// silently drift apart.
+///
+/// Precision: a store created while the ticker is overdue has that backlog
+/// added to its deadline, so a `timeout` fires no earlier than one period
+/// before its time and no later than one late ticker wake after it.
 pub const EPOCH_TICK_PERIOD_MS: u64 = crate::chamber::TICK_PERIOD_MS;
 
 /// A process-wide [`EmbedderVm`] whose engine has epoch interruption
 /// enabled ([`deterministic_engine_with_epoch`]), paired with exactly one
 /// background ticker thread that advances the epoch by one per whole
 /// [`EPOCH_TICK_PERIOD_MS`] elapsed, catching up after a late wake, for
-/// as long as the process runs.
+/// as long as the process runs. A run's `timeout` fires no earlier than one
+/// period before its time and no later than one late ticker wake after it:
+/// the VM carries the ticker's clock, and a store created while the ticker
+/// is overdue has the backlog added to its deadline.
 ///
 /// Built and the ticker spawned lazily, the first time any caller needs a
 /// wall-clock bound (a `timeout`) on a run - never per call. A fresh
@@ -373,14 +380,19 @@ pub fn shared_epoch_vm_with(nan: NanMode) -> Result<&'static EmbedderVm> {
     let once = slot.get_or_init(|| {
         let engine = deterministic_engine_with_epoch_nan(nan).map_err(|e| e.to_string())?;
         let ticker_engine = engine.clone();
+        let epoch_clock = Arc::new(crate::chamber::EpochClock::new(std::time::Instant::now()));
+        let ticker_clock = Arc::clone(&epoch_clock);
         afterburner_core::threads::spawn(
             afterburner_core::threads::ThreadKind::Background,
             0,
             "afterburner-embedder-epoch-ticker".into(),
-            move || crate::chamber::run_epoch_ticker(&ticker_engine, || true),
+            move || crate::chamber::run_epoch_ticker(&ticker_engine, ticker_clock, || true),
         )
         .map_err(|e| format!("spawning epoch ticker: {e}"))?;
-        Ok(EmbedderVm { engine })
+        Ok(EmbedderVm {
+            engine,
+            epoch_clock: Some(epoch_clock),
+        })
     });
     once.as_ref()
         .map_err(|msg| AfterburnerError::Engine(msg.clone()))
@@ -1067,9 +1079,12 @@ pub struct BoundedCommandOutput {
 #[derive(Clone)]
 pub struct EmbedderVm {
     engine: Engine,
+    /// The clock of this engine's own ticker; `None` for an engine nothing
+    /// of ours ticks, which then has no backlog to add to a deadline.
+    epoch_clock: Option<Arc<crate::chamber::EpochClock>>,
 }
 
-// EmbedderVm holds only a wasmtime::Engine, which is Send + Sync.
+// EmbedderVm holds only a wasmtime::Engine and an Arc of atomics, both Send + Sync.
 unsafe impl Send for EmbedderVm {}
 unsafe impl Sync for EmbedderVm {}
 
@@ -1078,7 +1093,13 @@ impl EmbedderVm {
     pub fn new() -> Result<Self> {
         Ok(Self {
             engine: deterministic_engine()?,
+            epoch_clock: None,
         })
+    }
+
+    /// The clock of this VM's epoch ticker, for arming a store's deadline.
+    pub(crate) fn epoch_clock(&self) -> Option<&crate::chamber::EpochClock> {
+        self.epoch_clock.as_deref()
     }
 
     /// The wasmtime engine this VM compiles and runs on.
@@ -1577,8 +1598,7 @@ impl EmbedderVm {
         // of `u64::MAX` at `EPOCH_TICK_PERIOD_MS` per tick outlives any run.
         let ticks = match timeout {
             Some(d) => {
-                let ms = d.as_millis().max(1);
-                ms.div_ceil(EPOCH_TICK_PERIOD_MS as u128).max(1) as u64
+                crate::chamber::deadline_ticks(self.epoch_clock(), d, std::time::Instant::now())
             }
             None => u64::MAX / 2,
         };
@@ -1708,7 +1728,9 @@ impl EmbedderVm {
     /// the compiled guest carries no epoch-check instrumentation to check
     /// it against, so the run is unbounded in wall-clock time regardless of
     /// what `timeout` says. Granularity is one [`EPOCH_TICK_PERIOD_MS`]
-    /// tick: a shorter request rounds up to it.
+    /// tick: a shorter request rounds up to it. The run is stopped no earlier
+    /// than one tick before `timeout` and no later than one late ticker wake
+    /// after it.
     pub fn run_command_bounded(
         &self,
         module: &EmbedderModule,
