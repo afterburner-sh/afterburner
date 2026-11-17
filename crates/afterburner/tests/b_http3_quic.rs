@@ -315,6 +315,40 @@ fn h3_endpoint_serves_real_request_round_trip() {
 
 #[test]
 #[serial]
+fn h3_response_bytes_arrive_exact() {
+    // A response body is bytes: every value 0..=255 through `s.end(Buffer)`.
+    let port = pick_port();
+    let (cert, key) = gen_cert_pem();
+    let src = format!(
+        r#"
+        const {{ QuicEndpoint }} = require('quic');
+        const ep = new QuicEndpoint({{ address: {{ port: {port} }} }});
+        ep.listen({{ cert: `{cert}`, key: `{key}` }}, (session) => {{
+            session.on('stream', (s) => {{
+                const b = Buffer.alloc(256);
+                for (let i = 0; i < 256; i++) b[i] = i;
+                s.respond({{ ':status': 200 }});
+                s.end(b);
+            }});
+        }});
+        "#,
+    );
+    let mut child = spawn_h3(&src);
+    let r = rt();
+    assert!(r.block_on(wait_for_h3(port, Duration::from_secs(60))));
+    let (status, body) = r.block_on(h3_request(port, "/")).unwrap_or_else(|e| {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("h3 request failed: {e}");
+    });
+    assert_eq!(status, 200);
+    assert_eq!(body, (0..=255u8).collect::<Vec<u8>>());
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+#[serial]
 fn h3_endpoint_status_code_round_trips() {
     let port = pick_port();
     let (cert, key) = gen_cert_pem();

@@ -194,7 +194,10 @@ pub struct WasmConfig {
     /// `crate::chamber::TICK_PERIOD_MS` and calls
     /// `Engine::increment_epoch()` once per whole period elapsed
     /// (catching up after a late wake) for the lifetime of the
-    /// combustor (joined on [`Drop`]). `Some(false)` suppresses that
+    /// combustor (joined on [`Drop`]). A store created while that ticker
+    /// is overdue has the backlog added to its deadline, so a timeout
+    /// fires no earlier than one period before its time and no later
+    /// than one late wake after it. `Some(false)` suppresses that
     /// spawn entirely - `WasmCombustor::new` then owns zero threads on
     /// this axis.
     ///
@@ -206,7 +209,8 @@ pub struct WasmConfig {
     /// remains. [`WasmCombustor::engine`] returns a `Clone`-able handle
     /// for exactly this purpose; `Engine::increment_epoch(&self)` takes
     /// a shared reference, so no synchronization is needed to drive it
-    /// from another thread.
+    /// from another thread. With no ticker of ours there is no backlog to
+    /// add: a timeout counts exactly the ticks the embedder issues.
     pub spawn_epoch_ticker: Option<bool>,
     /// `None` (default) keeps today's hard-coded pool size
     /// (`POOL_TOTAL_MEMORIES`, 128). `Some(n)` sizes the pooling
@@ -413,6 +417,9 @@ pub struct WasmCombustor {
     /// [`WasmConfig::spawn_epoch_ticker`] is `Some(false)`, in which case
     /// this is `None` and the embedder is driving the epoch itself.
     ticker: Option<JoinHandle<()>>,
+    /// The ticker's clock, read when a store's deadline is armed; `None`
+    /// when the embedder drives the epoch (no backlog of ours to add).
+    epoch_clock: Option<Arc<chamber::EpochClock>>,
 }
 
 impl WasmCombustor {
@@ -432,7 +439,11 @@ impl WasmCombustor {
             .map_err(|e| AfterburnerError::Engine(format!("plugin instantiate_pre: {e}")))?;
 
         let ticker_shutdown = Arc::new(AtomicBool::new(false));
-        let ticker = if config.spawn_epoch_ticker.unwrap_or(true) {
+        let epoch_clock = config
+            .spawn_epoch_ticker
+            .unwrap_or(true)
+            .then(|| Arc::new(chamber::EpochClock::new(std::time::Instant::now())));
+        let ticker = if let Some(clock) = epoch_clock.clone() {
             let engine_for_ticker = engine.clone();
             let shutdown = ticker_shutdown.clone();
             let ticker_name = config
@@ -442,7 +453,7 @@ impl WasmCombustor {
                 ticker_name,
                 config.ticker_governance.clone(),
                 move || {
-                    chamber::run_epoch_ticker(&engine_for_ticker, || {
+                    chamber::run_epoch_ticker(&engine_for_ticker, clock, || {
                         !shutdown.load(Ordering::Acquire)
                     })
                 },
@@ -476,6 +487,7 @@ impl WasmCombustor {
             transpile_hook: config.transpile_hook,
             ticker_shutdown,
             ticker,
+            epoch_clock,
         })
     }
 
@@ -568,7 +580,8 @@ impl WasmCombustor {
             self.state_store.clone(),
             None,
         );
-        let mut store = chamber::prepare_store(&self.engine, state, &limits)?;
+        let mut store =
+            chamber::prepare_store(&self.engine, self.epoch_clock.as_deref(), state, &limits)?;
         chamber::instantiate_and_start(&mut store, &self.instance_pre)?.map_err(|trap| {
             let stderr = format_trap_with_stderr(&format!("compile: {trap}"), &mut store);
             AfterburnerError::CompileFailed(stderr)
@@ -918,6 +931,7 @@ impl WasmCombustor {
 
         let mut store = chamber::fire(
             &self.engine,
+            self.epoch_clock.as_deref(),
             &sealed.instance_pre,
             state,
             limits,
@@ -966,7 +980,8 @@ impl WasmCombustor {
             self.host_context.clone(),
         );
 
-        let mut store = chamber::prepare_store(&self.engine, state, limits)?;
+        let mut store =
+            chamber::prepare_store(&self.engine, self.epoch_clock.as_deref(), state, limits)?;
 
         // Instance 1: the shared plugin. Its `afterburner:host` imports were
         // resolved at `WasmCombustor::new` and are part of `self.instance_pre`.
@@ -1087,7 +1102,8 @@ impl WasmCombustor {
             self.state_store.clone(),
             None,
         );
-        let mut store = chamber::prepare_store(&self.engine, state, &limits)?;
+        let mut store =
+            chamber::prepare_store(&self.engine, self.epoch_clock.as_deref(), state, &limits)?;
         chamber::instantiate_and_start(&mut store, &self.instance_pre)?.map_err(|trap| {
             let stderr = format_trap_with_stderr(&format!("compile-script: {trap}"), &mut store);
             AfterburnerError::CompileFailed(stderr)
@@ -1250,6 +1266,7 @@ impl WasmCombustor {
         // surface is consistent across the UDF paths.
         let mut store = chamber::fire(
             &self.engine,
+            self.epoch_clock.as_deref(),
             &self.instance_pre,
             state,
             limits,
@@ -1372,6 +1389,7 @@ impl WasmCombustor {
         state.transpile_hook = self.transpile_hook.clone();
         let mut store = chamber::fire(
             &self.engine,
+            self.epoch_clock.as_deref(),
             &self.instance_pre,
             state,
             limits,
@@ -1929,7 +1947,8 @@ impl Combustor for WasmCombustor {
             self.host_context.clone(),
         );
         state.transpile_hook = self.transpile_hook.clone();
-        let mut store = chamber::prepare_store(&self.engine, state, limits)?;
+        let mut store =
+            chamber::prepare_store(&self.engine, self.epoch_clock.as_deref(), state, limits)?;
         // Script mode keeps its own trap contract (proc_exit(N) is an
         // exit code, not an error), so it maps the raw `_start` result
         // itself instead of going through `chamber::fire`.
@@ -2013,7 +2032,8 @@ impl Combustor for WasmCombustor {
             Some(bridged),
         );
         state.transpile_hook = self.transpile_hook.clone();
-        let mut store = chamber::prepare_store(&self.engine, state, limits)?;
+        let mut store =
+            chamber::prepare_store(&self.engine, self.epoch_clock.as_deref(), state, limits)?;
         let call_result = chamber::instantiate_and_start(&mut store, &self.instance_pre)?;
 
         if store.data().output_overflowed() {

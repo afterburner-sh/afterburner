@@ -208,6 +208,130 @@ fn body_parser_pattern_buffer_concat_succeeds() {
 
 #[test]
 #[serial]
+fn burn_response_bytes_arrive_exact() {
+    // A response body is bytes: every value 0..=255 through `res.end(Buffer)`
+    // and a large non-ASCII body arrive as sent, with the byte length.
+    let port = pick_port();
+    let source = format!(
+        r#"
+        const http = require("node:http");
+        http.createServer((req, res) => {{
+            if (req.url === "/all") {{
+                const b = Buffer.alloc(256);
+                for (let i = 0; i < 256; i++) b[i] = i;
+                res.end(b);
+            }} else {{
+                const p = new Uint8Array([0xc3, 0xa9, 0x80, 0xff, 0x00, 0x7f, 0xe2, 0x82, 0xac]);
+                const b = new Uint8Array(85000);
+                for (let o = 0; o < b.length; o += p.length) {{
+                    b.set(p.subarray(0, Math.min(p.length, b.length - o)), o);
+                }}
+                res.write(b.subarray(0, 40000));
+                res.end(b.subarray(40000));
+            }}
+        }}).listen({port});
+        "#
+    );
+    let _child = ChildGuard::new(spawn_burn_inline(&source));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
+
+    let get = |path: &str| {
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+        common::http_exchange_bytes(port, request.as_bytes())
+    };
+    let (head, body) = get("/all");
+    assert!(head.contains("content-length: 256\r\n"), "head:\n{head}");
+    assert_eq!(body, (0..=255u8).collect::<Vec<u8>>());
+
+    let pattern = [0xc3, 0xa9, 0x80, 0xff, 0x00, 0x7f, 0xe2, 0x82, 0xac];
+    let expect: Vec<u8> = pattern.iter().copied().cycle().take(85_000).collect();
+    let (head, body) = get("/large");
+    assert!(head.contains("content-length: 85000\r\n"), "head:\n{head}");
+    assert!(
+        body == expect,
+        "85000-byte body differs ({} bytes)",
+        body.len()
+    );
+}
+
+#[test]
+#[serial]
+fn burn_request_bytes_echo_exact() {
+    // A request body that is not text reaches the handler as its exact bytes.
+    let port = pick_port();
+    let source = format!(
+        r#"
+        const http = require("node:http");
+        http.createServer((req, res) => {{
+            const chunks = [];
+            req.on("data", (c) => chunks.push(c));
+            req.on("end", () => res.end(Buffer.concat(chunks)));
+        }}).listen({port});
+        "#
+    );
+    let _child = ChildGuard::new(spawn_burn_inline(&source));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
+
+    let payload: Vec<u8> = (0..=255u8).collect();
+    let mut request = format!(
+        "POST / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(&payload);
+    let (head, body) = common::http_exchange_bytes(port, &request);
+    assert!(head.contains("content-length: 256\r\n"), "head:\n{head}");
+    assert_eq!(body, payload);
+
+    // A large body of a repeating pattern that is not valid UTF-8.
+    let pattern = [0xc3, 0x28, 0x80, 0xff, 0x00, 0xe2, 0x82];
+    let payload: Vec<u8> = pattern.iter().copied().cycle().take(85_000).collect();
+    let mut request = format!(
+        "POST / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(&payload);
+    let (head, body) = common::http_exchange_bytes(port, &request);
+    assert!(head.contains("content-length: 85000\r\n"), "head:\n{head}");
+    assert!(
+        body == payload,
+        "85000-byte echo differs ({} bytes)",
+        body.len()
+    );
+}
+
+#[test]
+#[serial]
+fn burn_request_text_reads_with_set_encoding() {
+    // A UTF-8 body still reads as that text through `setEncoding('utf8')`.
+    let port = pick_port();
+    let source = format!(
+        r#"
+        const http = require("node:http");
+        http.createServer((req, res) => {{
+            req.setEncoding("utf8");
+            let text = "";
+            req.on("data", (c) => {{ text += typeof c === "string" ? "S:" + c : "B"; }});
+            req.on("end", () => res.end(text));
+        }}).listen({port});
+        "#
+    );
+    let _child = ChildGuard::new(spawn_burn_inline(&source));
+    assert!(wait_for_listener(port, Duration::from_secs(60)));
+
+    let text = "h\u{e9}llo \u{20ac}";
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+        text.len()
+    );
+    let (_, body) = common::http_exchange_bytes(port, request.as_bytes());
+    assert_eq!(body, format!("S:{text}").as_bytes());
+}
+
+#[test]
+#[serial]
 fn burn_plain_script_exits_cleanly() {
     // A script with no `.listen()` should exit 0 quickly - daemon
     // mode detects no listeners and exits.

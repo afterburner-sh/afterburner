@@ -644,7 +644,8 @@ unsafe extern "C" {
     // `host_http_reply(req_id, resp_json_ptr, resp_json_len)` sends
     // the reply bytes through the host's internal request→reply
     // channel so the listener can write the response to the socket. `resp_json`
-    // shape: `{status, headers: {...}, body: string}`.
+    // shape: `{status, headers: {...}, body_b64: string}` (the exact body bytes, base64);
+    // a reply with only `body: string` is still accepted and sent as that string's UTF-8.
     pub fn host_http_reply(req_id: i64, resp_ptr: *const u8, resp_len: u32) -> i32;
 
     // `host_http_close(server_id)` aborts the HTTP listener task
