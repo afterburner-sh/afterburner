@@ -3701,25 +3701,22 @@ fn wrap_http_server(linker: &mut Linker<HostState>) -> Result<(), AfterburnerErr
                         return E_OTHER;
                     }
                 };
-                let status = parsed.get("status").and_then(|v| v.as_u64()).unwrap_or(500) as u16;
-                let headers: Vec<(String, String)> = parsed
-                    .get("headers")
-                    .and_then(|v| v.as_object())
-                    .map(|obj| {
-                        obj.iter()
-                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let body = parsed
-                    .get("body")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.as_bytes().to_vec())
-                    .unwrap_or_default();
-                let reply = crate::daemon_http::ReplyEnvelope {
-                    status,
-                    headers,
-                    body,
+                let reply = match crate::daemon_envelopes::parse_js_reply(&parsed) {
+                    Ok(reply) => reply,
+                    Err(e) => {
+                        // Answer the waiting client rather than leave it hanging,
+                        // and tell the guest its reply was refused.
+                        caller.data_mut().last_error = e;
+                        dh.deliver_reply(
+                            req_id,
+                            crate::daemon_http::ReplyEnvelope {
+                                status: 502,
+                                headers: Vec::new(),
+                                body: b"burn: malformed response body\n".to_vec(),
+                            },
+                        );
+                        return E_OTHER;
+                    }
                 };
                 dh.deliver_reply(req_id, reply);
                 0

@@ -525,7 +525,10 @@ function __plenum_install_http(moduleName) {
                 if (body !== undefined && body !== null && body !== '') {
                     var Buf = require('buffer').Buffer;
                     var chunk;
-                    if (typeof body === 'string') {
+                    if (typeof reqData.body_b64 === 'string') {
+                        // The host sends the exact bytes of a body that is not text.
+                        chunk = Buf.from(reqData.body_b64, 'base64');
+                    } else if (typeof body === 'string') {
                         chunk = Buf.from(body, 'utf8');
                     } else if (Buf.isBuffer && Buf.isBuffer(body)) {
                         chunk = body;
@@ -538,10 +541,16 @@ function __plenum_install_http(moduleName) {
                     } else {
                         chunk = Buf.from(String(body), 'utf8');
                     }
-                    msg.emit('data', chunk);
+                    msg.emit('data', msg._encoding ? chunk.toString(msg._encoding) : chunk);
                 }
                 msg.emit('end');
             }
+            msg._encoding = null;
+            // The one chunk is decoded at delivery, as Node's decoder would.
+            msg.setEncoding = function(enc) {
+                msg._encoding = enc == null ? 'utf8' : String(enc);
+                return msg;
+            };
             msg._deliver = deliver;
             queueMicrotask(deliver);
 
@@ -556,13 +565,93 @@ function __plenum_install_http(moduleName) {
             return msg;
         }
 
+        // Every server response (http, https, http2 and quic all write through
+        // this object) turns a chunk into bytes with `__ab_chunk_bytes` and
+        // leaves through `__ab_send_reply`, so a body is never a JS string
+        // on its way to the wire. The bytes cross the boundary once, as the
+        // envelope's `body_b64` (the one binary convention of this boundary,
+        // shared with the outbound and HTTP/3 paths), encoded by the native
+        // `__host_b64_encode`; a raw-bytes host import would be a new guest
+        // ABI for the same single copy.
+        var __ab_utf8 = typeof TextEncoder === 'function' ? new TextEncoder() : null;
+        var __ab_empty = new Uint8Array(0);
+
+        function __ab_arg_error(code, message) {
+            var e = new TypeError(message);
+            e.code = code;
+            return e;
+        }
+
+        // A string is encoded once with `encoding` (default utf8, as Node's
+        // Buffer); a Buffer, TypedArray, DataView or ArrayBuffer is its own
+        // bytes (a view, not a copy). Anything else is Node's ERR_INVALID_ARG_TYPE.
+        function __ab_chunk_bytes(chunk, encoding) {
+            if (typeof chunk === 'string') {
+                var enc = encoding == null || encoding === '' ? 'utf8' : String(encoding).toLowerCase();
+                if (enc === 'utf8' || enc === 'utf-8') {
+                    return __ab_utf8 ? __ab_utf8.encode(chunk) : Buffer.from(chunk, 'utf8');
+                }
+                if (enc === 'ucs2' || enc === 'ucs-2' || enc === 'utf16le' || enc === 'utf-16le') {
+                    var wide = new Uint8Array(chunk.length * 2);
+                    for (var i = 0; i < chunk.length; i++) {
+                        var u = chunk.charCodeAt(i);
+                        wide[2 * i] = u & 0xff;
+                        wide[2 * i + 1] = u >> 8;
+                    }
+                    return wide;
+                }
+                if (enc === 'base64url') {
+                    return Buffer.from(chunk.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+                }
+                if (!Buffer.isEncoding(enc)) {
+                    throw __ab_arg_error('ERR_UNKNOWN_ENCODING', 'Unknown encoding: ' + encoding);
+                }
+                return Buffer.from(chunk, enc);
+            }
+            if (chunk instanceof Uint8Array) return chunk;
+            if (ArrayBuffer.isView(chunk)) {
+                return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+            }
+            if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk);
+            throw __ab_arg_error('ERR_INVALID_ARG_TYPE',
+                'The "chunk" argument must be of type string or an instance of Buffer, TypedArray, or DataView.');
+        }
+
+        function __ab_join_chunks(parts, total) {
+            if (parts.length === 0) return __ab_empty;
+            if (parts.length === 1) return parts[0];
+            var out = new Uint8Array(total);
+            var off = 0;
+            for (var i = 0; i < parts.length; i++) {
+                out.set(parts[i], off);
+                off += parts[i].length;
+            }
+            return out;
+        }
+
+        // The host decides `content-length` from the byte length of the body
+        // it receives, so the headers go out untouched.
+        function __ab_send_reply(reqId, status, headers, bytes) {
+            if (typeof globalThis.__host_http_reply !== 'function') return;
+            var payload = { status: status, headers: headers };
+            if (bytes.length > 0) {
+                var b64 = null;
+                if (typeof globalThis.__host_b64_encode === 'function') {
+                    try { b64 = globalThis.__host_b64_encode(bytes); } catch (_) { b64 = null; }
+                }
+                payload.body_b64 = b64 !== null ? b64 : Buffer.from(bytes).toString('base64');
+            }
+            globalThis.__host_http_reply(Number(reqId), JSON.stringify(payload));
+        }
+
         function __ab_make_server_response(reqId) {
             var res = Object.create(EventEmitter.prototype);
             EventEmitter.call(res);
             res.statusCode = 200;
             res.statusMessage = undefined;
             res._headers = {};
-            res._buffered = '';
+            res._chunks = [];
+            res._chunkBytes = 0;
             res.writableEnded = false;
             res.headersSent = false;
 
@@ -597,25 +686,40 @@ function __plenum_install_http(moduleName) {
                 }
                 return res;
             };
-            res.write = function(chunk) {
+            res.write = function(chunk, encoding, cb) {
+                if (typeof encoding === 'function') { cb = encoding; encoding = undefined; }
                 if (res.writableEnded) throw new Error('write after end');
-                res._buffered += chunk != null ? String(chunk) : '';
+                if (chunk != null) {
+                    var bytes = __ab_chunk_bytes(chunk, encoding);
+                    // Kept past this call, so a caller that reuses its buffer
+                    // cannot change what was written.
+                    if (typeof chunk !== 'string') bytes = Uint8Array.prototype.slice.call(bytes);
+                    res._chunks.push(bytes);
+                    res._chunkBytes += bytes.length;
+                }
+                if (typeof cb === 'function') Promise.resolve().then(cb);
                 return true;
             };
-            res.end = function(chunk) {
-                if (res.writableEnded) return;
-                if (chunk != null) res._buffered += String(chunk);
-                res.writableEnded = true;
-                var payload = {
-                    status: res.statusCode,
-                    headers: res._headers,
-                    body: res._buffered
-                };
-                if (typeof globalThis.__host_http_reply === 'function') {
-                    globalThis.__host_http_reply(Number(reqId), JSON.stringify(payload));
+            res.end = function(chunk, encoding, cb) {
+                if (typeof chunk === 'function') { cb = chunk; chunk = undefined; encoding = undefined; }
+                else if (typeof encoding === 'function') { cb = encoding; encoding = undefined; }
+                if (res.writableEnded) return res;
+                // Encoded before the response is marked ended, so a bad chunk
+                // throws and leaves it open.
+                if (chunk != null) {
+                    var last = __ab_chunk_bytes(chunk, encoding);
+                    res._chunks.push(last);
+                    res._chunkBytes += last.length;
                 }
+                res.writableEnded = true;
+                var body = __ab_join_chunks(res._chunks, res._chunkBytes);
+                res._chunks = [];
+                res._chunkBytes = 0;
+                __ab_send_reply(reqId, res.statusCode, res._headers, body);
+                if (typeof cb === 'function') res.once('finish', cb);
                 res.emit('finish');
                 res.emit('close');
+                return res;
             };
 
             return res;

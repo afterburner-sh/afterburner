@@ -140,7 +140,9 @@ The **request** side reuses the *exact* JSON `daemon_envelopes::http_event_to_en
 already produces for the JS path - `{"kind":"http-request","server_id":..,
 "req_id":..,"req":{"method":..,"url":..,"headers":{...},"body":".."}}` -
 serialized to bytes and handed to `afterburner_daemon_dispatch` verbatim.
-One encoding for "here is an HTTP request," used by both guest kinds.
+One encoding for "here is an HTTP request," used by both guest kinds. A request
+body that is not valid UTF-8 also carries `"body_b64"` inside `req` (the exact
+bytes); `body` is then its lossy text.
 
 The **response** side is new (JS has no equivalent shape: it calls a host
 import per byte-range instead of returning one blob), but it is not a

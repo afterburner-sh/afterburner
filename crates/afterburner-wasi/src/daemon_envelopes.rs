@@ -51,19 +51,33 @@ pub fn http_outbound_response_to_envelope(event: &HttpOutboundResponseEvent) -> 
     })
 }
 
-/// HTTP request → daemon-event envelope. The body is utf8-decoded
-/// (lossy) on the way in; binary bodies should base64-encode.
+/// HTTP request → daemon-event envelope. `body` is the text of the request
+/// body; a body that is not valid UTF-8 also rides as `body_b64` (exact
+/// bytes), so text bodies pay no encoding and binary bodies lose nothing.
 pub fn http_event_to_envelope(event: &DaemonEvent) -> serde_json::Value {
+    use base64::Engine as _;
+
+    let (body, body_b64) = match std::str::from_utf8(&event.body) {
+        Ok(text) => (text.to_owned(), None),
+        Err(_) => (
+            String::from_utf8_lossy(&event.body).into_owned(),
+            Some(base64::engine::general_purpose::STANDARD.encode(&event.body)),
+        ),
+    };
+    let mut req = serde_json::json!({
+        "method": event.method,
+        "url": event.url,
+        "headers": event.headers.iter().cloned().collect::<BTreeMap<_, _>>(),
+        "body": body,
+    });
+    if let (Some(b64), Some(obj)) = (body_b64, req.as_object_mut()) {
+        obj.insert("body_b64".into(), serde_json::Value::String(b64));
+    }
     serde_json::json!({
         "kind": "http-request",
         "server_id": event.server_id,
         "req_id": event.req_id,
-        "req": {
-            "method": event.method,
-            "url": event.url,
-            "headers": event.headers.iter().cloned().collect::<BTreeMap<_, _>>(),
-            "body": String::from_utf8_lossy(&event.body).into_owned(),
-        }
+        "req": req,
     })
 }
 
@@ -510,14 +524,7 @@ pub fn parse_native_dispatch_response(bytes: &[u8]) -> Result<ReplyEnvelope, Str
         .map_err(|_| {
             "daemon-dispatch response: \"status\" is out of range (0-65535)".to_string()
         })?;
-    let mut headers = Vec::new();
-    if let Some(obj) = v.get("headers").and_then(|h| h.as_object()) {
-        for (k, val) in obj {
-            if let Some(s) = val.as_str() {
-                headers.push((k.clone(), s.to_string()));
-            }
-        }
-    }
+    let headers = reply_headers(&v);
     let body = match v.get("body_b64").and_then(|b| b.as_str()) {
         Some(b64) => base64::engine::general_purpose::STANDARD
             .decode(b64)
@@ -527,6 +534,51 @@ pub fn parse_native_dispatch_response(bytes: &[u8]) -> Result<ReplyEnvelope, Str
     Ok(ReplyEnvelope {
         status,
         headers,
+        body,
+    })
+}
+
+/// The string-valued entries of a reply's `headers` object.
+fn reply_headers(v: &serde_json::Value) -> Vec<(String, String)> {
+    v.get("headers")
+        .and_then(|h| h.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Turn the JSON a guest hands to `__host_http_reply`
+/// (`{"status":N,"headers":{...},"body_b64":"..."}`) into a [`ReplyEnvelope`].
+/// `body_b64` carries the exact response bytes; a reply that has only a
+/// string `body` (a guest built against an older polyfill) is sent as that
+/// string's UTF-8 bytes, and a reply with both uses `body_b64`. A missing
+/// `status` is a 500; a `body_b64` that is not a valid base64 string is an
+/// error, never an empty body.
+pub fn parse_js_reply(v: &serde_json::Value) -> Result<ReplyEnvelope, String> {
+    use base64::Engine as _;
+
+    let status = v
+        .get("status")
+        .and_then(|s| s.as_u64())
+        .and_then(|s| u16::try_from(s).ok())
+        .unwrap_or(500);
+    let body = match v.get("body_b64") {
+        Some(serde_json::Value::String(b64)) => base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("http_reply: invalid body_b64: {e}"))?,
+        Some(serde_json::Value::Null) | None => v
+            .get("body")
+            .and_then(|b| b.as_str())
+            .map(|s| s.as_bytes().to_vec())
+            .unwrap_or_default(),
+        Some(_) => return Err("http_reply: body_b64 must be a string".to_string()),
+    };
+    Ok(ReplyEnvelope {
+        status,
+        headers: reply_headers(v),
         body,
     })
 }
@@ -559,4 +611,71 @@ fn cert_chain_to_b64(chain: &[Vec<u8>]) -> serde_json::Value {
         .map(|der| serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(der)))
         .collect();
     serde_json::Value::Array(arr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+    use serde_json::json;
+
+    #[test]
+    fn js_reply_decodes_bytes_form() {
+        let all: Vec<u8> = (0..=255u8).collect();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&all);
+        let v = json!({"status": 201, "headers": {"x": "y", "n": 1}, "body_b64": b64});
+        let r = parse_js_reply(&v).expect("bytes form");
+        assert_eq!(r.status, 201);
+        assert_eq!(r.body, all);
+        assert_eq!(r.headers, vec![("x".to_string(), "y".to_string())]);
+    }
+
+    #[test]
+    fn js_reply_keeps_string_form() {
+        let v = json!({"status": 200, "headers": {}, "body": "h\u{e9}llo"});
+        let r = parse_js_reply(&v).expect("string form");
+        assert_eq!(r.body, "h\u{e9}llo".as_bytes());
+    }
+
+    #[test]
+    fn js_reply_prefers_bytes_over_string() {
+        let v = json!({"status": 200, "body": "text", "body_b64": "/wA="});
+        let r = parse_js_reply(&v).expect("both forms");
+        assert_eq!(r.body, [0xff, 0x00]);
+    }
+
+    #[test]
+    fn js_reply_empty_and_defaults() {
+        let r = parse_js_reply(&json!({})).expect("empty");
+        assert_eq!(r.status, 500);
+        assert!(r.body.is_empty() && r.headers.is_empty());
+        let v = json!({"status": 204, "body_b64": ""});
+        assert!(parse_js_reply(&v).expect("empty b64").body.is_empty());
+    }
+
+    #[test]
+    fn js_reply_rejects_malformed_body_b64() {
+        let bad_text = json!({"status": 200, "body_b64": "!!not base64!!"});
+        assert!(parse_js_reply(&bad_text).is_err());
+        let bad_type = json!({"status": 200, "body": "ok", "body_b64": 7});
+        assert!(parse_js_reply(&bad_type).is_err());
+    }
+
+    #[test]
+    fn request_envelope_carries_exact_bytes_only_when_not_text() {
+        let mut ev = DaemonEvent {
+            server_id: 1,
+            req_id: 2,
+            method: "POST".into(),
+            url: "/".into(),
+            headers: vec![],
+            body: "h\u{e9}llo".as_bytes().to_vec(),
+        };
+        let text = http_event_to_envelope(&ev);
+        assert_eq!(text["req"]["body"], "h\u{e9}llo");
+        assert!(text["req"].get("body_b64").is_none());
+        ev.body = vec![0xff, 0x00, 0x80];
+        let bin = http_event_to_envelope(&ev);
+        assert_eq!(bin["req"]["body_b64"], "/wCA");
+    }
 }

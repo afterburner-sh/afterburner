@@ -342,3 +342,260 @@ fn listen_granted_port_binds_and_other_port_is_denied() {
     );
     rt.shutdown_timeout(Duration::from_secs(2));
 }
+
+// ---- response bodies are bytes ----------------------------------------
+
+/// Send raw request bytes and return the response head (lowercased text)
+/// and body (exact bytes), split at the first blank line.
+fn http_bytes(port: u16, request: &[u8]) -> (String, Vec<u8>) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream.write_all(request).expect("write");
+    let mut resp = Vec::new();
+    stream.read_to_end(&mut resp).expect("read");
+    let split = resp
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response head ends");
+    (
+        String::from_utf8_lossy(&resp[..split]).to_ascii_lowercase(),
+        resp[split + 4..].to_vec(),
+    )
+}
+
+fn bare_request(port: u16, method: &str) -> Vec<u8> {
+    format!("{method} / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+        .into_bytes()
+}
+
+/// Serve `handler` (the body of `function (req, res) { ... }`) on a real
+/// listener, run `check` against its port, then tear everything down.
+fn with_handler(handler: &str, check: impl FnOnce(u16)) {
+    let rt = nuclei::Runtime::new().expect("nuclei");
+    let daemon_http = DaemonHttp::with_runtime(rt.handle(), 64);
+    let port = pick_port();
+    let source = format!(
+        "const http = require('http');\n\
+         http.createServer(function(req, res) {{ {handler} }}).listen({port});"
+    );
+    let c = WasmCombustor::new(WasmConfig::default()).expect("combustor");
+    let mut daemon = c
+        .spawn_daemon_with(&source, Manifold::open(), Arc::clone(&daemon_http))
+        .expect("spawn daemon");
+    let done = Arc::new(AtomicBool::new(false));
+    let dispatcher = {
+        let dh = Arc::clone(&daemon_http);
+        let d = Arc::clone(&done);
+        std::thread::spawn(move || {
+            while !d.load(Ordering::Relaxed) {
+                if let Some(event) = dh.try_recv_event() {
+                    let envelope =
+                        afterburner_wasi::daemon_envelopes::http_event_to_envelope(&event);
+                    let _ = daemon.dispatch_event(envelope);
+                } else {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        })
+    };
+    assert!(
+        wait_for_listener(port, Duration::from_secs(3)),
+        "HTTP listener never came up on :{port}"
+    );
+    check(port);
+    done.store(true, Ordering::Relaxed);
+    dispatcher.join().ok();
+    rt.shutdown_timeout(Duration::from_secs(2));
+}
+
+#[test]
+fn response_of_all_256_byte_values_arrives_exact() {
+    with_handler(
+        "const b = Buffer.alloc(256); for (let i = 0; i < 256; i++) b[i] = i; res.end(b);",
+        |port| {
+            let (head, body) = http_bytes(port, &bare_request(port, "GET"));
+            assert!(head.starts_with("http/1.1 200"), "head:\n{head}");
+            assert!(head.contains("content-length: 256\r\n"), "head:\n{head}");
+            assert_eq!(body, (0..=255u8).collect::<Vec<u8>>());
+        },
+    );
+}
+
+#[test]
+fn response_of_85000_non_ascii_bytes_arrives_exact() {
+    with_handler(
+        "const p = new Uint8Array([0xc3, 0xa9, 0x80, 0xff, 0x00, 0x7f, 0xe2, 0x82, 0xac]);\
+         const n = 85000; const b = new Uint8Array(n);\
+         for (let o = 0; o < n; o += p.length) b.set(p.subarray(0, Math.min(p.length, n - o)), o);\
+         res.end(b);",
+        |port| {
+            let pattern = [0xc3, 0xa9, 0x80, 0xff, 0x00, 0x7f, 0xe2, 0x82, 0xac];
+            let expect: Vec<u8> = pattern.iter().copied().cycle().take(85_000).collect();
+            let (head, body) = http_bytes(port, &bare_request(port, "GET"));
+            assert!(head.contains("content-length: 85000\r\n"), "head:\n{head}");
+            assert!(
+                body == expect,
+                "85000-byte body differs ({} bytes)",
+                body.len()
+            );
+        },
+    );
+}
+
+#[test]
+fn mixed_buffer_string_and_uint8array_chunks_arrive_in_order() {
+    with_handler(
+        "res.write(Buffer.from([0xff, 0x00])); res.write('h\\u00e9llo');\
+         res.end(new Uint8Array([1, 2, 3]));",
+        |port| {
+            let (head, body) = http_bytes(port, &bare_request(port, "GET"));
+            let mut expect = vec![0xff, 0x00];
+            expect.extend_from_slice("h\u{e9}llo".as_bytes());
+            expect.extend_from_slice(&[1, 2, 3]);
+            let length = format!("content-length: {}\r\n", expect.len());
+            assert!(head.contains(&length), "head:\n{head}");
+            assert_eq!(body, expect);
+        },
+    );
+}
+
+#[test]
+fn string_chunk_arrives_as_its_utf8_bytes() {
+    with_handler("res.end('h\\u00e9llo \\u20ac \\ud83d\\ude00');", |port| {
+        let text = "h\u{e9}llo \u{20ac} \u{1f600}";
+        let (head, body) = http_bytes(port, &bare_request(port, "GET"));
+        let length = format!("content-length: {}\r\n", text.len());
+        assert!(head.contains(&length), "head:\n{head}");
+        assert_eq!(body, text.as_bytes());
+    });
+}
+
+#[test]
+fn string_chunks_honour_their_encoding() {
+    with_handler(
+        "res.write('ff00', 'hex'); res.write('\\u00e9\\u00ff', 'latin1');\
+         res.write('a\\u20ac', 'utf16le'); res.write('/wA=', 'base64'); res.end('A', 'binary');",
+        |port| {
+            let (_, body) = http_bytes(port, &bare_request(port, "GET"));
+            assert_eq!(
+                body,
+                vec![
+                    0xff, 0x00, 0xe9, 0xff, 0x61, 0x00, 0xac, 0x20, 0xff, 0x00, 0x41
+                ]
+            );
+        },
+    );
+}
+
+#[test]
+fn empty_responses_have_a_zero_length_body() {
+    with_handler("res.end();", |port| {
+        let (head, body) = http_bytes(port, &bare_request(port, "GET"));
+        assert!(head.starts_with("http/1.1 200"), "head:\n{head}");
+        assert!(head.contains("content-length: 0\r\n"), "head:\n{head}");
+        assert!(body.is_empty());
+    });
+    with_handler("res.write(''); res.end('');", |port| {
+        let (head, body) = http_bytes(port, &bare_request(port, "GET"));
+        assert!(head.contains("content-length: 0\r\n"), "head:\n{head}");
+        assert!(body.is_empty());
+    });
+}
+
+#[test]
+fn head_request_reports_the_byte_length_and_sends_no_body() {
+    with_handler("res.end(Buffer.alloc(300, 7));", |port| {
+        let (head, body) = http_bytes(port, &bare_request(port, "HEAD"));
+        assert!(head.starts_with("http/1.1 200"), "head:\n{head}");
+        assert!(head.contains("content-length: 300\r\n"), "head:\n{head}");
+        assert!(body.is_empty());
+    });
+}
+
+#[test]
+fn a_chunk_that_is_not_string_or_bytes_throws_and_leaves_the_response_open() {
+    with_handler(
+        "try { res.end(123); } catch (e) { res.statusCode = 500; res.end(e.code); }",
+        |port| {
+            let (head, body) = http_bytes(port, &bare_request(port, "GET"));
+            assert!(head.starts_with("http/1.1 500"), "head:\n{head}");
+            assert_eq!(body, b"ERR_INVALID_ARG_TYPE");
+        },
+    );
+}
+
+#[test]
+fn a_reply_with_only_a_string_body_is_still_served() {
+    // What a guest built against the older polyfill sends.
+    with_handler(
+        "const send = globalThis.__host_http_reply;\
+         globalThis.__host_http_reply = (id) =>\
+           send(id, JSON.stringify({status: 200, headers: {}, body: 'old \\u00e9'}));\
+         res.end('ignored');",
+        |port| {
+            let (_, body) = http_bytes(port, &bare_request(port, "GET"));
+            assert_eq!(body, "old \u{e9}".as_bytes());
+        },
+    );
+}
+
+#[test]
+fn a_malformed_body_b64_answers_502() {
+    with_handler(
+        "const send = globalThis.__host_http_reply;\
+         globalThis.__host_http_reply = (id) =>\
+           send(id, JSON.stringify({status: 200, headers: {}, body_b64: '!!bad!!'}));\
+         res.end('x');",
+        |port| {
+            let (head, body) = http_bytes(port, &bare_request(port, "GET"));
+            assert!(head.starts_with("http/1.1 502"), "head:\n{head}");
+            assert!(!body.is_empty());
+        },
+    );
+}
+
+#[test]
+fn http2_response_of_all_256_byte_values_arrives_exact() {
+    // The same handler answers an HTTP/2 prior-knowledge client: the reply is
+    // one `ReplyEnvelope` for every protocol.
+    with_handler(
+        "const b = Buffer.alloc(256); for (let i = 0; i < 256; i++) b[i] = i; res.end(b);",
+        |port| {
+            let rt = nuclei::Runtime::new().expect("client runtime");
+            let (status, length, body) = rt.block_on(async move {
+                let tcp = nuclei::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .expect("connect");
+                let (mut send, conn) = h2::client::handshake(tcp).await.expect("h2 handshake");
+                nuclei::spawn(async move {
+                    let _ = conn.await;
+                })
+                .detach();
+                let request = http::Request::builder()
+                    .method("GET")
+                    .uri(format!("http://127.0.0.1:{port}/"))
+                    .body(())
+                    .expect("request");
+                let (response, _) = send.send_request(request, true).expect("send request");
+                let response = response.await.expect("response");
+                let status = response.status().as_u16();
+                let length = response
+                    .headers()
+                    .get("content-length")
+                    .and_then(|v| v.to_str().ok().map(str::to_owned));
+                let mut stream = response.into_body();
+                let mut body = Vec::new();
+                while let Some(chunk) = stream.data().await {
+                    let chunk = chunk.expect("data frame");
+                    body.extend_from_slice(&chunk);
+                    let _ = stream.flow_control().release_capacity(chunk.len());
+                }
+                (status, length, body)
+            });
+            assert_eq!(status, 200);
+            assert_eq!(length.as_deref(), Some("256"));
+            assert_eq!(body, (0..=255u8).collect::<Vec<u8>>());
+            rt.shutdown_timeout(Duration::from_secs(2));
+        },
+    );
+}

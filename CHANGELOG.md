@@ -3,6 +3,30 @@
 All notable changes to afterburner are documented here. This project adheres to
 [Semantic Versioning](https://semver.org).
 
+## [0.3.3] - 2026-11-17
+
+### Fixed
+
+- A daemon's HTTP bodies are bytes in both directions. A response written with a `Buffer` or
+  `Uint8Array` was turned into a string, so every byte of 0x80 and above left as two or three
+  UTF-8 bytes (256 bytes written, 512 sent), and a request body that was not valid UTF-8 reached
+  the handler with U+FFFD in place of those bytes. A response now leaves as exactly the bytes
+  written (a string chunk is encoded once, with the `encoding` argument as Node's `Buffer` does)
+  and a request reaches `req.on('data')` as exactly the bytes the client sent, on HTTP/1, HTTP/2
+  and HTTP/3. Covered by `response_of_all_256_byte_values_arrives_exact` and
+  `burn_request_bytes_echo_exact`.
+
+### Changed
+
+- `res.write` and `res.end` take `(chunk, encoding, callback)` as Node does. A chunk that is
+  neither a string nor bytes (a number, an object) is now `ERR_INVALID_ARG_TYPE`, and an encoding
+  that is not known is `ERR_UNKNOWN_ENCODING`; such a chunk was sent as its string form before.
+- A daemon reply whose `body_b64` is not valid base64 answers the client 502 and reports the
+  error to the guest. A reply that carries only a string `body` is still accepted.
+- kovan 0.2.6. A version move: the crates used here (kovan-map, kovan-channel, kovan-queue) are
+  unchanged in behaviour.
+- Every crate of the workspace goes to 0.3.3.
+
 ## [0.3.2] - 2026-11-10
 
 ### Changed

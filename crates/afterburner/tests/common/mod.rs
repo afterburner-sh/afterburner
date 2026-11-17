@@ -245,6 +245,24 @@ pub fn wait_for_listener(port: u16, timeout: Duration) -> bool {
     false
 }
 
+/// One HTTP/1.1 exchange with raw request bytes; returns the response head
+/// (lowercased text) and the exact body bytes, split at the first blank line.
+pub fn http_exchange_bytes(port: u16, request: &[u8]) -> (String, Vec<u8>) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    stream.write_all(request).expect("write");
+    let mut resp = Vec::new();
+    stream.read_to_end(&mut resp).expect("read");
+    let split = resp
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response head ends");
+    (
+        String::from_utf8_lossy(&resp[..split]).to_ascii_lowercase(),
+        resp[split + 4..].to_vec(),
+    )
+}
+
 pub fn extract_body(resp: &str) -> &str {
     resp.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("")
 }
