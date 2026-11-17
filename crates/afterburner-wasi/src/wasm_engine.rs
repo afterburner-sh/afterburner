@@ -26,7 +26,7 @@
 //!   `{source, input}` onto stdin, instantiates plugin + runs `_start`,
 //!   and reads the JSON result from stdout.
 
-use crate::chamber::{self, TICK_PERIOD_MS, drain_stdout, format_trap_with_stderr};
+use crate::chamber::{self, drain_stdout, format_trap_with_stderr};
 use crate::host::{HostState, InputFormat};
 use crate::host_imports;
 use crate::nozzle::parse_output;
@@ -47,8 +47,7 @@ use kovan_map::HopscotchMap;
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::thread::JoinHandle;
 use wasmtime::{
     Config, Engine, InstanceAllocationStrategy, InstancePre, Linker, Module, OptLevel,
     PoolingAllocationConfig, Trap,
@@ -193,7 +192,8 @@ pub struct WasmConfig {
     /// `None` (default) keeps today's behaviour: `WasmCombustor::new`
     /// spawns a dedicated `afterburner-epoch-ticker` thread that sleeps
     /// `crate::chamber::TICK_PERIOD_MS` and calls
-    /// `Engine::increment_epoch()` in a loop for the lifetime of the
+    /// `Engine::increment_epoch()` once per whole period elapsed
+    /// (catching up after a late wake) for the lifetime of the
     /// combustor (joined on [`Drop`]). `Some(false)` suppresses that
     /// spawn entirely - `WasmCombustor::new` then owns zero threads on
     /// this axis.
@@ -442,10 +442,9 @@ impl WasmCombustor {
                 ticker_name,
                 config.ticker_governance.clone(),
                 move || {
-                    while !shutdown.load(Ordering::Acquire) {
-                        thread::sleep(Duration::from_millis(TICK_PERIOD_MS));
-                        engine_for_ticker.increment_epoch();
-                    }
+                    chamber::run_epoch_ticker(&engine_for_ticker, || {
+                        !shutdown.load(Ordering::Acquire)
+                    })
                 },
             )?)
         } else {
